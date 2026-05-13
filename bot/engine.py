@@ -1,9 +1,7 @@
 """
-NEXUS-7 Trading Engine v5.1
-- Multi-símbolo (BTC, ETH, SOL, BNB, XRP)
-- 100% automático
-- Risk manager integrado
-- Nunca derruba o servidor
+NEXUS-7 Trading Engine v5.2
+- Opera com qualquer saldo acima de $0.10
+- Multi-símbolo automático
 """
 import asyncio
 from datetime import datetime
@@ -42,7 +40,7 @@ class Position:
 
 class RiskManager:
     def __init__(self):
-        self.peak      = 0.0   # será definido pelo saldo real
+        self.peak      = 0.0
         self.balance   = 0.0
         self.drawdown  = 0.0
         self.losses    = 0
@@ -51,12 +49,11 @@ class RiskManager:
         self._initialized = False
 
     def init(self, balance: float):
-        """Inicializa com saldo real da conta"""
         if not self._initialized and balance > 0:
             self.peak         = balance
             self.balance      = balance
             self._initialized = True
-            log.info(f"📊 Risk Manager iniciado com ${balance:.2f}")
+            log.info(f"📊 Risk Manager iniciado com ${balance:.4f}")
 
     def update(self, balance: float):
         if balance <= 0:
@@ -69,8 +66,9 @@ class RiskManager:
     def can_open(self, n_open: int) -> bool:
         if not self._initialized:
             return False
-        if self.balance < 10:
-            log.warning(f"⚠️ Saldo insuficiente: ${self.balance:.2f} — mínimo $10")
+        # Mínimo $0.10 para operar
+        if self.balance < 0.10:
+            log.warning(f"⚠️ Saldo insuficiente: ${self.balance:.4f} USDT")
             return False
         if self.drawdown >= cfg.MAX_DRAWDOWN:
             log.warning(f"⚠️ Drawdown {self.drawdown:.1%} — bloqueando")
@@ -80,14 +78,19 @@ class RiskManager:
         return True
 
     def size(self, entry: float, sl: float) -> float:
-        risk_usd = self.balance * cfg.MAX_RISK_PCT
+        """Calcula tamanho da posição com alavancagem"""
+        # Com $0.16 e 50x leverage = $8 de poder de compra
+        buying_power = self.balance * cfg.LEVERAGE
+        # Arrisca 10% do poder de compra por trade
+        risk_usd = buying_power * cfg.MAX_RISK_PCT
         sl_dist  = abs(entry - sl)
         if sl_dist <= 0:
             return 0.001
         qty = risk_usd / sl_dist
-        max_qty = (self.balance * 0.2) / entry
-        qty = min(qty, max_qty)
-        return max(0.001, round(qty, 3))
+        # Mínimo absoluto da Bybit para BTC é 0.001
+        qty = max(0.001, round(qty, 3))
+        log.info(f"📐 Size: {qty} | Balance: ${self.balance:.4f} | Power: ${buying_power:.2f}")
+        return qty
 
     def record(self, pnl: float):
         self.total_pnl += pnl
@@ -155,36 +158,36 @@ class TradingEngine:
 
             bal = await self.client.get_balance()
             if bal < 0:
-                log.error("❌ Auth Bybit falhou — verifique BYBIT_API_KEY e BYBIT_API_SECRET")
+                log.error("❌ Auth falhou — verifique BYBIT_API_KEY e BYBIT_API_SECRET")
                 self.connected = False
                 return
 
-            # Inicializa risk manager com saldo REAL da conta
             self.risk.init(bal)
             self.risk.update(bal)
 
-            if bal < 10:
-                log.warning(f"⚠️ Saldo muito baixo: ${bal:.2f} USDT")
-                log.warning("   Deposite USDT na sua conta Bybit para o bot operar")
-                self.connected = True
-                self.active    = False   # não opera sem saldo suficiente
-                return
-
-            # Configura leverage
+            # Configura leverage em todos os pares
             for sym in cfg.SYMBOLS:
                 await self.client.set_leverage(sym, cfg.LEVERAGE)
                 await asyncio.sleep(0.3)
 
             self.connected = True
             self.active    = True
-            log.info(f"✅ Bybit conectada! Saldo: ${bal:.2f} USDT | {len(cfg.SYMBOLS)} pares")
-            await notify(f"✅ *NEXUS-7 Online!*\nSaldo: `${bal:.2f} USDT`\nPares: `{', '.join(cfg.SYMBOLS)}`")
+            log.info(f"✅ Bybit conectada! Saldo: ${bal:.4f} USDT | Leverage: {cfg.LEVERAGE}x")
+            log.info(f"💪 Poder de compra: ${bal * cfg.LEVERAGE:.2f} USDT")
+            await notify(
+                f"✅ *NEXUS-7 Online!*\n"
+                f"Saldo: `${bal:.4f} USDT`\n"
+                f"Leverage: `{cfg.LEVERAGE}x`\n"
+                f"Poder de compra: `${bal * cfg.LEVERAGE:.2f}`\n"
+                f"Pares: `{', '.join(cfg.SYMBOLS)}`"
+            )
 
         except Exception as e:
             log.error(f"_connect: {e}")
             self.connected = False
 
     async def _scan_markets(self):
+        """Varre todos os pares em busca de sinais"""
         for symbol in cfg.SYMBOLS:
             if symbol in self.positions:
                 continue
@@ -204,26 +207,40 @@ class TradingEngine:
     async def _open(self, sig: Signal):
         try:
             bal = await self.client.get_balance()
-            if bal <= 0:
+            if bal < 0.10:
+                log.warning(f"⚠️ Saldo muito baixo para operar: ${bal:.4f}")
                 return
+
             qty  = self.risk.size(sig.entry, sig.sl)
             side = "Buy" if sig.direction == "LONG" else "Sell"
+
             await self.client.place_order(
-                symbol=sig.symbol, side=side, qty=qty,
-                sl=sig.sl, tp=sig.tp
+                symbol=sig.symbol,
+                side=side,
+                qty=qty,
+                sl=sig.sl,
+                tp=sig.tp,
             )
+
             pos = Position(sig, qty)
             self.positions[sig.symbol] = pos
+
             msg = await signal_msg(sig)
             await notify(msg)
+
             self._signals_log.append({
-                "symbol": sig.symbol, "direction": sig.direction,
-                "entry": sig.entry, "conf": sig.confidence,
-                "reason": sig.reason, "time": str(datetime.utcnow()),
+                "symbol":    sig.symbol,
+                "direction": sig.direction,
+                "entry":     sig.entry,
+                "conf":      sig.confidence,
+                "reason":    sig.reason,
+                "time":      str(datetime.utcnow()),
             })
             if len(self._signals_log) > 50:
                 self._signals_log.pop(0)
+
             log.info(f"✅ {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.2f}")
+
         except Exception as e:
             log.error(f"_open {sig.symbol}: {e}")
 
@@ -231,8 +248,9 @@ class TradingEngine:
         if not self.positions:
             return
         try:
-            all_pos  = await self.client.get_positions()
+            all_pos   = await self.client.get_positions()
             open_syms = {p["symbol"] for p in all_pos if float(p.get("size", 0)) > 0}
+
             for sym in list(self.positions.keys()):
                 if sym not in open_syms:
                     pos = self.positions.pop(sym)
@@ -243,10 +261,15 @@ class TradingEngine:
                               else (pos.entry - cur_price) * pos.qty
                     except Exception:
                         pnl = 0.0
+
                     self.risk.record(pnl)
                     icon = "✅" if pnl >= 0 else "❌"
-                    log.info(f"📭 {sym} fechado | PnL: ${pnl:+.2f}")
-                    await notify(f"{icon} *{sym} fechado*\nPnL: `${pnl:+.2f}`\nWin Rate: `{self.risk.win_rate:.0%}`")
+                    log.info(f"📭 {sym} fechado | PnL: ${pnl:+.4f}")
+                    await notify(
+                        f"{icon} *{sym} fechado*\n"
+                        f"PnL: `${pnl:+.4f}`\n"
+                        f"Win Rate: `{self.risk.win_rate:.0%}`"
+                    )
         except Exception as e:
             log.error(f"_monitor: {e}")
 
@@ -266,14 +289,15 @@ class TradingEngine:
         return {
             "connected":      self.connected,
             "active":         self.active,
-            "balance":        round(self.risk.balance, 2),
+            "balance":        round(self.risk.balance, 4),
+            "buying_power":   round(self.risk.balance * cfg.LEVERAGE, 2),
             "drawdown_pct":   round(self.risk.drawdown * 100, 2),
             "win_rate_pct":   round(self.risk.win_rate * 100, 1),
             "wins":           self.risk.wins,
             "losses":         self.risk.losses,
-            "total_pnl":      round(self.risk.total_pnl, 2),
+            "total_pnl":      round(self.risk.total_pnl, 4),
             "positions":      [p.to_dict() for p in self.positions.values()],
             "symbols":        cfg.SYMBOLS,
+            "leverage":       cfg.LEVERAGE,
             "recent_signals": self._signals_log[-5:],
-            "message":        "Deposite USDT na Bybit para iniciar trades" if self.risk.balance < 10 else "Operando normalmente",
         }
