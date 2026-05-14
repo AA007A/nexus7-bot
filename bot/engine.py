@@ -77,19 +77,30 @@ class RiskManager:
             return False
         return True
 
-    def size(self, entry: float, sl: float) -> float:
-        """Calcula tamanho da posição com alavancagem"""
-        # Com $0.16 e 50x leverage = $8 de poder de compra
+    def size(self, symbol: str, entry: float, sl: float) -> float:
+        """Calcula tamanho com alavancagem e respeita mínimos da Bybit"""
+        from bot.strategy import MIN_QTY, MIN_NOTIONAL
         buying_power = self.balance * cfg.LEVERAGE
-        # Arrisca 10% do poder de compra por trade
-        risk_usd = buying_power * cfg.MAX_RISK_PCT
-        sl_dist  = abs(entry - sl)
-        if sl_dist <= 0:
-            return 0.001
+        risk_usd     = buying_power * cfg.MAX_RISK_PCT
+        sl_dist      = abs(entry - sl)
+
+        if sl_dist <= 0 or entry <= 0:
+            return MIN_QTY.get(symbol, 0.001)
+
         qty = risk_usd / sl_dist
-        # Mínimo absoluto da Bybit para BTC é 0.001
-        qty = max(0.001, round(qty, 3))
-        log.info(f"📐 Size: {qty} | Balance: ${self.balance:.4f} | Power: ${buying_power:.2f}")
+
+        # Garante quantidade mínima da Bybit
+        min_qty = MIN_QTY.get(symbol, 0.001)
+        qty = max(qty, min_qty)
+
+        # Garante valor notional mínimo ($5)
+        min_notional = MIN_NOTIONAL.get(symbol, 5.0)
+        if qty * entry < min_notional:
+            qty = min_notional / entry
+
+        qty = round(qty, 3)
+        notional = qty * entry
+        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.2f} | power=${buying_power:.2f}")
         return qty
 
     def record(self, pnl: float):
@@ -170,6 +181,9 @@ class TradingEngine:
                 await self.client.set_leverage(sym, cfg.LEVERAGE)
                 await asyncio.sleep(0.3)
 
+            # Carrega posições já abertas na Bybit
+            await self._load_existing_positions()
+
             self.connected = True
             self.active    = True
             log.info(f"✅ Bybit conectada! Saldo: ${bal:.4f} USDT | Leverage: {cfg.LEVERAGE}x")
@@ -211,7 +225,7 @@ class TradingEngine:
                 log.warning(f"⚠️ Saldo muito baixo para operar: ${bal:.4f}")
                 return
 
-            qty  = self.risk.size(sig.entry, sig.sl)
+            qty  = self.risk.size(sig.symbol, sig.entry, sig.sl)
             side = "Buy" if sig.direction == "LONG" else "Sell"
 
             await self.client.place_order(
@@ -285,6 +299,47 @@ class TradingEngine:
         except Exception:
             pass
 
+    async def _load_existing_positions(self):
+        """Carrega posições já abertas na Bybit ao iniciar"""
+        try:
+            all_pos = await self.client.get_positions()
+            loaded = 0
+            for p in all_pos:
+                size = float(p.get("size", 0))
+                if size <= 0:
+                    continue
+                sym  = p.get("symbol", "")
+                side = p.get("side", "")
+                if not sym or not side:
+                    continue
+                direction = "LONG" if side == "Buy" else "SHORT"
+                entry = float(p.get("avgPrice", 0))
+                liq   = float(p.get("liqPrice", 0))
+                # Estima SL e TP baseado na posição
+                atr_est = entry * 0.007
+                if direction == "LONG":
+                    sl = max(liq * 1.01, entry - atr_est * 1.2)
+                    tp = entry + atr_est * 2.5
+                else:
+                    sl = min(liq * 0.99, entry + atr_est * 1.2)
+                    tp = entry - atr_est * 2.5
+
+                # Cria objeto Signal mínimo para Position
+                from bot.strategy import Signal
+                sig = Signal(sym, direction, entry, sl, tp, 0.75, "Posição existente carregada")
+                pos = Position(sig, size)
+                pos.pnl = float(p.get("unrealisedPnl", 0))
+                self.positions[sym] = pos
+                loaded += 1
+                log.info(f"📂 Posição carregada: {direction} {size} {sym} @ ${entry:.2f} | PnL: ${pos.pnl:.4f}")
+
+            if loaded > 0:
+                log.info(f"✅ {loaded} posição(ões) existente(s) carregada(s)")
+            else:
+                log.info("📭 Nenhuma posição existente encontrada")
+        except Exception as e:
+            log.error(f"_load_existing_positions: {e}")
+
     def get_status(self) -> dict:
         return {
             "connected":      self.connected,
@@ -301,3 +356,4 @@ class TradingEngine:
             "leverage":       cfg.LEVERAGE,
             "recent_signals": self._signals_log[-5:],
         }
+# patch applied below in _connect

@@ -1,33 +1,54 @@
 """
-Análise técnica multi-indicador para gerar sinais de alta qualidade.
-Confluência de sinais = maior precisão.
+Análise técnica multi-indicador
 """
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 from bot.indicators import ema, rsi, atr, macd
 
+# Quantidade mínima por símbolo na Bybit
+MIN_QTY = {
+    "BTCUSDT":  0.001,
+    "ETHUSDT":  0.01,
+    "SOLUSDT":  0.1,
+    "BNBUSDT":  0.1,
+    "XRPUSDT":  1.0,
+    "AVAXUSDT": 0.1,
+    "DOGEUSDT": 10.0,
+    "LINKUSDT": 0.1,
+}
+
+# Valor mínimo notional (USD) por símbolo
+MIN_NOTIONAL = {
+    "BTCUSDT":  5.0,
+    "ETHUSDT":  5.0,
+    "SOLUSDT":  5.0,
+    "BNBUSDT":  5.0,
+    "XRPUSDT":  5.0,
+    "AVAXUSDT": 5.0,
+    "DOGEUSDT": 5.0,
+    "LINKUSDT": 5.0,
+}
+
 
 @dataclass
 class Signal:
     symbol:     str
-    direction:  str        # "LONG" or "SHORT"
+    direction:  str
     entry:      float
     sl:         float
     tp:         float
-    confidence: float      # 0.0 – 1.0
+    confidence: float
     reason:     str = ""
     rr:         float = field(init=False)
 
     def __post_init__(self):
         risk   = abs(self.entry - self.sl)
-        reward = abs(self.tp   - self.entry)
+        reward = abs(self.tp - self.entry)
         self.rr = round(reward / risk, 2) if risk > 0 else 0
 
 
 class Analyzer:
-    """Gera sinais por confluência de múltiplos indicadores"""
-
     def analyze(self, symbol: str, klines: list) -> Optional[Signal]:
         if len(klines) < 50:
             return None
@@ -38,73 +59,56 @@ class Analyzer:
         price  = closes[-1]
         atr_v  = atr(highs, lows, closes)[-1]
 
-        # ── Indicadores ──────────────────────────────────────
         ema9  = ema(closes, 9)[-1]
         ema21 = ema(closes, 21)[-1]
         ema50 = ema(closes, 50)[-1]
         rsi_v = rsi(closes)[-1]
         macd_line, macd_sig, macd_hist = macd(closes)
-        ml = macd_line[-1]; ms = macd_sig[-1]; mh = macd_hist[-1]
+        mh = macd_hist[-1]
         prev_mh = macd_hist[-2] if len(macd_hist) > 1 else mh
 
-        # ── Scoring: LONG ────────────────────────────────────
-        long_score  = 0
+        long_score = 0
         short_score = 0
-        reasons_l   = []
-        reasons_s   = []
+        reasons_l = []
+        reasons_s = []
 
-        # 1. EMA stack
         if ema9 > ema21 > ema50:
-            long_score += 2; reasons_l.append("EMA bullish stack")
+            long_score += 2; reasons_l.append("EMA bullish")
         if ema9 < ema21 < ema50:
-            short_score += 2; reasons_s.append("EMA bearish stack")
+            short_score += 2; reasons_s.append("EMA bearish")
 
-        # 2. Price vs EMA
         if price > ema21:
-            long_score += 1; reasons_l.append("price>EMA21")
-        if price < ema21:
-            short_score += 1; reasons_s.append("price<EMA21")
-
-        # 3. RSI zones
-        if 40 <= rsi_v <= 60:
-            long_score += 1; short_score += 1   # neutro
-        if rsi_v < 40:
-            long_score += 2; reasons_l.append(f"RSI oversold {rsi_v:.0f}")
-        if rsi_v > 60:
-            short_score += 2; reasons_s.append(f"RSI overbought {rsi_v:.0f}")
-        if rsi_v < 25:  # extremo
             long_score += 1
-        if rsi_v > 75:
+        if price < ema21:
             short_score += 1
 
-        # 4. MACD
-        if not np.isnan(ml) and not np.isnan(ms):
-            if ml > ms and mh > 0 and mh > prev_mh:
-                long_score += 2; reasons_l.append("MACD cross UP")
-            if ml < ms and mh < 0 and mh < prev_mh:
-                short_score += 2; reasons_s.append("MACD cross DOWN")
+        if rsi_v < 40:
+            long_score += 2; reasons_l.append(f"RSI {rsi_v:.0f}")
+        if rsi_v > 60:
+            short_score += 2; reasons_s.append(f"RSI {rsi_v:.0f}")
 
-        # 5. Momentum (last 3 candles)
+        if not np.isnan(mh):
+            if mh > 0 and mh > prev_mh:
+                long_score += 2; reasons_l.append("MACD↑")
+            if mh < 0 and mh < prev_mh:
+                short_score += 2; reasons_s.append("MACD↓")
+
         if len(closes) >= 4:
-            momentum = (closes[-1] - closes[-4]) / closes[-4]
-            if momentum > 0.003:
-                long_score += 1
-            if momentum < -0.003:
-                short_score += 1
+            mom = (closes[-1] - closes[-4]) / closes[-4]
+            if mom > 0.002: long_score += 1
+            if mom < -0.002: short_score += 1
 
-        # ── Gerar sinal ──────────────────────────────────────
-        max_score = 8
         if long_score >= 5 and long_score > short_score:
-            conf = min(0.92, 0.55 + (long_score / max_score) * 0.4)
-            sl   = price - atr_v * 1.2
-            tp   = price + atr_v * 2.5
+            conf = min(0.92, 0.55 + (long_score / 8) * 0.4)
+            sl = price - atr_v * 1.2
+            tp = price + atr_v * 2.5
             return Signal(symbol, "LONG", price, sl, tp, conf,
                           " | ".join(reasons_l[:3]))
 
         if short_score >= 5 and short_score > long_score:
-            conf = min(0.92, 0.55 + (short_score / max_score) * 0.4)
-            sl   = price + atr_v * 1.2
-            tp   = price - atr_v * 2.5
+            conf = min(0.92, 0.55 + (short_score / 8) * 0.4)
+            sl = price + atr_v * 1.2
+            tp = price - atr_v * 2.5
             return Signal(symbol, "SHORT", price, sl, tp, conf,
                           " | ".join(reasons_s[:3]))
 
