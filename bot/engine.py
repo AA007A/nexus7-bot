@@ -78,29 +78,42 @@ class RiskManager:
         return True
 
     def size(self, symbol: str, entry: float, sl: float) -> float:
-        """Calcula tamanho com alavancagem e respeita mínimos da Bybit"""
-        from bot.strategy import MIN_QTY, MIN_NOTIONAL
-        buying_power = self.balance * cfg.LEVERAGE
-        risk_usd     = buying_power * cfg.MAX_RISK_PCT
-        sl_dist      = abs(entry - sl)
+        """
+        Calcula qty respeitando:
+        1. Poder de compra real (balance * leverage)
+        2. Qty mínima da Bybit por símbolo
+        3. Notional mínimo da Bybit ($5)
+        4. Notional máximo = 80% do poder de compra
+        """
+        from bot.strategy import MIN_QTY
+        if entry <= 0:
+            return 0.001
 
-        if sl_dist <= 0 or entry <= 0:
-            return MIN_QTY.get(symbol, 0.001)
+        buying_power = self.balance * cfg.LEVERAGE   # ex: $0.16 * 50 = $8
+        max_notional = buying_power * 0.8             # ex: $6.4 máximo por trade
+        min_qty      = MIN_QTY.get(symbol, 0.001)
+        min_notional = 5.0                            # Bybit exige mínimo $5
 
-        qty = risk_usd / sl_dist
+        # Verifica se tem poder de compra suficiente
+        if buying_power < min_notional:
+            log.warning(f"⚠️ Poder de compra ${buying_power:.2f} insuficiente para {symbol} (mín $5)")
+            return 0.0
 
-        # Garante quantidade mínima da Bybit
-        min_qty = MIN_QTY.get(symbol, 0.001)
+        # Qty baseada em 50% do poder de compra
+        target_notional = min(max_notional, buying_power * 0.5)
+        target_notional = max(target_notional, min_notional)
+        qty = target_notional / entry
+
+        # Garante mínimo da Bybit
         qty = max(qty, min_qty)
 
-        # Garante valor notional mínimo ($5)
-        min_notional = MIN_NOTIONAL.get(symbol, 5.0)
-        if qty * entry < min_notional:
-            qty = min_notional / entry
+        # Garante que não ultrapassa poder de compra
+        if qty * entry > buying_power:
+            qty = (buying_power * 0.8) / entry
 
         qty = round(qty, 3)
         notional = qty * entry
-        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.2f} | power=${buying_power:.2f}")
+        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.2f} | power=${buying_power:.2f} | bal=${self.balance:.4f}")
         return qty
 
     def record(self, pnl: float):
@@ -226,6 +239,10 @@ class TradingEngine:
                 return
 
             qty  = self.risk.size(sig.symbol, sig.entry, sig.sl)
+            if qty <= 0:
+                log.warning(f"⚠️ Qty 0 para {sig.symbol} — saldo insuficiente")
+                return
+
             side = "Buy" if sig.direction == "LONG" else "Sell"
 
             await self.client.place_order(

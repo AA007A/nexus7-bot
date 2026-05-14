@@ -9,13 +9,13 @@ from bot.indicators import ema, rsi, atr, macd
 # Quantidade mínima por símbolo na Bybit
 MIN_QTY = {
     "BTCUSDT":  0.001,
-    "ETHUSDT":  0.01,
-    "SOLUSDT":  0.1,
-    "BNBUSDT":  0.1,
-    "XRPUSDT":  1.0,
-    "AVAXUSDT": 0.1,
-    "DOGEUSDT": 10.0,
-    "LINKUSDT": 0.1,
+    "ETHUSDT":  0.001,   # mínimo real Bybit
+    "SOLUSDT":  0.01,    # mínimo real Bybit
+    "BNBUSDT":  0.001,   # mínimo real Bybit
+    "XRPUSDT":  1.0,     # mínimo real Bybit
+    "AVAXUSDT": 0.01,
+    "DOGEUSDT": 1.0,
+    "LINKUSDT": 0.01,
 }
 
 # Valor mínimo notional (USD) por símbolo
