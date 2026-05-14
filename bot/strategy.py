@@ -7,27 +7,19 @@ from typing import Optional
 from bot.indicators import ema, rsi, atr, macd
 
 # Quantidade mínima por símbolo na Bybit
+# Mínimos REAIS da Bybit Unified Trading Account
 MIN_QTY = {
-    "BTCUSDT":  0.001,
-    "ETHUSDT":  0.001,   # mínimo real Bybit
-    "SOLUSDT":  0.01,    # mínimo real Bybit
-    "BNBUSDT":  0.001,   # mínimo real Bybit
-    "XRPUSDT":  1.0,     # mínimo real Bybit
-    "AVAXUSDT": 0.01,
+    "BNBUSDT":  0.01,
+    "XRPUSDT":  1.0,
     "DOGEUSDT": 1.0,
-    "LINKUSDT": 0.01,
+    "LINKUSDT": 0.1,
 }
 
-# Valor mínimo notional (USD) por símbolo
 MIN_NOTIONAL = {
-    "BTCUSDT":  5.0,
-    "ETHUSDT":  5.0,
-    "SOLUSDT":  5.0,
-    "BNBUSDT":  5.0,
-    "XRPUSDT":  5.0,
-    "AVAXUSDT": 5.0,
-    "DOGEUSDT": 5.0,
-    "LINKUSDT": 5.0,
+    "BNBUSDT":  6.7,
+    "XRPUSDT":  2.3,
+    "DOGEUSDT": 0.2,
+    "LINKUSDT": 1.8,
 }
 
 

@@ -7,7 +7,7 @@ class Config:
     API_SECRET: str = os.environ.get("BYBIT_API_SECRET", os.environ.get("BINANCE_API_SECRET", ""))
 
     # Trading
-    SYMBOLS:        list  = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+    SYMBOLS:        list  = ["BNBUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT"]
     LEVERAGE:       int   = int(os.environ.get("LEVERAGE",         "50"))
     MAX_RISK_PCT:   float = float(os.environ.get("MAX_RISK_PCT",   "0.01"))   # 1% por trade
     MAX_DRAWDOWN:   float = float(os.environ.get("MAX_DRAWDOWN",   "0.08"))   # 8% stop total

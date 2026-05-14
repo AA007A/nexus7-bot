@@ -85,35 +85,32 @@ class RiskManager:
         3. Notional mínimo da Bybit ($5)
         4. Notional máximo = 80% do poder de compra
         """
-        from bot.strategy import MIN_QTY
+        from bot.strategy import MIN_QTY, MIN_NOTIONAL
         if entry <= 0:
-            return 0.001
-
-        buying_power = self.balance * cfg.LEVERAGE   # ex: $0.16 * 50 = $8
-        max_notional = buying_power * 0.8             # ex: $6.4 máximo por trade
-        min_qty      = MIN_QTY.get(symbol, 0.001)
-        min_notional = 5.0                            # Bybit exige mínimo $5
-
-        # Verifica se tem poder de compra suficiente
-        if buying_power < min_notional:
-            log.warning(f"⚠️ Poder de compra ${buying_power:.2f} insuficiente para {symbol} (mín $5)")
             return 0.0
 
-        # Qty baseada em 50% do poder de compra
-        target_notional = min(max_notional, buying_power * 0.5)
-        target_notional = max(target_notional, min_notional)
-        qty = target_notional / entry
+        buying_power = self.balance * cfg.LEVERAGE
+        min_qty      = MIN_QTY.get(symbol, 0.001)
+        min_notional = MIN_NOTIONAL.get(symbol, 2.0)
 
-        # Garante mínimo da Bybit
+        # Sem poder de compra suficiente
+        if buying_power < min_notional:
+            log.warning(f"⚠️ ${buying_power:.2f} insuficiente para {symbol} (mín ${min_notional})")
+            return 0.0
+
+        # Usa 80% do poder de compra
+        target_notional = buying_power * 0.8
+        qty = target_notional / entry
         qty = max(qty, min_qty)
 
-        # Garante que não ultrapassa poder de compra
+        # Nunca ultrapassa o poder de compra
         if qty * entry > buying_power:
-            qty = (buying_power * 0.8) / entry
+            qty = (buying_power * 0.95) / entry
+            qty = max(qty, min_qty)
 
         qty = round(qty, 3)
         notional = qty * entry
-        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.2f} | power=${buying_power:.2f} | bal=${self.balance:.4f}")
+        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.2f} | power=${buying_power:.2f}")
         return qty
 
     def record(self, pnl: float):
