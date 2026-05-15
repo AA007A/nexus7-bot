@@ -6,13 +6,12 @@ from contextlib import asynccontextmanager
 
 from bot.engine import TradingEngine
 from bot.bybit import BybitClient
-from bot.config import cfg
 from bot.logger import log
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 NEXUS-7 iniciando...")
+    log.info("🚀 NEXUS-7 v6 iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
@@ -24,49 +23,58 @@ async def lifespan(app: FastAPI):
     await client.close()
 
 
-app = FastAPI(title="NEXUS-7", version="5.0.0", lifespan=lifespan)
+app = FastAPI(title="NEXUS-7", version="6.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "5.0.0", "name": "NEXUS-7 AI Trader"}
-
+    return {"status": "online", "version": "6.0.0", "name": "NEXUS-7 AI Trader"}
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-
 @app.get("/api/status")
 async def status():
     return app.state.engine.get_status()
-
 
 @app.get("/api/balance")
 async def balance():
     b = await app.state.client.get_balance()
     return {"balance": b, "currency": "USDT"}
 
+@app.get("/api/positions")
+async def positions():
+    eng = app.state.engine
+    return {
+        "open":  [p.to_dict() for p in eng.positions.values()],
+        "count": len(eng.positions),
+        "max":   eng.risk.__class__.__name__,
+    }
+
+@app.get("/api/pnl")
+async def pnl():
+    return app.state.engine.stats.all_summaries()
 
 @app.post("/api/pause")
 async def pause():
     app.state.engine.stop()
     return {"message": "Bot pausado"}
 
-
 @app.post("/api/resume")
 async def resume():
     asyncio.create_task(app.state.engine.run())
     return {"message": "Bot retomado"}
 
-
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    with open("dashboard/index.html") as f:
-        return f.read()
-
+    try:
+        with open("dashboard/index.html") as f:
+            return f.read()
+    except Exception:
+        return "<h1>Dashboard não encontrado</h1>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

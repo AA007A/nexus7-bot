@@ -11,7 +11,7 @@ from bot.config import cfg
 from bot.logger import log
 
 BASE = "https://api.bybit.com"
-RW   = "5000"   # recvWindow — must match in both signature and header
+RW   = "5000"
 
 INTERVALS = {
     "1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
@@ -40,6 +40,7 @@ class BybitClient:
         self.key     = cfg.API_KEY
         self.secret  = cfg.API_SECRET
         self._sess: Optional[aiohttp.ClientSession] = None
+        self._instruments: dict = {}  # cache de info dos instrumentos
         log.info(f"🔑 Bybit key: {self.key[:8]}... ({len(self.key)} chars)")
 
     async def _s(self) -> aiohttp.ClientSession:
@@ -79,7 +80,29 @@ class BybitClient:
                 raise Exception(f"Bybit {rc}: {data.get('retMsg','')}")
             return data.get("result", {})
 
-    # ── Public ────────────────────────────────────────────────
+    async def get_instruments(self) -> dict:
+        """Busca info de todos os instrumentos — min qty, step size etc"""
+        if self._instruments:
+            return self._instruments
+        try:
+            data = await self._get("/v5/market/instruments-info",
+                                   {"category": "linear", "limit": "1000"})
+            for item in data.get("list", []):
+                sym = item.get("symbol", "")
+                if not sym.endswith("USDT"):
+                    continue
+                lot = item.get("lotSizeFilter", {})
+                self._instruments[sym] = {
+                    "minQty":  float(lot.get("minOrderQty",  0.001)),
+                    "maxQty":  float(lot.get("maxOrderQty",  999999)),
+                    "qtyStep": float(lot.get("qtyStep",      0.001)),
+                    "minNotional": float(lot.get("minNotionalValue", 1.0)),
+                }
+            log.info(f"📋 {len(self._instruments)} instrumentos carregados")
+        except Exception as e:
+            log.error(f"get_instruments: {e}")
+        return self._instruments
+
     async def ping(self) -> bool:
         try:
             await self._get("/v5/market/time")
@@ -105,7 +128,11 @@ class BybitClient:
         lst = data.get("list", [{}])
         return lst[0] if lst else {}
 
-    # ── Private ───────────────────────────────────────────────
+    async def get_all_tickers(self) -> list:
+        """Retorna todos os tickers USDT perpetual"""
+        data = await self._get("/v5/market/tickers", {"category": "linear"})
+        return [t for t in data.get("list", []) if t.get("symbol","").endswith("USDT")]
+
     async def get_balance(self) -> float:
         try:
             data = await self._get("/v5/account/wallet-balance",
@@ -114,7 +141,7 @@ class BybitClient:
                 for coin in item.get("coin", []):
                     if coin.get("coin") == "USDT":
                         val = float(coin.get("walletBalance", 0))
-                        log.info(f"💰 Saldo: ${val:.2f} USDT")
+                        log.info(f"💰 Saldo: ${val:.4f} USDT")
                         return val
             return 0.0
         except Exception as e:
@@ -137,27 +164,15 @@ class BybitClient:
         body = {
             "category":    "linear",
             "symbol":      symbol,
-            "side":        side,        # "Buy" or "Sell"
+            "side":        side,
             "orderType":   "Market",
-            "qty":         str(round(qty, 3)),
+            "qty":         str(qty),
             "timeInForce": "GoodTillCancel",
         }
-        if sl: body["stopLoss"]   = str(round(sl, 2))
-        if tp: body["takeProfit"] = str(round(tp, 2))
-        log.info(f"📤 {side} {qty} {symbol} SL={sl:.0f} TP={tp:.0f}")
+        if sl: body["stopLoss"]   = str(round(sl, 6))
+        if tp: body["takeProfit"] = str(round(tp, 6))
+        log.info(f"📤 {side} {qty} {symbol} SL={sl} TP={tp}")
         return await self._post("/v5/order/create", body)
-
-    async def close_position(self, symbol: str, side: str, qty: float) -> dict:
-        close_side = "Sell" if side == "Buy" else "Buy"
-        return await self._post("/v5/order/create", {
-            "category":    "linear",
-            "symbol":      symbol,
-            "side":        close_side,
-            "orderType":   "Market",
-            "qty":         str(round(qty, 3)),
-            "timeInForce": "GoodTillCancel",
-            "reduceOnly":  True,
-        })
 
     async def cancel_all(self, symbol: str = None) -> dict:
         try:
@@ -175,7 +190,6 @@ class BybitClient:
                 "category": "linear", "symbol": symbol,
                 "buyLeverage": str(lev), "sellLeverage": str(lev),
             })
-            log.info(f"⚙️ Leverage {lev}x — {symbol}")
         except Exception as e:
             if "leverage not modified" not in str(e).lower():
                 log.warning(f"set_leverage {symbol}: {e}")

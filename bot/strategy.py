@@ -1,26 +1,10 @@
 """
-Análise técnica multi-indicador
+Análise técnica multi-indicador — sem mínimos hardcoded
 """
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 from bot.indicators import ema, rsi, atr, macd
-
-# Quantidade mínima por símbolo na Bybit
-# Mínimos REAIS da Bybit Unified Trading Account
-MIN_QTY = {
-    "BNBUSDT":  0.01,
-    "XRPUSDT":  1.0,
-    "DOGEUSDT": 1.0,
-    "LINKUSDT": 0.1,
-}
-
-MIN_NOTIONAL = {
-    "BNBUSDT":  6.7,
-    "XRPUSDT":  2.3,
-    "DOGEUSDT": 0.2,
-    "LINKUSDT": 1.8,
-}
 
 
 @dataclass
@@ -36,7 +20,7 @@ class Signal:
 
     def __post_init__(self):
         risk   = abs(self.entry - self.sl)
-        reward = abs(self.tp - self.entry)
+        reward = abs(self.tp   - self.entry)
         self.rr = round(reward / risk, 2) if risk > 0 else 0
 
 
@@ -51,57 +35,58 @@ class Analyzer:
         price  = closes[-1]
         atr_v  = atr(highs, lows, closes)[-1]
 
-        ema9  = ema(closes, 9)[-1]
-        ema21 = ema(closes, 21)[-1]
-        ema50 = ema(closes, 50)[-1]
-        rsi_v = rsi(closes)[-1]
-        macd_line, macd_sig, macd_hist = macd(closes)
-        mh = macd_hist[-1]
-        prev_mh = macd_hist[-2] if len(macd_hist) > 1 else mh
+        if atr_v <= 0 or price <= 0:
+            return None
 
-        long_score = 0
-        short_score = 0
-        reasons_l = []
-        reasons_s = []
+        ema9   = ema(closes, 9)[-1]
+        ema21  = ema(closes, 21)[-1]
+        ema50  = ema(closes, 50)[-1]
+        rsi_v  = rsi(closes)[-1]
+        _, _, hist = macd(closes)
+        mh     = hist[-1] if not np.isnan(hist[-1]) else 0
+        prev_mh = hist[-2] if len(hist) > 1 and not np.isnan(hist[-2]) else mh
 
+        long_s, short_s = 0, 0
+        rl, rs = [], []
+
+        # EMA stack
         if ema9 > ema21 > ema50:
-            long_score += 2; reasons_l.append("EMA bullish")
+            long_s += 2; rl.append("EMA stack ▲")
         if ema9 < ema21 < ema50:
-            short_score += 2; reasons_s.append("EMA bearish")
+            short_s += 2; rs.append("EMA stack ▼")
 
-        if price > ema21:
-            long_score += 1
-        if price < ema21:
-            short_score += 1
+        # Price vs EMA21
+        if price > ema21: long_s  += 1
+        if price < ema21: short_s += 1
 
-        if rsi_v < 40:
-            long_score += 2; reasons_l.append(f"RSI {rsi_v:.0f}")
-        if rsi_v > 60:
-            short_score += 2; reasons_s.append(f"RSI {rsi_v:.0f}")
+        # RSI
+        if rsi_v < 35:    long_s  += 2; rl.append(f"RSI {rsi_v:.0f}")
+        elif rsi_v < 45:  long_s  += 1
+        if rsi_v > 65:    short_s += 2; rs.append(f"RSI {rsi_v:.0f}")
+        elif rsi_v > 55:  short_s += 1
 
-        if not np.isnan(mh):
-            if mh > 0 and mh > prev_mh:
-                long_score += 2; reasons_l.append("MACD↑")
-            if mh < 0 and mh < prev_mh:
-                short_score += 2; reasons_s.append("MACD↓")
+        # MACD
+        if mh > 0 and mh > prev_mh: long_s  += 2; rl.append("MACD ↑")
+        if mh < 0 and mh < prev_mh: short_s += 2; rs.append("MACD ↓")
 
+        # Momentum (últimas 3 velas)
         if len(closes) >= 4:
             mom = (closes[-1] - closes[-4]) / closes[-4]
-            if mom > 0.002: long_score += 1
-            if mom < -0.002: short_score += 1
+            if mom >  0.002: long_s  += 1
+            if mom < -0.002: short_s += 1
 
-        if long_score >= 5 and long_score > short_score:
-            conf = min(0.92, 0.55 + (long_score / 8) * 0.4)
-            sl = price - atr_v * 1.2
-            tp = price + atr_v * 2.5
-            return Signal(symbol, "LONG", price, sl, tp, conf,
-                          " | ".join(reasons_l[:3]))
+        # Gera sinal
+        max_s = 8
+        if long_s >= 5 and long_s > short_s:
+            conf = min(0.95, 0.55 + (long_s / max_s) * 0.45)
+            sl   = price - atr_v * 1.5
+            tp   = price + atr_v * 3.0
+            return Signal(symbol, "LONG", price, sl, tp, conf, " | ".join(rl[:3]))
 
-        if short_score >= 5 and short_score > long_score:
-            conf = min(0.92, 0.55 + (short_score / 8) * 0.4)
-            sl = price + atr_v * 1.2
-            tp = price - atr_v * 2.5
-            return Signal(symbol, "SHORT", price, sl, tp, conf,
-                          " | ".join(reasons_s[:3]))
+        if short_s >= 5 and short_s > long_s:
+            conf = min(0.95, 0.55 + (short_s / max_s) * 0.45)
+            sl   = price + atr_v * 1.5
+            tp   = price - atr_v * 3.0
+            return Signal(symbol, "SHORT", price, sl, tp, conf, " | ".join(rs[:3]))
 
         return None
