@@ -180,6 +180,39 @@ class BybitClient:
             if "leverage not modified" not in str(e).lower():
                 log.warning(f"set_leverage {symbol}: {e}")
 
+    async def update_stop_loss(self, symbol: str, sl: float) -> dict:
+        """Atualiza o stop loss de uma posição aberta via Trading Stop."""
+        try:
+            result = await self._post("/v5/position/trading-stop", {
+                "category":  "linear",
+                "symbol":    symbol,
+                "stopLoss":  str(round(sl, 6)),
+                "slTriggerBy": "MarkPrice",
+            })
+            log.info(f"🔒 SL atualizado {symbol} → ${sl:.4f}")
+            return result
+        except Exception as e:
+            log.error(f"update_stop_loss {symbol}: {e}")
+            return {}
+
+    async def get_closed_pnl(self, symbol: str = None,
+                             start_ms: int = None, end_ms: int = None,
+                             limit: int = 200) -> list:
+        """Retorna PnL realizado de posições fechadas."""
+        try:
+            params: dict = {"category": "linear", "limit": str(limit)}
+            if symbol:
+                params["symbol"] = symbol
+            if start_ms:
+                params["startTime"] = str(start_ms)
+            if end_ms:
+                params["endTime"] = str(end_ms)
+            data = await self._get("/v5/position/closed-pnl", params, auth=True)
+            return data.get("list", [])
+        except Exception as e:
+            log.error(f"get_closed_pnl: {e}")
+            return []
+
     async def close(self):
         if self._sess and not self._sess.closed:
             await self._sess.close()
