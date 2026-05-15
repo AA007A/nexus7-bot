@@ -13,6 +13,11 @@ MIN_QTY = {
     "XRPUSDT":  1.0,
     "DOGEUSDT": 1.0,
     "LINKUSDT": 0.1,
+    "ETHUSDT":  0.01,
+    "ADAUSDT":  10.0,
+    "SOLUSDT":  0.1,
+    "AVAXUSDT": 0.1,
+    "MATICUSDT": 1.0,
 }
 
 MIN_NOTIONAL = {
@@ -20,6 +25,11 @@ MIN_NOTIONAL = {
     "XRPUSDT":  2.3,
     "DOGEUSDT": 0.2,
     "LINKUSDT": 1.8,
+    "ETHUSDT":  10.0,
+    "ADAUSDT":  2.0,
+    "SOLUSDT":  5.0,
+    "AVAXUSDT": 5.0,
+    "MATICUSDT": 2.0,
 }
 
 
