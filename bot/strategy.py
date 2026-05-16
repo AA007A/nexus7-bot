@@ -1,10 +1,12 @@
 """
 Análise técnica multi-indicador — sem mínimos hardcoded
+Filtra por Risk/Reward ratio mínimo
 """
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 from bot.indicators import ema, rsi, atr, macd
+from bot.config import cfg
 
 
 @dataclass
@@ -81,12 +83,24 @@ class Analyzer:
             conf = min(0.95, 0.55 + (long_s / max_s) * 0.45)
             sl   = price - atr_v * 1.5
             tp   = price + atr_v * 3.0
-            return Signal(symbol, "LONG", price, sl, tp, conf, " | ".join(rl[:3]))
+            sig = Signal(symbol, "LONG", price, sl, tp, conf, " | ".join(rl[:3]))
+            
+            # Filtra por RR ratio mínimo
+            if sig.rr >= cfg.MIN_RR_RATIO:
+                return sig
+            else:
+                return None
 
         if short_s >= 5 and short_s > long_s:
             conf = min(0.95, 0.55 + (short_s / max_s) * 0.45)
             sl   = price + atr_v * 1.5
             tp   = price - atr_v * 3.0
-            return Signal(symbol, "SHORT", price, sl, tp, conf, " | ".join(rs[:3]))
+            sig = Signal(symbol, "SHORT", price, sl, tp, conf, " | ".join(rs[:3]))
+            
+            # Filtra por RR ratio mínimo
+            if sig.rr >= cfg.MIN_RR_RATIO:
+                return sig
+            else:
+                return None
 
         return None
