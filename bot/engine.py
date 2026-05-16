@@ -1,10 +1,16 @@
 """
-NEXUS-7 Trading Engine v6.0
-- Auto-detecta mínimos reais da Bybit
-- Trailing stop quando lucro >= 50%
-- Até 8 posições simultâneas
-- PnL tracking: sessão, 1d, 7d, 30d
-- Posições abertas sempre visíveis
+NEXUS-7 Trading Engine v7.0
+Mudanças vs v6:
+  ✅ Máximo 3 posições simultâneas (MAX_POSITIONS=3)
+  ✅ Score mínimo 80/100 para entrar (MIN_ENTRY_SCORE=80)
+  ✅ Trailing stop PROGRESSIVO:
+       lucro >=10% → SL em +5%
+       lucro >=20% → SL em +10%
+       lucro >=30% → SL em +15%  ... e assim por diante
+  ✅ Sincronização em tempo real com Bybit (posições abertas/fechadas)
+  ✅ Tamanho de ordem: 30% do poder de compra por trade
+  ✅ Seletor inteligente: escaneia todos os símbolos e entra apenas nos melhores score
+  ✅ Cooldown de 60s após fechar posição no mesmo símbolo
 """
 import asyncio, time
 from datetime import datetime, timedelta
@@ -17,8 +23,8 @@ from bot.logger import log
 from bot.notifier import notify, signal_msg
 
 
+# ─── Trade (histórico fechado) ─────────────────────────────────────────────────
 class Trade:
-    """Histórico de um trade fechado"""
     def __init__(self, symbol, direction, entry, exit_price, qty, pnl, opened_at):
         self.symbol      = symbol
         self.direction   = direction
@@ -30,6 +36,7 @@ class Trade:
         self.closed_at   = datetime.utcnow()
 
 
+# ─── Position ──────────────────────────────────────────────────────────────────
 class Position:
     def __init__(self, sig: Signal, qty: float):
         self.symbol      = sig.symbol
@@ -37,14 +44,19 @@ class Position:
         self.entry       = sig.entry
         self.sl          = sig.sl
         self.tp          = sig.tp
+        self.score       = sig.score
         self.qty         = qty
         self.opened_at   = datetime.utcnow()
         self.pnl         = 0.0
-        self.peak_pnl    = 0.0   # maior lucro já atingido
-        self.trailing_sl = None  # stop loss do trailing
-        self.trailing_active = False
+        self.peak_pnl    = 0.0
+        self.current_price = sig.entry
+        # Trailing stop progressivo
+        self.trailing_sl       = sig.sl    # SL ativo atual (começa igual ao original)
+        self.trailing_active   = False
+        self.trailing_milestone= 0         # último milestone de 10% atingido
 
     def update_pnl(self, current_price: float):
+        self.current_price = current_price
         if self.direction == "LONG":
             self.pnl = (current_price - self.entry) * self.qty
         else:
@@ -53,31 +65,58 @@ class Position:
             self.peak_pnl = self.pnl
 
     def pnl_pct(self) -> float:
-        """Percentual de lucro em relação ao entry"""
-        if self.entry <= 0:
+        if self.entry <= 0 or self.qty <= 0:
             return 0.0
         if self.direction == "LONG":
-            return (self.pnl / (self.entry * self.qty)) if self.qty > 0 else 0.0
-        return (self.pnl / (self.entry * self.qty)) if self.qty > 0 else 0.0
+            return (self.current_price - self.entry) / self.entry * 100 * cfg.LEVERAGE
+        return (self.entry - self.current_price) / self.entry * 100 * cfg.LEVERAGE
+
+    def calc_trailing_sl(self) -> Optional[float]:
+        """
+        Trailing stop progressivo:
+          a cada 10% de lucro → move SL para trás metade do milestone
+          Ex: 10% lucro → SL em +5%, 20% → +10%, 30% → +15%
+        """
+        pct = self.pnl_pct()
+        if pct < 10:
+            return None   # ainda não ativado
+
+        milestone = int(pct // 10) * 10   # arredonda para baixo: 10, 20, 30...
+        lock_pct  = milestone * 0.5       # trava metade do milestone
+
+        if self.direction == "LONG":
+            new_sl = self.entry * (1 + lock_pct / 100 / cfg.LEVERAGE)
+            # Só move SL para cima, nunca para baixo
+            if new_sl > self.trailing_sl:
+                return round(new_sl, 6)
+        else:
+            new_sl = self.entry * (1 - lock_pct / 100 / cfg.LEVERAGE)
+            if new_sl < self.trailing_sl:
+                return round(new_sl, 6)
+
+        return None
 
     def to_dict(self) -> dict:
         return {
-            "symbol":          self.symbol,
-            "direction":       self.direction,
-            "entry":           round(self.entry, 6),
-            "sl":              round(self.trailing_sl or self.sl, 6),
-            "tp":              round(self.tp, 6),
-            "qty":             self.qty,
-            "pnl":             round(self.pnl, 4),
-            "pnl_pct":         round(self.pnl_pct() * 100, 2),
-            "peak_pnl":        round(self.peak_pnl, 4),
-            "trailing_active": self.trailing_active,
-            "opened_at":       str(self.opened_at),
+            "symbol":           self.symbol,
+            "direction":        self.direction,
+            "entry":            round(self.entry, 6),
+            "current_price":    round(self.current_price, 6),
+            "sl":               round(self.trailing_sl, 6),
+            "tp":               round(self.tp, 6),
+            "qty":              self.qty,
+            "pnl":              round(self.pnl, 4),
+            "pnl_pct":          round(self.pnl_pct(), 2),
+            "peak_pnl":         round(self.peak_pnl, 4),
+            "trailing_active":  self.trailing_active,
+            "trailing_sl":      round(self.trailing_sl, 6),
+            "score":            self.score,
+            "opened_at":        str(self.opened_at),
         }
 
 
+# ─── Stats ────────────────────────────────────────────────────────────────────
 class Stats:
-    """PnL por período"""
     def __init__(self):
         self.trades: List[Trade] = []
         self.session_start = datetime.utcnow()
@@ -114,6 +153,7 @@ class Stats:
         }
 
 
+# ─── Risk Manager ─────────────────────────────────────────────────────────────
 class RiskManager:
     def __init__(self):
         self.peak     = 0.0
@@ -139,67 +179,65 @@ class RiskManager:
         if not self._ready:
             return False
         if self.drawdown >= cfg.MAX_DRAWDOWN:
+            log.warning(f"🚨 Drawdown {self.drawdown:.1%} >= limite {cfg.MAX_DRAWDOWN:.0%} → bloqueado")
             return False
         if n_open >= cfg.MAX_POSITIONS:
+            log.info(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando fechamento")
             return False
         return True
 
     def size(self, symbol: str, entry: float, instruments: dict) -> float:
-        """Calcula qty usando info real da Bybit"""
         if entry <= 0 or not self._ready:
             return 0.0
-        info = instruments.get(symbol, {})
+        info     = instruments.get(symbol, {})
         min_qty  = info.get("minQty",  0.001)
         qty_step = info.get("qtyStep", 0.001)
         min_not  = info.get("minNotional", 1.0)
 
-        buying_power  = self.balance * cfg.LEVERAGE
-        target_not    = buying_power * cfg.MAX_RISK_PCT
-        target_not    = max(target_not, min_not)
+        buying_power = self.balance * cfg.LEVERAGE
+        target_not   = buying_power * cfg.MAX_RISK_PCT
+        target_not   = max(target_not, min_not)
 
-        # Não pode usar mais que 95% do poder de compra
         if target_not > buying_power * 0.95:
             target_not = buying_power * 0.95
 
-        qty = target_not / entry
-
-        # Arredonda para o step correto
+        qty   = target_not / entry
         steps = int(qty / qty_step)
         qty   = round(steps * qty_step, 8)
         qty   = max(qty, min_qty)
 
-        notional = qty * entry
-        if notional > buying_power:
-            qty = (buying_power * 0.90) / entry
+        if qty * entry > buying_power:
+            qty   = (buying_power * 0.90) / entry
             steps = int(qty / qty_step)
             qty   = round(steps * qty_step, 8)
             qty   = max(qty, min_qty)
 
-        notional = qty * entry
-        log.info(f"📐 {symbol}: qty={qty} notional=${notional:.3f} step={qty_step}")
+        log.info(f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f}")
         return qty
 
 
+# ─── Trading Engine ───────────────────────────────────────────────────────────
 class TradingEngine:
     def __init__(self, client: BybitClient):
-        self.client      = client
-        self.analyzer    = Analyzer()
-        self.risk        = RiskManager()
-        self.stats       = Stats()
-        self.positions:  Dict[str, Position] = {}
+        self.client       = client
+        self.analyzer     = Analyzer()
+        self.risk         = RiskManager()
+        self.stats        = Stats()
+        self.positions:   Dict[str, Position] = {}
         self.instruments: dict = {}
         self.viable_symbols: List[str] = []
-        self.connected   = False
-        self.active      = False
-        self._running    = False
-        self._scan_idx   = 0   # rotação dos símbolos
+        self.connected    = False
+        self.active       = False
+        self._running     = False
+        self._scan_idx    = 0
+        self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
 
-    # ── Lifecycle ─────────────────────────────────────────────
+    # ── Lifecycle ──────────────────────────────────────────────
     async def run(self):
         if self._running:
             return
         self._running = True
-        log.info("⚡ Engine v6.0 iniciando...")
+        log.info("⚡ Engine v7.0 iniciando...")
         await self._connect()
 
         while self._running:
@@ -211,23 +249,24 @@ class TradingEngine:
 
                 if self.active:
                     await self._update_balance()
-                    await self._update_open_positions()
+                    await self._sync_positions()         # sincroniza com Bybit
+                    await self._apply_trailing_stops()   # atualiza SLs progressivos
                     if self.risk.can_open(len(self.positions)):
-                        await self._scan_next()
+                        await self._scan_all_and_enter() # escaneia e entra nos melhores
 
                 await asyncio.sleep(15)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.error(f"Engine: {e}")
+                log.error(f"Engine loop: {e}")
                 await asyncio.sleep(10)
 
     def stop(self):
         self.active = False
-        log.info("⏸️ Bot pausado")
+        log.info("⏸️ Bot pausado (servidor continua rodando)")
 
-    # ── Connect ───────────────────────────────────────────────
+    # ── Connect ────────────────────────────────────────────────
     async def _connect(self):
         try:
             if not await self.client.ping():
@@ -237,93 +276,180 @@ class TradingEngine:
 
             bal = await self.client.get_balance()
             if bal < 0:
-                log.error("❌ Auth falhou")
+                log.error("❌ Autenticação falhou")
                 self.connected = False
                 return
 
             self.risk.init(bal)
             self.risk.update(bal)
-
-            # Carrega instrumentos reais
             self.instruments = await self.client.get_instruments()
-
-            # Filtra símbolos viáveis com o saldo atual
             await self._filter_viable_symbols()
 
-            # Configura leverage
-            for sym in self.viable_symbols[:10]:
+            for sym in self.viable_symbols[:15]:
                 await self.client.set_leverage(sym, cfg.LEVERAGE)
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
 
-            # Carrega posições existentes
-            await self._load_existing()
-
+            await self._load_existing_positions()
             self.connected = True
             self.active    = True
-            log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares viáveis")
+            log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
             await notify(
-                f"✅ *NEXUS-7 v6 Online!*\n"
+                f"✅ *NEXUS-7 v7 Online!*\n"
                 f"Saldo: `${bal:.4f} USDT`\n"
                 f"Poder: `${bal*cfg.LEVERAGE:.2f} USDT`\n"
-                f"Pares: `{len(self.viable_symbols)}`\n"
-                f"Max posições: `{cfg.MAX_POSITIONS}`"
+                f"Max posições: `{cfg.MAX_POSITIONS}`\n"
+                f"Score mínimo: `{cfg.MIN_ENTRY_SCORE}/100`\n"
+                f"Pares ativos: `{len(self.viable_symbols)}`"
             )
         except Exception as e:
             log.error(f"_connect: {e}")
             self.connected = False
 
     async def _filter_viable_symbols(self):
-        """Filtra símbolos onde o saldo permite abrir posição mínima"""
-        viable = []
         try:
-            tickers = await self.client.get_all_tickers()
-            price_map = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
-
+            tickers    = await self.client.get_all_tickers()
+            price_map  = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
             buying_power = self.risk.balance * cfg.LEVERAGE
-
+            viable = []
             for sym in cfg.SYMBOLS:
-                info = self.instruments.get(sym)
-                if not info:
+                info  = self.instruments.get(sym)
+                price = price_map.get(sym, 0)
+                if not info or price <= 0:
                     continue
-                price    = price_map.get(sym, 0)
-                if price <= 0:
-                    continue
-                min_not  = info.get("minNotional", 1.0)
-                min_qty  = info.get("minQty", 0.001)
-                min_cost = max(min_not, min_qty * price)
-
+                min_cost = max(info.get("minNotional", 1.0), info.get("minQty", 0.001) * price)
                 if buying_power >= min_cost * 1.1:
                     viable.append(sym)
-
             self.viable_symbols = viable
-            log.info(f"✅ {len(viable)} pares viáveis: {viable[:8]}...")
+            log.info(f"✅ {len(viable)} pares viáveis")
         except Exception as e:
             log.error(f"_filter_viable: {e}")
             self.viable_symbols = cfg.SYMBOLS[:5]
 
-    # ── Scan (rotação) ────────────────────────────────────────
-    async def _scan_next(self):
-        """Escaneia 3 símbolos por ciclo em rotação"""
-        if not self.viable_symbols:
-            return
-        for _ in range(3):
-            sym = self.viable_symbols[self._scan_idx % len(self.viable_symbols)]
-            self._scan_idx += 1
+    # ── Sincronização em tempo real com Bybit ──────────────────
+    async def _sync_positions(self):
+        """Puxa posições abertas do Bybit e reconcilia estado local."""
+        try:
+            all_pos   = await self.client.get_positions()
+            open_syms = {}
+            for p in all_pos:
+                if float(p.get("size", 0)) > 0:
+                    open_syms[p["symbol"]] = p
+
+            # Posições fechadas remotamente
+            for sym in list(self.positions.keys()):
+                pos = self.positions[sym]
+                if sym not in open_syms:
+                    pnl   = pos.pnl
+                    icon  = "✅" if pnl >= 0 else "❌"
+                    trade = Trade(sym, pos.direction, pos.entry,
+                                  pos.current_price, pos.qty, pnl, pos.opened_at)
+                    self.stats.add(trade)
+                    del self.positions[sym]
+                    self._cooldown[sym] = time.time() + 60   # cooldown 60s
+                    log.info(f"📭 {sym} fechado PnL=${pnl:+.4f}")
+                    await notify(
+                        f"{icon} *{sym} fechado*\n"
+                        f"Direção: `{pos.direction}`\n"
+                        f"PnL: `${pnl:+.4f}`\n"
+                        f"Score entrada: `{pos.score}/100`\n"
+                        f"📊 Sessão: `${self.stats.summary()['pnl']:+.4f}`"
+                    )
+                else:
+                    # Atualiza dados da posição aberta
+                    bp = open_syms[sym]
+                    cur = float(bp.get("markPrice", pos.current_price))
+                    upnl = float(bp.get("unrealisedPnl", pos.pnl))
+                    pos.update_pnl(cur)
+                    pos.pnl = upnl
+
+            # Posições abertas externamente (ex: manual)
+            for sym, bp in open_syms.items():
+                if sym not in self.positions:
+                    ep  = float(bp.get("avgPrice", 0))
+                    sz  = float(bp.get("size", 0))
+                    side = bp.get("side", "Buy")
+                    if ep > 0 and sz > 0:
+                        direction = "LONG" if side == "Buy" else "SHORT"
+                        atr_est = ep * 0.007
+                        if direction == "LONG":
+                            sl = ep - atr_est * 1.5
+                            tp = ep + atr_est * 3.0
+                        else:
+                            sl = ep + atr_est * 1.5
+                            tp = ep - atr_est * 3.0
+                        sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync Bybit", 75)
+                        pos = Position(sig, sz)
+                        pos.pnl = float(bp.get("unrealisedPnl", 0))
+                        cur = float(bp.get("markPrice", ep))
+                        pos.update_pnl(cur)
+                        self.positions[sym] = pos
+                        log.info(f"📥 Posição externa carregada: {sym} {direction}")
+
+        except Exception as e:
+            log.error(f"_sync_positions: {e}")
+
+    # ── Trailing stop progressivo ───────────────────────────────
+    async def _apply_trailing_stops(self):
+        for sym, pos in list(self.positions.items()):
+            new_sl = pos.calc_trailing_sl()
+            if new_sl is None:
+                continue
+            pct = pos.pnl_pct()
+            milestone = int(pct // 10) * 10
+
+            if not pos.trailing_active or milestone > pos.trailing_milestone:
+                pos.trailing_sl = new_sl
+                pos.trailing_active = True
+                pos.trailing_milestone = milestone
+
+                try:
+                    await self.client._post("/v5/position/trading-stop", {
+                        "category": "linear",
+                        "symbol": sym,
+                        "stopLoss": str(new_sl),
+                        "positionIdx": 0,
+                    })
+                    log.info(f"🔄 {sym} trailing SL → ${new_sl:.6f} (lucro {pct:.1f}% | milestone {milestone}%)")
+                    await notify(
+                        f"🔄 *Trailing SL atualizado — {sym}*\n"
+                        f"Lucro atual: `{pct:.1f}%`\n"
+                        f"Novo SL: `${new_sl:.4f}` (protege {milestone//2}% de lucro)"
+                    )
+                except Exception as e:
+                    log.error(f"trailing_stop {sym}: {e}")
+
+    # ── Scan & Enter ────────────────────────────────────────────
+    async def _scan_all_and_enter(self):
+        """
+        Escaneia TODOS os símbolos viáveis, calcula score de cada um
+        e entra nas melhores oportunidades (score >= MIN_ENTRY_SCORE).
+        Respeita limite de MAX_POSITIONS simultâneas.
+        """
+        candidates = []
+        for sym in self.viable_symbols:
             if sym in self.positions:
+                continue
+            if time.time() < self._cooldown.get(sym, 0):
                 continue
             try:
                 klines = await self.client.get_klines(sym, "15m", 100)
-                if len(klines) < 50:
+                if len(klines) < 60:
                     continue
                 sig = self.analyzer.analyze(sym, klines)
-                if sig and sig.confidence >= cfg.MIN_CONFIDENCE:
-                    log.info(f"📊 [{sym}] {sig.direction} {sig.confidence:.0%} | {sig.reason}")
-                    await self._open(sig)
+                if sig and sig.score >= cfg.MIN_ENTRY_SCORE:
+                    candidates.append(sig)
+                    log.info(f"🎯 Candidato: {sym} score={sig.score}/100 {sig.direction} | {sig.reason}")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
-    # ── Open ──────────────────────────────────────────────────
+        # Ordena por score e entra nos melhores
+        candidates = self.analyzer.rank_signals(candidates)
+        for sig in candidates:
+            if len(self.positions) >= cfg.MAX_POSITIONS:
+                break
+            await self._open(sig)
+
     async def _open(self, sig: Signal):
         try:
             qty = self.risk.size(sig.symbol, sig.entry, self.instruments)
@@ -339,128 +465,49 @@ class TradingEngine:
 
             pos = Position(sig, qty)
             self.positions[sig.symbol] = pos
-            log.info(f"✅ {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f}")
-
+            log.info(
+                f"✅ ABERTO {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f} "
+                f"SL=${sig.sl:.4f} TP=${sig.tp:.4f} Score={sig.score}/100 RR={sig.rr}"
+            )
             await notify(await signal_msg(sig))
         except Exception as e:
             log.error(f"_open {sig.symbol}: {e}")
 
-    # ── Update open positions + trailing stop ─────────────────
-    async def _update_open_positions(self):
-        if not self.positions:
-            return
-        try:
-            all_pos   = await self.client.get_positions()
-            open_syms = {}
-            for p in all_pos:
-                size = float(p.get("size", 0))
-                if size > 0:
-                    open_syms[p["symbol"]] = p
-
-            for sym in list(self.positions.keys()):
-                pos = self.positions[sym]
-
-                if sym not in open_syms:
-                    # Posição fechada
-                    pnl  = pos.pnl
-                    icon = "✅" if pnl >= 0 else "❌"
-                    trade = Trade(sym, pos.direction, pos.entry,
-                                  pos.entry + (pnl/pos.qty if pos.qty else 0),
-                                  pos.qty, pnl, pos.opened_at)
-                    self.stats.add(trade)
-                    self.positions.pop(sym)
-                    log.info(f"📭 {sym} fechado PnL=${pnl:+.4f}")
-                    await notify(
-                        f"{icon} *{sym} fechado*\n"
-                        f"Direção: `{pos.direction}`\n"
-                        f"PnL: `${pnl:+.4f}`\n"
-                        f"📊 Sessão: `${self.stats.summary()['pnl']:+.4f}`"
-                    )
-                else:
-                    # Atualiza PnL e trailing stop
-                    bybit_pos = open_syms[sym]
-                    upnl = float(bybit_pos.get("unrealisedPnl", 0))
-                    cur  = float(bybit_pos.get("markPrice", pos.entry))
-                    pos.update_pnl(cur)
-                    pos.pnl = upnl
-
-                    # Trailing stop — ativa quando lucro >= 50%
-                    await self._check_trailing(pos, cur)
-
-        except Exception as e:
-            log.error(f"_update_positions: {e}")
-
-    async def _check_trailing(self, pos: Position, current_price: float):
-        """Ativa trailing stop quando lucro >= TRAILING_TRIGGER (50%)"""
-        if pos.qty <= 0 or pos.entry <= 0:
-            return
-
-        # Calcula % de lucro
-        if pos.direction == "LONG":
-            pnl_pct = (current_price - pos.entry) / pos.entry
-        else:
-            pnl_pct = (pos.entry - current_price) / pos.entry
-
-        # Ativa trailing quando >= 50% de lucro
-        if pnl_pct >= cfg.TRAILING_TRIGGER and not pos.trailing_active:
-            pos.trailing_active = True
-            log.info(f"🔄 {pos.symbol} trailing ativado! Lucro={pnl_pct:.0%}")
-            await notify(
-                f"🔄 *Trailing Stop Ativado!*\n"
-                f"Par: `{pos.symbol}`\n"
-                f"Lucro: `{pnl_pct:.0%}`\n"
-                f"Garantindo 25% do pico"
-            )
-
-        if pos.trailing_active:
-            # Trava 25% do pico de lucro
-            if pos.direction == "LONG":
-                peak_price = pos.entry * (1 + pos.pnl / (pos.entry * pos.qty))
-                new_sl = pos.entry + (peak_price - pos.entry) * cfg.TRAILING_LOCK
-                if pos.trailing_sl is None or new_sl > pos.trailing_sl:
-                    pos.trailing_sl = new_sl
-                    log.info(f"🔄 {pos.symbol} trailing SL → ${new_sl:.4f}")
-            else:
-                peak_price = pos.entry * (1 - pos.pnl / (pos.entry * pos.qty))
-                new_sl = pos.entry - (pos.entry - peak_price) * cfg.TRAILING_LOCK
-                if pos.trailing_sl is None or new_sl < pos.trailing_sl:
-                    pos.trailing_sl = new_sl
-                    log.info(f"🔄 {pos.symbol} trailing SL → ${new_sl:.4f}")
-
-    # ── Load existing positions ───────────────────────────────
-    async def _load_existing(self):
+    # ── Load existing positions on startup ─────────────────────
+    async def _load_existing_positions(self):
         try:
             all_pos = await self.client.get_positions()
-            count   = 0
+            count = 0
             for p in all_pos:
                 size = float(p.get("size", 0))
                 if size <= 0:
                     continue
-                sym  = p["symbol"]
-                side = p.get("side", "Buy")
-                direction = "LONG" if side == "Buy" else "SHORT"
-                entry = float(p.get("avgPrice", 0))
+                sym   = p["symbol"]
+                side  = p.get("side", "Buy")
+                ep    = float(p.get("avgPrice", 0))
                 upnl  = float(p.get("unrealisedPnl", 0))
                 liq   = float(p.get("liqPrice", 0))
+                direction = "LONG" if side == "Buy" else "SHORT"
+                atr_est = ep * 0.007
 
-                atr_est = entry * 0.007
                 if direction == "LONG":
-                    sl = max(liq * 1.02, entry - atr_est * 1.5) if liq > 0 else entry - atr_est * 1.5
-                    tp = entry + atr_est * 3.0
+                    sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
+                    tp = ep + atr_est * 3.0
                 else:
-                    sl = min(liq * 0.98, entry + atr_est * 1.5) if liq > 0 else entry + atr_est * 1.5
-                    tp = entry - atr_est * 3.0
+                    sl = min(liq * 0.98, ep + atr_est * 1.5) if liq > 0 else ep + atr_est * 1.5
+                    tp = ep - atr_est * 3.0
 
-                from bot.strategy import Signal
-                sig = Signal(sym, direction, entry, sl, tp, 0.75, "Carregada do Bybit")
+                sig = Signal(sym, direction, ep, sl, tp, 0.75, "Startup sync", 75)
                 pos = Position(sig, size)
                 pos.pnl = upnl
+                cur = float(p.get("markPrice", ep))
+                pos.update_pnl(cur)
                 self.positions[sym] = pos
                 count += 1
-                log.info(f"📂 Carregada: {direction} {size} {sym} @ ${entry:.4f} PnL=${upnl:.4f}")
+                log.info(f"📂 Carregada: {direction} {size} {sym} @ ${ep:.4f} PnL=${upnl:.4f}")
 
             if count:
-                log.info(f"✅ {count} posição(ões) carregada(s)")
+                log.info(f"✅ {count} posição(ões) sincronizadas do Bybit")
         except Exception as e:
             log.error(f"_load_existing: {e}")
 
@@ -470,33 +517,34 @@ class TradingEngine:
             if bal >= 0:
                 self.risk.update(bal)
                 if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
-                    log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} — pausando")
+                    log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
                     self.active = False
-                    await notify(f"⚠️ *Bot Pausado*\nDrawdown: `{self.risk.drawdown:.1%}`")
+                    await notify(f"⚠️ *Bot Pausado — Drawdown*\n`{self.risk.drawdown:.1%}` atingido")
         except Exception:
             pass
 
-    # ── Status ────────────────────────────────────────────────
+    # ── Status (endpoint /api/status) ──────────────────────────
     def get_status(self) -> dict:
         summaries = self.stats.all_summaries()
         return {
-            "connected":       self.connected,
-            "active":          self.active,
-            "balance":         round(self.risk.balance, 4),
-            "buying_power":    round(self.risk.balance * cfg.LEVERAGE, 2),
-            "drawdown_pct":    round(self.risk.drawdown * 100, 2),
-            "leverage":        cfg.LEVERAGE,
-            "max_positions":   cfg.MAX_POSITIONS,
-            "viable_symbols":  len(self.viable_symbols),
-            "positions":       [p.to_dict() for p in self.positions.values()],
-            "pnl_session":     summaries["session"],
-            "pnl_1d":          summaries["1d"],
-            "pnl_7d":          summaries["7d"],
-            "pnl_30d":         summaries["30d"],
-            # legacy fields para dashboard
-            "wins":            summaries["session"]["wins"],
-            "losses":          summaries["session"]["losses"],
-            "win_rate_pct":    summaries["session"]["win_rate"],
-            "total_pnl":       summaries["session"]["pnl"],
-            "symbols":         self.viable_symbols[:10],
+            "connected":        self.connected,
+            "active":           self.active,
+            "balance":          round(self.risk.balance, 4),
+            "buying_power":     round(self.risk.balance * cfg.LEVERAGE, 2),
+            "drawdown_pct":     round(self.risk.drawdown * 100, 2),
+            "leverage":         cfg.LEVERAGE,
+            "max_positions":    cfg.MAX_POSITIONS,
+            "min_entry_score":  cfg.MIN_ENTRY_SCORE,
+            "open_positions":   len(self.positions),
+            "viable_symbols":   len(self.viable_symbols),
+            "positions":        [p.to_dict() for p in self.positions.values()],
+            "pnl_session":      summaries["session"],
+            "pnl_1d":           summaries["1d"],
+            "pnl_7d":           summaries["7d"],
+            "pnl_30d":          summaries["30d"],
+            "wins":             summaries["session"]["wins"],
+            "losses":           summaries["session"]["losses"],
+            "win_rate_pct":     summaries["session"]["win_rate"],
+            "total_pnl":        summaries["session"]["pnl"],
+            "symbols":          self.viable_symbols[:10],
         }
