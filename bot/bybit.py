@@ -150,7 +150,7 @@ class BybitClient:
 
     async def get_positions(self, symbol: str = None) -> list:
         try:
-            params = {"category": "linear"}
+            params = {"category": "linear", "settleCoin": "USDT", "limit": "200"}
             if symbol:
                 params["symbol"] = symbol
             data = await self._get("/v5/position/list", params, auth=True)
