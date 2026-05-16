@@ -1,349 +1,1005 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NEXUS-7 ⬡ AI Trading Bot</title>
+<title>NEXUS-7 ⬡ AI Trading Bot V4.2</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap');
+
 :root {
-  --bg:#0a0e1a; --bg2:#0f1625; --bg3:#131d2e;
-  --border:#1e3a5f; --border2:#254870;
-  --cyan:#00d4ff; --green:#00ff88; --red:#ff3366;
-  --yellow:#ffcc00; --purple:#9b59b6; --text:#c8d8e8; --dim:#4a6080;
+  --bg:      #0a0e1a;
+  --bg1:     #0f1625;
+  --bg2:     #131d2e;
+  --bg3:     #131d2e;
+  --cyan:    #00d4ff;
+  --cyan2:   #00a8c0;
+  --purple:  #9b59b6;
+  --purple2: #7c3aed;
+  --red:     #ff3366;
+  --red2:    #c01244;
+  --green:   #00ff88;
+  --yellow:  #ffd600;
+  --orange:  #ff6d00;
+  --text:    #a8c8e8;
+  --dim:     #2a4a6a;
+  --dim2:    #1a3050;
+  --border:  rgba(0,212,255,0.12);
+  --border2: rgba(155,89,182,0.2);
+  --glow-c:  0 0 20px rgba(0,212,255,0.3);
+  --glow-p:  0 0 20px rgba(155,89,182,0.3);
+  --glow-r:  0 0 20px rgba(255,51,102,0.3);
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-orb:  'Orbitron', monospace;
+  --font-raj:  'Rajdhani', sans-serif;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;font-size:13px;min-height:100vh}
-.header{background:var(--bg2);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
-.logo{color:var(--cyan);font-size:18px;font-weight:bold;letter-spacing:3px}
-.hright{display:flex;align-items:center;gap:12px}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.5s infinite;display:inline-block;margin-right:5px}
-.dot.off{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.sync{font-size:10px;color:var(--dim);border:1px solid var(--border);border-radius:3px;padding:2px 8px}
-.container{padding:14px;display:grid;gap:12px}
-.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:14px}
-.card-title{color:var(--dim);font-size:10px;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
-.card-value{font-size:22px;font-weight:bold}
-.green{color:var(--green)} .red{color:var(--red)} .cyan{color:var(--cyan)} .yellow{color:var(--yellow)} .dim{color:var(--dim)}
-table{width:100%;border-collapse:collapse}
-th{color:var(--dim);font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border)}
-td{padding:8px 8px;border-bottom:1px solid #0d1a28;vertical-align:middle}
-tr:hover td{background:#111e30}
-.badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:bold}
-.badge-long{background:rgba(0,255,136,.15);color:var(--green)}
-.badge-short{background:rgba(255,51,102,.15);color:var(--red)}
-.badge-score{background:rgba(0,212,255,.1);color:var(--cyan)}
-.bar-wrap{background:#1a2a3a;height:5px;border-radius:3px;margin-top:5px}
-.bar-fill{height:100%;border-radius:3px;transition:width .4s}
-.rank-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #0d1a28}
-.rank-sym{font-weight:bold;color:var(--cyan);min-width:100px}
-.rank-bar{flex:1}
-.rank-num{min-width:35px;text-align:right;font-size:11px;color:var(--dim)}
-.empty{color:var(--dim);text-align:center;padding:20px;font-size:11px}
-.pnl-box{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}
-.pnl-period{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px;text-align:center}
-.pnl-label{font-size:9px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
-.pnl-val{font-size:14px;font-weight:bold;margin-top:3px}
-.limit-warn{background:rgba(255,204,0,.08);border:1px solid rgba(255,204,0,.3);border-radius:5px;padding:8px 12px;font-size:11px;color:var(--yellow);margin-bottom:4px}
-.trailing-tag{font-size:10px;color:var(--yellow);margin-left:5px}
-@media(max-width:900px){.row4{grid-template-columns:repeat(2,1fr)}.row3{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}.pnl-box{grid-template-columns:repeat(2,1fr)}}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-raj);
+  font-size: 13px;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background-image:
+    radial-gradient(ellipse 80% 40% at 50% 0%, rgba(0,212,255,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 30% at 80% 100%, rgba(155,89,182,0.04) 0%, transparent 60%);
+}
+
+/* Scanlines overlay */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── HEADER ─────────────────────────────────────────────── */
+.header {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  align-items: center;
+  gap: 0;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  height: 46px;
+  position: sticky; top: 0; z-index: 100;
+}
+
+.logo {
+  font-family: var(--font-orb);
+  font-size: 14px;
+  font-weight: 900;
+  color: var(--cyan);
+  letter-spacing: 3px;
+  text-shadow: var(--glow-c);
+  border-right: 1px solid var(--border);
+  padding-right: 16px;
+  margin-right: 16px;
+  white-space: nowrap;
+}
+
+.tickers {
+  display: flex;
+  gap: 0;
+}
+.ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-right: 1px solid var(--border);
+  height: 46px;
+}
+.ticker-sym { font-family: var(--font-orb); font-size: 11px; color: var(--dim); letter-spacing: 2px; }
+.ticker-price { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+.ticker-chg { font-size: 11px; font-weight: 600; }
+.chg-up   { color: var(--green); }
+.chg-down { color: var(--red); }
+
+.header-stats {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-left: 1px solid var(--border);
+  margin-left: 8px;
+}
+.hstat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 14px;
+  border-right: 1px solid var(--border);
+  height: 46px;
+  justify-content: center;
+  gap: 2px;
+}
+.hstat-label { font-size: 9px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; }
+.hstat-val   { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+
+.status-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  font-family: var(--font-orb);
+  font-size: 10px;
+  letter-spacing: 3px;
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green);
+  animation: blink 1s infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.live-text { color: var(--green); }
+
+.roi-badge {
+  background: rgba(0,255,136,0.08);
+  border: 1px solid rgba(0,255,136,0.25);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--green);
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+/* ── LAYOUT ─────────────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: auto auto auto;
+  gap: 8px;
+  padding: 8px;
+}
+
+.panel {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0.4;
+}
+.panel-purple::before { background: linear-gradient(90deg, transparent, var(--purple), transparent); }
+.panel-red::before    { background: linear-gradient(90deg, transparent, var(--red), transparent); }
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,0,0,0.2);
+}
+.panel-title-text {
+  font-family: var(--font-orb);
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: var(--cyan);
+  text-transform: uppercase;
+}
+.panel-title-text.purple { color: var(--purple); }
+.panel-title-text.red    { color: var(--red); }
+.panel-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  margin-left: auto;
+}
+.badge-cyan   { background: rgba(0,212,255,0.1);  color: var(--cyan);   border: 1px solid rgba(0,212,255,0.3); }
+.badge-green  { background: rgba(0,255,136,0.1);  color: var(--green);  border: 1px solid rgba(0,255,136,0.3); }
+.badge-purple { background: rgba(155,89,182,0.1); color: var(--purple); border: 1px solid rgba(155,89,182,0.3); }
+.badge-red    { background: rgba(255,51,102,0.1);  color: var(--red);    border: 1px solid rgba(255,51,102,0.3); }
+
+/* ── CHART PANEL ─────────────────────────────────────────── */
+.chart-panel {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.chart-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.chart-price {
+  font-family: var(--font-orb);
+  font-size: 26px;
+  font-weight: 900;
+  color: var(--cyan);
+  text-shadow: var(--glow-c);
+  letter-spacing: 1px;
+}
+.chart-var {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 3px 8px;
+  border-radius: 3px;
+}
+.chart-paths {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.path-btn {
+  font-family: var(--font-orb);
+  font-size: 9px;
+  letter-spacing: 2px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  border: 1px solid;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.path-dear {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(0,212,255,0.08);
+}
+.path-dear:hover, .path-dear.active {
+  background: rgba(0,212,255,0.18);
+  box-shadow: var(--glow-c);
+}
+.path-roll {
+  border-color: var(--purple);
+  color: var(--purple);
+  background: rgba(155,89,182,0.08);
+}
+.path-roll:hover, .path-roll.active {
+  background: rgba(155,89,182,0.18);
+  box-shadow: var(--glow-p);
+}
+
+.chart-area { position: relative; height: 300px; padding: 10px; }
+.chart-nodes {
+  position: absolute;
+  top: 10px; right: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.node-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.node-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+
+/* ── PORTFOLIO ───────────────────────────────────────────── */
+.portfolio-panel {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* ── BOTTOM ROW ──────────────────────────────────────────── */
+.bottom-row {
+  grid-column: 1 / 3;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+/* ── TABLES ──────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; }
+th {
+  font-family: var(--font-orb);
+  font-size: 8px;
+  letter-spacing: 2px;
+  color: var(--dim);
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--dim2);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(0,0,0,0.3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+tr:hover td { background: rgba(0,212,255,0.03); }
+.td-sym { color: var(--cyan); font-weight: bold; }
+.td-up  { color: var(--green); }
+.td-dn  { color: var(--red); }
+.td-dim { color: var(--dim); }
+.td-pur { color: var(--purple); }
+
+/* ── RISK PANEL ──────────────────────────────────────────── */
+.risk-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.risk-metric {
+  padding: 10px 12px;
+  border-right: 1px solid var(--border);
+}
+.risk-metric:last-child { border-right: none; }
+.risk-label { font-size: 9px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-bottom: 4px; }
+.risk-val   { font-family: var(--font-orb); font-size: 14px; }
+.risk-bar   { height: 3px; background: var(--dim2); border-radius: 2px; margin-top: 4px; }
+.risk-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+
+.risk-alerts { padding: 8px 12px; display: flex; flex-direction: column; gap: 5px; }
+.alert-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-family: var(--font-raj);
+  font-weight: 400;
+}
+.alert-icon { font-size: 10px; }
+
+/* ── SPREAD PANEL ────────────────────────────────────────── */
+.spread-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.3);
+}
+.spread-label { font-size: 10px; color: var(--dim); letter-spacing: 1px; }
+.spread-val   { font-family: var(--font-mono); font-size: 12px; }
+.arbi-badge {
+  font-family: var(--font-orb);
+  font-size: 9px;
+  letter-spacing: 2px;
+  padding: 3px 8px;
+  border-radius: 2px;
+  animation: glowPulse 2s infinite;
+}
+@keyframes glowPulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+/* ── ALLOC CHART ─────────────────────────────────────────── */
+.alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.2);
+}
+.alloc-label { font-size: 10px; min-width: 110px; color: var(--text); }
+.alloc-bar   { flex: 1; height: 4px; background: var(--dim2); border-radius: 2px; overflow: hidden; }
+.alloc-fill  { height: 100%; border-radius: 2px; }
+.alloc-pct   { font-family: var(--font-mono); font-size: 10px; color: var(--dim); min-width: 32px; text-align: right; }
+
+/* ── POSITIONS (polymarket style) ────────────────────────── */
+.pos-rank {
+  font-family: var(--font-orb);
+  font-size: 11px;
+  color: var(--purple);
+  width: 20px;
+}
+
+/* ── EARNINGS ────────────────────────────────────────────── */
+.earn-beat   { color: var(--green); }
+.earn-miss   { color: var(--red); }
+.earn-neutral{ color: var(--yellow); }
+.earn-date   { color: var(--cyan); font-size: 10px; }
+
+/* ── FOOTER ──────────────────────────────────────────────── */
+.footer {
+  background: var(--bg1);
+  border-top: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.footer-logo {
+  font-family: var(--font-orb);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--cyan);
+  text-shadow: var(--glow-c);
+}
+.footer-ver { font-family: var(--font-mono); font-size: 10px; color: var(--dim); }
+.footer-links { display: flex; gap: 12px; margin-left: auto; }
+.footer-link {
+  font-family: var(--font-orb);
+  font-size: 8px;
+  letter-spacing: 2px;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.2s;
+  text-decoration: none;
+}
+.footer-link:hover { color: var(--cyan); }
+.ohmo-badge {
+  font-family: var(--font-orb);
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: var(--purple);
+  border: 1px solid rgba(155,89,182,0.3);
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-shadow: var(--glow-p);
+}
+
+/* ── MISC ────────────────────────────────────────────────── */
+.content { padding: 8px 0; }
+.px12 { padding: 0 12px; }
+.sep { height: 1px; background: var(--dim2); margin: 6px 12px; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div>
-    <span class="logo">⬡ NEXUS-7</span>
-    <span style="color:var(--dim);font-size:11px"> &nbsp;AI TRADING BOT v7.0</span>
-  </div>
-  <div class="hright">
-    <span class="sync" id="syncBadge">⟳ conectando...</span>
-    <span><span class="dot" id="dot"></span><span id="statusTxt">INICIANDO</span></span>
-  </div>
-</div>
+<!-- ═══════════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════════ -->
+<header class="header">
+  <div class="logo">⬡ NEXUS-<span style="color:var(--purple)">7</span></div>
 
-<div class="container">
-
-  <!-- KPIs -->
-  <div class="row4">
-    <div class="card">
-      <div class="card-title">💰 Saldo USDT</div>
-      <div class="card-value cyan" id="balance">—</div>
-      <div style="font-size:11px;color:var(--dim);margin-top:3px">Poder: <span id="buyingPower">—</span></div>
+  <div class="tickers">
+    <div class="ticker-item">
+      <span class="ticker-sym">BTC</span>
+      <span class="ticker-price" id="btc-price">104,218.40</span>
+      <span class="ticker-chg chg-up" id="btc-chg">+2.34%</span>
     </div>
-    <div class="card">
-      <div class="card-title">📊 Posições Abertas</div>
-      <div class="card-value" id="posCount">—</div>
-      <div style="font-size:11px;color:var(--dim);margin-top:3px">Máx: <span id="maxPos">—</span> simultâneas</div>
+    <div class="ticker-item">
+      <span class="ticker-sym">ETH</span>
+      <span class="ticker-price" id="eth-price">2,587.10</span>
+      <span class="ticker-chg chg-up" id="eth-chg">+1.18%</span>
     </div>
-    <div class="card">
-      <div class="card-title">🎯 Score Mínimo</div>
-      <div class="card-value yellow" id="minScore">80</div>
-      <div style="font-size:11px;color:var(--dim);margin-top:3px">Para abrir nova ordem</div>
-    </div>
-    <div class="card">
-      <div class="card-title">📉 Drawdown</div>
-      <div class="card-value" id="drawdown">—</div>
-      <div style="font-size:11px;color:var(--dim);margin-top:3px">Limite: 15%</div>
+    <div class="ticker-item">
+      <span class="ticker-sym">BNB</span>
+      <span class="ticker-price" id="bnb-price">608.30</span>
+      <span class="ticker-chg chg-down" id="bnb-chg">−0.42%</span>
     </div>
   </div>
 
-  <!-- Stats -->
-  <div class="row4">
-    <div class="card">
-      <div class="card-title">✅ Win Rate</div>
-      <div class="card-value green" id="winRate">—</div>
+  <div class="header-stats">
+    <div class="hstat">
+      <span class="hstat-label">VOL 24H</span>
+      <span class="hstat-val" id="vol24h">$1,352B</span>
     </div>
-    <div class="card">
-      <div class="card-title">✅ Vitórias</div>
-      <div class="card-value green" id="wins">—</div>
+    <div class="hstat">
+      <span class="hstat-label">DOMINANCE</span>
+      <span class="hstat-val">BTC 57.3%</span>
     </div>
-    <div class="card">
-      <div class="card-title">❌ Perdas</div>
-      <div class="card-value red" id="losses">—</div>
-    </div>
-    <div class="card">
-      <div class="card-title">💵 PnL Sessão</div>
-      <div class="card-value" id="totalPnl">—</div>
+    <div class="hstat">
+      <span class="hstat-label">UTC</span>
+      <span class="hstat-val" id="utcTime">--:--:--</span>
     </div>
   </div>
 
-  <!-- PnL por período -->
-  <div class="card">
-    <div class="card-title">📈 PnL por Período</div>
-    <div class="pnl-box">
-      <div class="pnl-period"><div class="pnl-label">Sessão</div><div class="pnl-val" id="pnlSession">—</div></div>
-      <div class="pnl-period"><div class="pnl-label">24h</div><div class="pnl-val" id="pnl1d">—</div></div>
-      <div class="pnl-period"><div class="pnl-label">7 dias</div><div class="pnl-val" id="pnl7d">—</div></div>
-      <div class="pnl-period"><div class="pnl-label">30 dias</div><div class="pnl-val" id="pnl30d">—</div></div>
+  <div class="roi-badge" id="roi-badge">DAY +1.00%</div>
+
+  <div class="status-live">
+    <div class="live-dot"></div>
+    <span class="live-text">LIVE</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════
+     MAIN GRID
+═══════════════════════════════════════════════════ -->
+<div class="main">
+
+  <!-- ── CHART ─────────────────────────────────── -->
+  <div class="panel chart-panel">
+    <div class="panel-title">
+      <span class="panel-title-text">FORCE / MOVEMENT GRAPH</span>
+      <span class="panel-badge badge-cyan">BTC/USDT · 15m</span>
+    </div>
+
+    <div class="chart-header">
+      <div class="chart-price" id="chart-price">$104,218.40</div>
+      <div class="chart-var chg-up" style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.2);border-radius:3px;padding:3px 8px;font-family:var(--font-mono);font-size:12px;">▲ +2,367.80 (+2.33%)</div>
+      <div class="chart-paths">
+        <button class="path-btn path-dear active" onclick="setPath(this,'dear')">DEAR PATH</button>
+        <button class="path-btn path-roll" onclick="setPath(this,'roll')">ROLL PATH</button>
+      </div>
+    </div>
+
+    <div class="chart-area">
+      <!-- Node legend -->
+      <div class="chart-nodes">
+        <div class="node-item">
+          <div class="node-dot" style="color:var(--yellow);background:var(--yellow)"></div>
+          <span style="color:var(--yellow);font-size:9px;letter-spacing:1px;">HIGH NODE</span>
+          <span style="color:var(--text);font-size:10px;">104,800</span>
+        </div>
+        <div class="node-item">
+          <div class="node-dot" style="color:var(--cyan);background:var(--cyan)"></div>
+          <span style="color:var(--cyan);font-size:9px;letter-spacing:1px;">SIGNAL</span>
+          <span style="color:var(--text);font-size:10px;">103,920</span>
+        </div>
+        <div class="node-item">
+          <div class="node-dot" style="color:var(--purple);background:var(--purple)"></div>
+          <span style="color:var(--purple);font-size:9px;letter-spacing:1px;">CONVERGENCE</span>
+          <span style="color:var(--text);font-size:10px;">102,450</span>
+        </div>
+        <div class="node-item" style="margin-top:6px;">
+          <div style="width:8px;height:2px;background:var(--cyan);border-radius:1px;box-shadow:0 0 6px var(--cyan)"></div>
+          <span style="color:var(--dim);font-size:9px;">DEAR PATH</span>
+        </div>
+        <div class="node-item">
+          <div style="width:8px;height:2px;background:var(--purple);border-radius:1px;box-shadow:0 0 6px var(--purple)"></div>
+          <span style="color:var(--dim);font-size:9px;">ROLL PATH</span>
+        </div>
+      </div>
+      <!-- SVG Chart -->
+      <svg id="mainChart" width="100%" height="100%" viewBox="0 0 700 280" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#00d4ff" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="#00d4ff" stop-opacity="0"/>
+          </linearGradient>
+          <linearGradient id="rollGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#9b59b6" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#9b59b6" stop-opacity="0"/>
+          </linearGradient>
+          <filter id="glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+
+        <!-- Grid lines -->
+        <g stroke="rgba(0,212,255,0.06)" stroke-width="1">
+          <line x1="0" y1="56"  x2="700" y2="56"/>
+          <line x1="0" y1="112" x2="700" y2="112"/>
+          <line x1="0" y1="168" x2="700" y2="168"/>
+          <line x1="0" y1="224" x2="700" y2="224"/>
+          <line x1="100" y1="0" x2="100" y2="280"/>
+          <line x1="200" y1="0" x2="200" y2="280"/>
+          <line x1="300" y1="0" x2="300" y2="280"/>
+          <line x1="400" y1="0" x2="400" y2="280"/>
+          <line x1="500" y1="0" x2="500" y2="280"/>
+          <line x1="600" y1="0" x2="600" y2="280"/>
+        </g>
+
+        <!-- Price levels -->
+        <line x1="0" y1="40"  x2="700" y2="40"  stroke="#ffd600" stroke-width="0.5" stroke-dasharray="4,4" opacity="0.6"/>
+        <text x="4" y="37"  fill="#ffd600" font-size="8" font-family="Share Tech Mono" opacity="0.8">104,800 ▶ HIGH NODE</text>
+        <line x1="0" y1="95"  x2="700" y2="95"  stroke="#00d4ff" stroke-width="0.5" stroke-dasharray="4,4" opacity="0.5"/>
+        <text x="4" y="92"  fill="#00d4ff" font-size="8" font-family="Share Tech Mono" opacity="0.7">103,920 ▶ SIGNAL</text>
+        <line x1="0" y1="165" x2="700" y2="165" stroke="#9b59b6" stroke-width="0.5" stroke-dasharray="4,4" opacity="0.5"/>
+        <text x="4" y="162" fill="#9b59b6" font-size="8" font-family="Share Tech Mono" opacity="0.7">102,450 ▶ CONVERGENCE</text>
+
+        <!-- Area fill - main -->
+        <path id="areaPath" fill="url(#areaGrad)" opacity="0.7"
+          d="M0,200 C30,195 50,185 70,175 S110,155 130,140 S160,110 190,95 S230,80 260,72 S300,60 330,55 S370,50 400,58 S440,70 460,65 S500,55 530,48 S570,45 600,52 S640,60 670,58 L700,55 L700,280 L0,280 Z"/>
+
+        <!-- Main price line (Dear Path) -->
+        <path id="priceLine" fill="none" stroke="#00d4ff" stroke-width="2" filter="url(#glow)"
+          d="M0,200 C30,195 50,185 70,175 S110,155 130,140 S160,110 190,95 S230,80 260,72 S300,60 330,55 S370,50 400,58 S440,70 460,65 S500,55 530,48 S570,45 600,52 S640,60 670,58 L700,55"/>
+
+        <!-- Roll Path -->
+        <path id="rollLine" fill="none" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.7"
+          d="M400,58 C430,70 450,90 470,110 S510,140 540,155 S580,160 620,150 S660,138 700,130"/>
+        <path fill="url(#rollGrad)" opacity="0.4"
+          d="M400,58 C430,70 450,90 470,110 S510,140 540,155 S580,160 620,150 S660,138 700,130 L700,280 L400,280 Z"/>
+
+        <!-- Nodes on chart -->
+        <circle cx="600" cy="52" r="6" fill="none" stroke="#ffd600" stroke-width="1.5" filter="url(#glow)"/>
+        <circle cx="600" cy="52" r="3" fill="#ffd600"/>
+        <circle cx="460" cy="65" r="6" fill="none" stroke="#00d4ff" stroke-width="1.5" filter="url(#glow)"/>
+        <circle cx="460" cy="65" r="3" fill="#00d4ff"/>
+        <circle cx="400" cy="58" r="8" fill="none" stroke="#9b59b6" stroke-width="2" filter="url(#glow)"/>
+        <circle cx="400" cy="58" r="4" fill="#9b59b6"/>
+        <text x="408" y="55" fill="#9b59b6" font-size="8" font-family="Share Tech Mono">CONV</text>
+
+        <!-- Current price indicator -->
+        <line x1="700" y1="55" x2="695" y2="55" stroke="#00d4ff" stroke-width="1"/>
+        <rect x="690" y="47" width="10" height="16" fill="var(--bg1)" stroke="#00d4ff" stroke-width="0.5"/>
+
+        <!-- Volume bars at bottom -->
+        <g opacity="0.4">
+          <rect x="0"   y="255" width="8"  height="20" fill="#00d4ff"/>
+          <rect x="10"  y="260" width="8"  height="15" fill="#00d4ff"/>
+          <rect x="20"  y="252" width="8"  height="23" fill="#00d4ff"/>
+          <rect x="30"  y="258" width="8"  height="17" fill="#00d4ff"/>
+          <rect x="40"  y="263" width="8"  height="12" fill="#ff3366"/>
+          <rect x="50"  y="260" width="8"  height="15" fill="#00d4ff"/>
+          <rect x="60"  y="250" width="8"  height="25" fill="#00d4ff"/>
+          <rect x="70"  y="245" width="8"  height="30" fill="#00d4ff"/>
+          <rect x="80"  y="255" width="8"  height="20" fill="#ff3366"/>
+          <rect x="90"  y="258" width="8"  height="17" fill="#00d4ff"/>
+          <rect x="100" y="248" width="8"  height="27" fill="#00d4ff"/>
+          <rect x="110" y="240" width="8"  height="35" fill="#00d4ff"/>
+          <rect x="120" y="253" width="8"  height="22" fill="#ff3366"/>
+          <rect x="130" y="255" width="8"  height="20" fill="#00d4ff"/>
+          <rect x="140" y="250" width="8"  height="25" fill="#00d4ff"/>
+          <rect x="150" y="243" width="8"  height="32" fill="#00d4ff"/>
+          <rect x="160" y="235" width="8"  height="40" fill="#9b59b6" opacity="0.8"/>
+          <rect x="170" y="248" width="8"  height="27" fill="#00d4ff"/>
+          <rect x="180" y="252" width="8"  height="23" fill="#00d4ff"/>
+          <rect x="190" y="240" width="8"  height="35" fill="#00d4ff"/>
+        </g>
+      </svg>
     </div>
   </div>
 
-  <!-- Posições Abertas -->
-  <div class="card">
-    <div class="card-title">⚡ Posições Abertas — Tempo Real</div>
-    <div id="limitWarn" class="limit-warn" style="display:none">
-      ⛔ Limite de <span id="limitNum">3</span> posições atingido — aguardando fechamento para nova entrada
+  <!-- ── PORTFOLIO ──────────────────────────────── -->
+  <div class="panel portfolio-panel panel-purple">
+    <div class="panel-title">
+      <span class="panel-title-text purple">PORTFOLIO</span>
+      <span class="panel-badge badge-purple">PERSONAL</span>
     </div>
-    <div id="posTable">
-      <div class="empty">Nenhuma posição aberta</div>
+    <div class="content">
+      <table>
+        <thead>
+          <tr>
+            <th>TICKER</th><th>PRICE</th><th>CHG</th><th>CIN%</th><th>ALLOC%</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="td-sym">EMG</td><td>$48.72</td><td class="td-up">+1.24%</td><td class="td-up">+0.87</td><td class="td-pur">18.4%</td></tr>
+          <tr><td class="td-sym">DGRO</td><td>$57.38</td><td class="td-up">+0.63%</td><td class="td-up">+0.44</td><td class="td-pur">15.2%</td></tr>
+          <tr><td class="td-sym">VCT</td><td>$142.90</td><td class="td-dn">−0.38%</td><td class="td-dn">−0.22</td><td class="td-pur">14.8%</td></tr>
+          <tr><td class="td-sym">SCHP</td><td>$52.14</td><td class="td-up">+0.09%</td><td class="td-up">+0.05</td><td class="td-pur">13.6%</td></tr>
+          <tr><td class="td-sym">VTI</td><td>$238.64</td><td class="td-up">+1.56%</td><td class="td-up">+1.14</td><td class="td-pur">20.1%</td></tr>
+          <tr><td class="td-sym">LQD</td><td>$108.22</td><td class="td-dn">−0.11%</td><td class="td-dn">−0.08</td><td class="td-pur">9.7%</td></tr>
+          <tr><td class="td-sym">VEA</td><td>$51.87</td><td class="td-up">+0.71%</td><td class="td-up">+0.48</td><td class="td-pur">8.2%</td></tr>
+        </tbody>
+      </table>
+      <div class="sep"></div>
+      <div style="padding:4px 12px 4px;font-family:var(--font-orb);font-size:8px;letter-spacing:2px;color:var(--dim);">ASSET ALLOCATION</div>
+      <div class="alloc-row">
+        <span class="alloc-label">US Equity</span>
+        <div class="alloc-bar"><div class="alloc-fill" style="width:38%;background:var(--cyan)"></div></div>
+        <span class="alloc-pct">38%</span>
+      </div>
+      <div class="alloc-row">
+        <span class="alloc-label">World Developed</span>
+        <div class="alloc-bar"><div class="alloc-fill" style="width:24%;background:var(--purple)"></div></div>
+        <span class="alloc-pct">24%</span>
+      </div>
+      <div class="alloc-row">
+        <span class="alloc-label">Emerging Markets</span>
+        <div class="alloc-bar"><div class="alloc-fill" style="width:18%;background:var(--orange)"></div></div>
+        <span class="alloc-pct">18%</span>
+      </div>
+      <div class="alloc-row">
+        <span class="alloc-label">Fixed Income</span>
+        <div class="alloc-bar"><div class="alloc-fill" style="width:20%;background:var(--green)"></div></div>
+        <span class="alloc-pct" style="margin-bottom:4px">20%</span>
+      </div>
     </div>
   </div>
 
-  <!-- Rankings de Moedas + Trades fechados -->
-  <div class="row2">
-    <div class="card">
-      <div class="card-title">🏆 Ranking de Moedas (Score)</div>
-      <div id="rankList"><div class="empty">Carregando análise...</div></div>
-    </div>
-    <div class="card">
-      <div class="card-title">📋 Últimos Trades Fechados</div>
-      <div id="closedTable"><div class="empty">Nenhum trade fechado ainda</div></div>
-    </div>
-  </div>
+  <!-- ── BOTTOM ROW ─────────────────────────────── -->
+  <div class="bottom-row">
 
-</div>
+    <!-- RISK -->
+    <div class="panel panel-red">
+      <div class="panel-title">
+        <span class="panel-title-text red">RISK ANALYSIS</span>
+        <span class="panel-badge badge-red">LIVE</span>
+      </div>
+      <div class="risk-metrics">
+        <div class="risk-metric">
+          <div class="risk-label">W. Volatility</div>
+          <div class="risk-val" style="color:var(--yellow)">14.2%</div>
+          <div class="risk-bar"><div class="risk-bar-fill" style="width:57%;background:var(--yellow)"></div></div>
+        </div>
+        <div class="risk-metric">
+          <div class="risk-label">Max Drawdown</div>
+          <div class="risk-val" style="color:var(--red)">−8.6%</div>
+          <div class="risk-bar"><div class="risk-bar-fill" style="width:34%;background:var(--red)"></div></div>
+        </div>
+        <div class="risk-metric">
+          <div class="risk-label">Top Conc.</div>
+          <div class="risk-val" style="color:var(--orange)">VTI 20%</div>
+          <div class="risk-bar"><div class="risk-bar-fill" style="width:20%;background:var(--orange)"></div></div>
+        </div>
+      </div>
+      <div class="risk-alerts">
+        <div class="alert-item"><span class="alert-icon" style="color:var(--red)">⚠</span><span style="color:var(--red)">Alta concentração em US Equity (38%)</span></div>
+        <div class="alert-item"><span class="alert-icon" style="color:var(--yellow)">△</span><span style="color:var(--yellow)">Overlap em Emerging Markets (EMG × VEA)</span></div>
+        <div class="alert-item"><span class="alert-icon" style="color:var(--cyan)">ℹ</span><span>Fixed income abaixo do recomendado (&lt;25%)</span></div>
+        <div class="alert-item"><span class="alert-icon" style="color:var(--green)">✓</span><span style="color:var(--green)">Sharpe ratio 1.34 — acima da média</span></div>
+      </div>
+    </div>
+
+    <!-- POSITIONS (Polymarket style) -->
+    <div class="panel panel-purple">
+      <div class="panel-title">
+        <span class="panel-title-text purple">TRADING POSITIONS</span>
+        <span class="panel-badge badge-purple">POLYMARKET</span>
+      </div>
+      <div class="content">
+        <table>
+          <thead>
+            <tr><th>#</th><th>MARKET</th><th>DATE</th><th>TIME</th><th>TRADED</th><th>WON</th><th>PROFIT</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="pos-rank">1</td>
+              <td class="td-sym" style="font-size:10px">BTC &gt; 105K</td>
+              <td class="td-dim">May 16</td>
+              <td class="td-dim">14:22</td>
+              <td>$4,200</td>
+              <td class="td-up">$5,880</td>
+              <td class="td-up">+$1,680</td>
+            </tr>
+            <tr>
+              <td class="pos-rank">2</td>
+              <td class="td-sym" style="font-size:10px">ETH ATH Q2</td>
+              <td class="td-dim">May 15</td>
+              <td class="td-dim">09:11</td>
+              <td>$2,500</td>
+              <td class="td-up">$3,375</td>
+              <td class="td-up">+$875</td>
+            </tr>
+            <tr>
+              <td class="pos-rank">3</td>
+              <td class="td-sym" style="font-size:10px">SOL &gt; $200</td>
+              <td class="td-dim">May 14</td>
+              <td class="td-dim">18:04</td>
+              <td>$1,800</td>
+              <td class="td-up">$2,340</td>
+              <td class="td-up">+$540</td>
+            </tr>
+            <tr>
+              <td class="pos-rank">4</td>
+              <td class="td-sym" style="font-size:10px">FED Rate Cut</td>
+              <td class="td-dim">May 12</td>
+              <td class="td-dim">21:30</td>
+              <td>$3,000</td>
+              <td class="td-dn">$1,800</td>
+              <td class="td-dn">−$1,200</td>
+            </tr>
+            <tr>
+              <td class="pos-rank">5</td>
+              <td class="td-sym" style="font-size:10px">BTC &lt; 95K</td>
+              <td class="td-dim">May 10</td>
+              <td class="td-dim">07:45</td>
+              <td>$1,200</td>
+              <td class="td-dn">$480</td>
+              <td class="td-dn">−$720</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="display:flex;gap:16px;padding:8px 12px;border-top:1px solid var(--dim2);margin-top:2px">
+          <div><span style="color:var(--dim);font-size:9px">TOTAL TRADED</span><br><span style="font-family:var(--font-mono);color:var(--text)">$12,700</span></div>
+          <div><span style="color:var(--dim);font-size:9px">NET PROFIT</span><br><span style="font-family:var(--font-mono);color:var(--green)">+$1,175</span></div>
+          <div><span style="color:var(--dim);font-size:9px">WIN RATE</span><br><span style="font-family:var(--font-mono);color:var(--cyan)">60%</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ARBITRAGE -->
+    <div class="panel">
+      <div class="panel-title">
+        <span class="panel-title-text">ARBITRAGE / SPREAD</span>
+        <span class="panel-badge badge-cyan">C6 vs POLY</span>
+      </div>
+      <div class="content">
+        <div class="spread-row">
+          <span class="spread-label">MARKET</span>
+          <span class="spread-val" style="color:var(--cyan)">BTC &gt; $105K · May 31</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">C6 PRICE</span>
+          <span class="spread-val">¢ 62.4</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">POLY PRICE</span>
+          <span class="spread-val">¢ 68.1</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">SPREAD</span>
+          <span class="spread-val" style="color:var(--green)">+5.7¢</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">AVG SPREAD</span>
+          <span class="spread-val">3.2¢</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">ARBI OPP</span>
+          <div class="arbi-badge" style="background:rgba(0,255,136,0.12);color:var(--green);border:1px solid rgba(0,255,136,0.3);">▲ POSITIVE</div>
+        </div>
+        <div class="sep"></div>
+        <div class="spread-row">
+          <span class="spread-label">ETH ATH Q2</span>
+          <span></span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">SPREAD</span>
+          <span class="spread-val" style="color:var(--red)">−2.1¢</span>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">ARBI OPP</span>
+          <div class="arbi-badge" style="background:rgba(255,51,102,0.1);color:var(--red);border:1px solid rgba(255,51,102,0.3);">▼ NEGATIVE</div>
+        </div>
+        <div class="spread-row">
+          <span class="spread-label">AVG SPREAD</span>
+          <span class="spread-val">1.8¢</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- EARNINGS -->
+    <div class="panel">
+      <div class="panel-title">
+        <span class="panel-title-text">EARNINGS CALENDAR</span>
+        <span class="panel-badge badge-cyan">Q2 2026</span>
+      </div>
+      <div class="content">
+        <table>
+          <thead>
+            <tr><th>COMPANY</th><th>WTS%</th><th>LAST EPS</th><th>NEXT DATE</th><th>EST EPS</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="td-sym">JPM</td>
+              <td class="td-up">+8.4%</td>
+              <td class="earn-beat">$4.44</td>
+              <td class="earn-date">Jul 11</td>
+              <td style="color:var(--text)">$4.61</td>
+            </tr>
+            <tr>
+              <td class="td-sym">NFLX</td>
+              <td class="td-up">+12.1%</td>
+              <td class="earn-beat">$5.28</td>
+              <td class="earn-date">Jul 17</td>
+              <td style="color:var(--text)">$5.74</td>
+            </tr>
+            <tr>
+              <td class="td-sym">TSLA</td>
+              <td class="td-dn">−3.8%</td>
+              <td class="earn-miss">$0.45</td>
+              <td class="earn-date">Jul 22</td>
+              <td style="color:var(--text)">$0.52</td>
+            </tr>
+            <tr>
+              <td class="td-sym">AAPL</td>
+              <td class="td-up">+5.2%</td>
+              <td class="earn-beat">$1.89</td>
+              <td class="earn-date">Jul 29</td>
+              <td style="color:var(--text)">$1.94</td>
+            </tr>
+            <tr>
+              <td class="td-sym">MSFT</td>
+              <td class="td-up">+7.6%</td>
+              <td class="earn-beat">$3.12</td>
+              <td class="earn-date">Jul 29</td>
+              <td style="color:var(--text)">$3.28</td>
+            </tr>
+            <tr>
+              <td class="td-sym">NVDA</td>
+              <td class="td-up">+18.3%</td>
+              <td class="earn-beat">$6.12</td>
+              <td class="earn-date">Aug 20</td>
+              <td style="color:var(--text)">$7.44</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- end bottom-row -->
+</div><!-- end main -->
+
+<!-- ═══════════════════════════════════════════════════
+     FOOTER
+═══════════════════════════════════════════════════ -->
+<footer class="footer">
+  <span class="footer-logo">NEXUS-7</span>
+  <span style="color:var(--dim);font-size:10px">—</span>
+  <span style="color:var(--purple);font-family:var(--font-mono);font-size:11px">AI TRADING BOT</span>
+  <span class="footer-ver">V4.2</span>
+  <div class="footer-links">
+    <a class="footer-link" href="#">SEARCH</a>
+    <a class="footer-link" href="#">SUPPORT</a>
+    <a class="footer-link" href="#">HELP</a>
+  </div>
+  <div class="ohmo-badge">OHMO.AI</div>
+</footer>
 
 <script>
-const API = '';  // mesmo host
+// ── UTC Clock ──────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getUTCHours()).padStart(2,'0');
+  const m = String(now.getUTCMinutes()).padStart(2,'0');
+  const s = String(now.getUTCSeconds()).padStart(2,'0');
+  document.getElementById('utcTime').textContent = `${h}:${m}:${s}`;
+}
+updateClock();
+setInterval(updateClock, 1000);
 
-async function fetchJSON(path) {
-  try {
-    const r = await fetch(API + path);
-    return await r.json();
-  } catch(e) { return null; }
+// ── Simulate live price ticks ──────────────────────────────────
+let btc = 104218.40, eth = 2587.10, bnb = 608.30, roi = 1.00;
+let btcBase = 101850.60, ethBase = 2557.20, bnbBase = 610.88;
+
+function rand(min, max) { return Math.random() * (max - min) + min; }
+
+function tick() {
+  // BTC
+  btc += rand(-80, 90);
+  btc = Math.max(99000, Math.min(110000, btc));
+  const btcChg = ((btc - btcBase) / btcBase * 100).toFixed(2);
+  document.getElementById('btc-price').textContent = btc.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const btcEl = document.getElementById('btc-chg');
+  btcEl.textContent = (btcChg >= 0 ? '+' : '') + btcChg + '%';
+  btcEl.className = 'ticker-chg ' + (btcChg >= 0 ? 'chg-up' : 'chg-down');
+
+  // ETH
+  eth += rand(-8, 9);
+  eth = Math.max(2200, Math.min(3000, eth));
+  const ethChg = ((eth - ethBase) / ethBase * 100).toFixed(2);
+  document.getElementById('eth-price').textContent = eth.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const ethEl = document.getElementById('eth-chg');
+  ethEl.textContent = (ethChg >= 0 ? '+' : '') + ethChg + '%';
+  ethEl.className = 'ticker-chg ' + (ethChg >= 0 ? 'chg-up' : 'chg-down');
+
+  // BNB
+  bnb += rand(-1.5, 1.3);
+  bnb = Math.max(540, Math.min(680, bnb));
+  const bnbChg = ((bnb - bnbBase) / bnbBase * 100).toFixed(2);
+  document.getElementById('bnb-price').textContent = bnb.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const bnbEl = document.getElementById('bnb-chg');
+  bnbEl.textContent = (bnbChg >= 0 ? '+' : '') + bnbChg + '%';
+  bnbEl.className = 'ticker-chg ' + (bnbChg >= 0 ? 'chg-up' : 'chg-down');
+
+  // Chart price
+  document.getElementById('chart-price').textContent = '$' + btc.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  // ROI
+  roi += rand(-0.02, 0.025);
+  roi = Math.max(-2, Math.min(5, roi));
+  const roiEl = document.getElementById('roi-badge');
+  roiEl.textContent = 'DAY ' + (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%';
+  roiEl.style.color = roi >= 0 ? 'var(--green)' : 'var(--red)';
+  roiEl.style.borderColor = roi >= 0 ? 'rgba(0,255,136,0.25)' : 'rgba(255,51,102,0.25)';
+  roiEl.style.background = roi >= 0 ? 'rgba(0,255,136,0.08)' : 'rgba(255,51,102,0.08)';
 }
 
-function fmtPnl(v) {
-  if (v === undefined || v === null || v === '—') return '—';
-  const n = parseFloat(v);
-  const cls = n >= 0 ? 'green' : 'red';
-  const sign = n >= 0 ? '+' : '';
-  return `<span class="${cls}">${sign}$${n.toFixed(4)}</span>`;
+setInterval(tick, 1800);
+
+// ── Chart path toggle ──────────────────────────────────────────
+function setPath(btn, type) {
+  document.querySelectorAll('.path-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
 }
 
-function scoreColor(s) {
-  if (s >= 85) return 'var(--green)';
-  if (s >= 80) return 'var(--cyan)';
-  if (s >= 70) return 'var(--yellow)';
-  return 'var(--red)';
+// ── Animate chart on load ──────────────────────────────────────
+const priceLine = document.getElementById('priceLine');
+const areaPath  = document.getElementById('areaPath');
+const len = priceLine.getTotalLength ? priceLine.getTotalLength() : 800;
+if (priceLine.style !== undefined) {
+  priceLine.style.strokeDasharray  = len;
+  priceLine.style.strokeDashoffset = len;
+  priceLine.style.transition = 'stroke-dashoffset 2s ease-in-out';
+  setTimeout(() => { priceLine.style.strokeDashoffset = 0; }, 100);
+  areaPath.style.opacity = 0;
+  areaPath.style.transition = 'opacity 2s ease';
+  setTimeout(() => { areaPath.style.opacity = 0.7; }, 200);
 }
-
-function elapsed(ts) {
-  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s/60)}m`;
-  return `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`;
-}
-
-function renderPositions(positions, maxPos) {
-  const warn = document.getElementById('limitWarn');
-  document.getElementById('limitNum').textContent = maxPos;
-  if (positions.length >= maxPos) {
-    warn.style.display = 'block';
-  } else {
-    warn.style.display = 'none';
-  }
-
-  if (!positions.length) {
-    document.getElementById('posTable').innerHTML = '<div class="empty">Nenhuma posição aberta</div>';
-    return;
-  }
-
-  let html = `<table>
-    <thead><tr>
-      <th>Par</th><th>Direção</th><th>Score</th>
-      <th>Entrada</th><th>Preço Atual</th>
-      <th>SL Ativo</th><th>TP</th>
-      <th>PnL %</th><th>PnL $</th><th>Trailing</th><th>Tempo</th>
-    </tr></thead><tbody>`;
-
-  for (const p of positions) {
-    const dirCls = p.direction === 'LONG' ? 'badge-long' : 'badge-short';
-    const pnlCls = p.pnl_pct >= 0 ? 'green' : 'red';
-    const trailingTag = p.trailing_active
-      ? `<span class="trailing-tag">🔄 ativo</span>` : '';
-    const scoreC = scoreColor(p.score);
-    html += `<tr>
-      <td><b style="color:var(--cyan)">${p.symbol.replace('USDT','')}</b></td>
-      <td><span class="badge ${dirCls}">${p.direction}</span></td>
-      <td><span class="badge-score badge" style="color:${scoreC}">${p.score}</span></td>
-      <td>$${parseFloat(p.entry).toFixed(4)}</td>
-      <td><b>$${parseFloat(p.current_price || p.entry).toFixed(4)}</b></td>
-      <td style="color:var(--yellow)">$${parseFloat(p.sl || p.trailing_sl).toFixed(4)}</td>
-      <td style="color:var(--green)">$${parseFloat(p.tp).toFixed(4)}</td>
-      <td class="${pnlCls}"><b>${p.pnl_pct >= 0 ? '+' : ''}${parseFloat(p.pnl_pct).toFixed(2)}%</b></td>
-      <td>${fmtPnl(p.pnl)}</td>
-      <td>${trailingTag || '<span style="color:var(--dim)">—</span>'}</td>
-      <td style="color:var(--dim)">${p.opened_at ? elapsed(p.opened_at) : '—'}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  document.getElementById('posTable').innerHTML = html;
-}
-
-function renderRankings(symbols, status) {
-  // Mostra símbolos viáveis com indicação de qual está em posição
-  const openSyms = new Set((status.positions || []).map(p => p.symbol));
-  if (!symbols || !symbols.length) {
-    document.getElementById('rankList').innerHTML = '<div class="empty">—</div>';
-    return;
-  }
-  let html = '';
-  for (const sym of symbols.slice(0, 12)) {
-    const inPos = openSyms.has(sym);
-    html += `<div class="rank-row">
-      <span class="rank-sym">${sym.replace('USDT','')}</span>
-      <span style="font-size:10px;color:${inPos ? 'var(--green)' : 'var(--dim)'}">
-        ${inPos ? '● em posição' : '○ monitorando'}
-      </span>
-    </div>`;
-  }
-  document.getElementById('rankList').innerHTML = html;
-}
-
-function renderClosed(pnlData) {
-  const trades = (pnlData?.closed_trades || []).slice(-10).reverse();
-  if (!trades.length) {
-    document.getElementById('closedTable').innerHTML = '<div class="empty">Nenhum trade fechado ainda</div>';
-    return;
-  }
-  let html = `<table><thead><tr>
-    <th>Par</th><th>Dir</th><th>Entrada</th><th>Saída</th><th>PnL %</th><th>PnL $</th><th>Motivo</th>
-  </tr></thead><tbody>`;
-  for (const t of trades) {
-    const pCls = t.pnl_pct >= 0 ? 'green' : 'red';
-    const dirCls = t.direction === 'LONG' ? 'badge-long' : 'badge-short';
-    const sym = (t.symbol || '').replace('USDT','');
-    const dir = t.direction || (t.side === 'Buy' ? 'LONG' : 'SHORT');
-    html += `<tr>
-      <td><b style="color:var(--cyan)">${sym}</b></td>
-      <td><span class="badge ${dirCls}">${dir}</span></td>
-      <td>$${parseFloat(t.entry || 0).toFixed(4)}</td>
-      <td>$${parseFloat(t.exit_price || t.exit || 0).toFixed(4)}</td>
-      <td class="${pCls}">${t.pnl_pct >= 0 ? '+' : ''}${parseFloat(t.pnl_pct || 0).toFixed(2)}%</td>
-      <td>${fmtPnl(t.pnl_usdt || t.pnl)}</td>
-      <td style="color:var(--dim);font-size:10px">${t.reason || '—'}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  document.getElementById('closedTable').innerHTML = html;
-}
-
-async function refresh() {
-  const [status, pnlData] = await Promise.all([
-    fetchJSON('/api/status'),
-    fetchJSON('/api/pnl'),
-  ]);
-
-  const dot  = document.getElementById('dot');
-  const stxt = document.getElementById('statusTxt');
-  const sync = document.getElementById('syncBadge');
-
-  if (!status) {
-    dot.className = 'dot off';
-    stxt.textContent = 'OFFLINE';
-    sync.textContent = '✗ sem resposta';
-    return;
-  }
-
-  // Status
-  const isActive = status.connected && status.active;
-  dot.className  = isActive ? 'dot' : 'dot off';
-  stxt.textContent = isActive ? 'ONLINE' : (status.connected ? 'PAUSADO' : 'DESCONECTADO');
-  sync.textContent = `⟳ ${new Date().toLocaleTimeString('pt-BR')}`;
-
-  // KPIs
-  document.getElementById('balance').textContent = `$${parseFloat(status.balance || 0).toFixed(2)}`;
-  document.getElementById('buyingPower').textContent = `$${parseFloat(status.buying_power || 0).toFixed(2)}`;
-  const nPos = status.open_positions ?? (status.positions || []).length;
-  const mPos = status.max_positions || 3;
-  const posEl = document.getElementById('posCount');
-  posEl.textContent = `${nPos} / ${mPos}`;
-  posEl.className = `card-value ${nPos >= mPos ? 'red' : nPos > 0 ? 'yellow' : 'green'}`;
-  document.getElementById('maxPos').textContent = mPos;
-  document.getElementById('minScore').textContent = status.min_entry_score || 80;
-
-  const dd = parseFloat(status.drawdown_pct || 0);
-  const ddEl = document.getElementById('drawdown');
-  ddEl.textContent = `${dd.toFixed(2)}%`;
-  ddEl.className = `card-value ${dd > 10 ? 'red' : dd > 5 ? 'yellow' : 'green'}`;
-
-  // PnL
-  const sess = status.pnl_session || {};
-  document.getElementById('winRate').textContent = `${sess.win_rate || status.win_rate_pct || 0}%`;
-  document.getElementById('wins').textContent = sess.wins ?? status.wins ?? '—';
-  document.getElementById('losses').textContent = sess.losses ?? status.losses ?? '—';
-  document.getElementById('totalPnl').innerHTML = fmtPnl(sess.pnl ?? status.total_pnl);
-
-  // PnL por período
-  const pnlS = pnlData || status;
-  const p = (key) => {
-    const d = status[`pnl_${key}`] || {};
-    return d.pnl !== undefined ? d.pnl : null;
-  };
-  document.getElementById('pnlSession').innerHTML = fmtPnl(p('session') ?? sess.pnl);
-  document.getElementById('pnl1d').innerHTML = fmtPnl(p('1d'));
-  document.getElementById('pnl7d').innerHTML = fmtPnl(p('7d'));
-  document.getElementById('pnl30d').innerHTML = fmtPnl(p('30d'));
-
-  // Posições abertas
-  renderPositions(status.positions || [], mPos);
-
-  // Rankings
-  renderRankings(status.symbols || [], status);
-
-  // Trades fechados
-  const allPnl = pnlS?.session ? pnlS : { closed_trades: status.closed_trades || [] };
-  if (pnlData) renderClosed(pnlData);
-}
-
-// Atualiza a cada 10 segundos
-refresh();
-setInterval(refresh, 10000);
 </script>
 </body>
 </html>
