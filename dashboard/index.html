@@ -467,25 +467,25 @@ tr:hover td { background: rgba(0,212,255,0.03); }
   <div class="tickers">
     <div class="ticker-item">
       <span class="ticker-sym">BTC</span>
-      <span class="ticker-price" id="btc-price">103,420.00</span>
-      <span class="ticker-chg chg-up" id="btc-chg">+3.63%</span>
+      <span class="ticker-price" id="btc-price">77,885.00</span>
+      <span class="ticker-chg chg-down" id="btc-chg">−1.70%</span>
     </div>
     <div class="ticker-item">
       <span class="ticker-sym">ETH</span>
-      <span class="ticker-price" id="eth-price">2,275.00</span>
-      <span class="ticker-chg chg-down" id="eth-chg">−2.73%</span>
+      <span class="ticker-price" id="eth-price">2,217.00</span>
+      <span class="ticker-chg chg-down" id="eth-chg">−3.48%</span>
     </div>
     <div class="ticker-item">
       <span class="ticker-sym">BNB</span>
-      <span class="ticker-price" id="bnb-price">659.50</span>
-      <span class="ticker-chg chg-up" id="bnb-chg">+5.08%</span>
+      <span class="ticker-price" id="bnb-price">673.00</span>
+      <span class="ticker-chg chg-down" id="bnb-chg">−1.02%</span>
     </div>
   </div>
 
   <div class="header-stats">
     <div class="hstat">
       <span class="hstat-label">VOL 24H</span>
-      <span class="hstat-val" id="vol24h">$106.5B</span>
+      <span class="hstat-val" id="vol24h">$38.1B</span>
     </div>
     <div class="hstat">
       <span class="hstat-label">DOMINANCE</span>
@@ -497,7 +497,7 @@ tr:hover td { background: rgba(0,212,255,0.03); }
     </div>
   </div>
 
-  <div class="roi-badge" id="roi-badge">DAY +1.00%</div>
+  <div class="roi-badge" id="roi-badge">DAY −1.70%</div>
 
   <div class="status-live">
     <div class="live-dot"></div>
@@ -518,8 +518,8 @@ tr:hover td { background: rgba(0,212,255,0.03); }
     </div>
 
     <div class="chart-header">
-      <div class="chart-price" id="chart-price">$103,420.00</div>
-      <div class="chart-var chg-up" style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.2);border-radius:3px;padding:3px 8px;font-family:var(--font-mono);font-size:12px;">▲ +3,620.00 (+3.63%)</div>
+      <div class="chart-price" id="chart-price">$77,885.00</div>
+      <div class="chart-var chg-down" style="background:rgba(255,51,102,0.08);border:1px solid rgba(255,51,102,0.2);border-radius:3px;padding:3px 8px;font-family:var(--font-mono);font-size:12px;">▼ −1,355.00 (−1.70%)</div>
       <div class="chart-paths">
         <button class="path-btn path-dear active" onclick="setPath(this,'dear')">DEAR PATH</button>
         <button class="path-btn path-roll" onclick="setPath(this,'roll')">ROLL PATH</button>
@@ -534,17 +534,17 @@ tr:hover td { background: rgba(0,212,255,0.03); }
         <div class="node-item">
           <div class="node-dot" style="color:var(--yellow);background:var(--yellow)"></div>
           <span style="color:var(--yellow);font-size:9px;letter-spacing:1px;">HIGH NODE</span>
-          <span id="node-high" style="color:var(--text);font-size:10px;">104,200</span>
+          <span id="node-high" style="color:var(--text);font-size:10px;">78,470</span>
         </div>
         <div class="node-item">
           <div class="node-dot" style="color:var(--cyan);background:var(--cyan)"></div>
           <span style="color:var(--cyan);font-size:9px;letter-spacing:1px;">SIGNAL</span>
-          <span id="node-signal" style="color:var(--text);font-size:10px;">103,100</span>
+          <span id="node-signal" style="color:var(--text);font-size:10px;">77,950</span>
         </div>
         <div class="node-item">
           <div class="node-dot" style="color:var(--purple);background:var(--purple)"></div>
           <span style="color:var(--purple);font-size:9px;letter-spacing:1px;">CONVERGENCE</span>
-          <span id="node-conv" style="color:var(--text);font-size:10px;">101,800</span>
+          <span id="node-conv" style="color:var(--text);font-size:10px;">76,400</span>
         </div>
         <div class="node-item" style="margin-top:6px;">
           <div style="width:8px;height:2px;background:var(--cyan);border-radius:1px;box-shadow:0 0 6px var(--cyan)"></div>
@@ -849,8 +849,8 @@ updateClock();
 setInterval(updateClock, 1000);
 
 // ── Simulate live price ticks ──────────────────────────────────
-let btc = 103420.00, eth = 2587.10, bnb = 608.30, roi = 1.00;
-let btcBase = 99800.00, ethBase = 2557.20, bnbBase = 610.88;
+let btc = 77885.00, eth = 2217.00, bnb = 673.00, roi = -1.70;
+let btcBase = 79235.00, ethBase = 2297.00, bnbBase = 679.90;
 
 function rand(min, max) { return Math.random() * (max - min) + min; }
 
