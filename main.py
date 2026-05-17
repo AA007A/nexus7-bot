@@ -11,30 +11,41 @@ from bot.logger import log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 A007A TRADE v6 iniciando...")
+    log.info("🚀 A007A TRADE v7 iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
     app.state.engine = engine
+
+    # Engine roda em background — NÃO bloqueia o health check
     asyncio.create_task(engine.run())
-    log.info("✅ A007A TRADE online")
+
+    log.info("✅ A007A TRADE online — aguardando health check")
     yield
+    # Shutdown
     engine.stop()
+    await asyncio.sleep(0.5)
     await client.close()
+    log.info("👋 A007A TRADE encerrado")
 
 
-app = FastAPI(title="A007A TRADE", version="6.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                   allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="A007A TRADE", version="7.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/")
-async def root():
-    return {"status": "online", "version": "6.0.0", "name": "A007A TRADE AI Trader"}
-
+# ── Health check — responde IMEDIATAMENTE, sem depender do engine ──
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return {"status": "online", "version": "7.1.0", "name": "A007A TRADE"}
 
 @app.get("/api/status")
 async def status():
@@ -51,7 +62,6 @@ async def positions():
     return {
         "open":  [p.to_dict() for p in eng.positions.values()],
         "count": len(eng.positions),
-        "max":   eng.risk.__class__.__name__,
     }
 
 @app.get("/api/pnl")
@@ -78,4 +88,9 @@ async def dashboard():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
