@@ -15,7 +15,7 @@ class Config:
     ]
 
     LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "5"))
-    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.30"))
+    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.50"))  # 50% do poder por trade
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))
     MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "80"))
@@ -26,7 +26,7 @@ class Config:
     DAILY_TARGET:       float = float(os.environ.get("DAILY_TARGET",        "100.0"))  # meta em USDT
     DAILY_STOP_LOSS:    float = float(os.environ.get("DAILY_STOP_LOSS",     "50.0"))   # stop-loss diário (para tudo se perder $50)
     POST_TARGET_SCORE:  int   = int(os.environ.get("POST_TARGET_SCORE",     "88"))     # score mínimo APÓS bater a meta (mais seletivo)
-    POST_TARGET_RISK:   float = float(os.environ.get("POST_TARGET_RISK",    "0.15"))   # risco reduzido após meta (15%)
+    POST_TARGET_RISK:   float = float(os.environ.get("POST_TARGET_RISK",    "0.50"))  # 50% também após meta
 
     # Trailing stop progressivo
     TRAILING_STEP:   float = 0.10

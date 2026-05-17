@@ -69,24 +69,27 @@ class Position:
 
     def calc_trailing_sl(self) -> Optional[float]:
         """
-        Trailing stop progressivo:
-          a cada 10% de lucro → move SL para trás metade do milestone
-          Ex: 10% lucro → SL em +5%, 20% → +10%, 30% → +15%
+        Trailing SL = 50% do lucro % ATUAL em tempo real.
+        Se está dando 8% de lucro → SL trava em +4%.
+        Se sobe para 20% → SL move para +10%.
+        Só move para melhorar (nunca piora o SL).
+        Ativa a partir de qualquer lucro > 0%.
         """
         pct = self.pnl_pct()
-        if pct < 10:
-            return None   # ainda não ativado
+        if pct <= 0:
+            return None  # sem lucro ainda, mantém SL original
 
-        milestone = int(pct // 10) * 10   # arredonda para baixo: 10, 20, 30...
-        lock_pct  = milestone * 0.5       # trava metade do milestone
+        # SL = metade exata do lucro atual (contínuo, não por milestone)
+        lock_pct = pct * 0.5  # ex: lucro 8% → trava 4%
 
         if self.direction == "LONG":
             new_sl = self.entry * (1 + lock_pct / 100 / cfg.LEVERAGE)
-            # Só move SL para cima, nunca para baixo
+            # Só move para cima (nunca piora)
             if new_sl > self.trailing_sl:
                 return round(new_sl, 6)
         else:
             new_sl = self.entry * (1 - lock_pct / 100 / cfg.LEVERAGE)
+            # Só move para baixo (nunca piora)
             if new_sl < self.trailing_sl:
                 return round(new_sl, 6)
 
@@ -489,29 +492,27 @@ class TradingEngine:
             new_sl = pos.calc_trailing_sl()
             if new_sl is None:
                 continue
-            pct = pos.pnl_pct()
-            milestone = int(pct // 10) * 10
 
-            if not pos.trailing_active or milestone > pos.trailing_milestone:
-                pos.trailing_sl = new_sl
-                pos.trailing_active = True
-                pos.trailing_milestone = milestone
+            pct     = pos.pnl_pct()
+            lock    = pct * 0.5  # metade do lucro atual
 
-                try:
-                    await self.client._post("/v5/position/trading-stop", {
-                        "category": "linear",
-                        "symbol": sym,
-                        "stopLoss": str(new_sl),
-                        "positionIdx": 0,
-                    })
-                    log.info(f"🔄 {sym} trailing SL → ${new_sl:.6f} (lucro {pct:.1f}% | milestone {milestone}%)")
-                    await notify(
-                        f"🔄 *Trailing SL atualizado — {sym}*\n"
-                        f"Lucro atual: `{pct:.1f}%`\n"
-                        f"Novo SL: `${new_sl:.4f}` (protege {milestone//2}% de lucro)"
-                    )
-                except Exception as e:
-                    log.error(f"trailing_stop {sym}: {e}")
+            # Atualiza sempre que o SL melhorou
+            pos.trailing_sl     = new_sl
+            pos.trailing_active = True
+
+            try:
+                await self.client._post("/v5/position/trading-stop", {
+                    "category": "linear",
+                    "symbol": sym,
+                    "stopLoss": str(new_sl),
+                    "positionIdx": 0,
+                })
+                log.info(
+                    f"🔄 {sym} trailing SL → ${new_sl:.6f} "
+                    f"(lucro {pct:.1f}% → protege {lock:.1f}%)"
+                )
+            except Exception as e:
+                log.error(f"trailing_stop {sym}: {e}")
 
     # ── Scan & Enter ────────────────────────────────────────────
     async def _scan_all_and_enter(self):
