@@ -20,16 +20,31 @@ from bot.notifier import notify, signal_msg
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
+# Taxa Bybit: 0.055% por lado (maker) ou 0.055% taker — usamos 0.055% x2 = 0.11% total
+TAKER_FEE = 0.00055   # 0.055% por execução
+
 class Trade:
-    def __init__(self, symbol, direction, entry, exit_price, qty, pnl, opened_at):
+    def __init__(self, symbol, direction, entry, exit_price, qty, pnl_gross, opened_at,
+                 fee_open=0.0, fee_close=0.0):
         self.symbol      = symbol
         self.direction   = direction
         self.entry       = entry
         self.exit_price  = exit_price
         self.qty         = qty
-        self.pnl         = pnl
         self.opened_at   = opened_at
         self.closed_at   = datetime.utcnow()
+
+        # Calcula taxas se não fornecidas explicitamente
+        if fee_open == 0.0 and fee_close == 0.0:
+            # fee = qty * preço * taxa_taker
+            fee_open  = qty * entry      * TAKER_FEE
+            fee_close = qty * exit_price * TAKER_FEE
+
+        self.fee_open    = fee_open
+        self.fee_close   = fee_close
+        self.total_fees  = fee_open + fee_close
+        self.pnl_gross   = pnl_gross              # PnL bruto (sem taxas)
+        self.pnl         = pnl_gross - self.total_fees  # PnL LÍQUIDO (com taxas)
 
 
 # ─── Position ──────────────────────────────────────────────────────────────────
@@ -47,9 +62,13 @@ class Position:
         self.peak_pnl    = 0.0
         self.current_price = sig.entry
         # Trailing stop progressivo
-        self.trailing_sl       = sig.sl    # SL ativo atual (começa igual ao original)
+        self.trailing_sl       = sig.sl
         self.trailing_active   = False
-        self.trailing_milestone= 0         # último milestone de 10% atingido
+        self.trailing_milestone= 0
+        # Tempo mínimo no trade: 3 candles de 15min = 45min
+        self.min_hold_until    = datetime.utcnow().timestamp() + 45 * 60
+        self.expected_pnl      = getattr(sig, 'expected_pnl', 0.0)
+        self.total_fees_pct    = getattr(sig, 'total_fees', 0.0)
 
     def update_pnl(self, current_price: float):
         self.current_price = current_price
@@ -132,15 +151,35 @@ class Stats:
     def summary(self, days: int = None) -> dict:
         trades = self._filter(days)
         if not trades:
-            return {"pnl": 0.0, "wins": 0, "losses": 0, "win_rate": 0.0, "trades": 0}
-        wins   = [t for t in trades if t.pnl >= 0]
+            return {
+                "pnl": 0.0, "pnl_gross": 0.0, "total_fees": 0.0,
+                "wins": 0, "losses": 0, "win_rate": 0.0, "trades": 0,
+                "closed_trades": [],
+            }
+        wins   = [t for t in trades if t.pnl >= 0]   # pnl já é líquido
         losses = [t for t in trades if t.pnl < 0]
         return {
-            "pnl":      round(sum(t.pnl for t in trades), 4),
-            "wins":     len(wins),
-            "losses":   len(losses),
-            "win_rate": round(len(wins) / len(trades) * 100, 1),
-            "trades":   len(trades),
+            "pnl":          round(sum(t.pnl       for t in trades), 4),  # LÍQUIDO
+            "pnl_gross":    round(sum(t.pnl_gross for t in trades), 4),  # bruto
+            "total_fees":   round(sum(t.total_fees for t in trades), 4), # total taxas
+            "wins":         len(wins),
+            "losses":       len(losses),
+            "win_rate":     round(len(wins) / len(trades) * 100, 1),
+            "trades":       len(trades),
+            "closed_trades": [
+                {
+                    "symbol":    t.symbol,
+                    "direction": t.direction,
+                    "entry":     round(t.entry, 6),
+                    "exit":      round(t.exit_price, 6),
+                    "qty":       t.qty,
+                    "pnl_gross": round(t.pnl_gross, 4),
+                    "fees":      round(t.total_fees, 4),
+                    "pnl":       round(t.pnl, 4),       # LÍQUIDO
+                    "pnl_pct":   round(t.pnl / (t.entry * t.qty) * 100, 2) if t.entry * t.qty > 0 else 0,
+                }
+                for t in reversed(trades[-50:])
+            ],
         }
 
     def all_summaries(self) -> dict:
@@ -430,20 +469,37 @@ class TradingEngine:
             for sym in list(self.positions.keys()):
                 pos = self.positions[sym]
                 if sym not in open_syms:
-                    pnl   = pos.pnl
-                    icon  = "✅" if pnl >= 0 else "❌"
-                    trade = Trade(sym, pos.direction, pos.entry,
-                                  pos.current_price, pos.qty, pnl, pos.opened_at)
+                    # PnL bruto (sem taxas)
+                    pnl_gross = pos.pnl
+                    exit_px   = pos.current_price or pos.entry
+
+                    # Taxas: 0.055% por lado (taker Bybit)
+                    fee_open  = pos.qty * pos.entry * TAKER_FEE
+                    fee_close = pos.qty * exit_px   * TAKER_FEE
+                    total_fee = fee_open + fee_close
+                    pnl_net   = pnl_gross - total_fee   # PnL LÍQUIDO
+
+                    trade = Trade(
+                        sym, pos.direction, pos.entry, exit_px,
+                        pos.qty, pnl_gross, pos.opened_at,
+                        fee_open=fee_open, fee_close=fee_close
+                    )
                     self.stats.add(trade)
                     del self.positions[sym]
-                    self._cooldown[sym] = time.time() + 60   # cooldown 60s
-                    log.info(f"📭 {sym} fechado PnL=${pnl:+.4f}")
+                    self._cooldown[sym] = time.time() + 900
+                    icon = "✅" if pnl_net >= 0 else "❌"
+                    log.info(
+                        f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
+                        f"Taxas=-${total_fee:.4f} | Líquido=${pnl_net:+.4f}"
+                    )
                     await notify(
                         f"{icon} *{sym} fechado*\n"
                         f"Direção: `{pos.direction}`\n"
-                        f"PnL: `${pnl:+.4f}`\n"
-                        f"Score entrada: `{pos.score}/100`\n"
-                        f"📊 Sessão: `${self.stats.summary()['pnl']:+.4f}`"
+                        f"PnL Bruto: `${pnl_gross:+.4f}`\n"
+                        f"Taxas: `-${total_fee:.4f}`\n"
+                        f"PnL Líquido: `${pnl_net:+.4f}`\n"
+                        f"Score: `{pos.score}/100`\n"
+                        f"Sessão: `${self.stats.summary()['pnl']:+.4f}`"
                     )
                 else:
                     # Atualiza dados da posição aberta
@@ -519,7 +575,9 @@ class TradingEngine:
         for sym in self.viable_symbols:
             if sym in self.positions:
                 continue
-            if time.time() < self._cooldown.get(sym, 0):
+            cooldown_left = self._cooldown.get(sym, 0) - time.time()
+            if cooldown_left > 0:
+                log.debug(f"[{sym}] cooldown {cooldown_left:.0f}s restantes → skip")
                 continue
             try:
                 # Busca os dois timeframes em paralelo
@@ -530,17 +588,21 @@ class TradingEngine:
                 if len(k15) < 60 or len(k1h) < 30:
                     continue
 
-                sig = self.analyzer.analyze_mtf(sym, k15, k1h)
-                if sig and sig.score >= min_score:
+                sig = self.analyzer.analyze_mtf(sym, k15, k1h, min_score=min_score)
+                if sig:
+                    # Validação final: expected_pnl > 0 após taxas
+                    if sig.expected_pnl <= 0:
+                        log.debug(f"[{sym}] PnL esperado negativo após taxas → HOLD")
+                        continue
                     candidates.append(sig)
                     log.info(
-                        f"🎯 CANDIDATO {sym} score={sig.score}/100 "
-                        f"(mín={min_score}) {sig.direction} "
-                        f"1H:[{sig.tf_1h}] 15M:[{sig.tf_15m}]"
+                        f"🎯 CANDIDATO: {sym} score={sig.score}/100 "
+                        f"{sig.direction} RR={sig.rr} "
+                        f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.4)   # respeita rate limit Bybit
+            await asyncio.sleep(0.5)   # respeita rate limit Bybit
 
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
