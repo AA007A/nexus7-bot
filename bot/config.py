@@ -18,7 +18,7 @@ class Config:
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.50"))  # 50% do poder por trade
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "5"))
-    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "72"))
+    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "80"))
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.80"))
 
     # ── META DIÁRIA ──────────────────────────────────────────────

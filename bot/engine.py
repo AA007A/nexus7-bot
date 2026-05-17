@@ -66,7 +66,7 @@ class Position:
         self.trailing_active   = False
         self.trailing_milestone= 0
         # Tempo mínimo no trade: 3 candles de 15min = 45min
-        self.min_hold_until    = datetime.utcnow().timestamp() + 30 * 60
+        self.min_hold_until    = datetime.utcnow().timestamp() + 60 * 60  # 60min = 4 candles 15M
         self.expected_pnl      = getattr(sig, 'expected_pnl', 0.0)
         self.total_fees_pct    = getattr(sig, 'total_fees', 0.0)
 
@@ -88,18 +88,16 @@ class Position:
 
     def calc_trailing_sl(self) -> Optional[float]:
         """
-        Trailing SL = 50% do lucro % ATUAL em tempo real.
-        Se está dando 8% de lucro → SL trava em +4%.
-        Se sobe para 20% → SL move para +10%.
-        Só move para melhorar (nunca piora o SL).
-        Ativa a partir de qualquer lucro > 0%.
+        Trailing SL = 50% do lucro ATUAL.
+        Só ativa após lucro >= 5% líquido (evita fechar no ruído).
+        Com alta alavancagem, espera confirmação antes de mover SL.
         """
         pct = self.pnl_pct()
-        if pct <= 0:
-            return None  # sem lucro ainda, mantém SL original
+        if pct < 5.0:
+            return None  # aguarda lucro mínimo de 5% antes de ativar
 
-        # SL = metade exata do lucro atual (contínuo, não por milestone)
-        lock_pct = pct * 0.5  # ex: lucro 8% → trava 4%
+        # SL = metade exata do lucro atual
+        lock_pct = pct * 0.5
 
         if self.direction == "LONG":
             new_sl = self.entry * (1 + lock_pct / 100 / cfg.LEVERAGE)
@@ -469,6 +467,14 @@ class TradingEngine:
             for sym in list(self.positions.keys()):
                 pos = self.positions[sym]
                 if sym not in open_syms:
+                    # Respeita tempo mínimo no trade (só SL/TP da Bybit fecha)
+                    # Se a Bybit fechou, aceita — mas loga o motivo
+                    hold_left = pos.min_hold_until - time.time()
+                    if hold_left > 0:
+                        log.warning(
+                            f"⚠️ {sym} fechado pela Bybit antes do tempo mínimo "
+                            f"({hold_left/60:.0f}min restantes) — SL atingido"
+                        )
                     # PnL bruto (sem taxas)
                     pnl_gross = pos.pnl
                     exit_px   = pos.current_price or pos.entry

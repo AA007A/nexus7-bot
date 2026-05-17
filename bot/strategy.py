@@ -400,19 +400,22 @@ class Analyzer:
         # ── PASSO 5: SL e TP baseados em ATR do 1H ───────────
         # Usa ATR do 1H para SL (mais estável, evita stop hunt)
         # TP = 3x o risco (R:R 1:3 preferencial)
+        # SL: 2.5x ATR do 1H — largo o suficiente para o trade respirar
+        # Com alavancagem alta, SL apertado = liquidação imediata
+        # TP: 5x ATR = R:R 1:2 com SL largo
         if direction == "LONG":
-            sl = round(price - atr_v_1h * 1.5, 6)
-            tp = round(price + atr_v_1h * 3.0, 6)   # R:R 1:2 (mais realizável)
+            sl = round(price - atr_v_1h * 2.5, 6)
+            tp = round(price + atr_v_1h * 5.0, 6)   # R:R 1:2
         else:
-            sl = round(price + atr_v_1h * 1.5, 6)
-            tp = round(price - atr_v_1h * 3.0, 6)
+            sl = round(price + atr_v_1h * 2.5, 6)
+            tp = round(price - atr_v_1h * 5.0, 6)
 
         risk   = abs(price - sl)
         reward = abs(tp - price)
         rr     = reward / risk if risk > 0 else 0
 
-        if rr < 2.0:
-            log.debug(f"[{symbol}] R:R {rr:.2f} < 2.0 → HOLD")
+        if rr < 1.8:
+            log.debug(f"[{symbol}] R:R {rr:.2f} < 1.8 → HOLD")
             return None
 
         # ── PASSO 6: Validação de custo operacional ───────────
