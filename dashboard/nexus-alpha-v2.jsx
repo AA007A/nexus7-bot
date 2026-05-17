@@ -147,6 +147,9 @@ export default function NexusAlpha() {
     active:true, balance:19.97, buying_power:99.85,
     drawdown_pct:2.4, open_positions:0, viable_symbols:19,
     win_rate:0, trades:0, pnl:0,
+    daily_pnl:0, daily_target:100, daily_stop_loss:50,
+    daily_target_hit:false, daily_stopped:false,
+    daily_progress:0, mode:"AGRESSIVO", effective_score:80,
   });
   const [positions, setPositions] = useState([]);
   const [trades, setTrades]   = useState([]);
@@ -205,6 +208,14 @@ export default function NexusAlpha() {
         win_rate:        sess.win_rate || s.win_rate_pct || 0,
         trades:          sess.trades || (s.wins||0)+(s.losses||0),
         pnl:             typeof sess === "object" ? (sess.pnl||0) : sess,
+        daily_pnl:       s.daily_pnl || 0,
+        daily_target:    s.daily_target || 100,
+        daily_stop_loss: s.daily_stop_loss || 50,
+        daily_target_hit:s.daily_target_hit || false,
+        daily_stopped:   s.daily_stopped || false,
+        daily_progress:  s.daily_progress || 0,
+        mode:            s.mode || "AGRESSIVO",
+        effective_score: s.effective_score || 80,
       });
       setPositions(s.positions || []);
       setTrades((sess.closed_trades || s.closed_trades || []).slice(-8).reverse());
@@ -365,6 +376,84 @@ export default function NexusAlpha() {
                   <span style={{ fontFamily:orb,fontSize:8,letterSpacing:1,color:on?C.green:C.dim }}>{name}</span>
                 </div>
               ))}
+            </div>
+          </Panel>
+
+          {/* Meta Diária */}
+          <Panel accent={botStatus.daily_target_hit ? C.green : botStatus.daily_stopped ? C.mag : C.yellow}>
+            <PH
+              title="META DIÁRIA"
+              badge={botStatus.daily_target_hit ? "✅ BATIDA" : botStatus.daily_stopped ? "🛑 PARADO" : `${botStatus.mode}`}
+              bc={botStatus.daily_target_hit ? C.green : botStatus.daily_stopped ? C.mag : C.yellow}
+              accent={botStatus.daily_target_hit ? C.green : botStatus.daily_stopped ? C.mag : C.yellow}
+            />
+            <div style={{ padding:"10px 12px" }}>
+              {/* Valor atual vs meta */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:6 }}>
+                <div>
+                  <div style={{ fontSize:7, letterSpacing:2, color:C.dim, marginBottom:2 }}>LUCRO HOJE</div>
+                  <div style={{ fontFamily:orb, fontSize:22, fontWeight:900,
+                    color: botStatus.daily_pnl >= botStatus.daily_target ? C.green :
+                           botStatus.daily_pnl < 0 ? C.mag : C.yellow,
+                    textShadow:`0 0 15px ${botStatus.daily_pnl >= 0 ? C.yellow : C.mag}66` }}>
+                    {botStatus.daily_pnl >= 0 ? "+" : ""}${fmt(botStatus.daily_pnl)}
+                  </div>
+                </div>
+                <div style={{ textAlign:"right" }}>
+                  <div style={{ fontSize:7, letterSpacing:2, color:C.dim, marginBottom:2 }}>META</div>
+                  <div style={{ fontFamily:mono, fontSize:16, color:C.yellow }}>
+                    ${fmt(botStatus.daily_target)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Barra de progresso */}
+              <div style={{ height:6, background:C.dim2, borderRadius:3, overflow:"hidden", marginBottom:4 }}>
+                <div style={{
+                  height:"100%",
+                  width: botStatus.daily_pnl < 0
+                    ? "0%"
+                    : Math.min(botStatus.daily_progress, 100) + "%",
+                  background: botStatus.daily_target_hit
+                    ? `linear-gradient(90deg,${C.green},${C.cyan})`
+                    : `linear-gradient(90deg,${C.yellow},${C.green})`,
+                  boxShadow: `0 0 8px ${botStatus.daily_target_hit ? C.green : C.yellow}`,
+                  borderRadius:3, transition:"width 1s",
+                }} />
+              </div>
+
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, marginBottom:8 }}>
+                <span style={{ color:C.dim }}>
+                  {botStatus.daily_progress.toFixed(1)}% da meta
+                </span>
+                <span style={{ color:C.dim }}>
+                  Faltam: <span style={{ color:C.yellow }}>
+                    ${fmt(Math.max(0, botStatus.daily_target - botStatus.daily_pnl))}
+                  </span>
+                </span>
+              </div>
+
+              {/* Linha stop loss */}
+              <div style={{ display:"flex", justifyContent:"space-between",
+                padding:"4px 8px", background:`${C.mag}0a`,
+                border:`1px solid ${C.mag}22`, borderRadius:2, marginBottom:6 }}>
+                <span style={{ fontSize:9, color:C.dim }}>STOP-LOSS DIÁRIO</span>
+                <span style={{ fontFamily:mono, fontSize:10, color:C.mag }}>
+                  -${fmt(botStatus.daily_stop_loss)}
+                </span>
+              </div>
+
+              {/* Modo atual */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontSize:8, letterSpacing:1, color:C.dim }}>MODO</span>
+                <Tag color={botStatus.daily_target_hit ? C.cyan : botStatus.daily_stopped ? C.mag : C.yellow}>
+                  {botStatus.daily_target_hit
+                    ? `CONSERVADOR · score ≥ ${botStatus.effective_score}`
+                    : botStatus.daily_stopped
+                    ? "PARADO · aguarda meia-noite"
+                    : `AGRESSIVO · score ≥ ${botStatus.effective_score}`}
+                </Tag>
+              </div>
             </div>
           </Panel>
 

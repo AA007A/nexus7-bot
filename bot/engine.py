@@ -1,16 +1,12 @@
 """
-NEXUS-7 Trading Engine v7.0
-Mudanças vs v6:
-  ✅ Máximo 3 posições simultâneas (MAX_POSITIONS=3)
-  ✅ Score mínimo 80/100 para entrar (MIN_ENTRY_SCORE=80)
-  ✅ Trailing stop PROGRESSIVO:
-       lucro >=10% → SL em +5%
-       lucro >=20% → SL em +10%
-       lucro >=30% → SL em +15%  ... e assim por diante
-  ✅ Sincronização em tempo real com Bybit (posições abertas/fechadas)
-  ✅ Tamanho de ordem: 30% do poder de compra por trade
-  ✅ Seletor inteligente: escaneia todos os símbolos e entra apenas nos melhores score
-  ✅ Cooldown de 60s após fechar posição no mesmo símbolo
+NEXUS-7 Trading Engine v7.1
+  ✅ Meta diária de $100 de lucro
+  ✅ Stop-loss diário de $50 (para tudo se perder $50 no dia)
+  ✅ Modo agressivo até bater a meta → modo conservador depois
+  ✅ Máximo 3 posições simultâneas
+  ✅ Score mínimo 80/100 para entrar (88 após bater a meta)
+  ✅ Trailing stop progressivo
+  ✅ Sincronização em tempo real com Bybit
 """
 import asyncio, time
 from datetime import datetime, timedelta
@@ -152,6 +148,16 @@ class Stats:
             "30d":     self.summary(30),
         }
 
+    def daily_pnl(self) -> float:
+        """PnL realizado apenas hoje (UTC)."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        total = 0.0
+        for t in self.trades:
+            if t.closed_at.date() == today:
+                total += t.pnl
+        return total
+
 
 # ─── Risk Manager ─────────────────────────────────────────────────────────────
 class RiskManager:
@@ -195,6 +201,8 @@ class RiskManager:
         min_not  = info.get("minNotional", 1.0)
 
         buying_power = self.balance * cfg.LEVERAGE
+        # Usa risco reduzido após meta diária ser batida
+        risk_pct = engine_ref.get("risk_pct", cfg.MAX_RISK_PCT) if hasattr(cfg,"_engine_ref") else cfg.MAX_RISK_PCT
         target_not   = buying_power * cfg.MAX_RISK_PCT
         target_not   = max(target_not, min_not)
 
@@ -232,6 +240,14 @@ class TradingEngine:
         self._scan_idx    = 0
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
 
+        # ── Meta diária ──────────────────────────────────────────
+        self.daily_pnl        = 0.0      # PnL acumulado no dia (USDT)
+        self.daily_target     = cfg.DAILY_TARGET      # $100
+        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # -$50
+        self.daily_target_hit = False    # meta batida hoje?
+        self.daily_stopped    = False    # stop-loss diário ativado?
+        self._last_reset_day  = -1       # último dia (UTC) que resetou
+
     # ── Lifecycle ──────────────────────────────────────────────
     async def run(self):
         if self._running:
@@ -248,10 +264,14 @@ class TradingEngine:
                     continue
 
                 if self.active:
+                    self._check_daily_reset()            # reseta contadores à meia-noite UTC
                     await self._update_balance()
                     await self._sync_positions()         # sincroniza com Bybit
                     await self._apply_trailing_stops()   # atualiza SLs progressivos
-                    if self.risk.can_open(len(self.positions)):
+                    self._update_daily_pnl()             # atualiza PnL do dia
+                    if self.daily_stopped:
+                        log.warning("🛑 Stop-loss diário ativado — aguardando próximo dia")
+                    elif self.risk.can_open(len(self.positions)):
                         await self._scan_all_and_enter() # escaneia e entra nos melhores
 
                 await asyncio.sleep(15)
@@ -265,6 +285,81 @@ class TradingEngine:
     def stop(self):
         self.active = False
         log.info("⏸️ Bot pausado (servidor continua rodando)")
+
+    # ── Meta diária ────────────────────────────────────────────
+    def _check_daily_reset(self):
+        """Reseta contadores de PnL diário à meia-noite UTC."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).day
+        if today != self._last_reset_day:
+            if self._last_reset_day != -1:
+                log.info(
+                    f"📅 Novo dia UTC — resetando contadores. "
+                    f"PnL ontem: ${self.daily_pnl:+.4f} | "
+                    f"Meta {'✅ BATIDA' if self.daily_target_hit else '❌ não atingida'}"
+                )
+            self.daily_pnl        = 0.0
+            self.daily_target_hit = False
+            self.daily_stopped    = False
+            self._last_reset_day  = today
+            # Volta ao score padrão após reset
+            log.info(f"🎯 Meta diária: ${self.daily_target:.0f} | Stop-loss dia: -${self.daily_stop_loss:.0f}")
+
+    def _update_daily_pnl(self):
+        """Soma PnL realizado + não-realizado do dia e verifica meta/stop."""
+        realized    = self.stats.daily_pnl()
+        unrealized  = sum(p.pnl for p in self.positions.values())
+        self.daily_pnl = realized + unrealized
+
+        # ── Stop-loss diário ──────────────────────────────────────
+        if not self.daily_stopped and self.daily_pnl <= -self.daily_stop_loss:
+            self.daily_stopped = True
+            log.warning(
+                f"🛑 STOP-LOSS DIÁRIO ATINGIDO: ${self.daily_pnl:.4f} ≤ -${self.daily_stop_loss:.0f}"
+                f" — Bot pausado até meia-noite UTC"
+            )
+            import asyncio
+            asyncio.create_task(notify(
+                f"🛑 *STOP-LOSS DIÁRIO*
+"
+                f"Perda do dia: `${self.daily_pnl:.4f}`
+"
+                f"Limite: `-${self.daily_stop_loss:.0f}`
+"
+                f"Bot pausado até meia-noite UTC"
+            ))
+
+        # ── Meta batida ───────────────────────────────────────────
+        if not self.daily_target_hit and self.daily_pnl >= self.daily_target:
+            self.daily_target_hit = True
+            log.info(
+                f"🎯 META DIÁRIA BATIDA! PnL=${self.daily_pnl:.4f} ≥ ${self.daily_target:.0f}"
+                f" — Entrando em modo CONSERVADOR (score ≥ {cfg.POST_TARGET_SCORE})"
+            )
+            import asyncio
+            asyncio.create_task(notify(
+                f"🎯 *META DIÁRIA BATIDA!*
+"
+                f"Lucro do dia: `+${self.daily_pnl:.4f}`
+"
+                f"Meta: `${self.daily_target:.0f}`
+"
+                f"Modo: *CONSERVADOR* ativado
+"
+                f"Próximas entradas: score ≥ {cfg.POST_TARGET_SCORE}/100"
+            ))
+
+    def _effective_score(self) -> int:
+        """Score mínimo efetivo — aumenta após bater a meta."""
+        if self.daily_target_hit:
+            return cfg.POST_TARGET_SCORE  # mais seletivo (88)
+        return cfg.MIN_ENTRY_SCORE        # padrão (80)
+
+    def _effective_risk_pct(self) -> float:
+        """Risco por trade — reduz após bater a meta."""
+        if self.daily_target_hit:
+            return cfg.POST_TARGET_RISK   # conservador (15%)
+        return cfg.MAX_RISK_PCT           # padrão (30%)
 
     # ── Connect ────────────────────────────────────────────────
     async def _connect(self):
@@ -436,9 +531,9 @@ class TradingEngine:
                 if len(klines) < 60:
                     continue
                 sig = self.analyzer.analyze(sym, klines)
-                if sig and sig.score >= cfg.MIN_ENTRY_SCORE:
+                if sig and sig.score >= self._effective_score():
                     candidates.append(sig)
-                    log.info(f"🎯 Candidato: {sym} score={sig.score}/100 {sig.direction} | {sig.reason}")
+                    log.info(f"🎯 Candidato: {sym} score={sig.score}/100 (mín={self._effective_score()}) {sig.direction} | {sig.reason}")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
             await asyncio.sleep(0.3)
@@ -547,4 +642,13 @@ class TradingEngine:
             "win_rate_pct":     summaries["session"]["win_rate"],
             "total_pnl":        summaries["session"]["pnl"],
             "symbols":          self.viable_symbols[:10],
+            # ── Meta diária
+            "daily_target":     self.daily_target,
+            "daily_stop_loss":  self.daily_stop_loss,
+            "daily_pnl":        round(self.daily_pnl, 4),
+            "daily_target_hit": self.daily_target_hit,
+            "daily_stopped":    self.daily_stopped,
+            "daily_progress":   round(min(self.daily_pnl / self.daily_target * 100, 100), 1) if self.daily_target else 0,
+            "effective_score":  self._effective_score(),
+            "mode":             "CONSERVADOR" if self.daily_target_hit else ("PARADO" if self.daily_stopped else "AGRESSIVO"),
         }
