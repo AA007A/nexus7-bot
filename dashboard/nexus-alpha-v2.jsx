@@ -245,7 +245,7 @@ export default function A007ATrade() {
         <div style={{ fontFamily:orb,fontSize:14,fontWeight:900,letterSpacing:4,
           color:C.yellow,textShadow:`0 0 20px ${C.yellow}`,
           borderRight:`1px solid ${C.dim}`,paddingRight:14,marginRight:14 }}>
-          A007A<span style={{ color:C.cyan }}>TRADE</span>
+          KAKA<span style={{ color:C.cyan }}>ZITO</span>
         </div>
 
         {/* SYNC badge */}
@@ -607,7 +607,7 @@ export default function A007ATrade() {
       <div style={{ display:"grid",gridTemplateColumns:"1fr 235px 235px",gap:6,padding:"0 6px 6px" }}>
 
         <Panel accent={C.yellow}>
-          <PH title="A007A TRADE · FORCE GRAPH" badge="LIVE AI NETWORK" bc={C.yellow} accent={C.yellow}/>
+          <PH title="KAKAZITO · FORCE GRAPH" badge="LIVE AI NETWORK" bc={C.yellow} accent={C.yellow}/>
           <div style={{ position:"relative" }}>
             <Neural/>
             <div style={{ position:"absolute",top:8,left:8,display:"flex",flexDirection:"column",gap:4 }}>
