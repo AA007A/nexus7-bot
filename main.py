@@ -11,7 +11,7 @@ from bot.logger import log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 A007A TRADE v7 iniciando...")
+    log.info("🚀 KAKAZITO TRADE v7 iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
@@ -20,16 +20,16 @@ async def lifespan(app: FastAPI):
     # Engine roda em background — NÃO bloqueia o health check
     asyncio.create_task(engine.run())
 
-    log.info("✅ A007A TRADE online — aguardando health check")
+    log.info("✅ KAKAZITO TRADE online — aguardando health check")
     yield
     # Shutdown
     engine.stop()
     await asyncio.sleep(0.5)
     await client.close()
-    log.info("👋 A007A TRADE encerrado")
+    log.info("👋 KAKAZITO TRADE encerrado")
 
 
-app = FastAPI(title="A007A TRADE", version="7.1.0", lifespan=lifespan)
+app = FastAPI(title="KAKAZITO TRADE", version="7.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,7 +45,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "7.1.0", "name": "A007A TRADE"}
+    return {"status": "online", "version": "7.1.0", "name": "KAKAZITO TRADE"}
 
 @app.get("/api/status")
 async def status():

@@ -13,4 +13,4 @@ def _make(name):
         lg.propagate = False
     return lg
 
-log = _make("a007a-trade")
+log = _make("kakazito-trade")
