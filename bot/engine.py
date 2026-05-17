@@ -323,13 +323,10 @@ class TradingEngine:
             )
             import asyncio
             asyncio.create_task(notify(
-                f"🛑 *STOP-LOSS DIÁRIO*
-"
-                f"Perda do dia: `${self.daily_pnl:.4f}`
-"
-                f"Limite: `-${self.daily_stop_loss:.0f}`
-"
-                f"Bot pausado até meia-noite UTC"
+                "🛑 *STOP-LOSS DIÁRIO*\n"
+                f"Perda do dia: `${self.daily_pnl:.4f}`\n"
+                f"Limite: `-${self.daily_stop_loss:.0f}`\n"
+                "Bot pausado até meia-noite UTC"
             ))
 
         # ── Meta batida ───────────────────────────────────────────
@@ -341,15 +338,11 @@ class TradingEngine:
             )
             import asyncio
             asyncio.create_task(notify(
-                f"🎯 *META DIÁRIA BATIDA!*
-"
-                f"Lucro do dia: `+${self.daily_pnl:.4f}`
-"
-                f"Meta: `${self.daily_target:.0f}`
-"
-                f"Modo: *CONSERVADOR* ativado
-"
-                f"Próximas entradas: score ≥ {cfg.POST_TARGET_SCORE}/100"
+                "🎯 *META DIÁRIA BATIDA!*\n"
+                f"Lucro do dia: `+${self.daily_pnl:.4f}`\n"
+                f"Meta: `${self.daily_target:.0f}`\n"
+                "Modo: *CONSERVADOR* ativado\n"
+                f"Proximas entradas: score >= {cfg.POST_TARGET_SCORE}/100"
             ))
 
     def _effective_score(self) -> int:
