@@ -33,10 +33,10 @@ FUNDING_EST = 0.0001    # 0.01% estimado de funding (conservador)
 TOTAL_COST_PCT = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_EST  # custo total estimado
 
 # Movimento mínimo necessário para cobrir taxas com margem 3x
-MIN_MOVE_MULTIPLIER = 3.0   # lucro esperado >= 3x o custo total
+MIN_MOVE_MULTIPLIER = 2.0   # lucro esperado >= 2x o custo total
 
 # Cooldown mínimo entre trades no mesmo símbolo (segundos)
-MIN_COOLDOWN_SECONDS = 900   # 15 minutos
+MIN_COOLDOWN_SECONDS = 600   # 10 minutos
 
 
 @dataclass
@@ -78,7 +78,7 @@ def _detect_chop(closes: list, highs: list, lows: list, atr_v: float) -> bool:
 
     # Se o range for menor que 3x ATR% → mercado comprimido
     atr_pct = atr_v / price * 100
-    if range_pct < atr_pct * 3:
+    if range_pct < atr_pct * 2:
         return True
 
     # 2. ATR comprimido: ATR atual vs ATR médio das últimas 50 velas
@@ -90,7 +90,7 @@ def _detect_chop(closes: list, highs: list, lows: list, atr_v: float) -> bool:
     for i in range(-10, -1):
         if (closes[i] > e20[i]) != (closes[i-1] > e20[i-1]):
             crossings += 1
-    if crossings >= 4:   # muitos cruzamentos = chop
+    if crossings >= 5:   # muitos cruzamentos = chop
         return True
 
     return False
@@ -189,13 +189,15 @@ def _score_confluence(
     if vol_r >= 2.0 and all(bodies_dir):
         vol_s = 20
     elif vol_r >= 1.5 and sum(bodies_dir) >= 2:
-        vol_s = 14
+        vol_s = 15
     elif vol_r >= 1.2:
-        vol_s = 8
-    elif vol_r >= 1.0:
-        vol_s = 4
+        vol_s = 10
+    elif vol_r >= 0.9:
+        vol_s = 6
+    elif vol_r >= 0.75:
+        vol_s = 3
     else:
-        vol_s = 0   # volume abaixo da média → sem edge
+        vol_s = 0   # volume muito fraco → sem edge
 
     # ══ MOMENTUM (20 pts) ═══════════════════════════════════════
     rsi_v = rsi(closes)[-1]
@@ -205,14 +207,14 @@ def _score_confluence(
 
     # RSI: zona ideal sem extremos
     if direction == "LONG":
-        if 45 <= rsi_v <= 65:    rsi_s = 10
-        elif 38 <= rsi_v < 45:   rsi_s = 6
-        elif 65 < rsi_v <= 70:   rsi_s = 4
+        if 42 <= rsi_v <= 68:    rsi_s = 10
+        elif 35 <= rsi_v < 42:   rsi_s = 6
+        elif 68 < rsi_v <= 74:   rsi_s = 3
         else:                    rsi_s = 0   # extremo → bloqueia
     else:
-        if 35 <= rsi_v <= 55:    rsi_s = 10
-        elif 55 < rsi_v <= 62:   rsi_s = 6
-        elif 30 <= rsi_v < 35:   rsi_s = 4
+        if 32 <= rsi_v <= 58:    rsi_s = 10
+        elif 58 < rsi_v <= 65:   rsi_s = 6
+        elif 26 <= rsi_v < 32:   rsi_s = 3
         else:                    rsi_s = 0
 
     # MACD acelerando na direção certa
@@ -378,15 +380,17 @@ class Analyzer:
             log.debug(f"[{symbol}] RSI 15M extremo ({sc15['rsi_v']:.0f}) → HOLD")
             return None
 
-        # Volume abaixo da média em ambos → sem edge
+        # Volume muito fraco em ambos → sem edge
         if sc1h["vol_s"] == 0 and sc15["vol_s"] == 0:
             log.debug(f"[{symbol}] Volume fraco em ambos TFs → HOLD")
             return None
 
-        # ATR comprimido em ambos → mercado sem força
+        # ATR comprimido em AMBOS → mercado sem força (basta 1 em expansão)
         if not sc1h["atr_expanding"] and not sc15["atr_expanding"]:
-            log.debug(f"[{symbol}] ATR comprimido em ambos TFs → HOLD")
-            return None
+            # Tolera se o score já for alto (>= 65 em ambos)
+            if sc1h["total"] < 65 or sc15["total"] < 65:
+                log.debug(f"[{symbol}] ATR comprimido e score baixo → HOLD")
+                return None
 
         # Tendência não alinhada no 15M
         if not sc15["ema_aligned"]:
@@ -398,10 +402,10 @@ class Analyzer:
         # TP = 3x o risco (R:R 1:3 preferencial)
         if direction == "LONG":
             sl = round(price - atr_v_1h * 1.5, 6)
-            tp = round(price + atr_v_1h * 4.5, 6)   # R:R 1:3
+            tp = round(price + atr_v_1h * 3.0, 6)   # R:R 1:2 (mais realizável)
         else:
             sl = round(price + atr_v_1h * 1.5, 6)
-            tp = round(price - atr_v_1h * 4.5, 6)
+            tp = round(price - atr_v_1h * 3.0, 6)
 
         risk   = abs(price - sl)
         reward = abs(tp - price)

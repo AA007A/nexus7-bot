@@ -66,7 +66,7 @@ class Position:
         self.trailing_active   = False
         self.trailing_milestone= 0
         # Tempo mínimo no trade: 3 candles de 15min = 45min
-        self.min_hold_until    = datetime.utcnow().timestamp() + 45 * 60
+        self.min_hold_until    = datetime.utcnow().timestamp() + 30 * 60
         self.expected_pnl      = getattr(sig, 'expected_pnl', 0.0)
         self.total_fees_pct    = getattr(sig, 'total_fees', 0.0)
 
