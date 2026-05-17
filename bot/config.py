@@ -14,7 +14,7 @@ class Config:
         "WIFUSDT","1000BONKUSDT",
     ]
 
-    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "5"))
+    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "50"))
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.50"))  # 50% do poder por trade
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))
