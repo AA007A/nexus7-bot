@@ -136,7 +136,7 @@ async function fetchBybit(sym) {
   return d?.result?.list?.[0];
 }
 
-export default function NexusAlpha() {
+export default function A007ATrade() {
   const [time, setTime]       = useState(new Date());
   const [cycle, setCycle]     = useState(0);
   const [cycleN, setCycleN]   = useState(1);
@@ -245,7 +245,7 @@ export default function NexusAlpha() {
         <div style={{ fontFamily:orb,fontSize:14,fontWeight:900,letterSpacing:4,
           color:C.yellow,textShadow:`0 0 20px ${C.yellow}`,
           borderRight:`1px solid ${C.dim}`,paddingRight:14,marginRight:14 }}>
-          NEXUS<span style={{ color:C.cyan }}>ALPHA</span>
+          A007A<span style={{ color:C.cyan }}>TRADE</span>
         </div>
 
         {/* SYNC badge */}
@@ -315,7 +315,7 @@ export default function NexusAlpha() {
           {/* Wallet */}
           <div style={{ background:`linear-gradient(135deg,${C.yellow}0a,transparent 60%)`,
             border:`1px solid ${C.yellow}28`,borderRadius:3,padding:12 }}>
-            <div style={{ fontSize:9,color:C.dim,marginBottom:4 }}>NEXUS-7 · BYBIT FUTURES · ENGINE v7.0</div>
+            <div style={{ fontSize:9,color:C.dim,marginBottom:4 }}>A007A TRADE · BYBIT FUTURES · ENGINE v7.0</div>
             <div style={{ display:"inline-block",background:`${C.green}18`,border:`1px solid ${C.green}44`,
               borderRadius:2,padding:"1px 7px",fontFamily:orb,fontSize:8,letterSpacing:2,
               color:C.green,marginBottom:8 }}>● LIVE</div>
@@ -607,7 +607,7 @@ export default function NexusAlpha() {
       <div style={{ display:"grid",gridTemplateColumns:"1fr 235px 235px",gap:6,padding:"0 6px 6px" }}>
 
         <Panel accent={C.yellow}>
-          <PH title="NEXUS ALPHA · FORCE GRAPH" badge="LIVE AI NETWORK" bc={C.yellow} accent={C.yellow}/>
+          <PH title="A007A TRADE · FORCE GRAPH" badge="LIVE AI NETWORK" bc={C.yellow} accent={C.yellow}/>
           <div style={{ position:"relative" }}>
             <Neural/>
             <div style={{ position:"absolute",top:8,left:8,display:"flex",flexDirection:"column",gap:4 }}>

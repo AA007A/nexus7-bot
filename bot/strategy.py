@@ -1,5 +1,5 @@
 """
-NEXUS-7 Strategy v7.0 — Score 0-100
+A007A TRADE Strategy v7.0 — Score 0-100
 Critérios de entrada:
   - EMA stack (20/50/200) — tendência
   - RSI calibrado (evita extremos)

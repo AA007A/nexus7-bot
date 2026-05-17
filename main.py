@@ -11,26 +11,26 @@ from bot.logger import log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 NEXUS-7 v6 iniciando...")
+    log.info("🚀 A007A TRADE v6 iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
     app.state.engine = engine
     asyncio.create_task(engine.run())
-    log.info("✅ NEXUS-7 online")
+    log.info("✅ A007A TRADE online")
     yield
     engine.stop()
     await client.close()
 
 
-app = FastAPI(title="NEXUS-7", version="6.0.0", lifespan=lifespan)
+app = FastAPI(title="A007A TRADE", version="6.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "6.0.0", "name": "NEXUS-7 AI Trader"}
+    return {"status": "online", "version": "6.0.0", "name": "A007A TRADE AI Trader"}
 
 @app.get("/health")
 async def health():
