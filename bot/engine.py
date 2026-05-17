@@ -510,29 +510,39 @@ class TradingEngine:
     # ── Scan & Enter ────────────────────────────────────────────
     async def _scan_all_and_enter(self):
         """
-        Escaneia TODOS os símbolos viáveis, calcula score de cada um
-        e entra nas melhores oportunidades (score >= MIN_ENTRY_SCORE).
-        Respeita limite de MAX_POSITIONS simultâneas.
+        Multi-Timeframe scan: busca 15m E 1h para cada símbolo.
+        Só entra quando AMBOS os timeframes apontam na mesma direção.
         """
         candidates = []
+        min_score = self._effective_score()
+
         for sym in self.viable_symbols:
             if sym in self.positions:
                 continue
             if time.time() < self._cooldown.get(sym, 0):
                 continue
             try:
-                klines = await self.client.get_klines(sym, "15m", 100)
-                if len(klines) < 60:
+                # Busca os dois timeframes em paralelo
+                k15, k1h = await asyncio.gather(
+                    self.client.get_klines(sym, "15",  100),
+                    self.client.get_klines(sym, "60",  100),
+                )
+                if len(k15) < 60 or len(k1h) < 30:
                     continue
-                sig = self.analyzer.analyze(sym, klines)
-                if sig and sig.score >= self._effective_score():
+
+                sig = self.analyzer.analyze_mtf(sym, k15, k1h)
+                if sig and sig.score >= min_score:
                     candidates.append(sig)
-                    log.info(f"🎯 Candidato: {sym} score={sig.score}/100 (mín={self._effective_score()}) {sig.direction} | {sig.reason}")
+                    log.info(
+                        f"🎯 CANDIDATO {sym} score={sig.score}/100 "
+                        f"(mín={min_score}) {sig.direction} "
+                        f"1H:[{sig.tf_1h}] 15M:[{sig.tf_15m}]"
+                    )
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.4)   # respeita rate limit Bybit
 
-        # Ordena por score e entra nos melhores
+        # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
         for sig in candidates:
             if len(self.positions) >= cfg.MAX_POSITIONS:
