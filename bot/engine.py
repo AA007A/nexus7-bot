@@ -636,7 +636,46 @@ class TradingEngine:
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
                 else:
-                    log.info(f"[{sym}] ✗ Sem sinal (filtros não atendidos)")
+                    # Mostra score parcial para diagnóstico
+                    try:
+                        from bot.strategy import score_tf, detect_regime
+                        from bot.indicators import atr as atr_fn
+                        import numpy as np
+                        def ga(kl): return ([k["c"] for k in kl],[k["h"] for k in kl],[k["l"] for k in kl],[k["o"] for k in kl],[k["v"] for k in kl])
+                        c15,h15,l15,o15,v15 = ga(k15)
+                        c1h,h1h,l1h,o1h,v1h = ga(k1h)
+                        c4h,h4h,l4h,o4h,v4h = ga(k4h)
+                        def get_atr(h,l,c):
+                            a=atr_fn(h,l,c); return a[-1], float(np.mean(a[-20:])) if len(a)>=20 else a[-1]
+                        av15,ag15=get_atr(h15,l15,c15)
+                        av1h,ag1h=get_atr(h1h,l1h,c1h)
+                        av4h,ag4h=get_atr(h4h,l4h,c4h)
+                        e20_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,20)[-1]
+                        e50_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,50)[-1]
+                        e20_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,20)[-1]
+                        e50_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,50)[-1]
+                        bull_4h = not __import__('numpy').isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
+                        bear_4h = not __import__('numpy').isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
+                        bull_1h = not __import__('numpy').isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
+                        bear_1h = not __import__('numpy').isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
+                        direction = "LONG" if (bull_4h or bull_1h) else "SHORT"
+                        s4=score_tf(c4h,h4h,l4h,o4h,v4h,direction,av4h,ag4h)
+                        s1=score_tf(c1h,h1h,l1h,o1h,v1h,direction,av1h,ag1h)
+                        s15=score_tf(c15,h15,l15,o15,v15,direction,av15,ag15)
+                        combined=round(s4["total"]*0.30+s1["total"]*0.30+s15["total"]*0.40)
+                        regime=detect_regime(c4h,h4h,l4h,av4h)
+                        from bot.indicators import rsi as rsi_fn
+                        rsi_v=rsi_fn(c15)[-1]
+                        vols=__import__('numpy').array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1
+                        vol_r=vols[-1]/avg_vol
+                        log.info(
+                            f"[{sym}] Score={combined}/100 (4H:{s4['total']} 1H:{s1['total']} 15M:{s15['total']}) "
+                            f"| regime={regime} RSI={rsi_v:.0f} vol={vol_r:.2f}x "
+                            f"| 4H={'↑' if bull_4h else '↓' if bear_4h else '→'} "
+                            f"1H={'↑' if bull_1h else '↓' if bear_1h else '→'} → HOLD"
+                        )
+                    except Exception as ex:
+                        log.info(f"[{sym}] ✗ Sem sinal")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
             await asyncio.sleep(1.5)   # respeita rate limit Bybit (3 requests por símbolo)
