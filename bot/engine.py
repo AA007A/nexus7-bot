@@ -66,7 +66,7 @@ class Position:
         self.trailing_active   = False
         self.trailing_milestone= 0
         # Tempo mínimo no trade: 3 candles de 15min = 45min
-        self.min_hold_until    = datetime.utcnow().timestamp() + 60 * 60  # 60min = 4 candles 15M
+        self.min_hold_until    = datetime.utcnow().timestamp() + 90 * 60  # 90min = 6 candles 15M
         self.expected_pnl      = getattr(sig, 'expected_pnl', 0.0)
         self.total_fees_pct    = getattr(sig, 'total_fees', 0.0)
 
@@ -93,8 +93,8 @@ class Position:
         Com alta alavancagem, espera confirmação antes de mover SL.
         """
         pct = self.pnl_pct()
-        if pct < 5.0:
-            return None  # aguarda lucro mínimo de 5% antes de ativar
+        if pct < 8.0:
+            return None  # aguarda 8% de lucro antes de ativar trailing
 
         # SL = metade exata do lucro atual
         lock_pct = pct * 0.5
@@ -492,7 +492,7 @@ class TradingEngine:
                     )
                     self.stats.add(trade)
                     del self.positions[sym]
-                    self._cooldown[sym] = time.time() + 900
+                    self._cooldown[sym] = time.time() + 1800
                     icon = "✅" if pnl_net >= 0 else "❌"
                     log.info(
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
@@ -583,32 +583,37 @@ class TradingEngine:
                 continue
             cooldown_left = self._cooldown.get(sym, 0) - time.time()
             if cooldown_left > 0:
-                log.debug(f"[{sym}] cooldown {cooldown_left:.0f}s restantes → skip")
+                log.debug(f"[{sym}] cooldown {cooldown_left/60:.0f}min → skip")
                 continue
             try:
-                # Busca os dois timeframes em paralelo
-                k15, k1h = await asyncio.gather(
+                # Busca 3 timeframes: 4H (tendência), 1H (confirmação), 15M (entrada)
+                k15, k1h, k4h = await asyncio.gather(
                     self.client.get_klines(sym, "15",  100),
                     self.client.get_klines(sym, "60",  100),
+                    self.client.get_klines(sym, "240", 100),
                 )
-                if len(k15) < 60 or len(k1h) < 30:
+                if len(k15) < 60 or len(k1h) < 30 or len(k4h) < 20:
                     continue
 
-                sig = self.analyzer.analyze_mtf(sym, k15, k1h, min_score=min_score)
+                sig = self.analyzer.analyze_mtf(
+                    sym, k15, k1h, k4h,
+                    min_score=min_score,
+                    fee_mult=cfg.FEE_MULTIPLIER,
+                    vol_mult=cfg.MIN_VOLUME_MULT,
+                )
                 if sig:
-                    # Validação final: expected_pnl > 0 após taxas
                     if sig.expected_pnl <= 0:
-                        log.debug(f"[{sym}] PnL esperado negativo após taxas → HOLD")
+                        log.debug(f"[{sym}] PnL esperado negativo → HOLD")
                         continue
                     candidates.append(sig)
                     log.info(
-                        f"🎯 CANDIDATO: {sym} score={sig.score}/100 "
-                        f"{sig.direction} RR={sig.rr} "
+                        f"🎯 SINAL PREMIUM: {sym} score={sig.score}/100 "
+                        f"{sig.direction} R:R={sig.rr} "
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.5)   # respeita rate limit Bybit
+            await asyncio.sleep(0.6)   # respeita rate limit Bybit
 
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)

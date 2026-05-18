@@ -1,24 +1,24 @@
 """
-KAKAZITO TRADE Strategy v9.0 — Quantitative High-Probability System
-════════════════════════════════════════════════════════════════════
-OBJETIVO: Lucro líquido máximo. Poucos trades excelentes.
+KAKAZITO TRADE Strategy v10.0 — Quantitative Premium System
+═══════════════════════════════════════════════════════════
+Multi-Timeframe: 4H (tendência) → 1H (confirmação) → 15M (entrada)
 
 REGRAS ABSOLUTAS:
-  - expected_net_profit > total_fees * 3  (obrigatório)
-  - Score >= 80/100                        (obrigatório)
-  - R:R >= 1:2, preferência >= 1:3         (obrigatório)
-  - NÃO operar mercado lateral             (obrigatório)
-  - NÃO scalping de micro movimentos       (obrigatório)
-  - Confirmar 1H + 15M antes de entrar     (obrigatório)
-  - Volume acima da média                  (obrigatório)
-  - ATR expansion confirmado               (obrigatório)
+  ✅ Score >= 90/100
+  ✅ Volume > 1.5x média no 15M
+  ✅ Lucro esperado >= 4x custo operacional
+  ✅ R:R >= 1:2 (preferência 1:3)
+  ✅ 4H, 1H e 15M devem alinhar
+  ✅ ATR em expansão (mercado com força)
+  ✅ Sem chop / lateralização
+  ✅ Pullback confirmado antes da entrada
 
-Score de confluência (100 pts):
-  Tendência  = 30 pts (EMA + HH/LL + Market Structure)
-  Volume     = 20 pts (Volume delta + acima da média)
-  Momentum   = 20 pts (MACD + RSI não-extremo)
-  Volatilidade= 15 pts (ATR expansion, não comprimido)
-  Estrutura  = 15 pts (sem chop, sem range estreito)
+Score (100 pts):
+  Tendência   = 30 pts  (4H + 1H EMA stack + HH/LL)
+  Volume      = 20 pts  (fluxo institucional)
+  Momentum    = 20 pts  (MACD + RSI zona ideal)
+  Volatilidade= 15 pts  (ATR expansão, não comprimido)
+  Estrutura   = 15 pts  (sem fake, sem chop)
 """
 import numpy as np
 from dataclasses import dataclass, field
@@ -26,235 +26,198 @@ from typing import Optional
 from bot.indicators import ema, rsi, atr, macd
 from bot.logger import log
 
-# ── Taxas Bybit (taker) ─────────────────────────────────────────
-TAKER_FEE   = 0.00055   # 0.055% por lado
-SLIPPAGE    = 0.0002    # 0.02% estimado de slippage
-FUNDING_EST = 0.0001    # 0.01% estimado de funding (conservador)
-TOTAL_COST_PCT = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_EST  # custo total estimado
-
-# Movimento mínimo necessário para cobrir taxas com margem 3x
-MIN_MOVE_MULTIPLIER = 2.0   # lucro esperado >= 2x o custo total
-
-# Cooldown mínimo entre trades no mesmo símbolo (segundos)
-MIN_COOLDOWN_SECONDS = 600   # 10 minutos
+# ── Custos operacionais Bybit ────────────────────────────────────
+TAKER_FEE     = 0.00055   # 0.055% por execução
+SLIPPAGE      = 0.00020   # 0.020% slippage estimado
+FUNDING_FEE   = 0.00010   # 0.010% funding estimado (conservador)
+TOTAL_COST    = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_FEE  # ~0.16% total
 
 
 @dataclass
 class Signal:
     symbol:       str
-    direction:    str       # "LONG" | "SHORT"
+    direction:    str
     entry:        float
     sl:           float
     tp:           float
     confidence:   float
-    reason:       str = ""
-    score:        int = 0
-    tf_1h:        str = ""
-    tf_15m:       str = ""
-    expected_pnl: float = 0.0   # lucro esperado líquido em %
-    total_fees:   float = 0.0   # custo total estimado em %
+    reason:       str  = ""
+    score:        int  = 0
+    tf_4h:        str  = ""
+    tf_1h:        str  = ""
+    tf_15m:       str  = ""
+    expected_pnl: float = 0.0
+    total_fees:   float = 0.0
     rr:           float = field(init=False)
 
     def __post_init__(self):
         risk   = abs(self.entry - self.sl)
-        reward = abs(self.tp   - self.entry)
+        reward = abs(self.tp - self.entry)
         self.rr = round(reward / risk, 2) if risk > 0 else 0
 
 
-def _detect_chop(closes: list, highs: list, lows: list, atr_v: float) -> bool:
+# ─────────────────────────────────────────────────────────────────
+# DETECTOR DE REGIME DE MERCADO
+# ─────────────────────────────────────────────────────────────────
+def detect_regime(closes, highs, lows, atr_v) -> str:
     """
-    Detecta mercado lateral/chop.
-    Retorna True se o mercado estiver lateral (NÃO operar).
+    Classifica o regime atual:
+      TRENDING_UP | TRENDING_DOWN | RANGING | COMPRESSED | REVERSAL
     """
-    if len(closes) < 20:
-        return True
+    if len(closes) < 30:
+        return "UNKNOWN"
 
-    price = closes[-1]
+    price   = closes[-1]
+    e20     = ema(closes, 20)
+    e50     = ema(closes, 50)
+    atr_arr = atr(highs, lows, closes)
 
-    # 1. Range estreito: high-low das últimas 20 velas vs ATR
+    # ATR médio das últimas 20 velas vs atual
+    atr_avg = float(np.mean(atr_arr[-20:])) if len(atr_arr) >= 20 else atr_v
+    atr_pct = atr_v / price * 100
+
+    # Range das últimas 20 velas
     recent_high = max(highs[-20:])
     recent_low  = min(lows[-20:])
     range_pct   = (recent_high - recent_low) / price * 100
 
-    # Se o range for menor que 3x ATR% → mercado comprimido
-    atr_pct = atr_v / price * 100
-    if range_pct < atr_pct * 2:
-        return True
+    # Cruzamentos EMA20 (chop indicator)
+    crossings = sum(
+        1 for i in range(-9, -1)
+        if (closes[i] > e20[i]) != (closes[i-1] > e20[i-1])
+    )
 
-    # 2. ATR comprimido: ATR atual vs ATR médio das últimas 50 velas
-    # (já calculado pelo chamador)
+    bull_stack = (not np.isnan(e20[-1])) and (not np.isnan(e50[-1])) and e20[-1] > e50[-1] and price > e20[-1]
+    bear_stack = (not np.isnan(e20[-1])) and (not np.isnan(e50[-1])) and e20[-1] < e50[-1] and price < e20[-1]
 
-    # 3. Preço oscilando sem direção: conta cruzamentos da EMA20
-    e20 = ema(closes, 20)
-    crossings = 0
-    for i in range(-10, -1):
-        if (closes[i] > e20[i]) != (closes[i-1] > e20[i-1]):
-            crossings += 1
-    if crossings >= 5:   # muitos cruzamentos = chop
-        return True
+    # Comprimido: ATR < 70% da média histórica
+    if atr_v < atr_avg * 0.70:
+        return "COMPRESSED"
 
-    return False
+    # Chop: muitos cruzamentos e range estreito
+    if crossings >= 4 and range_pct < atr_pct * 2.5:
+        return "RANGING"
+
+    # Tendência
+    if bull_stack and atr_v >= atr_avg * 0.90:
+        return "TRENDING_UP"
+    if bear_stack and atr_v >= atr_avg * 0.90:
+        return "TRENDING_DOWN"
+
+    return "RANGING"
 
 
-def _higher_highs_lower_lows(highs: list, lows: list, direction: str) -> bool:
+# ─────────────────────────────────────────────────────────────────
+# DETECTOR DE PULLBACK
+# ─────────────────────────────────────────────────────────────────
+def detect_pullback(closes, highs, lows, direction, atr_v) -> bool:
     """
-    Confirma estrutura de mercado (HH/HL para LONG, LH/LL para SHORT).
-    Verifica os últimos 3 pivôs.
+    Confirma que houve um pullback saudável antes de entrar.
+    LONG: preço recuou ao menos 1x ATR após alta e voltou.
+    SHORT: preço subiu ao menos 1x ATR após queda e voltou.
     """
-    if len(highs) < 15:
+    if len(closes) < 10:
         return False
-
-    # Pega pivôs aproximados (máximos/mínimos locais)
-    recent_h = [max(highs[i-3:i+3]) for i in range(5, len(highs)-3, 5)][-3:]
-    recent_l = [min(lows[i-3:i+3])  for i in range(5, len(lows)-3,  5)][-3:]
-
-    if len(recent_h) < 2 or len(recent_l) < 2:
-        return False
+    price = closes[-1]
 
     if direction == "LONG":
-        # Higher Highs + Higher Lows
-        hh = all(recent_h[i] > recent_h[i-1] for i in range(1, len(recent_h)))
-        hl = all(recent_l[i] > recent_l[i-1] for i in range(1, len(recent_l)))
-        return hh or hl   # pelo menos um confirmado
+        # Procura mínimo local nos últimos 8 candles
+        local_min = min(lows[-8:])
+        # Pullback válido: preço caiu ao menos 1x ATR e recuperou
+        return (max(highs[-8:]) - local_min) >= atr_v * 0.8 and price > local_min + atr_v * 0.3
     else:
-        # Lower Highs + Lower Lows
-        lh = all(recent_h[i] < recent_h[i-1] for i in range(1, len(recent_h)))
-        ll = all(recent_l[i] < recent_l[i-1] for i in range(1, len(recent_l)))
-        return lh or ll
+        local_max = max(highs[-8:])
+        return (local_max - min(lows[-8:])) >= atr_v * 0.8 and price < local_max - atr_v * 0.3
 
 
-def _score_confluence(
-    closes, highs, lows, opens, volumes,
-    label: str,
-    direction: str,
-    atr_v: float,
-    atr_avg: float,
-) -> dict:
-    """
-    Calcula o score de confluência de um timeframe.
-    Retorna dict com scores parciais e flags.
-
-    Score total = 100 pts:
-      Tendência   = 30 pts
-      Volume      = 20 pts
-      Momentum    = 20 pts
-      Volatilidade= 15 pts
-      Estrutura   = 15 pts
-    """
+# ─────────────────────────────────────────────────────────────────
+# SCORE DE CONFLUÊNCIA
+# ─────────────────────────────────────────────────────────────────
+def score_tf(closes, highs, lows, opens, volumes, direction, atr_v, atr_avg) -> dict:
+    """Calcula score 0-100 para um único timeframe."""
     price = closes[-1]
     if price <= 0 or atr_v <= 0:
         return {"ok": False, "total": 0}
 
     vols    = np.array(volumes, dtype=float)
-    avg_vol = vols[-21:-1].mean() if len(vols) > 21 else vols.mean() or 1
+    avg_vol = vols[-21:-1].mean() if len(vols) > 21 else (vols.mean() or 1)
     vol_r   = vols[-1] / avg_vol
 
-    # ══ TENDÊNCIA (30 pts) ══════════════════════════════════════
+    # ── TENDÊNCIA (30 pts) ──────────────────────────────────────
     e20  = ema(closes, 20)[-1]
     e50  = ema(closes, 50)[-1]
     e200 = ema(closes, min(200, len(closes)-1))[-1]
 
-    ema_bull = (not np.isnan(e20)) and (not np.isnan(e50)) and e20 > e50 and price > e20
-    ema_bear = (not np.isnan(e20)) and (not np.isnan(e50)) and e20 < e50 and price < e20
-    full_stack = (
-        (ema_bull and not np.isnan(e200) and e50 > e200) or
-        (ema_bear and not np.isnan(e200) and e50 < e200)
-    )
+    bull = not np.isnan(e20) and not np.isnan(e50) and e20 > e50 and price > e20
+    bear = not np.isnan(e20) and not np.isnan(e50) and e20 < e50 and price < e20
+    full = (bull and not np.isnan(e200) and e50 > e200) or (bear and not np.isnan(e200) and e50 < e200)
+    aligned = (direction == "LONG" and bull) or (direction == "SHORT" and bear)
 
-    # Alinhamento com direção solicitada
-    ema_aligned = (direction == "LONG" and ema_bull) or (direction == "SHORT" and ema_bear)
-
-    # HH/LL Market Structure
-    hh_ll = _higher_highs_lower_lows(highs, lows, direction)
-
-    if full_stack and ema_aligned and hh_ll:
-        trend_s = 30
-    elif full_stack and ema_aligned:
-        trend_s = 22
-    elif ema_aligned and hh_ll:
-        trend_s = 18
-    elif ema_aligned:
-        trend_s = 12
+    # Higher Highs / Lower Lows
+    rh = [max(highs[i-3:i+3]) for i in range(5, len(highs)-3, 5)][-3:]
+    rl = [min(lows[i-3:i+3])  for i in range(5, len(lows)-3,  5)][-3:]
+    if direction == "LONG":
+        hh_ll = len(rh) >= 2 and (rh[-1] > rh[-2]) and (rl[-1] > rl[-2])
     else:
-        trend_s = 0   # contra a tendência → sem pontos
+        hh_ll = len(rh) >= 2 and (rh[-1] < rh[-2]) and (rl[-1] < rl[-2])
 
-    # ══ VOLUME (20 pts) ═════════════════════════════════════════
-    # Volume delta: últimos 3 candles com volume crescente na direção certa
-    bodies_dir = [
-        (closes[i] > opens[i]) == (direction == "LONG")
-        for i in range(-3, 0)
-    ]
-    vol_growing = all(vols[i] >= vols[i-1] for i in range(-2, 0))
+    if full and aligned and hh_ll: trend_s = 30
+    elif full and aligned:          trend_s = 22
+    elif aligned and hh_ll:         trend_s = 16
+    elif aligned:                   trend_s = 10
+    else:                           trend_s = 0
 
-    if vol_r >= 2.0 and all(bodies_dir):
-        vol_s = 20
-    elif vol_r >= 1.5 and sum(bodies_dir) >= 2:
-        vol_s = 15
-    elif vol_r >= 1.2:
-        vol_s = 10
-    elif vol_r >= 0.9:
-        vol_s = 6
-    elif vol_r >= 0.75:
-        vol_s = 3
-    else:
-        vol_s = 0   # volume muito fraco → sem edge
+    # ── VOLUME (20 pts) ─────────────────────────────────────────
+    bodies_ok = [(closes[i] > opens[i]) == (direction == "LONG") for i in range(-3, 0)]
+    if vol_r >= 2.5 and all(bodies_ok):   vol_s = 20
+    elif vol_r >= 2.0 and sum(bodies_ok) >= 2: vol_s = 16
+    elif vol_r >= 1.5 and sum(bodies_ok) >= 1: vol_s = 11
+    elif vol_r >= 1.2:                    vol_s = 6
+    else:                                 vol_s = 0   # abaixo da média → sem edge
 
-    # ══ MOMENTUM (20 pts) ═══════════════════════════════════════
+    # ── MOMENTUM (20 pts) ───────────────────────────────────────
     rsi_v = rsi(closes)[-1]
-    _, _, hist_arr = macd(closes)
-    h0 = hist_arr[-1] if not np.isnan(hist_arr[-1]) else 0
-    h1 = hist_arr[-2] if len(hist_arr) > 1 and not np.isnan(hist_arr[-2]) else h0
+    _, _, hist = macd(closes)
+    h0 = hist[-1] if not np.isnan(hist[-1]) else 0
+    h1 = hist[-2] if len(hist) > 1 and not np.isnan(hist[-2]) else h0
 
-    # RSI: zona ideal sem extremos
     if direction == "LONG":
-        if 42 <= rsi_v <= 68:    rsi_s = 10
-        elif 35 <= rsi_v < 42:   rsi_s = 6
-        elif 68 < rsi_v <= 74:   rsi_s = 3
-        else:                    rsi_s = 0   # extremo → bloqueia
+        if 45 <= rsi_v <= 65:  rsi_s = 10
+        elif 38 <= rsi_v < 45: rsi_s = 6
+        elif 65 < rsi_v <= 72: rsi_s = 3
+        else:                  rsi_s = 0
+        if h0 > 0 and h0 > h1: macd_s = 10
+        elif h0 > 0:            macd_s = 6
+        elif h0 > h1:           macd_s = 3
+        else:                   macd_s = 0
     else:
-        if 32 <= rsi_v <= 58:    rsi_s = 10
-        elif 58 < rsi_v <= 65:   rsi_s = 6
-        elif 26 <= rsi_v < 32:   rsi_s = 3
-        else:                    rsi_s = 0
-
-    # MACD acelerando na direção certa
-    if direction == "LONG":
-        if h0 > 0 and h0 > h1:   macd_s = 10
-        elif h0 > 0:              macd_s = 6
-        elif h0 > h1:             macd_s = 3
-        else:                     macd_s = 0
-    else:
-        if h0 < 0 and h0 < h1:   macd_s = 10
-        elif h0 < 0:              macd_s = 6
-        elif h0 < h1:             macd_s = 3
-        else:                     macd_s = 0
+        if 35 <= rsi_v <= 55:  rsi_s = 10
+        elif 55 < rsi_v <= 62: rsi_s = 6
+        elif 28 <= rsi_v < 35: rsi_s = 3
+        else:                  rsi_s = 0
+        if h0 < 0 and h0 < h1: macd_s = 10
+        elif h0 < 0:            macd_s = 6
+        elif h0 < h1:           macd_s = 3
+        else:                   macd_s = 0
 
     momentum_s = rsi_s + macd_s
 
-    # ══ VOLATILIDADE (15 pts) ═══════════════════════════════════
-    atr_pct = atr_v / price * 100
+    # ── VOLATILIDADE (15 pts) ───────────────────────────────────
+    atr_pct      = atr_v / price * 100
+    atr_expanding = atr_v > atr_avg * 1.05
 
-    # ATR deve estar em expansão (não comprimido)
-    atr_expanding = atr_v > atr_avg * 1.1   # ATR atual > 110% da média
+    if atr_expanding and 0.3 <= atr_pct <= 5.0: atr_s = 15
+    elif atr_expanding:                           atr_s = 9
+    elif 0.3 <= atr_pct <= 3.0:                  atr_s = 6
+    else:                                         atr_s = 0
 
-    if atr_expanding and 0.3 <= atr_pct <= 4.0:
-        atr_s = 15
-    elif atr_expanding and atr_pct > 0.2:
-        atr_s = 10
-    elif 0.3 <= atr_pct <= 2.5:
-        atr_s = 6
-    else:
-        atr_s = 0   # ATR comprimido → mercado sem força
-
-    # ══ ESTRUTURA (15 pts) ══════════════════════════════════════
-    # Penaliza manipulação/fake breakout
-    body     = abs(closes[-1] - opens[-1])
-    cr       = highs[-1] - lows[-1]
-    wick_r   = 1 - (body / cr) if cr > 0 else 1
-
+    # ── ESTRUTURA (15 pts) ──────────────────────────────────────
+    body  = abs(closes[-1] - opens[-1])
+    cr    = highs[-1] - lows[-1]
+    wick  = 1 - (body / cr) if cr > 0 else 1
     struct_s = 15
-    if wick_r > 0.65:                             struct_s -= 8   # wick dominante
-    if vol_r > 3.0 and body < atr_v * 0.15:      struct_s -= 6   # spike falso
+    if wick > 0.65:                            struct_s -= 8
+    if vol_r > 3.0 and body < atr_v * 0.15:   struct_s -= 6
     ph = max(highs[-6:-1]) if len(highs) > 6 else highs[-1]
     pl = min(lows[-6:-1])  if len(lows)  > 6 else lows[-1]
     if direction == "LONG"  and highs[-1] > ph and closes[-1] < ph: struct_s -= 8
@@ -263,221 +226,199 @@ def _score_confluence(
 
     total = trend_s + vol_s + momentum_s + atr_s + struct_s
 
-    summary = (
-        f"T{trend_s} V{vol_s} M{momentum_s} "
-        f"ATR{atr_s}({'↑' if atr_expanding else '→'}) "
-        f"S{struct_s} RSI{rsi_v:.0f}"
-    )
-
     return {
-        "ok":          True,
-        "total":       total,
-        "trend_s":     trend_s,
-        "vol_s":       vol_s,
-        "momentum_s":  momentum_s,
-        "atr_s":       atr_s,
-        "struct_s":    struct_s,
-        "rsi_v":       rsi_v,
-        "rsi_s":       rsi_s,
-        "macd_s":      macd_s,
-        "vol_r":       vol_r,
-        "atr_v":       atr_v,
-        "atr_pct":     atr_pct,
-        "atr_expanding": atr_expanding,
-        "ema_aligned": ema_aligned,
-        "ema_bull":    ema_bull,
-        "ema_bear":    ema_bear,
-        "price":       price,
-        "summary":     summary,
+        "ok": True, "total": total,
+        "trend_s": trend_s, "vol_s": vol_s,
+        "momentum_s": momentum_s, "atr_s": atr_s, "struct_s": struct_s,
+        "rsi_v": rsi_v, "rsi_s": rsi_s, "macd_s": macd_s,
+        "vol_r": vol_r, "atr_v": atr_v, "atr_expanding": atr_expanding,
+        "aligned": aligned, "bull": bull, "bear": bear, "full": full,
+        "price": price,
+        "summary": f"T{trend_s}+V{vol_s}+M{momentum_s}+A{atr_s}+S{struct_s}={total}",
     }
 
 
+# ─────────────────────────────────────────────────────────────────
+# ANALYZER PRINCIPAL
+# ─────────────────────────────────────────────────────────────────
 class Analyzer:
     def analyze_mtf(
         self,
-        symbol: str,
-        k15:    list,   # klines 15 minutos
-        k1h:    list,   # klines 1 hora
-        min_score: int = 80,
+        symbol:    str,
+        k15:       list,
+        k1h:       list,
+        k4h:       list,
+        min_score: int = 90,
+        fee_mult:  float = 4.0,
+        vol_mult:  float = 1.5,
     ) -> Optional[Signal]:
         """
-        Análise Multi-Timeframe com validação completa de edge.
-
-        PASSO 1: Identificar tendência forte no 1H
-        PASSO 2: Confirmar no 15M (pullback + momentum)
-        PASSO 3: Calcular custo operacional total
-        PASSO 4: Validar expected_net_profit > fees * 3
-        PASSO 5: Validar R:R >= 2
-        PASSO 6: Emitir sinal ou HOLD
+        PASSO 1: Regime do 4H → define se é seguro operar
+        PASSO 2: Direção do 4H + 1H → define viés
+        PASSO 3: Score confluência 3 TFs
+        PASSO 4: Pullback confirmado no 15M
+        PASSO 5: Volume institucional no 15M
+        PASSO 6: Custo operacional validado
+        PASSO 7: R:R validado
+        PASSO 8: Emite sinal ou HOLD
         """
-        if len(k15) < 60 or len(k1h) < 30:
+        if len(k4h) < 30 or len(k1h) < 30 or len(k15) < 60:
             return None
 
-        def to_arr(klines):
-            return (
-                [k["c"] for k in klines],
-                [k["h"] for k in klines],
-                [k["l"] for k in klines],
-                [k["o"] for k in klines],
-                [k["v"] for k in klines],
-            )
+        def arr(kl):
+            return ([k["c"] for k in kl], [k["h"] for k in kl],
+                    [k["l"] for k in kl], [k["o"] for k in kl],
+                    [k["v"] for k in kl])
 
-        c15, h15, l15, o15, v15 = to_arr(k15)
-        c1h, h1h, l1h, o1h, v1h = to_arr(k1h)
+        c4h,h4h,l4h,o4h,v4h = arr(k4h)
+        c1h,h1h,l1h,o1h,v1h = arr(k1h)
+        c15,h15,l15,o15,v15 = arr(k15)
 
         price = c15[-1]
 
-        # ── PASSO 1: Direção do 1H ─────────────────────────────
+        # ── ATR de cada TF ──────────────────────────────────────
+        def get_atr(h, l, c):
+            a = atr(h, l, c)
+            v = a[-1]
+            avg = float(np.mean(a[-20:])) if len(a) >= 20 else v
+            return v, avg
+
+        atr_4h, avg_4h = get_atr(h4h, l4h, c4h)
+        atr_1h, avg_1h = get_atr(h1h, l1h, c1h)
+        atr_15, avg_15 = get_atr(h15, l15, c15)
+
+        # ── PASSO 1: Regime do 4H ───────────────────────────────
+        regime = detect_regime(c4h, h4h, l4h, atr_4h)
+        if regime in ("COMPRESSED", "RANGING"):
+            log.debug(f"[{symbol}] 4H regime={regime} → HOLD")
+            return None
+
+        # ── PASSO 2: Direção (4H + 1H devem concordar) ─────────
+        e20_4h = ema(c4h, 20)[-1]
+        e50_4h = ema(c4h, 50)[-1]
         e20_1h = ema(c1h, 20)[-1]
         e50_1h = ema(c1h, 50)[-1]
-        if np.isnan(e20_1h) or np.isnan(e50_1h):
-            return None
 
-        if e20_1h > e50_1h and c1h[-1] > e20_1h:
+        bull_4h = not np.isnan(e20_4h) and e20_4h > e50_4h and c4h[-1] > e20_4h
+        bear_4h = not np.isnan(e20_4h) and e20_4h < e50_4h and c4h[-1] < e20_4h
+        bull_1h = not np.isnan(e20_1h) and e20_1h > e50_1h and c1h[-1] > e20_1h
+        bear_1h = not np.isnan(e20_1h) and e20_1h < e50_1h and c1h[-1] < e20_1h
+
+        if bull_4h and bull_1h:
             direction = "LONG"
-        elif e20_1h < e50_1h and c1h[-1] < e20_1h:
+        elif bear_4h and bear_1h:
             direction = "SHORT"
         else:
-            log.debug(f"[{symbol}] 1H sem tendência clara → HOLD")
+            log.debug(f"[{symbol}] 4H/1H conflito: 4H={'bull' if bull_4h else 'bear'} 1H={'bull' if bull_1h else 'bear'} → HOLD")
             return None
 
-        # ── PASSO 2: Detectar chop em ambos os TFs ────────────
-        atr_15 = atr(h15, l15, c15)
-        atr_1h = atr(h1h, l1h, c1h)
-        atr_v_15  = atr_15[-1]
-        atr_avg15 = float(np.mean(atr_15[-20:])) if len(atr_15) >= 20 else atr_v_15
-        atr_v_1h  = atr_1h[-1]
-        atr_avg1h = float(np.mean(atr_1h[-20:])) if len(atr_1h) >= 20 else atr_v_1h
-
-        if _detect_chop(c1h, h1h, l1h, atr_v_1h):
-            log.debug(f"[{symbol}] 1H lateral/chop → HOLD")
+        # ── PASSO 3: Regime do 15M ──────────────────────────────
+        regime_15 = detect_regime(c15, h15, l15, atr_15)
+        if regime_15 == "COMPRESSED":
+            log.debug(f"[{symbol}] 15M comprimido → HOLD")
             return None
 
-        if _detect_chop(c15, h15, l15, atr_v_15):
-            log.debug(f"[{symbol}] 15M lateral/chop → HOLD")
+        # ── PASSO 4: Score de confluência ───────────────────────
+        s4h = score_tf(c4h, h4h, l4h, o4h, v4h, direction, atr_4h, avg_4h)
+        s1h = score_tf(c1h, h1h, l1h, o1h, v1h, direction, atr_1h, avg_1h)
+        s15 = score_tf(c15, h15, l15, o15, v15, direction, atr_15, avg_15)
+
+        if not s4h["ok"] or not s1h["ok"] or not s15["ok"]:
             return None
 
-        # ── PASSO 3: Score de confluência ─────────────────────
-        sc1h  = _score_confluence(c1h, h1h, l1h, o1h, v1h, "1H",  direction, atr_v_1h,  atr_avg1h)
-        sc15  = _score_confluence(c15, h15, l15, o15, v15, "15M", direction, atr_v_15,  atr_avg15)
-
-        if not sc1h["ok"] or not sc15["ok"]:
-            return None
-
-        # 1H tem peso 40%, 15M tem peso 60% (timing mais importante)
-        combined = round(sc1h["total"] * 0.40 + sc15["total"] * 0.60)
+        # Peso: 4H=30%, 1H=30%, 15M=40%
+        combined = round(s4h["total"]*0.30 + s1h["total"]*0.30 + s15["total"]*0.40)
 
         if combined < min_score:
-            log.debug(
-                f"[{symbol}] Score {combined}/100 < {min_score} → HOLD "
-                f"1H:{sc1h['total']} 15M:{sc15['total']}"
-            )
+            log.debug(f"[{symbol}] Score {combined}/100 < {min_score} → HOLD | 4H:{s4h['total']} 1H:{s1h['total']} 15M:{s15['total']}")
             return None
 
-        # ── PASSO 4: Bloqueios críticos de qualidade ──────────
-        # RSI extremo no 15M (timing) → não entra
-        if sc15["rsi_s"] == 0:
-            log.debug(f"[{symbol}] RSI 15M extremo ({sc15['rsi_v']:.0f}) → HOLD")
+        # ── PASSO 5: Bloqueios críticos ─────────────────────────
+        # RSI extremo no 15M (timing)
+        if s15["rsi_s"] == 0:
+            log.debug(f"[{symbol}] RSI 15M extremo ({s15['rsi_v']:.0f}) → HOLD")
             return None
 
-        # Volume muito fraco em ambos → sem edge
-        if sc1h["vol_s"] == 0 and sc15["vol_s"] == 0:
-            log.debug(f"[{symbol}] Volume fraco em ambos TFs → HOLD")
+        # Volume mínimo obrigatório no 15M
+        if s15["vol_r"] < vol_mult:
+            log.debug(f"[{symbol}] Volume 15M {s15['vol_r']:.2f}x < {vol_mult}x → HOLD")
             return None
 
-        # ATR comprimido em AMBOS → mercado sem força (basta 1 em expansão)
-        if not sc1h["atr_expanding"] and not sc15["atr_expanding"]:
-            # Tolera se o score já for alto (>= 65 em ambos)
-            if sc1h["total"] < 65 or sc15["total"] < 65:
-                log.debug(f"[{symbol}] ATR comprimido e score baixo → HOLD")
-                return None
-
-        # Tendência não alinhada no 15M
-        if not sc15["ema_aligned"]:
-            log.debug(f"[{symbol}] 15M EMA contra direção {direction} → HOLD")
+        # Direção não alinhada no 15M
+        if not s15["aligned"]:
+            log.debug(f"[{symbol}] 15M EMA não alinha com {direction} → HOLD")
             return None
 
-        # ── PASSO 5: SL e TP baseados em ATR do 1H ───────────
-        # Usa ATR do 1H para SL (mais estável, evita stop hunt)
-        # TP = 3x o risco (R:R 1:3 preferencial)
-        # SL: 2.5x ATR do 1H — largo o suficiente para o trade respirar
-        # Com alavancagem alta, SL apertado = liquidação imediata
-        # TP: 5x ATR = R:R 1:2 com SL largo
+        # ATR comprimido nos 3 TFs → sem força
+        if not s4h["atr_expanding"] and not s1h["atr_expanding"] and not s15["atr_expanding"]:
+            log.debug(f"[{symbol}] ATR comprimido em todos TFs → HOLD")
+            return None
+
+        # ── PASSO 6: Pullback no 15M ────────────────────────────
+        if not detect_pullback(c15, h15, l15, direction, atr_15):
+            log.debug(f"[{symbol}] Sem pullback confirmado no 15M → aguardando")
+            return None
+
+        # ── PASSO 7: SL e TP adaptativos (ATR do 1H) ────────────
+        # SL = 2x ATR 1H (estável, evita stop hunt)
+        # TP = 4x ATR 1H (R:R 1:2)
+        sl_dist = atr_1h * 2.0
+        tp_dist = atr_1h * 4.0
+
         if direction == "LONG":
-            sl = round(price - atr_v_1h * 2.5, 6)
-            tp = round(price + atr_v_1h * 5.0, 6)   # R:R 1:2
+            sl = round(price - sl_dist, 6)
+            tp = round(price + tp_dist, 6)
         else:
-            sl = round(price + atr_v_1h * 2.5, 6)
-            tp = round(price - atr_v_1h * 5.0, 6)
+            sl = round(price + sl_dist, 6)
+            tp = round(price - tp_dist, 6)
 
-        risk   = abs(price - sl)
-        reward = abs(tp - price)
-        rr     = reward / risk if risk > 0 else 0
-
+        rr = tp_dist / sl_dist if sl_dist > 0 else 0
         if rr < 1.8:
             log.debug(f"[{symbol}] R:R {rr:.2f} < 1.8 → HOLD")
             return None
 
-        # ── PASSO 6: Validação de custo operacional ───────────
-        # Custo total: taxa entrada + taxa saída + slippage + funding
-        cost_pct = TOTAL_COST_PCT * 100   # em %
-        # Movimento necessário para cobrir custo com margem 3x
-        min_move_pct = cost_pct * MIN_MOVE_MULTIPLIER
+        # ── PASSO 8: Validação de custo operacional ─────────────
+        cost_pct      = TOTAL_COST * 100
+        min_move      = cost_pct * fee_mult
+        move_to_tp    = tp_dist / price * 100
 
-        # Movimento esperado até TP em %
-        move_to_tp_pct = reward / price * 100
-
-        if move_to_tp_pct < min_move_pct:
-            log.debug(
-                f"[{symbol}] Movimento até TP ({move_to_tp_pct:.2f}%) "
-                f"< mínimo ({min_move_pct:.2f}%) → HOLD (taxas não cobertas)"
-            )
+        if move_to_tp < min_move:
+            log.debug(f"[{symbol}] Move {move_to_tp:.3f}% < mínimo {min_move:.3f}% → HOLD (taxas não cobertas)")
             return None
 
-        # Lucro líquido esperado (após taxas)
-        expected_net_pct = move_to_tp_pct - cost_pct
+        expected_net = move_to_tp - cost_pct
 
-        # ── PASSO 7: Monta o sinal ────────────────────────────
+        # ── Monta sinal ─────────────────────────────────────────
         reasons = []
-        if sc1h["total"] >= 70:  reasons.append(f"1H-FORTE({sc1h['total']})")
-        if sc15["total"] >= 65:  reasons.append(f"15M-OK({sc15['total']})")
-        if sc15["vol_r"] >= 1.5: reasons.append(f"VOL{sc15['vol_r']:.1f}x")
-        if sc1h["atr_expanding"] or sc15["atr_expanding"]: reasons.append("ATR↑")
-        if rr >= 3.0:            reasons.append(f"RR{rr:.1f}")
-        else:                    reasons.append(f"RR{rr:.1f}")
-
-        confidence = min(0.97, combined / 100)
+        if s4h["total"] >= 70: reasons.append(f"4H✓({s4h['total']})")
+        if s1h["total"] >= 70: reasons.append(f"1H✓({s1h['total']})")
+        if s15["total"] >= 70: reasons.append(f"15M✓({s15['total']})")
+        if s15["vol_r"] >= 2:  reasons.append(f"VOL{s15['vol_r']:.1f}x")
+        reasons.append(f"RR{rr:.1f}")
+        reasons.append(f"regime={regime}")
 
         log.info(
-            f"[{symbol}] ✅ SINAL {direction} | Score={combined}/100 | "
-            f"RR={rr:.1f} | Move={move_to_tp_pct:.2f}% | "
-            f"PnL_líq≈{expected_net_pct:.2f}% | "
-            f"1H:[{sc1h['summary']}] | 15M:[{sc15['summary']}]"
+            f"[{symbol}] ✅ SINAL PREMIUM {direction} | Score={combined}/100 | "
+            f"R:R={rr:.1f} | Move={move_to_tp:.2f}% | Líq≈+{expected_net:.2f}% | "
+            f"4H:[{s4h['summary']}] 1H:[{s1h['summary']}] 15M:[{s15['summary']}] | "
+            f"Regime={regime}"
         )
 
         return Signal(
-            symbol=symbol,
-            direction=direction,
-            entry=price,
-            sl=sl,
-            tp=tp,
-            confidence=confidence,
+            symbol=symbol, direction=direction,
+            entry=price, sl=sl, tp=tp,
+            confidence=min(0.97, combined/100),
             reason=" | ".join(reasons),
             score=int(combined),
-            tf_1h=sc1h["summary"],
-            tf_15m=sc15["summary"],
-            expected_pnl=round(expected_net_pct, 3),
+            tf_4h=s4h["summary"], tf_1h=s1h["summary"], tf_15m=s15["summary"],
+            expected_pnl=round(expected_net, 3),
             total_fees=round(cost_pct, 4),
         )
 
-    def analyze(self, symbol: str, klines: list) -> Optional[Signal]:
-        """Fallback — só se 1H não estiver disponível."""
-        return self.analyze_mtf(symbol, klines, klines)
+    def analyze(self, symbol, klines):
+        """Fallback single-TF."""
+        return self.analyze_mtf(symbol, klines, klines, klines)
 
-    def rank_signals(self, signals: list) -> list:
-        """Ordena por score * RR (qualidade combinada)."""
-        return sorted(
-            [s for s in signals if s],
-            key=lambda s: s.score * s.rr,
-            reverse=True,
-        )
+    def rank_signals(self, signals):
+        """Score × R:R como critério de ranking."""
+        return sorted([s for s in signals if s], key=lambda s: s.score * s.rr, reverse=True)
