@@ -88,28 +88,10 @@ class Position:
 
     def calc_trailing_sl(self) -> Optional[float]:
         """
-        Trailing SL = 50% do lucro ATUAL.
-        Só ativa após lucro >= 5% líquido (evita fechar no ruído).
-        Com alta alavancagem, espera confirmação antes de mover SL.
+        TRAILING SL DESATIVADO.
+        SL permanece fixo no nível técnico original.
+        Trade só fecha por: TP atingido, SL técnico, ou R:R dobrado.
         """
-        pct = self.pnl_pct()
-        if pct < 8.0:
-            return None  # aguarda 8% de lucro antes de ativar trailing
-
-        # SL = metade exata do lucro atual
-        lock_pct = pct * 0.5
-
-        if self.direction == "LONG":
-            new_sl = self.entry * (1 + lock_pct / 100 / cfg.LEVERAGE)
-            # Só move para cima (nunca piora)
-            if new_sl > self.trailing_sl:
-                return round(new_sl, 6)
-        else:
-            new_sl = self.entry * (1 - lock_pct / 100 / cfg.LEVERAGE)
-            # Só move para baixo (nunca piora)
-            if new_sl < self.trailing_sl:
-                return round(new_sl, 6)
-
         return None
 
     def to_dict(self) -> dict:
@@ -307,7 +289,8 @@ class TradingEngine:
                     self._check_daily_reset()            # reseta contadores à meia-noite UTC
                     await self._update_balance()
                     await self._sync_positions()         # sincroniza com Bybit
-                    await self._apply_trailing_stops()   # atualiza SLs progressivos
+                    await self._apply_trailing_stops()   # trailing desativado (pass)
+                    await self._check_rr_double()        # fecha se R:R dobrou (lucro 2x risco)
                     self._update_daily_pnl()             # atualiza PnL do dia
                     if self.daily_stopped:
                         log.warning("🛑 Stop-loss diário ativado — aguardando próximo dia")
@@ -541,33 +524,72 @@ class TradingEngine:
         except Exception as e:
             log.error(f"_sync_positions: {e}")
 
-    # ── Trailing stop progressivo ───────────────────────────────
+    # ── Trailing stop DESATIVADO ────────────────────────────────
     async def _apply_trailing_stops(self):
+        """
+        Trailing SL desativado por configuração do usuário.
+        SL permanece no nível técnico original.
+        Trade fecha somente por: TP, SL técnico ou R:R dobrado.
+        """
+        pass
+
+    # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
+    async def _check_rr_double(self):
+        """
+        Fecha a posição quando o lucro atingir o dobro do risco original.
+        Ex: risco = $5 → fecha quando lucro = $10.
+        NÃO fecha por ruído, micro reversões ou trailing.
+        Só fecha 100% da posição — sem parciais.
+        """
         for sym, pos in list(self.positions.items()):
-            new_sl = pos.calc_trailing_sl()
-            if new_sl is None:
-                continue
-
-            pct     = pos.pnl_pct()
-            lock    = pct * 0.5  # metade do lucro atual
-
-            # Atualiza sempre que o SL melhorou
-            pos.trailing_sl     = new_sl
-            pos.trailing_active = True
-
             try:
-                await self.client._post("/v5/position/trading-stop", {
-                    "category": "linear",
-                    "symbol": sym,
-                    "stopLoss": str(new_sl),
-                    "positionIdx": 0,
-                })
-                log.info(
-                    f"🔄 {sym} trailing SL → ${new_sl:.6f} "
-                    f"(lucro {pct:.1f}% → protege {lock:.1f}%)"
-                )
+                risk_dist   = abs(pos.entry - pos.sl)   # distância SL original
+                if risk_dist <= 0:
+                    continue
+
+                price = pos.current_price or pos.entry
+                if pos.direction == "LONG":
+                    lucro_dist = price - pos.entry
+                else:
+                    lucro_dist = pos.entry - price
+
+                # Lucro atingiu o dobro do risco? → fecha 100%
+                if lucro_dist >= risk_dist * 2.0:
+                    rr_atual = lucro_dist / risk_dist
+                    log.info(
+                        f"🎯 {sym} R:R dobrado! "
+                        f"Lucro={lucro_dist:.4f} ≥ 2x Risco={risk_dist:.4f} "
+                        f"(R:R={rr_atual:.2f}) → fechando 100%"
+                    )
+                    close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                    await self.client.place_order(
+                        symbol=sym, side=close_side,
+                        qty=pos.qty, sl=0, tp=0,
+                    )
+                    # Registra como trade fechado
+                    pnl_gross = lucro_dist * pos.qty
+                    fee_open  = pos.qty * pos.entry * 0.00055
+                    fee_close = pos.qty * price     * 0.00055
+                    trade = Trade(
+                        sym, pos.direction, pos.entry, price,
+                        pos.qty, pnl_gross, pos.opened_at,
+                        fee_open=fee_open, fee_close=fee_close,
+                    )
+                    self.stats.add(trade)
+                    del self.positions[sym]
+                    self._cooldown[sym] = time.time() + 1800
+                    await notify(
+                        f"🎯 *{sym} — R:R DOBRADO*\n"
+                        f"Direção: `{pos.direction}`\n"
+                        f"Entrada: `${pos.entry:.4f}`\n"
+                        f"Saída: `${price:.4f}`\n"
+                        f"R:R: `{rr_atual:.2f}`\n"
+                        f"PnL Bruto: `+${pnl_gross:.4f}`\n"
+                        f"Taxas: `-${fee_open+fee_close:.4f}`\n"
+                        f"PnL Líquido: `+${pnl_gross-fee_open-fee_close:.4f}`"
+                    )
             except Exception as e:
-                log.error(f"trailing_stop {sym}: {e}")
+                log.error(f"_check_rr_double {sym}: {e}")
 
     # ── Scan & Enter ────────────────────────────────────────────
     async def _scan_all_and_enter(self):

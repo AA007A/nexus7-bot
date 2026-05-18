@@ -13,13 +13,13 @@ class Config:
     ]
 
     # ── Risk ─────────────────────────────────────────────────────
-    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "10"))   # 10x máximo
+    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "50"))   # 10x máximo
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.20")) # 20% por trade
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15")) # 15% DD máximo
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "5"))    # 5 simultâneas
 
     # ── Qualidade de entrada ─────────────────────────────────────
-    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "90"))   # 90/100 mínimo
+    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "80"))   # 90/100 mínimo
     MIN_VOLUME_MULT: float = float(os.environ.get("MIN_VOLUME_MULT","1.5")) # vol > 1.5x média
 
     # ── Filtro de taxas ──────────────────────────────────────────
@@ -44,7 +44,7 @@ class Config:
     # ── Meta diária ──────────────────────────────────────────────
     DAILY_TARGET:      float = float(os.environ.get("DAILY_TARGET",    "100.0"))
     DAILY_STOP_LOSS:   float = float(os.environ.get("DAILY_STOP_LOSS", "50.0"))
-    POST_TARGET_SCORE: int   = int(os.environ.get("POST_TARGET_SCORE", "92"))
+    POST_TARGET_SCORE: int   = int(os.environ.get("POST_TARGET_SCORE", "82"))
     POST_TARGET_RISK:  float = float(os.environ.get("POST_TARGET_RISK","0.20"))
 
     # ── Sistema ──────────────────────────────────────────────────
