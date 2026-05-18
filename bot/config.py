@@ -23,7 +23,7 @@ class Config:
     MIN_VOLUME_MULT: float = float(os.environ.get("MIN_VOLUME_MULT","1.5")) # vol > 1.5x média
 
     # ── Filtro de taxas ──────────────────────────────────────────
-    FEE_MULTIPLIER:  float = float(os.environ.get("FEE_MULTIPLIER", "4.0")) # lucro >= 4x taxas
+    FEE_MULTIPLIER:  float = float(os.environ.get("FEE_MULTIPLIER", "3.0")) # lucro >= 4x taxas
 
     # ── Timeframes ───────────────────────────────────────────────
     TF_TREND:  str = "240"   # 4H — tendência principal

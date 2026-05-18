@@ -121,13 +121,12 @@ def detect_pullback(closes, highs, lows, direction, atr_v) -> bool:
     price = closes[-1]
 
     if direction == "LONG":
-        # Procura mínimo local nos últimos 8 candles
         local_min = min(lows[-8:])
-        # Pullback válido: preço caiu ao menos 1x ATR e recuperou
-        return (max(highs[-8:]) - local_min) >= atr_v * 0.8 and price > local_min + atr_v * 0.3
+        # Pullback: preço recuou ao menos 0.5x ATR e está recuperando
+        return (max(highs[-8:]) - local_min) >= atr_v * 0.5 and price > local_min + atr_v * 0.2
     else:
         local_max = max(highs[-8:])
-        return (local_max - min(lows[-8:])) >= atr_v * 0.8 and price < local_max - atr_v * 0.3
+        return (local_max - min(lows[-8:])) >= atr_v * 0.5 and price < local_max - atr_v * 0.2
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -289,9 +288,13 @@ class Analyzer:
 
         # ── PASSO 1: Regime do 4H ───────────────────────────────
         regime = detect_regime(c4h, h4h, l4h, atr_4h)
-        if regime in ("COMPRESSED", "RANGING"):
-            log.debug(f"[{symbol}] 4H regime={regime} → HOLD")
+        if regime == "COMPRESSED":
+            log.debug(f"[{symbol}] 4H COMPRIMIDO → HOLD")
             return None
+        if regime == "RANGING":
+            # Ranging: só bloqueia se score for baixo
+            log.debug(f"[{symbol}] 4H RANGING — score mínimo aumentado para {min_score+5}")
+            min_score = min_score + 5   # exige score mais alto em ranging
 
         # ── PASSO 2: Direção (4H + 1H devem concordar) ─────────
         e20_4h = ema(c4h, 20)[-1]
@@ -339,10 +342,12 @@ class Analyzer:
             log.debug(f"[{symbol}] RSI 15M extremo ({s15['rsi_v']:.0f}) → HOLD")
             return None
 
-        # Volume mínimo obrigatório no 15M
-        if s15["vol_r"] < vol_mult:
-            log.debug(f"[{symbol}] Volume 15M {s15['vol_r']:.2f}x < {vol_mult}x → HOLD")
+        # Volume mínimo: 1.2x (se abaixo, desconta pontos mas não bloqueia)
+        if s15["vol_r"] < 1.0:
+            log.debug(f"[{symbol}] Volume 15M muito fraco {s15['vol_r']:.2f}x → HOLD")
             return None
+        if s15["vol_r"] < vol_mult:
+            log.debug(f"[{symbol}] Volume 15M {s15['vol_r']:.2f}x < {vol_mult}x → OK (com desconto)")
 
         # Direção não alinhada no 15M
         if not s15["aligned"]:
@@ -351,13 +356,17 @@ class Analyzer:
 
         # ATR comprimido nos 3 TFs → sem força
         if not s4h["atr_expanding"] and not s1h["atr_expanding"] and not s15["atr_expanding"]:
-            log.debug(f"[{symbol}] ATR comprimido em todos TFs → HOLD")
+            log.debug(f"[{symbol}] ATR comprimido nos 3 TFs → HOLD")
             return None
 
         # ── PASSO 6: Pullback no 15M ────────────────────────────
-        if not detect_pullback(c15, h15, l15, direction, atr_15):
-            log.debug(f"[{symbol}] Sem pullback confirmado no 15M → aguardando")
-            return None
+        pb_ok = detect_pullback(c15, h15, l15, direction, atr_15)
+        if not pb_ok:
+            # Pullback não ideal mas não bloqueia — desconta 5 pts do score
+            combined = max(0, combined - 5)
+            log.debug(f"[{symbol}] Pullback fraco → score ajustado para {combined}")
+            if combined < min_score:
+                return None
 
         # ── PASSO 7: SL e TP adaptativos (ATR do 1H) ────────────
         # SL = 2x ATR 1H (estável, evita stop hunt)
@@ -382,8 +391,9 @@ class Analyzer:
         min_move      = cost_pct * fee_mult
         move_to_tp    = tp_dist / price * 100
 
+        # Usa fee_mult configurado (padrão 3x)
         if move_to_tp < min_move:
-            log.debug(f"[{symbol}] Move {move_to_tp:.3f}% < mínimo {min_move:.3f}% → HOLD (taxas não cobertas)")
+            log.debug(f"[{symbol}] Move {move_to_tp:.3f}% < {min_move:.3f}% (fee {fee_mult}x) → HOLD")
             return None
 
         expected_net = move_to_tp - cost_pct
