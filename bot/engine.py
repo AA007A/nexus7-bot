@@ -608,6 +608,7 @@ class TradingEngine:
                 log.debug(f"[{sym}] cooldown {cooldown_left/60:.0f}min → skip")
                 continue
             try:
+                log.info(f"🔍 Analisando {sym}...")
                 # Busca 3 timeframes sequencialmente (evita rate limit)
                 k15 = await self.client.get_klines(sym, "15",  100)
                 await asyncio.sleep(0.4)
@@ -626,7 +627,7 @@ class TradingEngine:
                 )
                 if sig:
                     if sig.expected_pnl <= 0:
-                        log.debug(f"[{sym}] PnL esperado negativo → HOLD")
+                        log.info(f"[{sym}] PnL negativo após taxas → HOLD")
                         continue
                     candidates.append(sig)
                     log.info(
@@ -634,6 +635,8 @@ class TradingEngine:
                         f"{sig.direction} R:R={sig.rr} "
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
+                else:
+                    log.info(f"[{sym}] ✗ Sem sinal (filtros não atendidos)")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
             await asyncio.sleep(1.5)   # respeita rate limit Bybit (3 requests por símbolo)

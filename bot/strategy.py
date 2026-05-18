@@ -168,11 +168,12 @@ def score_tf(closes, highs, lows, opens, volumes, direction, atr_v, atr_avg) -> 
 
     # ── VOLUME (20 pts) ─────────────────────────────────────────
     bodies_ok = [(closes[i] > opens[i]) == (direction == "LONG") for i in range(-3, 0)]
-    if vol_r >= 2.5 and all(bodies_ok):   vol_s = 20
-    elif vol_r >= 2.0 and sum(bodies_ok) >= 2: vol_s = 16
-    elif vol_r >= 1.5 and sum(bodies_ok) >= 1: vol_s = 11
-    elif vol_r >= 1.2:                    vol_s = 6
-    else:                                 vol_s = 0   # abaixo da média → sem edge
+    if vol_r >= 2.0 and all(bodies_ok):        vol_s = 20
+    elif vol_r >= 1.5 and sum(bodies_ok) >= 2: vol_s = 16
+    elif vol_r >= 1.2 and sum(bodies_ok) >= 1: vol_s = 12
+    elif vol_r >= 0.9:                          vol_s = 7
+    elif vol_r >= 0.7:                          vol_s = 3
+    else:                                       vol_s = 0
 
     # ── MOMENTUM (20 pts) ───────────────────────────────────────
     rsi_v = rsi(closes)[-1]
@@ -181,19 +182,19 @@ def score_tf(closes, highs, lows, opens, volumes, direction, atr_v, atr_avg) -> 
     h1 = hist[-2] if len(hist) > 1 and not np.isnan(hist[-2]) else h0
 
     if direction == "LONG":
-        if 45 <= rsi_v <= 65:  rsi_s = 10
-        elif 38 <= rsi_v < 45: rsi_s = 6
-        elif 65 < rsi_v <= 72: rsi_s = 3
-        else:                  rsi_s = 0
+        if 40 <= rsi_v <= 70:   rsi_s = 10
+        elif 33 <= rsi_v < 40:  rsi_s = 6
+        elif 70 < rsi_v <= 78:  rsi_s = 3
+        else:                   rsi_s = 0   # >78 sobrecomprado extremo
         if h0 > 0 and h0 > h1: macd_s = 10
         elif h0 > 0:            macd_s = 6
         elif h0 > h1:           macd_s = 3
         else:                   macd_s = 0
     else:
-        if 35 <= rsi_v <= 55:  rsi_s = 10
-        elif 55 < rsi_v <= 62: rsi_s = 6
-        elif 28 <= rsi_v < 35: rsi_s = 3
-        else:                  rsi_s = 0
+        if 30 <= rsi_v <= 60:   rsi_s = 10
+        elif 60 < rsi_v <= 67:  rsi_s = 6
+        elif 22 <= rsi_v < 30:  rsi_s = 3
+        else:                   rsi_s = 0   # <22 sobrevendido extremo
         if h0 < 0 and h0 < h1: macd_s = 10
         elif h0 < 0:            macd_s = 6
         elif h0 < h1:           macd_s = 3
@@ -205,22 +206,23 @@ def score_tf(closes, highs, lows, opens, volumes, direction, atr_v, atr_avg) -> 
     atr_pct      = atr_v / price * 100
     atr_expanding = atr_v > atr_avg * 1.05
 
-    if atr_expanding and 0.3 <= atr_pct <= 5.0: atr_s = 15
-    elif atr_expanding:                           atr_s = 9
-    elif 0.3 <= atr_pct <= 3.0:                  atr_s = 6
-    else:                                         atr_s = 0
+    if atr_expanding and 0.2 <= atr_pct <= 6.0: atr_s = 15
+    elif atr_expanding:                           atr_s = 10
+    elif 0.2 <= atr_pct <= 4.0:                  atr_s = 8
+    elif 0.1 <= atr_pct < 0.2:                   atr_s = 3
+    else:                                         atr_s = 0   # comprimido demais
 
     # ── ESTRUTURA (15 pts) ──────────────────────────────────────
     body  = abs(closes[-1] - opens[-1])
     cr    = highs[-1] - lows[-1]
     wick  = 1 - (body / cr) if cr > 0 else 1
     struct_s = 15
-    if wick > 0.65:                            struct_s -= 8
-    if vol_r > 3.0 and body < atr_v * 0.15:   struct_s -= 6
+    if wick > 0.75:                            struct_s -= 6   # só penaliza wick muito extremo
+    if vol_r > 3.0 and body < atr_v * 0.10:   struct_s -= 5   # spike sem corpo real
     ph = max(highs[-6:-1]) if len(highs) > 6 else highs[-1]
     pl = min(lows[-6:-1])  if len(lows)  > 6 else lows[-1]
-    if direction == "LONG"  and highs[-1] > ph and closes[-1] < ph: struct_s -= 8
-    if direction == "SHORT" and lows[-1]  < pl and closes[-1] > pl: struct_s -= 8
+    if direction == "LONG"  and highs[-1] > ph and closes[-1] < ph: struct_s -= 6
+    if direction == "SHORT" and lows[-1]  < pl and closes[-1] > pl: struct_s -= 6
     struct_s = max(0, struct_s)
 
     total = trend_s + vol_s + momentum_s + atr_s + struct_s
@@ -247,7 +249,7 @@ class Analyzer:
         k15:       list,
         k1h:       list,
         k4h:       list,
-        min_score: int = 90,
+        min_score: int = 80,
         fee_mult:  float = 4.0,
         vol_mult:  float = 1.5,
     ) -> Optional[Signal]:
@@ -311,8 +313,15 @@ class Analyzer:
             direction = "LONG"
         elif bear_4h and bear_1h:
             direction = "SHORT"
+        elif bull_1h and not bear_4h:
+            # 4H neutro mas 1H bullish → aceita com score mínimo maior
+            direction = "LONG"
+            min_score = max(min_score, 85)
+        elif bear_1h and not bull_4h:
+            direction = "SHORT"
+            min_score = max(min_score, 85)
         else:
-            log.debug(f"[{symbol}] 4H/1H conflito: 4H={'bull' if bull_4h else 'bear'} 1H={'bull' if bull_1h else 'bear'} → HOLD")
+            log.debug(f"[{symbol}] 4H/1H conflito direto → HOLD")
             return None
 
         # ── PASSO 3: Regime do 15M ──────────────────────────────
@@ -338,16 +347,15 @@ class Analyzer:
 
         # ── PASSO 5: Bloqueios críticos ─────────────────────────
         # RSI extremo no 15M (timing)
-        if s15["rsi_s"] == 0:
+        # Só bloqueia RSI verdadeiramente extremo (>80 ou <20)
+        if s15["rsi_v"] > 80 or s15["rsi_v"] < 20:
             log.debug(f"[{symbol}] RSI 15M extremo ({s15['rsi_v']:.0f}) → HOLD")
             return None
 
-        # Volume mínimo: 1.2x (se abaixo, desconta pontos mas não bloqueia)
-        if s15["vol_r"] < 1.0:
+        # Bloqueia apenas volume muito fraco (<0.7x média)
+        if s15["vol_r"] < 0.7:
             log.debug(f"[{symbol}] Volume 15M muito fraco {s15['vol_r']:.2f}x → HOLD")
             return None
-        if s15["vol_r"] < vol_mult:
-            log.debug(f"[{symbol}] Volume 15M {s15['vol_r']:.2f}x < {vol_mult}x → OK (com desconto)")
 
         # Direção não alinhada no 15M
         if not s15["aligned"]:
