@@ -297,7 +297,7 @@ class TradingEngine:
                     elif self.risk.can_open(len(self.positions)):
                         await self._scan_all_and_enter() # escaneia e entra nos melhores
 
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
 
             except asyncio.CancelledError:
                 break
@@ -398,7 +398,7 @@ class TradingEngine:
 
             for sym in self.viable_symbols[:15]:
                 await self.client.set_leverage(sym, cfg.LEVERAGE)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.3)
 
             await self._load_existing_positions()
             self.connected = True
@@ -608,12 +608,13 @@ class TradingEngine:
                 log.debug(f"[{sym}] cooldown {cooldown_left/60:.0f}min → skip")
                 continue
             try:
-                # Busca 3 timeframes: 4H (tendência), 1H (confirmação), 15M (entrada)
-                k15, k1h, k4h = await asyncio.gather(
-                    self.client.get_klines(sym, "15",  100),
-                    self.client.get_klines(sym, "60",  100),
-                    self.client.get_klines(sym, "240", 100),
-                )
+                # Busca 3 timeframes sequencialmente (evita rate limit)
+                k15 = await self.client.get_klines(sym, "15",  100)
+                await asyncio.sleep(0.4)
+                k1h = await self.client.get_klines(sym, "60",  100)
+                await asyncio.sleep(0.4)
+                k4h = await self.client.get_klines(sym, "240", 100)
+                await asyncio.sleep(0.4)
                 if len(k15) < 60 or len(k1h) < 30 or len(k4h) < 20:
                     continue
 
@@ -635,7 +636,7 @@ class TradingEngine:
                     )
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.6)   # respeita rate limit Bybit
+            await asyncio.sleep(1.5)   # respeita rate limit Bybit (3 requests por símbolo)
 
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
