@@ -68,6 +68,48 @@ async def positions():
 async def pnl():
     return app.state.engine.stats.all_summaries()
 
+@app.get("/api/db-stats")
+async def db_stats():
+    """Métricas persistidas: Sharpe, Win Rate, Max DD, perdas consecutivas."""
+    from bot import database as db
+    return await db.get_stats_summary()
+
+@app.get("/api/backtest")
+async def backtest():
+    """Mini backtesting com os últimos 30 trades fechados do banco."""
+    from bot import database as db
+    import numpy as np
+    summary = await db.get_stats_summary()
+    trades = summary.get("recent_trades", [])
+    if not trades:
+        return {"message": "Nenhum trade fechado ainda", "trades": 0}
+    pnls = [t["pnl_net"] for t in trades]
+    arr  = np.array(pnls)
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    cum = np.cumsum(arr)
+    peak = np.maximum.accumulate(cum)
+    dd = (peak - cum)
+    max_dd = float(dd.max()) if len(dd) else 0
+    sharpe = float(arr.mean() / arr.std()) if arr.std() > 0 else 0
+    avg_hold = sum(t["hold_min"] for t in trades) / len(trades) if trades else 0
+    avg_win  = sum(wins)  / len(wins)   if wins   else 0
+    avg_loss = sum(losses)/ len(losses) if losses else 0
+    profit_factor = abs(sum(wins) / sum(losses)) if sum(losses) != 0 else 0
+    return {
+        "trades":         len(pnls),
+        "win_rate":       round(len(wins)/len(pnls)*100, 1),
+        "total_pnl_net":  round(float(arr.sum()), 4),
+        "avg_win":        round(avg_win, 4),
+        "avg_loss":       round(avg_loss, 4),
+        "profit_factor":  round(profit_factor, 2),
+        "max_drawdown":   round(max_dd, 4),
+        "sharpe_ratio":   round(sharpe, 3),
+        "avg_hold_min":   round(avg_hold, 1),
+        "consecutive_losses": summary.get("consecutive_losses", 0),
+        "recent_trades":  trades[:10],
+    }
+
 @app.post("/api/pause")
 async def pause():
     app.state.engine.stop()

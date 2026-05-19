@@ -17,6 +17,7 @@ from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
 from bot.notifier import notify, signal_msg
+from bot import database as db
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -254,6 +255,7 @@ class TradingEngine:
         self.risk         = RiskManager()
         self.stats        = Stats()
         self.positions:   Dict[str, Position] = {}
+        self._trade_ids:  Dict[str, int] = {}   # symbol → DB trade id
         self.instruments: dict = {}
         self.viable_symbols: List[str] = []
         self.connected    = False
@@ -276,6 +278,7 @@ class TradingEngine:
             return
         self._running = True
         log.info("⚡ Engine v7.0 iniciando...")
+        await db.get_db()   # inicia conexão com banco de dados
         await self._connect()
 
         while self._running:
@@ -474,8 +477,27 @@ class TradingEngine:
                         fee_open=fee_open, fee_close=fee_close
                     )
                     self.stats.add(trade)
+                    # Persiste fechamento no banco
+                    tid = self._trade_ids.pop(sym, 0)
+                    if tid:
+                        await db.save_trade_close(tid, trade)
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
+
+                    # ── Stop após 3 perdas consecutivas ──────────
+                    consecutive = await db.get_consecutive_losses()
+                    if consecutive >= 3:
+                        log.warning(
+                            f"🛑 {consecutive} PERDAS CONSECUTIVAS — Bot pausado por 2 horas"
+                        )
+                        await notify(
+                            f"🛑 *{consecutive} perdas consecutivas*\n"
+                            f"Bot pausado por 2 horas para proteção de capital.\n"
+                            f"Retoma às: `{__import__('datetime').datetime.utcnow().strftime('%H:%M')} + 2h UTC`"
+                        )
+                        # Pausa por 2 horas
+                        await asyncio.sleep(7200)
+                        await db.log_decision("SYSTEM","RESUME",0,"Auto-resume após 2h de pausa por perdas")
                     icon = "✅" if pnl_net >= 0 else "❌"
                     log.info(
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
@@ -576,8 +598,27 @@ class TradingEngine:
                         fee_open=fee_open, fee_close=fee_close,
                     )
                     self.stats.add(trade)
+                    # Persiste fechamento no banco
+                    tid = self._trade_ids.pop(sym, 0)
+                    if tid:
+                        await db.save_trade_close(tid, trade)
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
+
+                    # ── Stop após 3 perdas consecutivas ──────────
+                    consecutive = await db.get_consecutive_losses()
+                    if consecutive >= 3:
+                        log.warning(
+                            f"🛑 {consecutive} PERDAS CONSECUTIVAS — Bot pausado por 2 horas"
+                        )
+                        await notify(
+                            f"🛑 *{consecutive} perdas consecutivas*\n"
+                            f"Bot pausado por 2 horas para proteção de capital.\n"
+                            f"Retoma às: `{__import__('datetime').datetime.utcnow().strftime('%H:%M')} + 2h UTC`"
+                        )
+                        # Pausa por 2 horas
+                        await asyncio.sleep(7200)
+                        await db.log_decision("SYSTEM","RESUME",0,"Auto-resume após 2h de pausa por perdas")
                     await notify(
                         f"🎯 *{sym} — R:R DOBRADO*\n"
                         f"Direção: `{pos.direction}`\n"
@@ -635,6 +676,7 @@ class TradingEngine:
                         f"{sig.direction} R:R={sig.rr} "
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
+                    await db.log_decision(sym,"SIGNAL",sig.score,sig.reason)
                 else:
                     # Mostra score parcial para diagnóstico
                     try:
@@ -676,6 +718,7 @@ class TradingEngine:
                         )
                     except Exception as ex:
                         log.info(f"[{sym}] ✗ Sem sinal")
+                    await db.log_decision(sym,"HOLD",0,"filtros não atendidos")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
             await asyncio.sleep(1.5)   # respeita rate limit Bybit (3 requests por símbolo)
@@ -702,6 +745,9 @@ class TradingEngine:
 
             pos = Position(sig, qty)
             self.positions[sig.symbol] = pos
+            # Persiste no banco
+            trade_id = await db.save_trade_open(pos)
+            self._trade_ids[sig.symbol] = trade_id
             log.info(
                 f"✅ ABERTO {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f} "
                 f"SL=${sig.sl:.4f} TP=${sig.tp:.4f} Score={sig.score}/100 RR={sig.rr}"
