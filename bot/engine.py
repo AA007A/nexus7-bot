@@ -18,6 +18,7 @@ from bot.config import cfg
 from bot.logger import log
 from bot.notifier import notify, signal_msg
 from bot import database as db
+from bot import score as scoring
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -277,8 +278,10 @@ class TradingEngine:
         if self._running:
             return
         self._running = True
-        log.info("⚡ Engine v7.0 iniciando...")
-        await db.get_db()   # inicia conexão com banco de dados
+        log.info("⚡ Engine v10 iniciando...")
+        await db.init()   # inicia DB (PostgreSQL ou SQLite)
+        asyncio.create_task(scoring.update_macro_cache())   # Fear&Greed + BTC.D
+        asyncio.create_task(scoring.news_reader_loop())     # news 24/7
         await self._connect()
 
         while self._running:
@@ -406,6 +409,11 @@ class TradingEngine:
             await self._load_existing_positions()
             self.connected = True
             self.active    = True
+            # Inicia WebSocket para dados em tempo real
+            await self.client.start_websocket(
+                self.viable_symbols[:10],
+                intervals=["15", "60", "240"],
+            )
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
             await notify(
                 f"✅ *KAKAZITO TRADE v7 Online!*\n"
@@ -484,20 +492,22 @@ class TradingEngine:
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
 
-                    # ── Stop após 3 perdas consecutivas ──────────
-                    consecutive = await db.get_consecutive_losses()
+                    # ── 3 perdas consecutivas: registra, bot CONTINUA ──
+                    consecutive = await db.update_consecutive_losses(pnl_net)
                     if consecutive >= 3:
                         log.warning(
-                            f"🛑 {consecutive} PERDAS CONSECUTIVAS — Bot pausado por 2 horas"
+                            f"⚠️ {consecutive} perdas consecutivas — registrado, bot continua"
                         )
                         await notify(
-                            f"🛑 *{consecutive} perdas consecutivas*\n"
-                            f"Bot pausado por 2 horas para proteção de capital.\n"
-                            f"Retoma às: `{__import__('datetime').datetime.utcnow().strftime('%H:%M')} + 2h UTC`"
+                            f"⚠️ *{consecutive} perdas consecutivas*\n"
+                            f"Bot continua operando normalmente.\n"
+                            f"Registrado no banco para análise."
                         )
-                        # Pausa por 2 horas
-                        await asyncio.sleep(7200)
-                        await db.log_decision("SYSTEM","RESUME",0,"Auto-resume após 2h de pausa por perdas")
+                        await db.save_risk_event(
+                            "CONSECUTIVE_LOSSES",
+                            f"{consecutive} perdas consecutivas",
+                            pnl_net,
+                        )
                     icon = "✅" if pnl_net >= 0 else "❌"
                     log.info(
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
@@ -605,20 +615,22 @@ class TradingEngine:
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
 
-                    # ── Stop após 3 perdas consecutivas ──────────
-                    consecutive = await db.get_consecutive_losses()
+                    # ── 3 perdas consecutivas: registra, bot CONTINUA ──
+                    consecutive = await db.update_consecutive_losses(pnl_net)
                     if consecutive >= 3:
                         log.warning(
-                            f"🛑 {consecutive} PERDAS CONSECUTIVAS — Bot pausado por 2 horas"
+                            f"⚠️ {consecutive} perdas consecutivas — registrado, bot continua"
                         )
                         await notify(
-                            f"🛑 *{consecutive} perdas consecutivas*\n"
-                            f"Bot pausado por 2 horas para proteção de capital.\n"
-                            f"Retoma às: `{__import__('datetime').datetime.utcnow().strftime('%H:%M')} + 2h UTC`"
+                            f"⚠️ *{consecutive} perdas consecutivas*\n"
+                            f"Bot continua operando normalmente.\n"
+                            f"Registrado no banco para análise."
                         )
-                        # Pausa por 2 horas
-                        await asyncio.sleep(7200)
-                        await db.log_decision("SYSTEM","RESUME",0,"Auto-resume após 2h de pausa por perdas")
+                        await db.save_risk_event(
+                            "CONSECUTIVE_LOSSES",
+                            f"{consecutive} perdas consecutivas",
+                            pnl_net,
+                        )
                     await notify(
                         f"🎯 *{sym} — R:R DOBRADO*\n"
                         f"Direção: `{pos.direction}`\n"
@@ -737,6 +749,35 @@ class TradingEngine:
                 log.warning(f"⚠️ {sig.symbol}: qty=0 — saldo insuficiente")
                 return
 
+            # ── Score pré-trade ───────────────────────────────
+            c  = [sig.entry]   # usa entry como proxy se não tiver cache
+            kl = self.client.get_cached_klines(sig.symbol, "15", 50)
+            if len(kl) >= 10:
+                c = [k["c"] for k in kl]
+                h = [k["h"] for k in kl]
+                l = [k["l"] for k in kl]
+                v = [k["v"] for k in kl]
+            else:
+                h = c; l = c; v = [1000]*len(c)
+
+            pre_score = await scoring.calculate(
+                sig.symbol, sig.direction, c, h, l, v, self.client
+            )
+            if not pre_score["aprovado"]:
+                log.info(
+                    f"[{sig.symbol}] Score pré-trade {pre_score['total']}/100 "
+                    f"< {scoring.MIN_SCORE} → HOLD"
+                )
+                return
+
+            # Salva snapshot de mercado
+            await db.save_snapshot(
+                sig.symbol,
+                pre_score.get("oi", 0),
+                pre_score.get("funding", 0),
+                pre_score.get("cvd", 0),
+            )
+
             side = "Buy" if sig.direction == "LONG" else "Sell"
             await self.client.place_order(
                 symbol=sig.symbol, side=side, qty=qty,
@@ -744,9 +785,13 @@ class TradingEngine:
             )
 
             pos = Position(sig, qty)
+            pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
             # Persiste no banco
-            trade_id = await db.save_trade_open(pos)
+            trade_id = await db.save_trade_open(
+                sig.symbol, side, sig.entry, qty,
+                cfg.LEVERAGE, pre_score["total"],
+            )
             self._trade_ids[sig.symbol] = trade_id
             log.info(
                 f"✅ ABERTO {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f} "

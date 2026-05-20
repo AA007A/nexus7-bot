@@ -1,392 +1,340 @@
 """
-KAKAZITO TRADE — Database Layer
-Usa PostgreSQL em produção (Railway) e SQLite como fallback local.
-Persiste: trades, PnL histórico, decisões do bot, métricas.
+KAKAZITO TRADE — Database Layer v2
+PostgreSQL (Railway) com fallback SQLite.
+Persiste: trades, signals, risk_events, news_events,
+          market_snapshots, performance, consecutive_losses.
+Fault-tolerant: se DB cair, bot continua operando.
 """
-import os, time, json, asyncio
-from datetime import datetime, timezone
-from typing import Optional
+import os, json, asyncio
+from datetime import datetime, timezone, date
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-
-# ── SQLite fallback se não tiver PostgreSQL ──────────────────────
-SQLITE_PATH = os.environ.get("SQLITE_PATH", "/app/data/kakazito.db")
-
-_db = None   # conexão global
+DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
+SQLITE_PATH  = "/app/data/kakazito.db"
+_conn        = None
+_is_pg       = False
 
 
-async def get_db():
-    global _db
-    if _db is not None:
-        return _db
-    if DATABASE_URL and DATABASE_URL.startswith("postgresql"):
-        _db = await _init_postgres()
-    else:
-        _db = await _init_sqlite()
-    return _db
+async def init():
+    global _conn, _is_pg
+    if _conn:
+        return
+    if DATABASE_URL.startswith("postgresql"):
+        try:
+            import asyncpg
+            _conn  = await asyncpg.connect(DATABASE_URL)
+            _is_pg = True
+            await _create_tables()
+            from bot.logger import log
+            log.info("✅ PostgreSQL conectado")
+            return
+        except Exception as e:
+            from bot.logger import log
+            log.warning(f"PostgreSQL falhou ({e}) → usando SQLite")
+    # SQLite fallback
+    try:
+        import aiosqlite, os as _os
+        _os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
+        _conn  = await aiosqlite.connect(SQLITE_PATH)
+        _is_pg = False
+        await _create_tables()
+        from bot.logger import log
+        log.info(f"✅ SQLite: {SQLITE_PATH}")
+    except Exception as e:
+        from bot.logger import log
+        log.error(f"DB init falhou: {e} — sem persistência")
+        _conn = None
 
 
-async def _init_postgres():
-    import asyncpg
-    url = DATABASE_URL.replace("postgresql://", "postgresql://")
-    conn = await asyncpg.connect(url)
-    await _create_tables_pg(conn)
-    from bot.logger import log
-    log.info("✅ PostgreSQL conectado")
-    return conn
+# ── DDL ─────────────────────────────────────────────────────────
+_DDL = [
+    """CREATE TABLE IF NOT EXISTS trades (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, strategy TEXT, side TEXT,
+        symbol TEXT, entry_price REAL, exit_price REAL,
+        size REAL, leverage INTEGER, pnl REAL, fees REAL,
+        duration_minutes REAL, score_entrada INTEGER,
+        status TEXT DEFAULT 'open'
+    )""",
+    """CREATE TABLE IF NOT EXISTS signals (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, strategy TEXT, direction TEXT,
+        symbol TEXT, score_total INTEGER,
+        score_tecnico INTEGER, score_orderflow INTEGER,
+        score_macro INTEGER, score_news INTEGER,
+        entrou INTEGER DEFAULT 0, motivo_rejeicao TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS risk_events (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, tipo_evento TEXT,
+        descricao TEXT, pnl_acumulado REAL
+    )""",
+    """CREATE TABLE IF NOT EXISTS news_events (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, titulo TEXT, fonte TEXT,
+        classificacao TEXT, score_confianca REAL, impacto_no_score REAL
+    )""",
+    """CREATE TABLE IF NOT EXISTS market_snapshots (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, symbol TEXT,
+        open_interest REAL, funding_rate REAL,
+        cvd REAL, btc_dominance REAL, fear_greed_index REAL
+    )""",
+    """CREATE TABLE IF NOT EXISTS performance (
+        id SERIAL PRIMARY KEY,
+        periodo TEXT, strategy TEXT,
+        win_rate REAL, profit_factor REAL,
+        sharpe_ratio REAL, sortino_ratio REAL,
+        max_drawdown REAL, expectancy_por_trade REAL,
+        total_trades INTEGER, updated_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS consecutive_losses (
+        id SERIAL PRIMARY KEY,
+        count INTEGER DEFAULT 0, last_loss TEXT
+    )""",
+]
+
+_DDL_SQLITE = [s.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT") for s in _DDL]
 
 
-async def _init_sqlite():
-    import aiosqlite, os
-    os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
-    conn = await aiosqlite.connect(SQLITE_PATH)
-    await _create_tables_sqlite(conn)
-    from bot.logger import log
-    log.info(f"✅ SQLite conectado: {SQLITE_PATH}")
-    return conn
+async def _create_tables():
+    if not _conn:
+        return
+    stmts = _DDL if _is_pg else _DDL_SQLITE
+    for stmt in stmts:
+        try:
+            if _is_pg:
+                await _conn.execute(stmt)
+            else:
+                await _conn.execute(stmt)
+                await _conn.commit()
+        except Exception as e:
+            from bot.logger import log
+            log.warning(f"DDL: {e}")
 
 
-# ── DDL ──────────────────────────────────────────────────────────
-TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS trades (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol      TEXT    NOT NULL,
-    direction   TEXT    NOT NULL,
-    entry       REAL    NOT NULL,
-    exit_price  REAL,
-    qty         REAL    NOT NULL,
-    pnl_gross   REAL    DEFAULT 0,
-    pnl_net     REAL    DEFAULT 0,
-    fees        REAL    DEFAULT 0,
-    score       INTEGER DEFAULT 0,
-    rr          REAL    DEFAULT 0,
-    tf_4h       TEXT,
-    tf_1h       TEXT,
-    tf_15m      TEXT,
-    reason      TEXT,
-    status      TEXT    DEFAULT 'open',
-    opened_at   TEXT    NOT NULL,
-    closed_at   TEXT,
-    hold_minutes REAL   DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS daily_stats (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT    NOT NULL UNIQUE,
-    pnl_gross   REAL    DEFAULT 0,
-    pnl_net     REAL    DEFAULT 0,
-    fees        REAL    DEFAULT 0,
-    trades      INTEGER DEFAULT 0,
-    wins        INTEGER DEFAULT 0,
-    losses      INTEGER DEFAULT 0,
-    win_rate    REAL    DEFAULT 0,
-    max_dd      REAL    DEFAULT 0,
-    sharpe      REAL    DEFAULT 0,
-    updated_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS decisions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol      TEXT    NOT NULL,
-    action      TEXT    NOT NULL,
-    score       INTEGER,
-    reason      TEXT,
-    regime      TEXT,
-    rsi         REAL,
-    volume_r    REAL,
-    created_at  TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS consecutive_losses (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    count       INTEGER DEFAULT 0,
-    last_loss   TEXT,
-    paused      INTEGER DEFAULT 0
-);
-"""
-
-TABLES_PG = TABLES_SQL.replace(
-    "INTEGER PRIMARY KEY AUTOINCREMENT",
-    "SERIAL PRIMARY KEY"
-)
-
-
-async def _create_tables_sqlite(conn):
-    import aiosqlite
-    for stmt in TABLES_SQL.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            await conn.execute(stmt)
-    await conn.commit()
-
-
-async def _create_tables_pg(conn):
-    for stmt in TABLES_PG.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            await conn.execute(stmt)
-
-
-# ── helpers ──────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────
 def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _is_pg():
-    return DATABASE_URL and DATABASE_URL.startswith("postgresql")
+async def _exec(sql: str, params: tuple = ()):
+    if not _conn:
+        return
+    try:
+        if _is_pg:
+            # asyncpg usa $1,$2...
+            i = [1]
+            new = ""
+            for c in sql:
+                if c == "?":
+                    new += f"${i[0]}"; i[0] += 1
+                else:
+                    new += c
+            await _conn.execute(new, *params)
+        else:
+            await _conn.execute(sql, params)
+            await _conn.commit()
+    except Exception as e:
+        from bot.logger import log
+        log.error(f"DB exec: {e}")
 
 
-async def _exec(sql, params=()):
-    db = await get_db()
-    if _is_pg():
-        # asyncpg usa $1,$2... em vez de ?
-        sql_pg = sql.replace("?", "$%d" % 1)
-        i = 1
-        new_sql = ""
-        for ch in sql:
-            if ch == "?":
-                new_sql += f"${i}"; i += 1
-            else:
-                new_sql += ch
-        await db.execute(new_sql, *params)
-    else:
-        await db.execute(sql, params)
-        await db.commit()
+async def _fetchone(sql: str, params: tuple = ()):
+    if not _conn:
+        return None
+    try:
+        if _is_pg:
+            i = [1]
+            new = ""
+            for c in sql:
+                if c == "?":
+                    new += f"${i[0]}"; i[0] += 1
+                else:
+                    new += c
+            return await _conn.fetchrow(new, *params)
+        else:
+            import aiosqlite
+            async with _conn.execute(sql, params) as cur:
+                return await cur.fetchone()
+    except Exception:
+        return None
 
 
-async def _fetchone(sql, params=()):
-    db = await get_db()
-    if _is_pg():
-        i = [1]
-        def rep(ch):
-            if ch == "?":
-                v = f"${i[0]}"; i[0]+=1; return v
-            return ch
-        sql = "".join(rep(c) for c in sql)
-        return await db.fetchrow(sql, *params)
-    else:
-        import aiosqlite
-        async with db.execute(sql, params) as cur:
-            return await cur.fetchone()
-
-
-async def _fetchall(sql, params=()):
-    db = await get_db()
-    if _is_pg():
-        i = [1]
-        def rep(ch):
-            if ch == "?":
-                v = f"${i[0]}"; i[0]+=1; return v
-            return ch
-        sql = "".join(rep(c) for c in sql)
-        return await db.fetch(sql, *params)
-    else:
-        import aiosqlite
-        async with db.execute(sql, params) as cur:
-            return await cur.fetchall()
+async def _fetchall(sql: str, params: tuple = ()):
+    if not _conn:
+        return []
+    try:
+        if _is_pg:
+            i = [1]
+            new = ""
+            for c in sql:
+                if c == "?":
+                    new += f"${i[0]}"; i[0] += 1
+                else:
+                    new += c
+            return await _conn.fetch(new, *params)
+        else:
+            import aiosqlite
+            async with _conn.execute(sql, params) as cur:
+                return await cur.fetchall()
+    except Exception:
+        return []
 
 
 # ── API pública ──────────────────────────────────────────────────
-async def save_trade_open(pos) -> int:
-    """Persiste posição aberta."""
+async def save_trade_open(symbol, side, entry, size, leverage, score, strategy="MTF") -> int:
     sql = """INSERT INTO trades
-        (symbol,direction,entry,qty,score,rr,tf_4h,tf_1h,tf_15m,reason,status,opened_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'open',?)"""
-    params = (
-        pos.symbol, pos.direction, pos.entry, pos.qty,
-        getattr(pos,"score",0), getattr(pos,"rr",0),
-        getattr(pos,"tf_4h",""), getattr(pos,"tf_1h",""), getattr(pos,"tf_15m",""),
-        getattr(pos,"reason",""), _now(),
-    )
-    try:
-        await _exec(sql, params)
-        row = await _fetchone("SELECT MAX(id) FROM trades")
-        return row[0] if row else 0
-    except Exception as e:
-        from bot.logger import log; log.error(f"DB save_trade_open: {e}")
-        return 0
+        (timestamp,strategy,side,symbol,entry_price,size,leverage,score_entrada,status)
+        VALUES (?,?,?,?,?,?,?,?,'open')"""
+    await _exec(sql, (_now(), strategy, side, symbol, entry, size, leverage, score))
+    row = await _fetchone("SELECT MAX(id) FROM trades")
+    return row[0] if row else 0
 
 
-async def save_trade_close(trade_id: int, trade):
-    """Atualiza trade fechado com PnL e métricas."""
-    closed = _now()
-    hold = 0
-    try:
-        row = await _fetchone("SELECT opened_at FROM trades WHERE id=?", (trade_id,))
-        if row:
-            from datetime import datetime
-            opened = datetime.fromisoformat(row[0])
-            hold = (datetime.now(timezone.utc) - opened).total_seconds() / 60
-    except Exception:
-        pass
-
-    sql = """UPDATE trades SET
-        exit_price=?, pnl_gross=?, pnl_net=?, fees=?,
-        status='closed', closed_at=?, hold_minutes=?
-        WHERE id=?"""
-    params = (
-        trade.exit_price, trade.pnl_gross, trade.pnl,
-        trade.total_fees, closed, hold, trade_id,
-    )
-    try:
-        await _exec(sql, params)
-        await _update_daily_stats()
-        await _update_loss_streak(trade.pnl)
-    except Exception as e:
-        from bot.logger import log; log.error(f"DB save_trade_close: {e}")
+async def save_trade_close(trade_id: int, exit_price: float, pnl: float,
+                           fees: float, duration_min: float):
+    sql = """UPDATE trades SET exit_price=?,pnl=?,fees=?,
+             duration_minutes=?,status='closed' WHERE id=?"""
+    await _exec(sql, (exit_price, pnl, fees, duration_min, trade_id))
+    await _update_performance()
 
 
-async def log_decision(symbol, action, score=0, reason="", regime="", rsi=0, vol_r=0):
-    """Persiste decisão de análise (HOLD, SIGNAL, etc)."""
-    sql = """INSERT INTO decisions
-        (symbol,action,score,reason,regime,rsi,volume_r,created_at)
-        VALUES (?,?,?,?,?,?,?,?)"""
-    try:
-        await _exec(sql, (symbol, action, score, reason, regime, round(rsi,1), round(vol_r,2), _now()))
-    except Exception:
-        pass
+async def save_signal(symbol, direction, scores: dict, entrou: bool, motivo=""):
+    sql = """INSERT INTO signals
+        (timestamp,symbol,direction,score_total,score_tecnico,
+         score_orderflow,score_macro,score_news,entrou,motivo_rejeicao)
+        VALUES (?,?,?,?,?,?,?,?,?,?)"""
+    await _exec(sql, (
+        _now(), symbol, direction,
+        scores.get("total", 0), scores.get("tecnico", 0),
+        scores.get("orderflow", 0), scores.get("macro", 0),
+        scores.get("news", 0), 1 if entrou else 0, motivo,
+    ))
 
 
-async def _update_loss_streak(pnl: float):
-    """Atualiza contador de perdas consecutivas."""
-    try:
-        row = await _fetchone("SELECT count FROM consecutive_losses ORDER BY id DESC LIMIT 1")
-        current = row[0] if row else 0
-        if pnl < 0:
-            new_count = current + 1
-        else:
-            new_count = 0
-        await _exec(
-            "INSERT INTO consecutive_losses (count, last_loss, paused) VALUES (?,?,?)",
-            (new_count, _now(), 1 if new_count >= 3 else 0)
+async def save_news(titulo, fonte, classif, confianca, impacto):
+    sql = """INSERT INTO news_events
+        (timestamp,titulo,fonte,classificacao,score_confianca,impacto_no_score)
+        VALUES (?,?,?,?,?,?)"""
+    await _exec(sql, (_now(), titulo[:500], fonte, classif, confianca, impacto))
+
+
+async def save_snapshot(symbol, oi, fr, cvd=0, btc_dom=0, fear_greed=0):
+    sql = """INSERT INTO market_snapshots
+        (timestamp,symbol,open_interest,funding_rate,cvd,btc_dominance,fear_greed_index)
+        VALUES (?,?,?,?,?,?,?)"""
+    await _exec(sql, (_now(), symbol, oi, fr, cvd, btc_dom, fear_greed))
+
+
+async def save_risk_event(tipo, descricao, pnl_acum=0):
+    sql = "INSERT INTO risk_events (timestamp,tipo_evento,descricao,pnl_acumulado) VALUES (?,?,?,?)"
+    await _exec(sql, (_now(), tipo, descricao, pnl_acum))
+
+
+async def update_consecutive_losses(pnl: float):
+    """Atualiza streak de perdas. Bot NUNCA para por isso — só registra."""
+    row = await _fetchone("SELECT count FROM consecutive_losses ORDER BY id DESC LIMIT 1")
+    current = row[0] if row else 0
+    new_count = (current + 1) if pnl < 0 else 0
+    await _exec("INSERT INTO consecutive_losses (count,last_loss) VALUES (?,?)",
+                (new_count, _now()))
+    if new_count >= 3:
+        await save_risk_event(
+            "CONSECUTIVE_LOSSES",
+            f"{new_count} perdas consecutivas — registrado, bot continua operando",
         )
-    except Exception as e:
-        from bot.logger import log; log.error(f"DB loss_streak: {e}")
+    return new_count
 
 
 async def get_consecutive_losses() -> int:
-    """Retorna número de perdas consecutivas atuais."""
-    try:
-        row = await _fetchone("SELECT count FROM consecutive_losses ORDER BY id DESC LIMIT 1")
-        return row[0] if row else 0
-    except Exception:
-        return 0
+    row = await _fetchone("SELECT count FROM consecutive_losses ORDER BY id DESC LIMIT 1")
+    return row[0] if row else 0
 
 
-async def _update_daily_stats():
-    """Recalcula métricas do dia com Sharpe, Win Rate, Max DD."""
-    try:
-        today = datetime.now(timezone.utc).date().isoformat()
-        rows = await _fetchall(
-            "SELECT pnl_net, pnl_gross, fees FROM trades WHERE status='closed' AND date(closed_at)=?",
-            (today,)
-        )
-        if not rows:
-            return
+async def _update_performance():
+    """Recalcula métricas com todos os trades fechados."""
+    import numpy as np
+    rows = await _fetchall("SELECT pnl,fees FROM trades WHERE status='closed'")
+    if not rows:
+        return
+    pnls  = [r[0] for r in rows]
+    fees  = [r[1] for r in rows]
+    arr   = np.array(pnls)
+    wins  = arr[arr > 0]
+    losses= arr[arr <= 0]
+    total = len(arr)
+    wr    = len(wins)/total*100 if total else 0
+    pf    = abs(wins.sum()/losses.sum()) if losses.sum() != 0 else 0
+    sharpe= float(arr.mean()/arr.std()) if arr.std() > 0 and total > 1 else 0
+    # Sortino (só downside)
+    neg   = arr[arr < 0]
+    sortino = float(arr.mean()/neg.std()) if len(neg) > 1 and neg.std() > 0 else 0
+    # Max DD
+    cum   = np.cumsum(arr)
+    peak  = np.maximum.accumulate(cum)
+    max_dd= float((peak - cum).max()) if len(cum) else 0
+    exp   = float(arr.mean()) if total else 0
 
-        pnl_nets   = [r[0] for r in rows]
-        pnl_gross  = sum(r[1] for r in rows)
-        pnl_net    = sum(pnl_nets)
-        fees       = sum(r[2] for r in rows)
-        trades     = len(rows)
-        wins       = sum(1 for p in pnl_nets if p > 0)
-        losses     = trades - wins
-        win_rate   = wins / trades * 100 if trades > 0 else 0
-
-        # Max Drawdown do dia
-        cum = 0; peak = 0; max_dd = 0
-        for p in pnl_nets:
-            cum += p
-            peak = max(peak, cum)
-            dd = (peak - cum) / peak * 100 if peak > 0 else 0
-            max_dd = max(max_dd, dd)
-
-        # Sharpe simplificado (média/desvio dos retornos)
-        import numpy as np
-        if len(pnl_nets) >= 2:
-            arr = np.array(pnl_nets)
-            sharpe = float(arr.mean() / arr.std()) if arr.std() > 0 else 0
-        else:
-            sharpe = 0
-
-        sql = """INSERT INTO daily_stats
-            (date,pnl_gross,pnl_net,fees,trades,wins,losses,win_rate,max_dd,sharpe,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(date) DO UPDATE SET
-            pnl_gross=excluded.pnl_gross, pnl_net=excluded.pnl_net,
-            fees=excluded.fees, trades=excluded.trades,
-            wins=excluded.wins, losses=excluded.losses,
-            win_rate=excluded.win_rate, max_dd=excluded.max_dd,
-            sharpe=excluded.sharpe, updated_at=excluded.updated_at"""
-        await _exec(sql, (
-            today, round(pnl_gross,4), round(pnl_net,4), round(fees,4),
-            trades, wins, losses, round(win_rate,1),
-            round(max_dd,2), round(sharpe,3), _now()
-        ))
-    except Exception as e:
-        from bot.logger import log; log.error(f"DB _update_daily_stats: {e}")
+    sql = """INSERT INTO performance
+        (periodo,strategy,win_rate,profit_factor,sharpe_ratio,sortino_ratio,
+         max_drawdown,expectancy_por_trade,total_trades,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)"""
+    await _exec(sql, (
+        date.today().isoformat(), "ALL",
+        round(wr,1), round(pf,2), round(sharpe,3),
+        round(sortino,3), round(max_dd,4), round(exp,4),
+        total, _now(),
+    ))
 
 
-async def get_stats_summary() -> dict:
-    """Retorna métricas completas para o dashboard."""
-    try:
-        # Hoje
-        today = datetime.now(timezone.utc).date().isoformat()
-        today_row = await _fetchone("SELECT * FROM daily_stats WHERE date=?", (today,))
+async def get_stats() -> dict:
+    """Retorna métricas completas para dashboard e /api/backtest."""
+    perf = await _fetchone(
+        "SELECT * FROM performance ORDER BY id DESC LIMIT 1"
+    )
+    recent = await _fetchall(
+        """SELECT symbol,side,entry_price,exit_price,pnl,fees,
+                  score_entrada,duration_minutes,timestamp
+           FROM trades WHERE status='closed'
+           ORDER BY id DESC LIMIT 30"""
+    )
+    today = date.today().isoformat()
+    today_rows = await _fetchall(
+        "SELECT pnl,fees FROM trades WHERE status='closed' AND date(timestamp)=?",
+        (today,)
+    )
+    consecutive = await get_consecutive_losses()
+    today_pnl  = sum(r[0] for r in today_rows) if today_rows else 0
+    today_fees = sum(r[1] for r in today_rows) if today_rows else 0
+    today_wins = sum(1 for r in today_rows if r[0] > 0)
 
-        # Total histórico
-        all_rows = await _fetchall("SELECT pnl_net, pnl_gross, fees, wins, losses FROM daily_stats")
-        total_pnl_net   = sum(r[1] for r in all_rows) if all_rows else 0
-        total_pnl_gross = sum(r[2] for r in all_rows) if all_rows else 0
-        total_fees      = sum(r[3] for r in all_rows) if all_rows else 0
-        total_wins      = sum(r[4] for r in all_rows) if all_rows else 0
-        total_losses    = sum(r[5] for r in all_rows) if all_rows else 0
-        total_trades    = total_wins + total_losses
-
-        # Últimos 30 trades fechados
-        recent = await _fetchall(
-            """SELECT symbol,direction,entry,exit_price,pnl_net,fees,score,rr,hold_minutes,closed_at
-               FROM trades WHERE status='closed'
-               ORDER BY closed_at DESC LIMIT 30"""
-        )
-
-        consecutive = await get_consecutive_losses()
-
-        return {
-            "today": {
-                "pnl_net":   round(today_row[2], 4) if today_row else 0,
-                "pnl_gross": round(today_row[1], 4) if today_row else 0,
-                "fees":      round(today_row[3], 4) if today_row else 0,
-                "trades":    today_row[4] if today_row else 0,
-                "wins":      today_row[5] if today_row else 0,
-                "losses":    today_row[6] if today_row else 0,
-                "win_rate":  round(today_row[7], 1) if today_row else 0,
-                "max_dd":    round(today_row[8], 2) if today_row else 0,
-                "sharpe":    round(today_row[9], 3) if today_row else 0,
-            },
-            "total": {
-                "pnl_net":   round(total_pnl_net, 4),
-                "pnl_gross": round(total_pnl_gross, 4),
-                "fees":      round(total_fees, 4),
-                "trades":    total_trades,
-                "wins":      total_wins,
-                "losses":    total_losses,
-                "win_rate":  round(total_wins/total_trades*100, 1) if total_trades else 0,
-            },
-            "consecutive_losses": consecutive,
-            "paused_by_losses":   consecutive >= 3,
-            "recent_trades": [
-                {
-                    "symbol":    r[0], "direction": r[1],
-                    "entry":     round(r[2],4), "exit": round(r[3],4) if r[3] else None,
-                    "pnl_net":   round(r[4],4), "fees": round(r[5],4),
-                    "score":     r[6], "rr": round(r[7],2),
-                    "hold_min":  round(r[8],1) if r[8] else 0,
-                    "closed_at": r[9],
-                }
-                for r in (recent or [])
-            ],
-        }
-    except Exception as e:
-        from bot.logger import log; log.error(f"DB get_stats_summary: {e}")
-        return {"today": {}, "total": {}, "consecutive_losses": 0, "recent_trades": []}
+    return {
+        "performance": {
+            "win_rate":            round(perf[3], 1) if perf else 0,
+            "profit_factor":       round(perf[4], 2) if perf else 0,
+            "sharpe_ratio":        round(perf[5], 3) if perf else 0,
+            "sortino_ratio":       round(perf[6], 3) if perf else 0,
+            "max_drawdown":        round(perf[7], 4) if perf else 0,
+            "expectancy_por_trade":round(perf[8], 4) if perf else 0,
+            "total_trades":        perf[9] if perf else 0,
+        },
+        "today": {
+            "pnl_net":   round(today_pnl - today_fees, 4),
+            "pnl_gross": round(today_pnl, 4),
+            "fees":      round(today_fees, 4),
+            "trades":    len(today_rows),
+            "wins":      today_wins,
+        },
+        "consecutive_losses": consecutive,
+        "bot_paused":         False,   # NUNCA pausa por perdas
+        "recent_trades": [
+            {
+                "symbol":   r[0], "side":     r[1],
+                "entry":    round(r[2], 4), "exit": round(r[3], 4) if r[3] else None,
+                "pnl":      round(r[4], 4), "fees": round(r[5], 4),
+                "score":    r[6], "hold_min": round(r[7], 1) if r[7] else 0,
+                "time":     r[8],
+            }
+            for r in (recent or [])
+        ],
+    }

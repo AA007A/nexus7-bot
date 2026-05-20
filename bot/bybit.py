@@ -1,112 +1,104 @@
 """
-Bybit V5 REST API Client
-Signature: HMAC-SHA256(timestamp + apiKey + recvWindow + payload)
+KAKAZITO TRADE — Bybit V5 Client
+- HMAC-SHA256 corrigido (recv_window consistente)
+- REST para ordens e account
+- WebSocket para dados de mercado em tempo real
+- Reconexão automática
 """
-import hmac, hashlib, time, json, asyncio
-from urllib.parse import urlencode
-from typing import Optional, List
+import asyncio, hashlib, hmac, json, time, os
 import aiohttp
-
-from bot.config import cfg
 from bot.logger import log
 
-BASE = "https://api.bybit.com"
-RW   = "5000"
+BASE        = "https://api.bybit.com"
+WS_PUBLIC   = "wss://stream.bybit.com/v5/public/linear"
+WS_PRIVATE  = "wss://stream.bybit.com/v5/private"
+
+API_KEY    = os.environ.get("BYBIT_API_KEY",    os.environ.get("BINANCE_API_KEY",    ""))
+API_SECRET = os.environ.get("BYBIT_API_SECRET", os.environ.get("BINANCE_API_SECRET", ""))
+RECV_WINDOW = "20000"   # fixo em todas as chamadas
 
 INTERVALS = {
-    # Com sufixo
-    "1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
-    "1h":"60","2h":"120","4h":"240","1d":"D",
-    # Sem sufixo (como o engine passa)
     "1":"1","3":"3","5":"5","15":"15","30":"30",
     "60":"60","120":"120","240":"240","D":"D",
+    "1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+    "1h":"60","2h":"120","4h":"240","1d":"D",
 }
 
 
-def _sign(secret: str, ts: str, key: str, payload: str) -> str:
-    raw = ts + key + RW + payload
-    return hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+# ── HMAC-SHA256 corrigido ────────────────────────────────────────
+def _sign(secret: str, payload: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
-def _headers(key: str, secret: str, payload: str) -> dict:
+def _auth_params(params_str: str = "") -> dict:
     ts = str(int(time.time() * 1000))
+    pre = ts + API_KEY + RECV_WINDOW + params_str
+    sig = _sign(API_SECRET, pre)
     return {
-        "X-BAPI-API-KEY":     key,
+        "X-BAPI-API-KEY":     API_KEY,
         "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-SIGN":        _sign(secret, ts, key, payload),
-        "X-BAPI-RECV-WINDOW": RW,
+        "X-BAPI-SIGN":        sig,
+        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
         "Content-Type":       "application/json",
     }
 
 
 class BybitClient:
     def __init__(self):
-        self.key     = cfg.API_KEY
-        self.secret  = cfg.API_SECRET
-        self._sess: Optional[aiohttp.ClientSession] = None
-        self._instruments: dict = {}  # cache de info dos instrumentos
-        log.info(f"🔑 Bybit key: {self.key[:8]}... ({len(self.key)} chars)")
+        self._session: aiohttp.ClientSession | None = None
+        # WebSocket state
+        self._ws_task     = None
+        self._ws_handlers = {}   # topic → callback
+        self._kline_cache = {}   # "symbol_interval" → list of klines
+        self._ticker_cache= {}   # symbol → ticker dict
 
-    async def _s(self) -> aiohttp.ClientSession:
-        if not self._sess or self._sess.closed:
-            self._sess = aiohttp.ClientSession()
-        return self._sess
+    def _sess(self) -> aiohttp.ClientSession:
+        if not self._session or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    # ── REST helpers ────────────────────────────────────────────
     async def _get(self, path: str, params: dict = None, auth: bool = False) -> dict:
-        qs  = urlencode(sorted((params or {}).items()))
-        url = f"{BASE}{path}?{qs}" if qs else f"{BASE}{path}"
-        hdrs = _headers(self.key, self.secret, qs) if auth else {}
-        s = await self._s()
-        async with s.get(url, headers=hdrs, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            raw = await r.text()
-            try:
-                data = json.loads(raw)
-            except Exception:
-                raise Exception(f"Non-JSON: {raw[:150]}")
-            rc = data.get("retCode", 0)
-            if rc != 0:
-                raise Exception(f"Bybit {rc}: {data.get('retMsg','')}")
+        url = BASE + path
+        qs  = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+        headers = _auth_params(qs) if auth else {}
+        try:
+            async with self._sess().get(
+                url, params=params, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                data = await r.json()
+            if data.get("retCode", 0) != 0:
+                raise RuntimeError(f"Bybit {data.get('retCode')}: {data.get('retMsg')}")
             return data.get("result", {})
+        except Exception as e:
+            raise RuntimeError(f"GET {path}: {e}")
 
     async def _post(self, path: str, body: dict = None) -> dict:
-        bstr = json.dumps(body or {}, separators=(',', ':'))
-        hdrs = _headers(self.key, self.secret, bstr)
-        s = await self._s()
-        async with s.post(f"{BASE}{path}", headers=hdrs, data=bstr,
-                          timeout=aiohttp.ClientTimeout(total=10)) as r:
-            raw = await r.text()
-            try:
-                data = json.loads(raw)
-            except Exception:
-                raise Exception(f"Non-JSON: {raw[:150]}")
-            rc = data.get("retCode", 0)
-            if rc != 0:
-                raise Exception(f"Bybit {rc}: {data.get('retMsg','')}")
-            return data.get("result", {})
-
-    async def get_instruments(self) -> dict:
-        """Busca info de todos os instrumentos — min qty, step size etc"""
-        if self._instruments:
-            return self._instruments
+        url     = BASE + path
+        payload = json.dumps(body or {})
+        headers = _auth_params(payload)
         try:
-            data = await self._get("/v5/market/instruments-info",
-                                   {"category": "linear", "limit": "1000"})
-            for item in data.get("list", []):
-                sym = item.get("symbol", "")
-                if not sym.endswith("USDT"):
-                    continue
-                lot = item.get("lotSizeFilter", {})
-                self._instruments[sym] = {
-                    "minQty":  float(lot.get("minOrderQty",  0.001)),
-                    "maxQty":  float(lot.get("maxOrderQty",  999999)),
-                    "qtyStep": float(lot.get("qtyStep",      0.001)),
-                    "minNotional": float(lot.get("minNotionalValue", 1.0)),
-                }
-            log.info(f"📋 {len(self._instruments)} instrumentos carregados")
+            async with self._sess().post(
+                url, data=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                data = await r.json()
+            if data.get("retCode", 0) not in (0, 110043):
+                raise RuntimeError(f"Bybit {data.get('retCode')}: {data.get('retMsg')}")
+            return data.get("result", {})
         except Exception as e:
-            log.error(f"get_instruments: {e}")
-        return self._instruments
+            raise RuntimeError(f"POST {path}: {e}")
 
+    # ── Public REST ─────────────────────────────────────────────
     async def ping(self) -> bool:
         try:
             await self._get("/v5/market/time")
@@ -114,90 +106,214 @@ class BybitClient:
         except Exception:
             return False
 
-    async def get_klines(self, symbol: str, interval: str = "5m",
-                         limit: int = 100) -> List[dict]:
-        data = await self._get("/v5/market/kline", {
-            "category": "linear",
-            "symbol":   symbol,
-            "interval": INTERVALS.get(interval, "5"),
-            "limit":    str(limit),
+    async def get_klines(self, symbol: str, interval: str = "15", limit: int = 100) -> list:
+        iv  = INTERVALS.get(interval, interval)
+        res = await self._get("/v5/market/kline", {
+            "category": "linear", "symbol": symbol,
+            "interval": iv, "limit": limit,
         })
-        raw = list(reversed(data.get("list", [])))
-        return [{"t": r[0], "o": float(r[1]), "h": float(r[2]),
-                 "l": float(r[3]), "c": float(r[4]), "v": float(r[5])} for r in raw]
-
-    async def get_ticker(self, symbol: str) -> dict:
-        data = await self._get("/v5/market/tickers",
-                               {"category": "linear", "symbol": symbol})
-        lst = data.get("list", [{}])
-        return lst[0] if lst else {}
+        raw = res.get("list", [])
+        # Bybit retorna newest first → reverter
+        raw = list(reversed(raw))
+        return [
+            {"o": float(k[1]), "h": float(k[2]),
+             "l": float(k[3]), "c": float(k[4]),
+             "v": float(k[5])}
+            for k in raw
+        ]
 
     async def get_all_tickers(self) -> list:
-        """Retorna todos os tickers USDT perpetual"""
-        data = await self._get("/v5/market/tickers", {"category": "linear"})
-        return [t for t in data.get("list", []) if t.get("symbol","").endswith("USDT")]
+        res = await self._get("/v5/market/tickers", {"category": "linear"})
+        return res.get("list", [])
 
+    async def get_instruments(self) -> dict:
+        res = await self._get("/v5/market/instruments-info", {
+            "category": "linear", "limit": "1000",
+        })
+        out = {}
+        for item in res.get("list", []):
+            sym = item.get("symbol", "")
+            lot = item.get("lotSizeFilter", {})
+            out[sym] = {
+                "minQty":      float(lot.get("minOrderQty",  0.001)),
+                "qtyStep":     float(lot.get("qtyStep",      0.001)),
+                "minNotional": float(lot.get("minOrderAmt",  1.0)),
+            }
+        return out
+
+    async def get_orderbook(self, symbol: str) -> dict:
+        res = await self._get("/v5/market/orderbook", {
+            "category": "linear", "symbol": symbol, "limit": "25",
+        })
+        return res
+
+    async def get_open_interest(self, symbol: str) -> dict:
+        res = await self._get("/v5/market/open-interest", {
+            "category": "linear", "symbol": symbol,
+            "intervalTime": "5min", "limit": "10",
+        })
+        return res.get("list", [{}])[0] if res.get("list") else {}
+
+    async def get_funding_rate(self, symbol: str) -> float:
+        res = await self._get("/v5/market/tickers", {
+            "category": "linear", "symbol": symbol,
+        })
+        items = res.get("list", [])
+        if items:
+            return float(items[0].get("fundingRate", 0))
+        return 0.0
+
+    # ── Private REST ────────────────────────────────────────────
     async def get_balance(self) -> float:
+        if not API_KEY:
+            return 1000.0
         try:
-            data = await self._get("/v5/account/wallet-balance",
-                                   {"accountType": "UNIFIED"}, auth=True)
-            for item in data.get("list", []):
-                for coin in item.get("coin", []):
-                    if coin.get("coin") == "USDT":
-                        val = float(coin.get("walletBalance", 0))
-                        log.info(f"💰 Saldo: ${val:.4f} USDT")
-                        return val
+            res = await self._get("/v5/account/wallet-balance",
+                                  {"accountType": "UNIFIED"}, auth=True)
+            for coin in res.get("list", [{}])[0].get("coin", []):
+                if coin.get("coin") == "USDT":
+                    return float(coin.get("walletBalance", 0))
             return 0.0
         except Exception as e:
             log.error(f"get_balance: {e}")
             return -1.0
 
     async def get_positions(self, symbol: str = None) -> list:
+        if not API_KEY:
+            return []
+        params = {"category": "linear", "settleCoin": "USDT", "limit": "200"}
+        if symbol:
+            params["symbol"] = symbol
         try:
-            params = {"category": "linear", "settleCoin": "USDT", "limit": "200"}
-            if symbol:
-                params["symbol"] = symbol
-            data = await self._get("/v5/position/list", params, auth=True)
-            return data.get("list", [])
+            res = await self._get("/v5/position/list", params, auth=True)
+            return [p for p in res.get("list", []) if float(p.get("size", 0)) > 0]
         except Exception as e:
             log.error(f"get_positions: {e}")
             return []
 
-    async def place_order(self, symbol: str, side: str, qty: float,
-                          sl: float = None, tp: float = None) -> dict:
-        body = {
-            "category":    "linear",
-            "symbol":      symbol,
-            "side":        side,
-            "orderType":   "Market",
-            "qty":         str(qty),
-            "timeInForce": "GoodTillCancel",
-        }
-        if sl: body["stopLoss"]   = str(round(sl, 6))
-        if tp: body["takeProfit"] = str(round(tp, 6))
-        log.info(f"📤 {side} {qty} {symbol} SL={sl} TP={tp}")
-        return await self._post("/v5/order/create", body)
-
-    async def cancel_all(self, symbol: str = None) -> dict:
-        try:
-            body = {"category": "linear"}
-            if symbol:
-                body["symbol"] = symbol
-            return await self._post("/v5/order/cancel-all", body)
-        except Exception as e:
-            log.warning(f"cancel_all: {e}")
-            return {}
-
-    async def set_leverage(self, symbol: str, lev: int):
+    async def set_leverage(self, symbol: str, leverage: int):
+        if not API_KEY:
+            return
         try:
             await self._post("/v5/position/set-leverage", {
                 "category": "linear", "symbol": symbol,
-                "buyLeverage": str(lev), "sellLeverage": str(lev),
+                "buyLeverage": str(leverage), "sellLeverage": str(leverage),
             })
         except Exception as e:
-            if "leverage not modified" not in str(e).lower():
+            if "110043" not in str(e):   # já está nessa alavancagem
                 log.warning(f"set_leverage {symbol}: {e}")
 
-    async def close(self):
-        if self._sess and not self._sess.closed:
-            await self._sess.close()
+    async def place_order(self, symbol: str, side: str, qty: float,
+                          sl: float = 0, tp: float = 0) -> dict:
+        if not API_KEY:
+            log.info(f"[DEMO] {side} {qty} {symbol} SL={sl} TP={tp}")
+            return {"orderId": "demo"}
+        body = {
+            "category": "linear", "symbol": symbol,
+            "side": side, "orderType": "Market",
+            "qty": str(qty), "timeInForce": "IOC",
+            "positionIdx": 0,
+        }
+        if sl > 0: body["stopLoss"]   = str(round(sl, 6))
+        if tp > 0: body["takeProfit"] = str(round(tp, 6))
+        return await self._post("/v5/order/create", body)
+
+    async def set_sl(self, symbol: str, sl: float):
+        if not API_KEY:
+            return
+        try:
+            await self._post("/v5/position/trading-stop", {
+                "category": "linear", "symbol": symbol,
+                "stopLoss": str(round(sl, 6)), "positionIdx": 0,
+            })
+        except Exception as e:
+            log.error(f"set_sl {symbol}: {e}")
+
+    # ── WebSocket público ───────────────────────────────────────
+    async def start_websocket(self, symbols: list, intervals: list = None):
+        """Inicia WS em background. Reconecta automaticamente."""
+        if self._ws_task and not self._ws_task.done():
+            return
+        self._ws_task = asyncio.create_task(
+            self._ws_loop(symbols, intervals or ["15", "60"])
+        )
+
+    async def _ws_loop(self, symbols: list, intervals: list):
+        import websockets
+        while True:
+            try:
+                log.info("🔌 WebSocket Bybit conectando...")
+                async with websockets.connect(
+                    WS_PUBLIC, ping_interval=20, ping_timeout=10
+                ) as ws:
+                    # Subscreve tickers e klines
+                    topics = []
+                    for sym in symbols:
+                        topics.append(f"tickers.{sym}")
+                        for iv in intervals:
+                            topics.append(f"kline.{iv}.{sym}")
+
+                    # Bybit limita 10 topics por mensagem
+                    for i in range(0, len(topics), 10):
+                        await ws.send(json.dumps({
+                            "op": "subscribe",
+                            "args": topics[i:i+10],
+                        }))
+
+                    log.info(f"✅ WebSocket subscrito: {len(topics)} topics")
+
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                            await self._handle_ws(msg)
+                        except Exception as e:
+                            log.error(f"WS parse: {e}")
+
+            except Exception as e:
+                log.warning(f"⚡ WebSocket desconectado: {e} — reconectando em 5s")
+                await asyncio.sleep(5)
+
+    async def _handle_ws(self, msg: dict):
+        topic = msg.get("topic", "")
+        data  = msg.get("data", {})
+        if not topic or not data:
+            return
+
+        # Ticker
+        if topic.startswith("tickers."):
+            sym = topic.split(".")[1]
+            if isinstance(data, dict):
+                self._ticker_cache[sym] = data
+
+        # Kline
+        elif topic.startswith("kline."):
+            parts = topic.split(".")
+            iv, sym = parts[1], parts[2]
+            key = f"{sym}_{iv}"
+            items = data if isinstance(data, list) else [data]
+            if key not in self._kline_cache:
+                self._kline_cache[key] = []
+            for item in items:
+                k = {
+                    "o": float(item.get("open",  0)),
+                    "h": float(item.get("high",  0)),
+                    "l": float(item.get("low",   0)),
+                    "c": float(item.get("close", 0)),
+                    "v": float(item.get("volume",0)),
+                }
+                cache = self._kline_cache[key]
+                if cache and item.get("confirm") is False:
+                    cache[-1] = k   # atualiza candle em formação
+                else:
+                    cache.append(k)
+                    if len(cache) > 200:
+                        cache.pop(0)
+
+    def get_cached_klines(self, symbol: str, interval: str, limit: int = 100) -> list:
+        """Retorna klines do cache WS. Fallback para None se não tiver."""
+        key = f"{symbol}_{interval}"
+        data = self._kline_cache.get(key, [])
+        return data[-limit:] if data else []
+
+    def get_cached_ticker(self, symbol: str) -> dict:
+        return self._ticker_cache.get(symbol, {})
