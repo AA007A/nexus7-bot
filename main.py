@@ -147,6 +147,95 @@ async def rankings():
     return {"symbols": SYMBOLS[:10]}
 
 
+
+
+# ── P3 — Backtest, CVD, Heatmap, Macro ───────────────────────────
+@app.post("/api/backtest/run")
+async def run_backtest(symbol: str = "BTCUSDT"):
+    """Dispara backtest completo. Pode demorar 30-60s."""
+    from bot.backtest import run_backtest as do_bt
+    result = await do_bt(app.state.client, symbol.upper())
+    return result
+
+@app.get("/api/backtest/results")
+async def backtest_results():
+    """Último resultado de backtest do banco."""
+    stats = await db.get_stats()
+    return {
+        "performance":        stats.get("performance", {}),
+        "consecutive_losses": stats.get("consecutive_losses", 0),
+        "bot_paused":         False,
+        "today":              stats.get("today", {}),
+        "recent_trades":      stats.get("recent_trades", [])[:10],
+    }
+
+@app.get("/api/cvd/{symbol}")
+async def cvd(symbol: str):
+    """CVD acumulado em tempo real via WebSocket."""
+    from bot.market_data import get_cvd
+    sym = symbol.upper()
+    tk  = app.state.client.get_cached_ticker(sym)
+    return {
+        "symbol": sym,
+        "cvd":    round(get_cvd(sym), 2),
+        "price":  tk.get("lastPrice", 0),
+        "bias":   "BULLISH" if get_cvd(sym) > 0 else "BEARISH",
+    }
+
+@app.get("/api/heatmap/{symbol}")
+async def heatmap(symbol: str):
+    """Clusters de liquidação estimados."""
+    from bot.market_data import fetch_liq_heatmap
+    return await fetch_liq_heatmap(app.state.client, symbol.upper())
+
+@app.get("/api/macro")
+async def macro():
+    """Correlações macro: DXY, S&P500, BTC Dominance."""
+    from bot.market_data import get_macro_summary
+    from bot.score import _macro_cache
+    return {
+        "correlations": get_macro_summary(),
+        "fear_greed":   _macro_cache.get("fear_greed", 50),
+        "btc_dominance":_macro_cache.get("btc_dominance", 57.0),
+    }
+
+@app.get("/api/signals")
+async def signals(limit: int = 20):
+    """Últimos sinais gerados com scores detalhados."""
+    rows = await db._fetchall(
+        """SELECT symbol,direction,score_total,score_tecnico,
+                  score_orderflow,score_macro,score_news,
+                  entrou,motivo_rejeicao,timestamp
+           FROM signals ORDER BY id DESC LIMIT ?""",
+        (limit,)
+    )
+    return {
+        "signals": [
+            {
+                "symbol":     r[0], "direction":   r[1],
+                "score":      r[2], "tecnico":     r[3],
+                "orderflow":  r[4], "macro":       r[5],
+                "news_mod":   r[6], "entrou":      bool(r[7]),
+                "motivo":     r[8], "timestamp":   r[9],
+            }
+            for r in (rows or [])
+        ]
+    }
+
+@app.get("/api/risk-events")
+async def risk_events(limit: int = 20):
+    """Eventos de risco registrados."""
+    rows = await db._fetchall(
+        "SELECT tipo_evento,descricao,pnl_acumulado,timestamp FROM risk_events ORDER BY id DESC LIMIT ?",
+        (limit,)
+    )
+    return {
+        "events": [
+            {"tipo": r[0], "descricao": r[1], "pnl": r[2], "timestamp": r[3]}
+            for r in (rows or [])
+        ]
+    }
+
 # ── Dashboard ────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():

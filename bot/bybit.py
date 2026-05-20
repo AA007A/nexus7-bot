@@ -279,11 +279,22 @@ class BybitClient:
         if not topic or not data:
             return
 
-        # Ticker
+        # Ticker + CVD update
         if topic.startswith("tickers."):
             sym = topic.split(".")[1]
             if isinstance(data, dict):
+                prev = self._ticker_cache.get(sym, {})
                 self._ticker_cache[sym] = data
+                # Atualiza CVD com cada tick
+                try:
+                    from bot.market_data import update_cvd
+                    cur_p  = float(data.get("lastPrice", 0))
+                    prev_p = float(prev.get("lastPrice", cur_p))
+                    vol    = float(data.get("volume24h", 0))
+                    if cur_p > 0 and prev_p > 0:
+                        update_cvd(sym, cur_p, prev_p, vol)
+                except Exception:
+                    pass
 
         # Kline
         elif topic.startswith("kline."):

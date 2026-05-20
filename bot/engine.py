@@ -19,6 +19,8 @@ from bot.logger import log
 from bot.notifier import notify, signal_msg
 from bot import database as db
 from bot import score as scoring
+from bot import market_data as mdata
+from bot import backtest as bt
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -280,8 +282,10 @@ class TradingEngine:
         self._running = True
         log.info("⚡ Engine v10 iniciando...")
         await db.init()   # inicia DB (PostgreSQL ou SQLite)
-        asyncio.create_task(scoring.update_macro_cache())   # Fear&Greed + BTC.D
-        asyncio.create_task(scoring.news_reader_loop())     # news 24/7
+        asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
+        asyncio.create_task(scoring.news_reader_loop())           # news 24/7
+        asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
+        asyncio.create_task(bt.weekly_backtest_loop(client))      # backtest semanal
         await self._connect()
 
         while self._running:
@@ -875,6 +879,7 @@ class TradingEngine:
             "win_rate_pct":     summaries["session"]["win_rate"],
             "total_pnl":        summaries["session"]["pnl"],
             "symbols":          self.viable_symbols[:10],
+            "macro_corr":       mdata.get_macro_summary(),
             # ── Meta diária
             "daily_target":     self.daily_target,
             "daily_stop_loss":  self.daily_stop_loss,
