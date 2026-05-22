@@ -236,6 +236,58 @@ async def risk_events(limit: int = 20):
         ]
     }
 
+
+@app.get("/api/whale-alerts")
+async def whale_alerts():
+    """Transações de baleias via CryptoQuant/Santiment públicos."""
+    from bot.score import _news_cache, _macro_cache
+    from bot.market_data import get_macro_summary
+    macro = get_macro_summary()
+    return {
+        "btc_dominance":  _macro_cache.get("btc_dominance", 57.0),
+        "fear_greed":     _macro_cache.get("fear_greed", 50),
+        "dxy_trend":      macro.get("dxy_trend", "neutral"),
+        "sp500_trend":    macro.get("sp500_trend", "neutral"),
+        "btc_sp500_corr": macro.get("btc_sp500_corr", 0.7),
+        "btc_dxy_corr":   macro.get("btc_dxy_corr", -0.6),
+        "news_signal":    _news_cache.get("classificacao", "NEUTRO"),
+        "news_conf":      _news_cache.get("score_confianca", 0),
+        "fomc_window":    _news_cache.get("fomc_window", False),
+        "note":           "Whale tracking via Glassnode/CryptoQuant requer API paga"
+    }
+
+@app.get("/api/indicators/{symbol}")
+async def indicators(symbol: str, interval: str = "15"):
+    """Retorna todos os indicadores calculados para um símbolo."""
+    from bot.indicators import (adx, bollinger, choppiness, vwap as vwap_fn,
+                                 volume_profile, delta_footprint, smc_analysis, atr)
+    import numpy as np
+    sym = symbol.upper()
+    try:
+        kl = app.state.client.get_cached_klines(sym, interval, 100)
+        if len(kl) < 30:
+            kl = await app.state.client.get_klines(sym, interval, 100)
+        if not kl:
+            return {"error": "Sem dados"}
+        c=[k["c"] for k in kl]; h=[k["h"] for k in kl]
+        l=[k["l"] for k in kl]; o=[k["o"] for k in kl]; v=[k["v"] for k in kl]
+        atr_arr = atr(h,l,c)
+        return {
+            "symbol":   sym, "interval": interval,
+            "price":    c[-1],
+            "adx":      adx(h,l,c),
+            "bollinger":bollinger(c),
+            "choppiness":choppiness(h,l,c),
+            "vwap":     vwap_fn(h,l,c,v),
+            "vol_profile": volume_profile(h,l,v),
+            "delta":    delta_footprint(c,v,o),
+            "smc":      smc_analysis(h,l,c),
+            "atr":      round(float(atr_arr[-1]),6),
+            "atr_pct":  round(float(atr_arr[-1])/c[-1]*100, 3),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 # ── Dashboard ────────────────────────────────────────────────────
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():

@@ -291,7 +291,7 @@ class TradingEngine:
         while self._running:
             try:
                 if not self.connected:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(20)   # scan a cada 20s
                     await self._connect()
                     continue
 
@@ -666,13 +666,21 @@ class TradingEngine:
                 continue
             try:
                 log.info(f"🔍 Analisando {sym}...")
-                # Busca 3 timeframes sequencialmente (evita rate limit)
-                k15 = await self.client.get_klines(sym, "15",  100)
-                await asyncio.sleep(0.4)
-                k1h = await self.client.get_klines(sym, "60",  100)
-                await asyncio.sleep(0.4)
-                k4h = await self.client.get_klines(sym, "240", 100)
-                await asyncio.sleep(0.4)
+                # Tenta WebSocket cache primeiro (dados em tempo real, sem latência)
+                k15 = self.client.get_cached_klines(sym, "15",  100)
+                k1h = self.client.get_cached_klines(sym, "60",  100)
+                k4h = self.client.get_cached_klines(sym, "240", 100)
+
+                # Fallback REST se cache insuficiente
+                if len(k15) < 30:
+                    k15 = await self.client.get_klines(sym, "15",  100)
+                    await asyncio.sleep(0.3)
+                if len(k1h) < 20:
+                    k1h = await self.client.get_klines(sym, "60",  100)
+                    await asyncio.sleep(0.3)
+                if len(k4h) < 15:
+                    k4h = await self.client.get_klines(sym, "240", 100)
+                    await asyncio.sleep(0.3)
                 if len(k15) < 60 or len(k1h) < 30 or len(k4h) < 20:
                     continue
 
@@ -737,7 +745,7 @@ class TradingEngine:
                     await db.log_decision(sym,"HOLD",0,"filtros não atendidos")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(1.5)   # respeita rate limit Bybit (3 requests por símbolo)
+            await asyncio.sleep(0.5)   # delay reduzido (usa WS cache quando possível)
 
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
@@ -797,9 +805,12 @@ class TradingEngine:
                 cfg.LEVERAGE, pre_score["total"],
             )
             self._trade_ids[sig.symbol] = trade_id
+            entry_type = "BOS_BREAK" if "ENTRY:BOS_BREAK" in sig.reason else                          "MOMENTUM" if "ENTRY:MOMENTUM" in sig.reason else "PULLBACK"
             log.info(
                 f"✅ ABERTO {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f} "
-                f"SL=${sig.sl:.4f} TP=${sig.tp:.4f} Score={sig.score}/100 RR={sig.rr}"
+                f"SL=${sig.sl:.4f} TP=${sig.tp:.4f} "
+                f"Score={sig.score}/100 RR={sig.rr} "
+                f"Tipo={entry_type} ADX={sig.reason}"
             )
             await notify(await signal_msg(sig))
         except Exception as e:
