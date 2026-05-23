@@ -228,7 +228,7 @@ class RiskManager:
 
         buying_power = self.balance * cfg.LEVERAGE
         # Usa risco reduzido após meta diária ser batida
-        risk_pct = engine_ref.get("risk_pct", cfg.MAX_RISK_PCT) if hasattr(cfg,"_engine_ref") else cfg.MAX_RISK_PCT
+        risk_pct = self._effective_risk_pct()
         target_not   = buying_power * cfg.MAX_RISK_PCT
         target_not   = max(target_not, min_not)
 
@@ -506,7 +506,10 @@ class TradingEngine:
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)
                     if tid:
-                        await db.save_trade_close(tid, trade)
+                        await db.save_trade_close(
+                            tid, price, pnl_net, total_fee,
+                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                        )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
 
@@ -584,6 +587,12 @@ class TradingEngine:
         pass
 
     # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
+    def _effective_risk_pct(self) -> float:
+        """Retorna o risco efetivo, reduzido se a meta diária foi batida."""
+        if self.stats.daily_pnl >= cfg.DAILY_TARGET:
+            return cfg.POST_TARGET_RISK
+        return cfg.MAX_RISK_PCT
+
     async def _check_rr_double(self):
         """
         Fecha a posição quando o lucro atingir o dobro do risco original.
@@ -618,6 +627,10 @@ class TradingEngine:
                     )
                     # Registra como trade fechado
                     pnl_gross = lucro_dist * pos.qty
+                    fee_open  = pos.qty * pos.entry * TAKER_FEE
+                    fee_close = pos.qty * price     * TAKER_FEE
+                    total_fee = fee_open + fee_close
+                    pnl_net   = pnl_gross - total_fee
                     fee_open  = pos.qty * pos.entry * 0.00055
                     fee_close = pos.qty * price     * 0.00055
                     trade = Trade(
@@ -629,7 +642,10 @@ class TradingEngine:
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)
                     if tid:
-                        await db.save_trade_close(tid, trade)
+                        await db.save_trade_close(
+                            tid, price, pnl_net, total_fee,
+                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                        )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
 

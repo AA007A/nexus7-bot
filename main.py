@@ -77,20 +77,7 @@ async def db_stats():
     """Métricas persistidas: Sharpe, Sortino, Win Rate, Max DD, PF."""
     return await db.get_stats()
 
-@app.get("/api/backtest/results")
-async def backtest_results():
-    """Resultados de backtest / performance histórica do banco."""
-    import numpy as np
-    stats   = await db.get_stats()
-    trades  = stats.get("recent_trades", [])
-    perf    = stats.get("performance", {})
-    return {
-        "summary": perf,
-        "consecutive_losses": stats.get("consecutive_losses", 0),
-        "bot_paused":         False,   # nunca pausa
-        "today":              stats.get("today", {}),
-        "recent_trades":      trades[:10],
-    }
+
 
 
 # ── Score pré-trade ──────────────────────────────────────────────

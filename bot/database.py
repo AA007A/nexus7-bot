@@ -9,7 +9,7 @@ import os, json, asyncio
 from datetime import datetime, timezone, date
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
-SQLITE_PATH  = "/app/data/kakazito.db"
+SQLITE_PATH  = "/home/ubuntu/nexus7-bot/data/kakazito.db"
 _conn        = None
 _is_pg       = False
 
@@ -90,6 +90,10 @@ _DDL = [
     """CREATE TABLE IF NOT EXISTS consecutive_losses (
         id SERIAL PRIMARY KEY,
         count INTEGER DEFAULT 0, last_loss TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS decisions (
+        id SERIAL PRIMARY KEY,
+        timestamp TEXT, symbol TEXT, type TEXT, score INTEGER, reason TEXT
     )""",
 ]
 
@@ -225,6 +229,10 @@ async def save_snapshot(symbol, oi, fr, cvd=0, btc_dom=0, fear_greed=0):
         VALUES (?,?,?,?,?,?,?)"""
     await _exec(sql, (_now(), symbol, oi, fr, cvd, btc_dom, fear_greed))
 
+
+async def log_decision(symbol: str, tipo: str, score: int, reason: str):
+    sql = """INSERT INTO decisions (timestamp, symbol, type, score, reason) VALUES (?,?,?,?,?)"""
+    await _exec(sql, (_now(), symbol, tipo, score, reason))
 
 async def save_risk_event(tipo, descricao, pnl_acum=0):
     sql = "INSERT INTO risk_events (timestamp,tipo_evento,descricao,pnl_acumulado) VALUES (?,?,?,?)"
