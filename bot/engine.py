@@ -285,7 +285,7 @@ class TradingEngine:
         asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
         asyncio.create_task(scoring.news_reader_loop())           # news 24/7
         asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
-        asyncio.create_task(bt.weekly_backtest_loop(client))      # backtest semanal
+        asyncio.create_task(bt.weekly_backtest_loop(self.client))  # backtest semanal
         await self._connect()
 
         while self._running:
