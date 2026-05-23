@@ -413,12 +413,26 @@ class TradingEngine:
             await self._load_existing_positions()
             self.connected = True
             self.active    = True
+
             # Inicia WebSocket para dados em tempo real
+            # Garante que viable_symbols foi populado antes de iniciar o WS
+            ws_symbols = self.viable_symbols[:10]
+            if not ws_symbols:
+                log.warning(
+                    "⚠️ viable_symbols vazio — usando fallback cfg.SYMBOLS[:10] para WebSocket"
+                )
+                ws_symbols = cfg.SYMBOLS[:10]
+
+            log.info(
+                f"🔌 Iniciando WebSocket com {len(ws_symbols)} símbolos: "
+                f"{', '.join(ws_symbols)}"
+            )
             await self.client.start_websocket(
-                self.viable_symbols[:10],
+                ws_symbols,
                 intervals=["15", "60", "240"],
             )
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
+
             await notify(
                 f"✅ *KAKAZITO TRADE v7 Online!*\n"
                 f"Saldo: `${bal:.4f} USDT`\n"
