@@ -232,17 +232,30 @@ class BybitClient:
     # ── WebSocket público ───────────────────────────────────────
     async def start_websocket(self, symbols: list, intervals: list = None):
         """Inicia WS em background. Reconecta automaticamente."""
+        if not symbols:
+            log.error("❌ start_websocket chamado com lista de símbolos vazia — abortando")
+            return
+        # Cancela task anterior se já concluída (ex: abortou por lista vazia)
         if self._ws_task and not self._ws_task.done():
             return
+        if self._ws_task and self._ws_task.done():
+            self._ws_task = None
         self._ws_task = asyncio.create_task(
             self._ws_loop(symbols, intervals or ["15", "60"])
         )
 
     async def _ws_loop(self, symbols: list, intervals: list):
         import websockets
+        if not symbols:
+            log.error("❌ WebSocket: lista de símbolos vazia — abortando subscrição")
+            return
+
         while True:
             try:
-                log.info("🔌 WebSocket Bybit conectando...")
+                log.info(
+                    f"🔌 WebSocket Bybit conectando... "
+                    f"({len(symbols)} símbolos: {', '.join(symbols)})"
+                )
                 async with websockets.connect(
                     WS_PUBLIC, ping_interval=20, ping_timeout=10
                 ) as ws:
@@ -253,14 +266,33 @@ class BybitClient:
                         for iv in intervals:
                             topics.append(f"kline.{iv}.{sym}")
 
-                    # Bybit limita 10 topics por mensagem
-                    for i in range(0, len(topics), 10):
-                        await ws.send(json.dumps({
-                            "op": "subscribe",
-                            "args": topics[i:i+10],
-                        }))
+                    if not topics:
+                        log.error("❌ WebSocket: nenhum topic gerado — verifique símbolos e intervalos")
+                        return
 
-                    log.info(f"✅ WebSocket subscrito: {len(topics)} topics")
+                    log.info(
+                        f"📡 Subscrevendo {len(topics)} topics: "
+                        f"{', '.join(topics[:6])}"
+                        f"{'...' if len(topics) > 6 else ''}"
+                    )
+
+                    # Bybit limita 10 topics por mensagem
+                    sub_errors = 0
+                    for i in range(0, len(topics), 10):
+                        batch = topics[i:i+10]
+                        try:
+                            await ws.send(json.dumps({
+                                "op": "subscribe",
+                                "args": batch,
+                            }))
+                        except Exception as e:
+                            sub_errors += 1
+                            log.error(f"WS subscribe batch {i//10 + 1}: {e}")
+
+                    if sub_errors:
+                        log.warning(f"⚠️ WebSocket: {sub_errors} batch(es) com erro de subscrição")
+                    else:
+                        log.info(f"✅ WebSocket subscrito: {len(topics)} topics em {(len(topics) + 9) // 10} batch(es)")
 
                     async for raw in ws:
                         try:
