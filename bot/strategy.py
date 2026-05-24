@@ -323,7 +323,7 @@ def score_tf(closes, highs, lows, opens, volumes, direction,
 class Analyzer:
     def analyze_mtf(self, symbol, k15, k1h, k4h,
                     min_score=80, fee_mult=3.0, vol_mult=1.0) -> Optional[Signal]:
-        if len(k4h) < 20 or len(k1h) < 20 or len(k15) < 30:
+        if len(k4h) < 10 or len(k1h) < 15 or len(k15) < 20:
             return None
 
         def ga(kl):

@@ -336,6 +336,7 @@ class BybitClient:
             items = data if isinstance(data, list) else [data]
             if key not in self._kline_cache:
                 self._kline_cache[key] = []
+            prev_len = len(self._kline_cache[key])
             for item in items:
                 k = {
                     "o": float(item.get("open",  0)),
@@ -351,6 +352,12 @@ class BybitClient:
                     cache.append(k)
                     if len(cache) > 200:
                         cache.pop(0)
+            # Log milestones so we can confirm the cache is being populated
+            new_len = len(self._kline_cache[key])
+            if prev_len == 0 and new_len > 0:
+                log.info(f"📦 WS cache iniciado: {key} ({new_len} candles)")
+            elif prev_len < 20 <= new_len:
+                log.info(f"📦 WS cache pronto: {key} ({new_len} candles) — fast-track ativo")
 
     def get_cached_klines(self, symbol: str, interval: str, limit: int = 100) -> list:
         """Retorna klines do cache WS. Fallback para None se não tiver."""
@@ -360,3 +367,22 @@ class BybitClient:
 
     def get_cached_ticker(self, symbol: str) -> dict:
         return self._ticker_cache.get(symbol, {})
+
+    def get_cache_stats(self) -> dict:
+        """Returns a summary of the current WS kline cache state for diagnostics."""
+        stats = {}
+        for key, candles in self._kline_cache.items():
+            stats[key] = len(candles)
+        total_keys   = len(stats)
+        ready_keys   = sum(1 for v in stats.values() if v >= 20)
+        total_candles = sum(stats.values())
+        log.info(
+            f"📊 WS cache: {ready_keys}/{total_keys} keys prontos "
+            f"({total_candles} candles total)"
+        )
+        return {
+            "keys":          total_keys,
+            "ready":         ready_keys,
+            "total_candles": total_candles,
+            "detail":        stats,
+        }
