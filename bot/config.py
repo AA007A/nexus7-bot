@@ -10,13 +10,18 @@ class Config:
         "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
         "LINKUSDT","AVAXUSDT","DOTUSDT","ADAUSDT","MATICUSDT",
         "ARBUSDT","NEARUSDT","APTUSDT","OPUSDT","ATOMUSDT",
+        "LTCUSDT","BCHUSDT","DOGEUSDT","SHIBUSDT","STXUSDT",
+        "INJUSDT","TIAUSDT","RENDERUSDT","SUIUSDT","SEIUSDT",
+        "FETUSDT","AGIXUSDT","OCEANUSDT","TAOUSDT","RNDRUSDT",
+        "PEPEUSDT","WIFUSDT","FLOKIUSDT","BONKUSDT","JUPUSDT",
+        "PYTHUSDT","DYMUSDT","STRKUSDT","MANTAUSDT","ALTUSDT",
     ]
 
     # ── Risk ─────────────────────────────────────────────────────
     LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "50"))   # 10x máximo
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.20")) # 20% por trade
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15")) # 15% DD máximo
-    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "5"))    # 5 simultâneas
+    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "10"))    # 10 simultâneas
 
     # ── Qualidade de entrada ─────────────────────────────────────
     MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "80"))   # 90/100 mínimo
