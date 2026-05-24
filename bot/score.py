@@ -114,7 +114,7 @@ def score_tecnico(
         score += 3   # fallback
         details["rsi"] = 50
 
-    # 5. Spread bid/ask < 0.05%
+    # 5. Spread bid/ask rigoroso (< 0.03%)
     if orderbook:
         try:
             bids = orderbook.get("b", [[0, 0]])
@@ -122,13 +122,18 @@ def score_tecnico(
             best_bid = float(bids[0][0]) if bids else price
             best_ask = float(asks[0][0]) if asks else price
             spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 1
-            if spread_pct < 0.05:
+            
+            # Filtro de liquidez: spread alto bloqueia
+            if spread_pct > 0.1: # Spread > 0.1% é sinal de baixa liquidez/volatilidade extrema
+                score -= 50 
+                details["liquidity_block"] = True
+            elif spread_pct < 0.03:
                 score += 5
             details["spread_pct"] = round(spread_pct, 4)
         except Exception:
-            score += 3
+            score += 0
     else:
-        score += 3   # sem orderbook, assume razoável
+        score += 0   # Sem orderbook = sem confiança na liquidez
 
     return {"score": min(40, score), "details": details}
 
@@ -272,8 +277,8 @@ def score_news_modifier(direction: str) -> dict:
     is_fomc  = n.get("fomc_window", False)
 
     if is_fomc:
-        modifier -= 10
-        details["fomc"] = "janela FOMC/CPI/NFP -10pts"
+        modifier -= 50 # Bloqueia quase certamente
+        details["fomc"] = "janela FOMC/CPI/NFP -50pts (BLOQUEIO)"
 
     if conf >= 0.8:
         if classif == "BULLISH" and direction == "LONG":

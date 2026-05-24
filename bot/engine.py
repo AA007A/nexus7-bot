@@ -296,18 +296,20 @@ class TradingEngine:
                     continue
 
                 if self.active:
-                    self._check_daily_reset()            # reseta contadores à meia-noite UTC
+                    self._check_daily_reset()
                     await self._update_balance()
-                    await self._sync_positions()         # sincroniza com Bybit
-                    await self._apply_trailing_stops()   # trailing desativado (pass)
-                    await self._check_rr_double()        # fecha se R:R dobrou (lucro 2x risco)
-                    self._update_daily_pnl()             # atualiza PnL do dia
+                    await self._sync_positions()
+                    await self._apply_trailing_stops()
+                    await self._check_rr_double()
+                    self._update_daily_pnl()
+                    
                     if self.daily_stopped:
-                        log.warning("🛑 Stop-loss diário ativado — aguardando próximo dia")
+                        log.warning("🛑 Stop-loss diário ativado")
                     elif self.risk.can_open(len(self.positions)):
-                        await self._scan_all_and_enter() # escaneia e entra nos melhores
+                        # Reduzido para 10s para entradas mais rápidas
+                        await self._scan_all_and_enter()
 
-                await asyncio.sleep(30)
+                await asyncio.sleep(10)
 
             except asyncio.CancelledError:
                 break
@@ -534,15 +536,8 @@ class TradingEngine:
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
                         f"Taxas=-${total_fee:.4f} | Líquido=${pnl_net:+.4f}"
                     )
-                    await notify(
-                        f"{icon} *{sym} fechado*\n"
-                        f"Direção: `{pos.direction}`\n"
-                        f"PnL Bruto: `${pnl_gross:+.4f}`\n"
-                        f"Taxas: `-${total_fee:.4f}`\n"
-                        f"PnL Líquido: `${pnl_net:+.4f}`\n"
-                        f"Score: `{pos.score}/100`\n"
-                        f"Sessão: `${self.stats.summary()['pnl']:+.4f}`"
-                    )
+                    from bot.notifier import close_msg
+                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px))
                 else:
                     # Atualiza dados da posição aberta
                     bp = open_syms[sym]
@@ -665,16 +660,8 @@ class TradingEngine:
                             f"{consecutive} perdas consecutivas",
                             pnl_net,
                         )
-                    await notify(
-                        f"🎯 *{sym} — R:R DOBRADO*\n"
-                        f"Direção: `{pos.direction}`\n"
-                        f"Entrada: `${pos.entry:.4f}`\n"
-                        f"Saída: `${price:.4f}`\n"
-                        f"R:R: `{rr_atual:.2f}`\n"
-                        f"PnL Bruto: `+${pnl_gross:.4f}`\n"
-                        f"Taxas: `-${fee_open+fee_close:.4f}`\n"
-                        f"PnL Líquido: `+${pnl_gross-fee_open-fee_close:.4f}`"
-                    )
+                    from bot.notifier import close_msg
+                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), price))
             except Exception as e:
                 log.error(f"_check_rr_double {sym}: {e}")
 
