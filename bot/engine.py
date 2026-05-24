@@ -306,16 +306,15 @@ class TradingEngine:
                     if self.daily_stopped:
                         log.warning("🛑 Stop-loss diário ativado")
                     elif self.risk.can_open(len(self.positions)):
-                        # Reduzido para 10s para entradas mais rápidas
                         await self._scan_all_and_enter()
 
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error(f"Engine loop: {e}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
 
     def stop(self):
         self.active = False
@@ -668,11 +667,22 @@ class TradingEngine:
     # ── Scan & Enter ────────────────────────────────────────────
     async def _scan_all_and_enter(self):
         """
-        Multi-Timeframe scan: busca 15m E 1h para cada símbolo.
+        Multi-Timeframe scan: busca 15m, 1h e 4h para cada símbolo.
+        Fast-track: usa WebSocket cache quando disponível (sem latência REST).
+        Fallback: busca os três timeframes em paralelo via asyncio.gather().
         Só entra quando AMBOS os timeframes apontam na mesma direção.
         """
         candidates = []
         min_score = self._effective_score()
+
+        # Thresholds mínimos para considerar o cache WS "suficiente"
+        WS_MIN_15  = 20
+        WS_MIN_1H  = 15
+        WS_MIN_4H  = 10
+        # Thresholds mínimos para prosseguir com a análise (após REST fallback)
+        ANAL_MIN_15 = 20
+        ANAL_MIN_1H = 15
+        ANAL_MIN_4H = 10
 
         for sym in self.viable_symbols:
             if sym in self.positions:
@@ -682,23 +692,62 @@ class TradingEngine:
                 log.debug(f"[{sym}] cooldown {cooldown_left/60:.0f}min → skip")
                 continue
             try:
-                log.info(f"🔍 Analisando {sym}...")
-                # Tenta WebSocket cache primeiro (dados em tempo real, sem latência)
+                # ── Fast-track: WebSocket cache (zero latência REST) ──
                 k15 = self.client.get_cached_klines(sym, "15",  100)
                 k1h = self.client.get_cached_klines(sym, "60",  100)
                 k4h = self.client.get_cached_klines(sym, "240", 100)
 
-                # Fallback REST se cache insuficiente
-                if len(k15) < 30:
-                    k15 = await self.client.get_klines(sym, "15",  100)
-                    await asyncio.sleep(0.3)
-                if len(k1h) < 20:
-                    k1h = await self.client.get_klines(sym, "60",  100)
-                    await asyncio.sleep(0.3)
-                if len(k4h) < 15:
-                    k4h = await self.client.get_klines(sym, "240", 100)
-                    await asyncio.sleep(0.3)
-                if len(k15) < 60 or len(k1h) < 30 or len(k4h) < 20:
+                ws_hit = (
+                    len(k15) >= WS_MIN_15
+                    and len(k1h) >= WS_MIN_1H
+                    and len(k4h) >= WS_MIN_4H
+                )
+
+                if ws_hit:
+                    log.info(
+                        f"🔍 [{sym}] WS cache hit "
+                        f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) — sem REST"
+                    )
+                else:
+                    # ── Fallback REST paralelo (sem delays sequenciais) ──
+                    missing = []
+                    if len(k15) < WS_MIN_15:
+                        missing.append(("15",  100))
+                    if len(k1h) < WS_MIN_1H:
+                        missing.append(("60",  100))
+                    if len(k4h) < WS_MIN_4H:
+                        missing.append(("240", 100))
+
+                    log.info(
+                        f"🔍 [{sym}] WS cache miss "
+                        f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) "
+                        f"— REST paralelo para {[m[0] for m in missing]}"
+                    )
+
+                    results = await asyncio.gather(
+                        *[self.client.get_klines(sym, iv, lim) for iv, lim in missing],
+                        return_exceptions=True,
+                    )
+
+                    idx = 0
+                    if len(k15) < WS_MIN_15:
+                        r = results[idx]; idx += 1
+                        if not isinstance(r, Exception):
+                            k15 = r
+                    if len(k1h) < WS_MIN_1H:
+                        r = results[idx]; idx += 1
+                        if not isinstance(r, Exception):
+                            k1h = r
+                    if len(k4h) < WS_MIN_4H:
+                        r = results[idx]; idx += 1
+                        if not isinstance(r, Exception):
+                            k4h = r
+
+                if len(k15) < ANAL_MIN_15 or len(k1h) < ANAL_MIN_1H or len(k4h) < ANAL_MIN_4H:
+                    log.debug(
+                        f"[{sym}] dados insuficientes após fetch "
+                        f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) → skip"
+                    )
                     continue
 
                 sig = self.analyzer.analyze_mtf(
@@ -762,7 +811,6 @@ class TradingEngine:
                     await db.log_decision(sym,"HOLD",0,"filtros não atendidos")
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
-            await asyncio.sleep(0.5)   # delay reduzido (usa WS cache quando possível)
 
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
