@@ -1,5 +1,5 @@
 """
-KAKAZITO TRADE — Market Data Module (P3)
+AA Capital — Market Data Module
 - CVD (Cumulative Volume Delta) em tempo real
 - Liquidation Heatmap
 - Correlações Macro (BTC x DXY, S&P500, BTC.D)
@@ -8,22 +8,91 @@ Fault-tolerant: falhas não afetam o bot.
 import asyncio, time
 from bot.logger import log
 
-# ── CVD State ────────────────────────────────────────────────────
-_cvd_cache: dict = {}   # symbol → cvd acumulado
+# ── CVD State — Persistente com janela de 4h ─────────────────────
+# Problema resolvido: CVD não reseta mais no reinício do bot.
+# Solução: mantém histórico de ticks com timestamp.
+# Na inicialização, reconstrói o CVD com os últimos 4h de klines.
+
+import time as _time
+from collections import deque
+
+_CVD_WINDOW_SECONDS = 4 * 3600   # janela de 4 horas
+
+# Cada entry: (timestamp, delta_volume)
+_cvd_ticks: dict = {}    # symbol → deque de (ts, delta)
+_cvd_cache: dict = {}    # symbol → cvd acumulado (soma da janela)
+
+
+def _purge_old_ticks(symbol: str):
+    """Remove ticks mais antigos que a janela de 4h."""
+    if symbol not in _cvd_ticks:
+        return
+    cutoff = _time.time() - _CVD_WINDOW_SECONDS
+    q = _cvd_ticks[symbol]
+    while q and q[0][0] < cutoff:
+        _, delta = q.popleft()
+        _cvd_cache[symbol] = _cvd_cache.get(symbol, 0) - delta
 
 
 def update_cvd(symbol: str, close: float, prev_close: float, volume: float):
-    """Atualiza CVD com cada tick. Chama do WebSocket handler."""
+    """
+    Atualiza CVD com cada tick do WebSocket.
+    Mantém janela rolante de 4h — não perde histórico no reinício.
+    """
+    if symbol not in _cvd_ticks:
+        _cvd_ticks[symbol] = deque()
+    _purge_old_ticks(symbol)
     delta = volume if close >= prev_close else -volume
+    ts    = _time.time()
+    _cvd_ticks[symbol].append((ts, delta))
     _cvd_cache[symbol] = _cvd_cache.get(symbol, 0) + delta
 
 
 def get_cvd(symbol: str) -> float:
+    """Retorna CVD acumulado na janela de 4h."""
+    _purge_old_ticks(symbol)
     return _cvd_cache.get(symbol, 0.0)
 
 
+def get_cvd_bias(symbol: str) -> str:
+    """Retorna BULLISH, BEARISH ou NEUTRAL com base no CVD."""
+    cvd = get_cvd(symbol)
+    if cvd > 0:   return "BULLISH"
+    if cvd < 0:   return "BEARISH"
+    return "NEUTRAL"
+
+
 def reset_cvd(symbol: str):
+    """Reseta CVD de um símbolo (usado apenas em testes)."""
     _cvd_cache[symbol] = 0.0
+    if symbol in _cvd_ticks:
+        _cvd_ticks[symbol].clear()
+
+
+async def rebuild_cvd_from_klines(client, symbol: str):
+    """
+    Reconstrói o CVD dos últimos 4h usando klines históricas.
+    Chamado na inicialização do bot para evitar CVD zerado.
+    """
+    try:
+        klines = await client.get_klines(symbol, "15", 16)  # 16 candles × 15min = 4h
+        if not klines:
+            return
+        if symbol not in _cvd_ticks:
+            _cvd_ticks[symbol] = deque()
+        # Simula ticks históricos com timestamp aproximado
+        now = _time.time()
+        for i, k in enumerate(klines):
+            ts    = now - (len(klines) - i) * 900  # 900s = 15min por candle
+            close = float(k.get("c", 0))
+            prev  = float(klines[i-1].get("c", close)) if i > 0 else close
+            vol   = float(k.get("v", 0))
+            delta = vol if close >= prev else -vol
+            _cvd_ticks[symbol].append((ts, delta))
+            _cvd_cache[symbol] = _cvd_cache.get(symbol, 0) + delta
+        log.info(f"📊 CVD {symbol} reconstruído: {get_cvd(symbol):+.0f} ({len(klines)} candles)")
+    except Exception as e:
+        log.warning(f"rebuild_cvd {symbol}: {e}")
 
 
 # ── Liquidation Heatmap ──────────────────────────────────────────
