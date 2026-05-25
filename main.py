@@ -285,6 +285,28 @@ async def dashboard():
         return "<h1>Dashboard não encontrado</h1>"
 
 
+
+@app.get("/api/decisions")
+async def decisions(limit: int = 60):
+    """Retorna as últimas decisões do scan (SIGNAL e HOLD) para o dashboard."""
+    try:
+        from bot import database as db
+        rows = await db.get_recent_decisions(limit)
+        return {"decisions": rows}
+    except Exception as e:
+        # Fallback: retorna log em memória do engine
+        eng = app.state.engine
+        logs = []
+        for sig in reversed(eng._signals_log[-limit:]):
+            logs.append({
+                "timestamp": sig.get("time", ""),
+                "symbol":    sig.get("symbol", ""),
+                "type":      "SIGNAL",
+                "score":     sig.get("score", 0),
+                "reason":    sig.get("reason", ""),
+            })
+        return {"decisions": logs}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
