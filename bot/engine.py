@@ -93,11 +93,30 @@ class Position:
 
     def calc_trailing_sl(self) -> Optional[float]:
         """
-        TRAILING SL DESATIVADO.
-        SL permanece fixo no nível técnico original.
-        Trade só fecha por: TP atingido, SL técnico, ou R:R dobrado.
+        Trailing Stop progressivo:
+        - Ativa quando lucro >= 50% do alvo (TRAILING_TRIGGER)
+        - Trava 25% abaixo do pico de lucro (TRAILING_LOCK)
+        - Protege ganhos sem cortar o trade cedo demais
         """
-        return None
+        if self.pnl <= 0 or self.tp == self.entry:
+            return None
+        target = abs(self.tp - self.entry)
+        if target <= 0:
+            return None
+        # Ativa trailing quando lucro >= TRAILING_TRIGGER % do alvo
+        trigger_pnl = target * cfg.TRAILING_TRIGGER * self.qty
+        if self.pnl < trigger_pnl:
+            return None
+        self.trailing_active = True
+        # Trava TRAILING_LOCK % abaixo do pico de preço
+        if self.direction == "LONG":
+            peak_price = self.entry + (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            new_sl = peak_price * (1 - cfg.TRAILING_LOCK * 0.1)
+            return max(new_sl, self.sl)   # nunca recua abaixo do SL original
+        else:
+            peak_price = self.entry - (self.peak_pnl / self.qty if self.qty > 0 else 0)
+            new_sl = peak_price * (1 + cfg.TRAILING_LOCK * 0.1)
+            return min(new_sl, self.sl)   # nunca recua acima do SL original
 
     def to_dict(self) -> dict:
         return {
