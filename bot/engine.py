@@ -1,5 +1,5 @@
 """
-KAKAZITO TRADE Trading Engine v7.1
+AA Capital Trading Engine v7.1
   ✅ Meta diária de $100 de lucro
   ✅ Stop-loss diário de $50 (para tudo se perder $50 no dia)
   ✅ Modo agressivo até bater a meta → modo conservador depois
@@ -435,7 +435,7 @@ class TradingEngine:
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
 
             await notify(
-                f"✅ *KAKAZITO TRADE v7 Online!*\n"
+                f"✅ *AA Capital v7 Online!*\n"
                 f"Saldo: `${bal:.4f} USDT`\n"
                 f"Poder: `${bal*cfg.LEVERAGE:.2f} USDT`\n"
                 f"Max posições: `{cfg.MAX_POSITIONS}`\n"
