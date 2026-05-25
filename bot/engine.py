@@ -831,6 +831,16 @@ class TradingEngine:
                         f"1H={'↑' if locals().get('bull_1h') else '↓' if locals().get('bear_1h') else '→'}"
                     )
                     await db.log_decision(sym, "HOLD", combined, hold_reason)
+                    # Alerta "quase entrando" — score entre 55 e cfg.MIN_ENTRY_SCORE-1
+                    if cfg.MIN_ENTRY_SCORE - 5 <= combined < cfg.MIN_ENTRY_SCORE:
+                        asyncio.create_task(notify(
+                            f"🔔 *QUASE ENTRANDO — {sym}*\n"
+                            f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                            f"📊 Score: `{combined}/{cfg.MIN_ENTRY_SCORE}` (faltam {cfg.MIN_ENTRY_SCORE - combined}pts)\n"
+                            f"📍 Par: `{sym}`\n"
+                            f"🕐 Regime: `{regime}`\n"
+                            f"_Monitorando..._"
+                        ))
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
 
