@@ -1,5 +1,5 @@
 import os, asyncio, uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
@@ -329,6 +329,102 @@ async def test_notify():
         return {"ok": True, "message": "Mensagem enviada!", "chat": cfg.TELEGRAM_CHAT}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── Telegram Webhook — comandos /status /balance /positions /pause /resume ────
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Recebe comandos do Telegram e responde."""
+    from bot.notifier import notify
+    from bot.config import cfg
+    try:
+        data = await request.json()
+        msg  = data.get("message") or data.get("edited_message", {})
+        if not msg:
+            return {"ok": True}
+        text    = msg.get("text", "").strip()
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        # Só responde ao chat autorizado
+        if chat_id != cfg.TELEGRAM_CHAT:
+            return {"ok": True}
+
+        eng    = app.state.engine
+        client = app.state.client
+
+        if text.startswith("/status"):
+            st  = eng.get_status()
+            bal = await client.get_balance()
+            resp_text = (
+                f"🤖 *AA Capital — STATUS*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"{'🟢 ATIVO' if st.get('running') else '🔴 PAUSADO'}\n"
+                f"💼 Saldo:        `${bal:,.2f} USDT`\n"
+                f"⚡ Poder compra: `${bal*cfg.LEVERAGE:,.2f} USDT`\n"
+                f"📊 Posições:     `{st.get('open_positions',0)}/{cfg.MAX_POSITIONS}`\n"
+                f"🎯 PnL hoje:     `${st.get('daily_pnl',0):+.2f} USDT`\n"
+                f"📈 Score mín:    `{cfg.MIN_ENTRY_SCORE}/100`\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`"
+            )
+        elif text.startswith("/balance"):
+            bal = await client.get_balance()
+            resp_text = (
+                f"💼 *SALDO AA Capital*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"💰 Saldo:        `${bal:,.2f} USDT`\n"
+                f"⚡ Poder compra: `${bal*cfg.LEVERAGE:,.2f} USDT`\n"
+                f"📊 Alavancagem:  `{cfg.LEVERAGE}x`"
+            )
+        elif text.startswith("/positions"):
+            positions = list(eng.positions.values())
+            if not positions:
+                resp_text = "📭 *Nenhuma posição aberta no momento*"
+            else:
+                lines = [f"📊 *POSIÇÕES ABERTAS ({len(positions)})*\n`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`"]
+                for p in positions:
+                    icon = "🟢" if p.direction == "LONG" else "🔴"
+                    lines.append(
+                        f"{icon} `{p.symbol}` {p.direction}\n"
+                        f"   Entrada: `${p.entry:,.4f}` → Atual: `${p.current_price:,.4f}`\n"
+                        f"   PnL: `{'+' if p.pnl>=0 else ''}${p.pnl:,.2f}` ({p.pnl_pct():+.1f}%)"
+                    )
+                resp_text = "\n".join(lines)
+        elif text.startswith("/pause"):
+            eng.stop()
+            resp_text = "⏸ *Bot pausado!*\nUse /resume para retomar."
+        elif text.startswith("/resume"):
+            import asyncio
+            asyncio.create_task(eng.run())
+            resp_text = "▶️ *Bot retomado!*\nEscaneando o mercado..."
+        elif text.startswith("/pnl"):
+            st = eng.get_status()
+            resp_text = (
+                f"📈 *PnL AA Capital*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"📅 Hoje:    `${st.get('daily_pnl',0):+.2f} USDT`\n"
+                f"📆 Sessão:  `${st.get('session_pnl',0):+.2f} USDT`\n"
+                f"🏆 Trades:  `{st.get('total_trades',0)}`\n"
+                f"✅ Win Rate: `{st.get('win_rate',0):.0f}%`"
+            )
+        elif text.startswith("/help"):
+            resp_text = (
+                f"🤖 *AA Capital — Comandos*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"/status — status completo do bot\n"
+                f"/balance — saldo e poder de compra\n"
+                f"/positions — posições abertas\n"
+                f"/pnl — lucro/prejuízo\n"
+                f"/pause — pausar o bot\n"
+                f"/resume — retomar o bot\n"
+                f"/help — esta mensagem"
+            )
+        else:
+            return {"ok": True}
+
+        await notify(resp_text)
+    except Exception as e:
+        log.error(f"telegram_webhook: {e}")
+    return {"ok": True}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
