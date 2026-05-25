@@ -31,7 +31,7 @@ import asyncio, time
 from typing import Optional
 from bot.logger import log
 
-MIN_SCORE = 70   # score mínimo para entrar
+MIN_SCORE = 60   # score mínimo para entrar
 
 # Cache de dados macro (atualiza a cada 5min)
 _macro_cache = {
@@ -133,7 +133,7 @@ def score_tecnico(
         except Exception:
             score += 0
     else:
-        score += 0   # Sem orderbook = sem confiança na liquidez
+        score += 3   # Sem orderbook = score neutro
 
     return {"score": min(40, score), "details": details}
 
@@ -277,8 +277,8 @@ def score_news_modifier(direction: str) -> dict:
     is_fomc  = n.get("fomc_window", False)
 
     if is_fomc:
-        modifier -= 50 # Bloqueia quase certamente
-        details["fomc"] = "janela FOMC/CPI/NFP -50pts (BLOQUEIO)"
+        modifier -= 10  # Reduz mas não bloqueia
+        details["fomc"] = "janela FOMC/CPI/NFP -10pts"
 
     if conf >= 0.8:
         if classif == "BULLISH" and direction == "LONG":
