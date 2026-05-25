@@ -24,7 +24,7 @@ class Config:
     TRAILING_LOCK:    float = 0.25
 
     # ── Qualidade de entrada (usado pelo engine.py) ───────────────
-    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "72"))   # score mínimo MTF
+    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "60"))   # score mínimo MTF
     POST_TARGET_SCORE:int   = int(os.environ.get("POST_TARGET_SCORE","80"))   # após meta diária
     POST_TARGET_RISK: float = float(os.environ.get("POST_TARGET_RISK","0.20"))
     MIN_VOLUME_MULT:  float = float(os.environ.get("MIN_VOLUME_MULT", "1.2")) # volume mínimo 1.2x média
