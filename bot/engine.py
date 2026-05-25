@@ -16,7 +16,8 @@ from bot.bybit import BybitClient
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
-from bot.notifier import notify, signal_msg
+from bot.notifier import (notify, signal_msg, order_opened_msg, close_msg,
+    daily_report_msg, daily_target_msg, daily_stop_msg, drawdown_msg, consecutive_losses_msg, online_msg)
 from bot import database as db
 from bot import score as scoring
 from bot import market_data as mdata
@@ -354,10 +355,7 @@ class TradingEngine:
             )
             import asyncio
             asyncio.create_task(notify(
-                "🛑 *STOP-LOSS DIÁRIO*\n"
-                f"Perda do dia: `${self.daily_pnl:.4f}`\n"
-                f"Limite: `-${self.daily_stop_loss:.0f}`\n"
-                "Bot pausado até meia-noite UTC"
+await daily_stop_msg(self.daily_pnl, self.daily_stop_loss, await self.client.get_balance())
             ))
 
         # ── Meta batida ───────────────────────────────────────────
@@ -369,10 +367,7 @@ class TradingEngine:
             )
             import asyncio
             asyncio.create_task(notify(
-                "🎯 *META DIÁRIA BATIDA!*\n"
-                f"Lucro do dia: `+${self.daily_pnl:.4f}`\n"
-                f"Meta: `${self.daily_target:.0f}`\n"
-                "Modo: *CONSERVADOR* ativado\n"
+await daily_target_msg(self.daily_pnl, self.daily_target, await self.client.get_balance(), await self.client.get_balance()*cfg.LEVERAGE)
                 f"Proximas entradas: score >= {cfg.POST_TARGET_SCORE}/100"
             ))
 
@@ -434,11 +429,8 @@ class TradingEngine:
             )
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
 
+            await notify(await online_msg(bal, bal*cfg.LEVERAGE, len(self.viable_symbols), cfg.MAX_POSITIONS))
             await notify(
-                f"✅ *AA Capital v7 Online!*\n"
-                f"Saldo: `${bal:.4f} USDT`\n"
-                f"Poder: `${bal*cfg.LEVERAGE:.2f} USDT`\n"
-                f"Max posições: `{cfg.MAX_POSITIONS}`\n"
                 f"Score mínimo: `{cfg.MIN_ENTRY_SCORE}/100`\n"
                 f"Pares ativos: `{len(self.viable_symbols)}`"
             )
@@ -520,11 +512,8 @@ class TradingEngine:
                         log.warning(
                             f"⚠️ {consecutive} perdas consecutivas — registrado, bot continua"
                         )
-                        await notify(
-                            f"⚠️ *{consecutive} perdas consecutivas*\n"
-                            f"Bot continua operando normalmente.\n"
-                            f"Registrado no banco para análise."
-                        )
+                        _cbal = await self.client.get_balance()
+                        await notify(await consecutive_losses_msg(consecutive, _cbal, _cbal*cfg.LEVERAGE))
                         await db.save_risk_event(
                             "CONSECUTIVE_LOSSES",
                             f"{consecutive} perdas consecutivas",
@@ -535,8 +524,8 @@ class TradingEngine:
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
                         f"Taxas=-${total_fee:.4f} | Líquido=${pnl_net:+.4f}"
                     )
-                    from bot.notifier import close_msg
-                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px))
+                    _bal = await self.client.get_balance()
+                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px, _bal, _bal*cfg.LEVERAGE))
                 else:
                     # Atualiza dados da posição aberta
                     bp = open_syms[sym]
@@ -649,18 +638,15 @@ class TradingEngine:
                         log.warning(
                             f"⚠️ {consecutive} perdas consecutivas — registrado, bot continua"
                         )
-                        await notify(
-                            f"⚠️ *{consecutive} perdas consecutivas*\n"
-                            f"Bot continua operando normalmente.\n"
-                            f"Registrado no banco para análise."
-                        )
+                        _cbal = await self.client.get_balance()
+                        await notify(await consecutive_losses_msg(consecutive, _cbal, _cbal*cfg.LEVERAGE))
                         await db.save_risk_event(
                             "CONSECUTIVE_LOSSES",
                             f"{consecutive} perdas consecutivas",
                             pnl_net,
                         )
-                    from bot.notifier import close_msg
-                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), price))
+                    _bal2 = await self.client.get_balance()
+                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), price, _bal2, _bal2*cfg.LEVERAGE))
             except Exception as e:
                 log.error(f"_check_rr_double {sym}: {e}")
 
@@ -892,7 +878,9 @@ class TradingEngine:
                 f"Score={sig.score}/100 RR={sig.rr} "
                 f"Tipo={entry_type} ADX={sig.reason}"
             )
+            _obal = await self.client.get_balance()
             await notify(await signal_msg(sig))
+            await notify(await order_opened_msg(sig, qty, _obal, _obal*cfg.LEVERAGE))
         except Exception as e:
             log.error(f"_open {sig.symbol}: {e}")
 
@@ -942,7 +930,8 @@ class TradingEngine:
                 if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                     log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
                     self.active = False
-                    await notify(f"⚠️ *Bot Pausado — Drawdown*\n`{self.risk.drawdown:.1%}` atingido")
+                    _dbal = await self.client.get_balance()
+            await notify(await drawdown_msg(self.risk.drawdown, _dbal))
         except Exception:
             pass
 
