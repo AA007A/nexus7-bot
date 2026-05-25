@@ -766,7 +766,12 @@ class TradingEngine:
                         f"{sig.direction} R:R={sig.rr} "
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
                     )
-                    await db.log_decision(sym,"SIGNAL",sig.score,sig.reason)
+                    signal_reason = (
+                        f"{sig.reason} | regime={getattr(sig,'regime','TREND')} "
+                        f"RSI={getattr(sig,'rsi',0):.0f} vol={getattr(sig,'vol_ratio',0):.2f}x "
+                        f"4H=↑ 1H=↑"
+                    )
+                    await db.log_decision(sym, "SIGNAL", sig.score, signal_reason)
                 else:
                     # Mostra score parcial para diagnóstico
                     try:
@@ -808,7 +813,17 @@ class TradingEngine:
                         )
                     except Exception as ex:
                         log.info(f"[{sym}] ✗ Sem sinal")
-                    await db.log_decision(sym,"HOLD",0,"filtros não atendidos")
+                        combined = 0
+                        regime = "UNKNOWN"
+                        rsi_v = 0
+                        vol_r = 0
+                    # Salva score real no banco para o dashboard
+                    hold_reason = (
+                        f"regime={regime} RSI={rsi_v:.0f} vol={vol_r:.2f}x "
+                        f"4H={'↑' if locals().get('bull_4h') else '↓' if locals().get('bear_4h') else '→'} "
+                        f"1H={'↑' if locals().get('bull_1h') else '↓' if locals().get('bear_1h') else '→'}"
+                    )
+                    await db.log_decision(sym, "HOLD", combined, hold_reason)
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
 
