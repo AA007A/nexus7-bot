@@ -21,7 +21,7 @@ async def notify(text: str):
 async def signal_msg(sig) -> str:
     icon = "🟢🚀" if sig.direction == "LONG" else "🔴🩸"
     return (
-        f"{icon} *KAKAZITO TRADE — {sig.direction}*\n"
+        f"{icon} *AA Capital — {sig.direction}*\n"
         f"`{'━'*26}`\n"
         f"📍 Par:     `{sig.symbol}`\n"
         f"💰 Entrada: `${sig.entry:,.2f}`\n"
