@@ -1,5 +1,5 @@
 """
-KAKAZITO TRADE — Bybit V5 Client
+AA Capital — Bybit V5 Client
 - HMAC-SHA256 corrigido (recv_window consistente)
 - REST para ordens e account
 - WebSocket para dados de mercado em tempo real
