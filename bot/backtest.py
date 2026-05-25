@@ -1,5 +1,5 @@
 """
-KAKAZITO TRADE — Backtesting Engine
+AA Capital — Backtesting Engine
 Busca dados históricos OHLCV da Bybit e roda as estratégias.
 Calcula: Win Rate, Profit Factor, Sharpe, Sortino, Max DD,
          Expectancy, melhor/pior horário UTC, melhor/pior dia da semana,
@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import List, Dict
 import numpy as np
 from bot.logger import log
+from bot.config import cfg
 
 
 # ── Busca histórico OHLCV ────────────────────────────────────────
@@ -27,7 +28,8 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
 
 # ── Simulador de estratégia MTF ──────────────────────────────────
 def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
-                  min_score: int = 75) -> List[dict]:
+                  min_score: int = 75,
+                  min_rr: float = 2.0) -> List[dict]:
     """
     Simula a estratégia MTF sobre dados históricos.
     Retorna lista de trades simulados.
@@ -51,14 +53,16 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
         try:
             sig = analyzer.analyze_mtf(
                 "BT", k15, k1h, k4h,
-                min_score=min_score,
-                fee_mult=2.5,
-                vol_mult=1.0,
+                min_score=getattr(cfg, 'MIN_ENTRY_SCORE', min_score),
+                fee_mult=getattr(cfg, 'FEE_MULTIPLIER', 2.0),
+                vol_mult=getattr(cfg, 'MIN_VOLUME_MULT', 1.2),
             )
         except Exception:
             continue
 
         if not sig:
+            continue
+        if sig.rr < getattr(cfg, "MIN_RR_RATIO", min_rr):
             continue
 
         # Simula resultado: verifica próximos 20 candles
