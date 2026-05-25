@@ -156,6 +156,13 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 .log-row.signal-row{background:rgba(0,255,127,0.04);border-left:2px solid var(--green);}
 .log-row.signal-row .log-sym{color:var(--green);}
 
+
+/* PNL CHART */
+.pnl-chart-wrap{background:var(--bg1);border:1px solid var(--dim);border-radius:4px;padding:10px 12px;}
+.pnl-chart-title{font-family:var(--orb);font-size:9px;letter-spacing:3px;color:var(--cyan);margin-bottom:8px;display:flex;align-items:center;gap:8px;}
+.pnl-chart-title span{color:var(--dim);font-size:9px;letter-spacing:1px;}
+#pnl-canvas{width:100%;height:120px;display:block;}
+
 </style>
 </head>
 <body>
@@ -374,6 +381,18 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
   </div>
 </div>
 
+
+
+    <!-- PNL CHART -->
+    <div style="grid-column:1/5;margin-bottom:6px">
+      <div class="pnl-chart-wrap">
+        <div class="pnl-chart-title">
+          📈 EVOLUÇÃO DO PnL
+          <span id="pnl-chart-label">carregando...</span>
+        </div>
+        <canvas id="pnl-canvas"></canvas>
+      </div>
+    </div>
 
 <!-- SCAN LOG PANEL -->
 <div style="margin:0 6px 12px;grid-column:1/4">
@@ -701,6 +720,114 @@ async function fetchScanLog() {
 }
 setInterval(fetchScanLog, 5000);
 fetchScanLog();
+
+
+// ── PNL CHART ──────────────────────────────────────────────────
+async function fetchPnlChart() {
+  try {
+    const r = await fetch('/api/pnl');
+    const d = await r.json();
+    const trades = (d.session && d.session.closed_trades) ? d.session.closed_trades : [];
+    const canvas  = document.getElementById('pnl-canvas');
+    const label   = document.getElementById('pnl-chart-label');
+    if (!canvas || !trades.length) {
+      if (label) label.textContent = 'sem trades ainda';
+      return;
+    }
+
+    // Calcular PnL acumulado
+    let cum = 0;
+    const points = [{x:0, y:0}];
+    trades.slice().reverse().forEach((t,i) => {
+      cum += parseFloat(t.pnl || 0);
+      points.push({x: i+1, y: parseFloat(cum.toFixed(4))});
+    });
+
+    const totalPnl = cum;
+    label.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + ' USDT sessão';
+    label.style.color = totalPnl >= 0 ? 'var(--green)' : 'var(--mag)';
+
+    // Desenhar gráfico no canvas
+    const ctx    = canvas.getContext('2d');
+    const W      = canvas.offsetWidth  || 800;
+    const H      = canvas.offsetHeight || 120;
+    canvas.width  = W;
+    canvas.height = H;
+
+    const ys    = points.map(p => p.y);
+    const minY  = Math.min(...ys);
+    const maxY  = Math.max(...ys);
+    const rangeY= maxY - minY || 1;
+    const pad   = {l:40, r:10, t:10, b:20};
+
+    const toX = i  => pad.l + (i / (points.length-1 || 1)) * (W - pad.l - pad.r);
+    const toY = v  => pad.t + (1 - (v - minY) / rangeY) * (H - pad.t - pad.b);
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Grade
+    ctx.strokeStyle = 'rgba(30,61,80,0.5)';
+    ctx.lineWidth   = 1;
+    for (let i=0;i<=4;i++) {
+      const y = pad.t + i*(H-pad.t-pad.b)/4;
+      ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(W-pad.r,y); ctx.stroke();
+      const val = maxY - i*(rangeY/4);
+      ctx.fillStyle = 'rgba(100,140,160,0.7)';
+      ctx.font = '9px monospace';
+      ctx.fillText((val>=0?'+':'')+val.toFixed(2), 0, y+3);
+    }
+
+    // Linha zero
+    if (minY < 0 && maxY > 0) {
+      const zy = toY(0);
+      ctx.strokeStyle = 'rgba(100,140,160,0.4)';
+      ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.moveTo(pad.l,zy); ctx.lineTo(W-pad.r,zy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Gradiente
+    const grad = ctx.createLinearGradient(0, pad.t, 0, H-pad.b);
+    if (totalPnl >= 0) {
+      grad.addColorStop(0, 'rgba(0,255,127,0.25)');
+      grad.addColorStop(1, 'rgba(0,255,127,0.0)');
+    } else {
+      grad.addColorStop(0, 'rgba(255,0,100,0.0)');
+      grad.addColorStop(1, 'rgba(255,0,100,0.2)');
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(toX(0), toY(points[0].y));
+    points.forEach((p,i) => ctx.lineTo(toX(i), toY(p.y)));
+    ctx.lineTo(toX(points.length-1), H-pad.b);
+    ctx.lineTo(toX(0), H-pad.b);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Linha principal
+    ctx.beginPath();
+    ctx.strokeStyle = totalPnl >= 0 ? 'var(--green)' : 'var(--mag)';
+    ctx.lineWidth   = 2;
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur  = 4;
+    ctx.moveTo(toX(0), toY(points[0].y));
+    points.forEach((p,i) => ctx.lineTo(toX(i), toY(p.y)));
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Pontos
+    points.forEach((p,i) => {
+      ctx.beginPath();
+      ctx.arc(toX(i), toY(p.y), 3, 0, Math.PI*2);
+      ctx.fillStyle = p.y >= 0 ? 'var(--green)' : 'var(--mag)';
+      ctx.fill();
+    });
+
+  } catch(e) {}
+}
+setInterval(fetchPnlChart, 15000);
+fetchPnlChart();
 
 </script>
 
