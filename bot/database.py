@@ -346,3 +346,23 @@ async def get_stats() -> dict:
             for r in (recent or [])
         ],
     }
+
+async def get_recent_decisions(limit: int = 60) -> list:
+    """Retorna as últimas decisões de scan para o SCAN LOG do dashboard."""
+    if not _conn:
+        return []
+    try:
+        query = f"SELECT timestamp, symbol, type, score, reason FROM decisions ORDER BY id DESC LIMIT {limit}"
+        if _is_pg:
+            rows = await _conn.fetch(query)
+            return [{"timestamp": str(r["timestamp"]), "symbol": r["symbol"],
+                     "type": r["type"], "score": r["score"], "reason": r["reason"] or ""} for r in rows]
+        else:
+            async with _conn.execute(query) as cur:
+                rows = await cur.fetchall()
+            return [{"timestamp": str(r[0]), "symbol": r[1],
+                     "type": r[2], "score": r[3], "reason": r[4] or ""} for r in rows]
+    except Exception as e:
+        from bot.logger import log
+        log.error(f"get_recent_decisions: {e}")
+        return []
