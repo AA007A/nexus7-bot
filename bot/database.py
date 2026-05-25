@@ -1,5 +1,5 @@
 """
-KAKAZITO TRADE — Database Layer v2
+AA Capital — Database Layer v2
 PostgreSQL (Railway) com fallback SQLite.
 Persiste: trades, signals, risk_events, news_events,
           market_snapshots, performance, consecutive_losses.
@@ -9,7 +9,7 @@ import os, json, asyncio
 from datetime import datetime, timezone, date
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
-SQLITE_PATH  = "/home/ubuntu/nexus7-bot/data/kakazito.db"
+SQLITE_PATH  = "/tmp/aa_capital.db"
 _conn        = None
 _is_pg       = False
 
