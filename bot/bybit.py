@@ -15,7 +15,13 @@ WS_PRIVATE  = "wss://stream.bybit.com/v5/private"
 
 API_KEY    = os.environ.get("BYBIT_API_KEY",    os.environ.get("BINANCE_API_KEY",    ""))
 API_SECRET = os.environ.get("BYBIT_API_SECRET", os.environ.get("BINANCE_API_SECRET", ""))
-RECV_WINDOW = "20000"   # fixo em todas as chamadas
+RECV_WINDOW = "20000"
+
+# ── Paper Trading Mode ───────────────────────────────────────────
+PAPER_TRADE = os.environ.get("PAPER_TRADE", "false").lower() == "true"
+if PAPER_TRADE:
+    log.info("🟡 PAPER TRADE MODE ATIVO — nenhuma ordem real será enviada")
+
 
 INTERVALS = {
     "1":"1","3":"3","5":"5","15":"15","30":"30",
