@@ -162,7 +162,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 
 <!-- TOPBAR -->
 <div class="topbar">
-  <div class="logo">KAKA<span>ZITO</span></div>
+  <div class="logo">AA<span> CAPITAL</span></div>
   <div class="sync-badge"><div class="sync-dot"></div><span id="syncTxt">CONNECTING</span></div>
   <div class="tb-tickers">
     <div class="tb-tick"><span class="tb-sym">BTC</span><span class="tb-price" id="p-btc">—</span>&nbsp;<span id="c-btc" style="font-size:10px">—</span></div>
@@ -370,6 +370,24 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
     <div class="ph"><span class="ph-title ph-g">TRADES FECHADOS</span></div>
     <div id="closed-list" style="overflow-y:auto;max-height:120px">
       <div style="padding:10px;text-align:center;color:var(--dim);font-size:10px">Nenhum trade fechado</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- SCAN LOG PANEL -->
+<div style="margin:0 6px 12px;grid-column:1/4">
+  <div class="ph" style="margin-bottom:4px">
+    <span class="ph-title ph-c">⬡ SCAN LOG — AA CAPITAL</span>
+    <span class="ph-badge badge-c" id="log-count">0 entradas</span>
+    <span style="font-size:9px;color:var(--dim);margin-left:8px">⟳ 5s</span>
+  </div>
+  <div style="background:var(--bg1);border:1px solid var(--dim);border-radius:4px;overflow:hidden">
+    <div style="display:grid;grid-template-columns:58px 78px 64px 1fr 82px;padding:5px 12px;border-bottom:1px solid var(--dim2);font-size:9px;letter-spacing:2px;color:var(--dim)">
+      <span>HORA</span><span>PAR</span><span>SCORE</span><span>DETALHES</span><span style="text-align:right">STATUS</span>
+    </div>
+    <div id="log-body" style="height:300px;overflow-y:auto;font-size:10px;line-height:2">
+      <div style="padding:20px;text-align:center;color:var(--dim)">Aguardando scan...</div>
     </div>
   </div>
 </div>
@@ -626,21 +644,65 @@ setInterval(fetchNews,     60000);
 setInterval(fetchCVD,      10000);
 setInterval(fetchSignals,  20000);
 setInterval(fetchRiskEvents,60000);
-</script>
 
-<!-- SCAN LOG -->
-<div style="padding:0 12px 12px">
-  <div class="log-panel">
-    <div class="log-header">
-      <span class="log-title">⬡ SCAN LOG — AA CAPITAL</span>
-      <span style="font-size:9px;color:var(--dim)">atualiza a cada 5s</span>
-      <span class="log-count" id="log-count">0 entradas</span>
-    </div>
-    <div class="log-body" id="log-body">
-      <div style="padding:20px;text-align:center;color:var(--dim)">Aguardando dados...</div>
-    </div>
-  </div>
-</div>
+// ── SCAN LOG ─────────────────────────────────────────────────────
+async function fetchScanLog() {
+  try {
+    const r = await fetch('/api/decisions?limit=80');
+    const d = await r.json();
+    const entries = (d.decisions || []);
+    const body  = document.getElementById('log-body');
+    const count = document.getElementById('log-count');
+    if (!body || !entries.length) return;
+
+    count.textContent = entries.length + ' entradas';
+
+    const GREEN = 'var(--green)', ORANGE = '#ff6b00', DIM = 'var(--dim)', MAG = 'var(--mag)';
+
+    body.innerHTML = entries.map(e => {
+      const score    = parseInt(e.score || 0);
+      const isSignal = (e.type || '').toUpperCase() === 'SIGNAL';
+      const scoreCol = isSignal ? GREEN : score >= 65 ? ORANGE : DIM;
+      const scoreStr = (isSignal ? '✅ ' : score >= 65 ? '◎ ' : '⬡ ') + score + '/100';
+
+      const reason = e.reason || '';
+      const regime = (reason.match(/regime=([A-Z_]+)/) || [])[1] || '';
+      const rsi    = (reason.match(/RSI=([\d.]+)/) || [])[1] || '';
+      const vol    = (reason.match(/vol=([\d.]+)x/) || [])[1] || '';
+      const adx    = (reason.match(/ADX([\d.]+)/) || [])[1] || '';
+      const tf4h   = reason.includes('4H:↑') ? '4H↑' : reason.includes('4H:↓') ? '4H↓' : '';
+      const tf1h   = reason.includes('1H:↑') ? '1H↑' : reason.includes('1H:↓') ? '1H↓' : '';
+
+      const meta = [
+        regime ? `<span style="color:${regime.includes('TREND') ? GREEN : DIM}">${regime}</span>` : '',
+        rsi    ? `<span style="color:var(--text)">RSI:${rsi}</span>` : '',
+        vol    ? `<span style="color:${parseFloat(vol)>=1.5 ? GREEN : DIM}">vol:${vol}x</span>` : '',
+        adx    ? `<span style="color:var(--text)">ADX:${adx}</span>` : '',
+        tf4h   ? `<span style="color:${tf4h.includes('↑') ? GREEN : MAG}">${tf4h}</span>` : '',
+        tf1h   ? `<span style="color:${tf1h.includes('↑') ? GREEN : MAG}">${tf1h}</span>` : '',
+      ].filter(Boolean).join(' &nbsp;');
+
+      const ts = e.timestamp ? new Date(e.timestamp) : null;
+      const time = ts ? ts.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '--:--:--';
+
+      const rowBg = isSignal ? 'background:rgba(0,255,127,0.05);border-left:2px solid var(--green)' : '';
+
+      return `<div style="display:grid;grid-template-columns:58px 78px 64px 1fr 82px;gap:4px;padding:3px 12px;border-bottom:1px solid rgba(30,61,80,0.4);align-items:center;${rowBg}">
+        <span style="color:var(--dim);font-size:9px">${time}</span>
+        <span style="color:${isSignal ? GREEN : 'var(--cyan)'};font-weight:bold">${(e.symbol||'').replace('USDT','')}</span>
+        <span style="color:${scoreCol};font-size:9px">${scoreStr}</span>
+        <span style="color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px">${meta}</span>
+        <span style="text-align:right;color:${isSignal ? GREEN : DIM};font-size:9px">${isSignal ? '🚀 SINAL' : '→ HOLD'}</span>
+      </div>`;
+    }).join('');
+
+    body.scrollTop = 0;
+  } catch(e) {}
+}
+setInterval(fetchScanLog, 5000);
+fetchScanLog();
+
+</script>
 
 </body>
 </html>
