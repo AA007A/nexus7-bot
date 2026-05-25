@@ -14,6 +14,7 @@ from bot.indicators import (
     orderbook_imbalance, delta_footprint, smc_analysis,
 )
 from bot.logger import log
+from bot.config import cfg
 
 TAKER_FEE   = 0.00055
 SLIPPAGE    = 0.00020
@@ -436,8 +437,8 @@ class Analyzer:
             tp = round(price - atr_1h * tp_mult, 6)
 
         rr = abs(tp - price) / abs(sl - price) if abs(sl - price) > 0 else 0
-        if rr < 1.5:
-            log.debug(f"[{symbol}] R:R {rr:.2f} < 1.5 → HOLD")
+        if rr < cfg.MIN_RR_RATIO:
+            log.debug(f"[{symbol}] R:R {rr:.2f} < {cfg.MIN_RR_RATIO} → HOLD")
             return None
 
         # ── PASSO 7: Validação de taxas ─────────────────────────
