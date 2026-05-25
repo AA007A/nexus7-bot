@@ -74,6 +74,13 @@ class Position:
         self.min_hold_until    = datetime.utcnow().timestamp() + 90 * 60  # 90min = 6 candles 15M
         self.expected_pnl      = getattr(sig, 'expected_pnl', 0.0)
         self.total_fees_pct    = getattr(sig, 'total_fees', 0.0)
+        # TP Parcial — dois alvos técnicos
+        self.tp1               = getattr(sig, 'tp1', sig.tp)   # fecha 50% aqui
+        self.tp2               = getattr(sig, 'tp2', sig.tp)   # fecha 50% aqui
+        self.tp1_hit           = False    # já fechou metade no TP1?
+        self.qty_original      = qty      # quantidade original para TP parcial
+        self.rr1               = getattr(sig, 'rr1', sig.rr)
+        self.rr2               = getattr(sig, 'rr2', sig.rr)
 
     def update_pnl(self, current_price: float):
         self.current_price = current_price
@@ -134,6 +141,11 @@ class Position:
             "trailing_sl":      round(self.trailing_sl, 6),
             "score":            self.score,
             "opened_at":        str(self.opened_at),
+            "tp1":              round(self.tp1, 6),
+            "tp2":              round(self.tp2, 6),
+            "tp1_hit":          self.tp1_hit,
+            "rr1":              self.rr1,
+            "rr2":              self.rr2,
         }
 
 
@@ -910,7 +922,22 @@ class TradingEngine:
                 f"Tipo={entry_type} ADX={sig.reason}"
             )
             _obal = await self.client.get_balance()
-            await notify(await signal_msg(sig))
+            # Enriquecer sinal com TP1/TP2 se disponível
+            if hasattr(sig, 'tp1') and sig.tp1 != sig.tp:
+                asyncio.create_task(notify(
+                    f"{'🟢🚀' if sig.direction == 'LONG' else '🔴🩸'} *SINAL — {'COMPRA (LONG)' if sig.direction == 'LONG' else 'VENDA (SHORT)'}*\n"
+                    f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                    f"📍 Par:    `{sig.symbol}`\n"
+                    f"💰 Entrada: `${sig.entry:,.4f}`\n"
+                    f"🛑 SL:      `${sig.sl:,.4f}` _(nível técnico)_\n"
+                    f"🎯 TP1:     `${sig.tp1:,.4f}` _(50% — R:R {sig.rr1:.1f})_\n"
+                    f"🏆 TP2:     `${sig.tp2:,.4f}` _(50% — R:R {sig.rr2:.1f})_\n"
+                    f"🧠 Score:   `{sig.score}/100`\n"
+                    f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                    f"_SL move para break-even ao atingir TP1_"
+                ))
+            else:
+                await notify(await signal_msg(sig))
             await notify(await order_opened_msg(sig, qty, _obal, _obal*cfg.LEVERAGE))
         except Exception as e:
             log.error(f"_open {sig.symbol}: {e}")
