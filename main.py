@@ -12,20 +12,20 @@ from bot import database as db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 KAKAZITO TRADE iniciando...")
+    log.info("🚀 AA Capital iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
     app.state.engine = engine
     asyncio.create_task(engine.run())
-    log.info("✅ KAKAZITO TRADE online")
+    log.info("✅ AA Capital online")
     yield
     engine.stop()
     await asyncio.sleep(0.5)
     await client.close()
 
 
-app = FastAPI(title="KAKAZITO TRADE", version="10.0.0", lifespan=lifespan)
+app = FastAPI(title="AA Capital", version="10.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -37,7 +37,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "10.0.0", "name": "KAKAZITO TRADE"}
+    return {"status": "online", "version": "10.0.0", "name": "AA Capital"}
 
 
 # ── Bot status ───────────────────────────────────────────────────
