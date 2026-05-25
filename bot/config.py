@@ -53,7 +53,7 @@ class Config:
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
     PORT:      int = int(os.environ.get("PORT", "8000"))
 
-    TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", "7763960437:AAHe2sV6icadsF1wddLwbOn1-WZi6LUkaLU")
-    TELEGRAM_CHAT:  str = os.environ.get("TELEGRAM_CHAT",  "8422682029")
+    TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", "")
+    TELEGRAM_CHAT:  str = os.environ.get("TELEGRAM_CHAT",  "")
 
 cfg = Config()
