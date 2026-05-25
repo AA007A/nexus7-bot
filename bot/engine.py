@@ -353,9 +353,10 @@ class TradingEngine:
                 f"🛑 STOP-LOSS DIÁRIO ATINGIDO: ${self.daily_pnl:.4f} ≤ -${self.daily_stop_loss:.0f}"
                 f" — Bot pausado até meia-noite UTC"
             )
-            import asyncio
             asyncio.create_task(notify(
-await daily_stop_msg(self.daily_pnl, self.daily_stop_loss, await self.client.get_balance())
+                f"🛑 *STOP-LOSS DIÁRIO ATINGIDO*\n"
+                f"Perda: `${self.daily_pnl:.2f}` | Limite: `-${self.daily_stop_loss:.0f}`\n"
+                f"Bot pausado até meia-noite UTC"
             ))
 
         # ── Meta batida ───────────────────────────────────────────
@@ -365,10 +366,11 @@ await daily_stop_msg(self.daily_pnl, self.daily_stop_loss, await self.client.get
                 f"🎯 META DIÁRIA BATIDA! PnL=${self.daily_pnl:.4f} ≥ ${self.daily_target:.0f}"
                 f" — Entrando em modo CONSERVADOR (score ≥ {cfg.POST_TARGET_SCORE})"
             )
-            import asyncio
             asyncio.create_task(notify(
-await daily_target_msg(self.daily_pnl, self.daily_target, await self.client.get_balance(), await self.client.get_balance()*cfg.LEVERAGE)
-                f"Proximas entradas: score >= {cfg.POST_TARGET_SCORE}/100"
+                f"🎯 *META DIÁRIA BATIDA!*\n"
+                f"Lucro: `+${self.daily_pnl:.2f} USDT`\n"
+                f"Próximas entradas: score >= `{cfg.POST_TARGET_SCORE}/100`\n"
+                f"Modo conservador ativado"
             ))
 
     def _effective_score(self) -> int:
