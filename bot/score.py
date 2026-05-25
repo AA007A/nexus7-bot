@@ -124,9 +124,8 @@ def score_tecnico(
             spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 1
             
             # Filtro de liquidez: spread alto bloqueia
-            if spread_pct > 0.1: # Spread > 0.1% é sinal de baixa liquidez/volatilidade extrema
-                score -= 50 
-                details["liquidity_block"] = True
+            if spread_pct > 0.1:  # spread alto: sem pontos, não bloqueia
+                details["liquidity_block"] = False
             elif spread_pct < 0.03:
                 score += 5
             details["spread_pct"] = round(spread_pct, 4)
