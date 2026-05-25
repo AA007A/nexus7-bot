@@ -253,9 +253,33 @@ def score_macro(direction: str) -> dict:
             score += 4
             details["btc_dominance"] = f"{btc_dom}%"
 
-    # 3. DXY — sem dados externos, neutro
-    score += 5
-    details["dxy"] = "neutro (sem dados)"
+    # 3. DXY — via cache do market_data
+    try:
+        from bot.market_data import _macro_corr
+        dxy = _macro_corr.get("dxy_trend", "neutral")
+        if direction == "LONG":
+            if dxy == "down":
+                score += 7
+                details["dxy"] = "down (favorável long)"
+            elif dxy == "neutral":
+                score += 4
+                details["dxy"] = "neutro"
+            else:
+                score += 1
+                details["dxy"] = "up (desfavorável long)"
+        else:
+            if dxy == "up":
+                score += 7
+                details["dxy"] = "up (favorável short)"
+            elif dxy == "neutral":
+                score += 4
+                details["dxy"] = "neutro"
+            else:
+                score += 1
+                details["dxy"] = "down (desfavorável short)"
+    except Exception:
+        score += 4
+        details["dxy"] = "neutro (fallback)"
 
     return {"score": min(25, score), "details": details}
 
