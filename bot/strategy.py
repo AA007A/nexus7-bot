@@ -16,6 +16,109 @@ from bot.indicators import (
 from bot.logger import log
 from bot.config import cfg
 
+
+
+# ─── Níveis Técnicos Reais ────────────────────────────────────────
+def find_support_resistance(highs: list, lows: list, closes: list, atr_v: float) -> dict:
+    """
+    Encontra suporte e resistência REAIS baseados em swing points.
+    Trader profissional: SL SEMPRE atrás de um nível técnico real.
+    """
+    import numpy as np
+    h = np.array(highs[-50:], dtype=float)
+    l = np.array(lows[-50:],  dtype=float)
+    c = np.array(closes[-50:],dtype=float)
+    price = c[-1]
+
+    # Swing highs: pico local (maior que os 2 vizinhos de cada lado)
+    swing_highs = []
+    swing_lows  = []
+    for i in range(2, len(h)-2):
+        if h[i] > h[i-1] and h[i] > h[i-2] and h[i] > h[i+1] and h[i] > h[i+2]:
+            swing_highs.append(float(h[i]))
+        if l[i] < l[i-1] and l[i] < l[i-2] and l[i] < l[i+1] and l[i] < l[i+2]:
+            swing_lows.append(float(l[i]))
+
+    # Suportes: swing lows abaixo do preço atual
+    supports = sorted([s for s in swing_lows if s < price], reverse=True)
+    # Resistências: swing highs acima do preço atual
+    resistances = sorted([r for r in swing_highs if r > price])
+
+    # Fallback: se não há níveis técnicos, usa ATR
+    nearest_support    = supports[0]    if supports    else price - atr_v * 1.5
+    nearest_resistance = resistances[0] if resistances else price + atr_v * 3.0
+
+    # Segundo nível para TP2
+    second_resistance = resistances[1] if len(resistances) > 1 else nearest_resistance + atr_v * 1.5
+    second_support    = supports[1]    if len(supports)    > 1 else nearest_support    - atr_v * 1.5
+
+    return {
+        "nearest_support":    nearest_support,
+        "nearest_resistance": nearest_resistance,
+        "second_support":     second_support,
+        "second_resistance":  second_resistance,
+        "supports":           supports[:3],
+        "resistances":        resistances[:3],
+    }
+
+
+def calc_sl_tp(direction: str, entry: float, levels: dict, atr_v: float) -> dict:
+    """
+    Calcula SL e TP1/TP2 baseados em níveis técnicos reais.
+
+    LONG:
+      SL  = abaixo do suporte mais próximo (+ buffer de 0.2x ATR)
+      TP1 = primeira resistência (fecha 50% da posição)
+      TP2 = segunda resistência (fecha os outros 50%)
+
+    SHORT:
+      SL  = acima da resistência mais próxima (+ buffer de 0.2x ATR)
+      TP1 = primeiro suporte (fecha 50% da posição)
+      TP2 = segundo suporte (fecha os outros 50%)
+    """
+    buffer = atr_v * 0.2   # pequeno buffer para evitar stop hunt
+
+    if direction == "LONG":
+        sl  = levels["nearest_support"]  - buffer
+        tp1 = levels["nearest_resistance"]
+        tp2 = levels["second_resistance"]
+    else:
+        sl  = levels["nearest_resistance"] + buffer
+        tp1 = levels["nearest_support"]
+        tp2 = levels["second_support"]
+
+    # Validações de qualidade
+    risk    = abs(entry - sl)
+    reward1 = abs(tp1 - entry)
+    reward2 = abs(tp2 - entry)
+
+    # Se RR do TP1 < 1.0, empurra TP1 para mínimo de 1:1
+    if risk > 0 and reward1 / risk < 1.0:
+        if direction == "LONG":
+            tp1 = entry + risk * 1.2
+        else:
+            tp1 = entry - risk * 1.2
+
+    # TP2 deve ser pelo menos 2x o risco
+    if risk > 0 and reward2 / risk < 2.0:
+        if direction == "LONG":
+            tp2 = entry + risk * 2.5
+        else:
+            tp2 = entry - risk * 2.5
+
+    rr1 = round(abs(tp1 - entry) / risk, 2) if risk > 0 else 0
+    rr2 = round(abs(tp2 - entry) / risk, 2) if risk > 0 else 0
+
+    return {
+        "sl":  round(sl,  6),
+        "tp1": round(tp1, 6),
+        "tp2": round(tp2, 6),
+        "rr1": rr1,
+        "rr2": rr2,
+        "risk": round(risk, 6),
+    }
+
+
 TAKER_FEE   = 0.00055
 SLIPPAGE    = 0.00020
 FUNDING_FEE = 0.00010
@@ -38,12 +141,21 @@ class Signal:
     expected_pnl: float = 0.0
     total_fees:   float = 0.0
     entry_type:   str  = "PULLBACK"
+    tp1:          float = 0.0   # TP parcial 50% — primeiro alvo técnico
+    tp2:          float = 0.0   # TP final  50% — segundo alvo técnico
+    rr1:          float = 0.0   # R/R do TP1
+    rr2:          float = 0.0   # R/R do TP2
     rr:           float = field(init=False)
 
     def __post_init__(self):
         risk   = abs(self.entry - self.sl)
         reward = abs(self.tp - self.entry)
         self.rr = round(reward / risk, 2) if risk > 0 else 0
+        # Sincroniza tp1/tp2 se não fornecidos
+        if self.tp1 == 0.0:
+            self.tp1 = self.tp
+        if self.tp2 == 0.0:
+            self.tp2 = self.tp
 
 
 # ─── Regime Detector ─────────────────────────────────────────────
