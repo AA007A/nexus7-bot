@@ -307,6 +307,29 @@ async def decisions(limit: int = 60):
             })
         return {"decisions": logs}
 
+
+@app.get("/api/test-notify")
+async def test_notify():
+    """Envia mensagem de teste no Telegram para verificar configuração."""
+    from bot.notifier import notify
+    from bot.config import cfg
+    if not cfg.TELEGRAM_TOKEN:
+        return {"ok": False, "error": "TELEGRAM_TOKEN não configurado no Railway"}
+    if not cfg.TELEGRAM_CHAT:
+        return {"ok": False, "error": "TELEGRAM_CHAT não configurado no Railway"}
+    try:
+        await notify(
+            "✅ *AA Capital — Teste OK!*\n"
+            "`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+            "🤖 Bot conectado e enviando alertas\n"
+            f"💬 Chat ID: `{cfg.TELEGRAM_CHAT}`\n"
+            "`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+            "_Configuração do Telegram funcionando!_"
+        )
+        return {"ok": True, "message": "Mensagem enviada!", "chat": cfg.TELEGRAM_CHAT}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
