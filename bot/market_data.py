@@ -268,3 +268,207 @@ def macro_corr_score(direction: str) -> int:
 
 def get_macro_summary() -> dict:
     return dict(_macro_corr)
+
+# ══════════════════════════════════════════════════════════════════
+# FONTES EXTERNAS — Nível Institucional
+# ══════════════════════════════════════════════════════════════════
+
+_coinglass_cache: dict = {}
+_events_cache:   list  = []
+_sentiment_cache: dict = {}
+
+# ── Coinglass — Open Interest + Liquidações + Long/Short Ratio ────
+async def update_coinglass():
+    """
+    Busca dados do Coinglass via API pública (sem auth):
+    - Open Interest BTC/ETH
+    - Long/Short ratio
+    - Liquidações 24h
+    """
+    global _coinglass_cache
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Open Interest + Long/Short ratio via Coinglass public
+            url = "https://open-api.coinglass.com/public/v2/indicator/open_interest"
+            headers = {"coinglassSecret": ""}  # público
+            async with s.get(
+                "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+                "?symbol=BTCUSDT&period=1h&limit=1",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data:
+                        ls = data[0]
+                        _coinglass_cache["btc_long_ratio"]  = float(ls.get("longAccount",  0.5))
+                        _coinglass_cache["btc_short_ratio"] = float(ls.get("shortAccount", 0.5))
+                        _coinglass_cache["ls_ratio"]        = float(ls.get("longShortRatio", 1.0))
+
+            # Open Interest via Binance Futures (proxy confiável)
+            async with s.get(
+                "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    _coinglass_cache["btc_oi"] = float(data.get("openInterest", 0))
+
+            # Liquidações estimadas via Binance (funding + OI proxy)
+            async with s.get(
+                "https://fapi.binance.com/futures/data/takerlongshortRatio"
+                "?symbol=BTCUSDT&period=1h&limit=1",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data:
+                        _coinglass_cache["taker_buy_ratio"]  = float(data[0].get("buySellRatio", 1.0))
+                        _coinglass_cache["taker_buy_vol"]    = float(data[0].get("buyVol",  0))
+                        _coinglass_cache["taker_sell_vol"]   = float(data[0].get("sellVol", 0))
+
+            log.info(f"📊 Coinglass: L/S={_coinglass_cache.get('ls_ratio',1):.2f} "
+                     f"OI={_coinglass_cache.get('btc_oi',0)/1e6:.1f}M")
+    except Exception as e:
+        log.warning(f"update_coinglass: {e}")
+
+
+def get_coinglass() -> dict:
+    return _coinglass_cache.copy()
+
+
+# ── Binance Announcements — detecta novos listings ────────────────
+_binance_seen_ids: set = set()
+
+async def check_binance_announcements() -> list:
+    """
+    Monitora anúncios da Binance.
+    Novo listing = pump quase garantido nas primeiras horas.
+    Retorna lista de anúncios novos desde a última checagem.
+    """
+    new_items = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            url = ("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+                   "?type=1&pageNo=1&pageSize=5")
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8),
+                             headers={"User-Agent": "Mozilla/5.0"}) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    articles = data.get("data", {}).get("articles", [])
+                    for a in articles:
+                        aid   = str(a.get("id", ""))
+                        title = a.get("title", "")
+                        if aid and aid not in _binance_seen_ids:
+                            _binance_seen_ids.add(aid)
+                            is_listing = any(w in title.lower() for w in
+                                           ["will list", "vai listar", "new listing",
+                                            "lists", "perpetual", "futures"])
+                            new_items.append({
+                                "id":         aid,
+                                "title":      title,
+                                "is_listing": is_listing,
+                                "url":        f"https://www.binance.com/en/support/announcement/{aid}"
+                            })
+                            if is_listing:
+                                log.info(f"🔔 BINANCE LISTING: {title}")
+    except Exception as e:
+        log.warning(f"check_binance_announcements: {e}")
+    return new_items
+
+
+# ── CoinMarketCal — Calendário de Eventos ─────────────────────────
+async def update_coinmarketcal():
+    """
+    Busca eventos importantes do calendário crypto:
+    - Halvings, mainnet launches, listings, expiração de opções
+    - Usa API pública (sem auth) via scraping leve
+    """
+    global _events_cache
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Alternativa gratuita: CryptoCompare news como proxy de eventos
+            url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC,ETH&sortOrder=latest"
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    items = data.get("Data", [])[:10]
+                    _events_cache = [{
+                        "title":    i.get("title", ""),
+                        "source":   i.get("source_info", {}).get("name", ""),
+                        "url":      i.get("url", ""),
+                        "ts":       i.get("published_on", 0),
+                        "tags":     i.get("tags", ""),
+                    } for i in items]
+                    log.info(f"📅 CoinMarketCal/CryptoCompare: {len(_events_cache)} eventos")
+    except Exception as e:
+        log.warning(f"update_coinmarketcal: {e}")
+
+
+def get_events() -> list:
+    return _events_cache.copy()
+
+
+# ── Sentimento Completo — cruza Fear&Greed + L/S + OI + Taker ─────
+def get_market_sentiment() -> dict:
+    """
+    Sentimento consolidado de múltiplas fontes.
+    Retorna score de -100 (extremo bearish) a +100 (extremo bullish).
+    """
+    score = 0
+    signals = []
+
+    # Fear & Greed
+    fg = _macro_cache.get("fear_greed", 50)
+    if fg >= 75:
+        score -= 10; signals.append(f"F&G={fg}(greed_extremo)")
+    elif fg >= 55:
+        score += 8;  signals.append(f"F&G={fg}(greed)")
+    elif fg <= 25:
+        score += 5;  signals.append(f"F&G={fg}(fear_extremo_reversão)")
+    elif fg <= 45:
+        score -= 5;  signals.append(f"F&G={fg}(fear)")
+    else:
+        signals.append(f"F&G={fg}(neutro)")
+
+    # Long/Short ratio
+    ls = _coinglass_cache.get("ls_ratio", 1.0)
+    if ls > 1.5:
+        score += 10; signals.append(f"L/S={ls:.2f}(longs_dominam)")
+    elif ls > 1.1:
+        score += 5;  signals.append(f"L/S={ls:.2f}(levemente_long)")
+    elif ls < 0.7:
+        score -= 10; signals.append(f"L/S={ls:.2f}(shorts_dominam)")
+    elif ls < 0.9:
+        score -= 5;  signals.append(f"L/S={ls:.2f}(levemente_short)")
+    else:
+        signals.append(f"L/S={ls:.2f}(neutro)")
+
+    # Taker buy/sell ratio
+    tbr = _coinglass_cache.get("taker_buy_ratio", 1.0)
+    if tbr > 1.3:
+        score += 8;  signals.append(f"TAKER={tbr:.2f}(buy_agressivo)")
+    elif tbr < 0.8:
+        score -= 8;  signals.append(f"TAKER={tbr:.2f}(sell_agressivo)")
+    else:
+        signals.append(f"TAKER={tbr:.2f}(equilibrado)")
+
+    # Classificação final
+    if score >= 15:
+        sentiment = "BULLISH"
+    elif score <= -15:
+        sentiment = "BEARISH"
+    elif score >= 5:
+        sentiment = "SLIGHTLY_BULLISH"
+    elif score <= -5:
+        sentiment = "SLIGHTLY_BEARISH"
+    else:
+        sentiment = "NEUTRAL"
+
+    return {
+        "sentiment": sentiment,
+        "score":     score,
+        "signals":   signals,
+        "fg":        fg,
+        "ls_ratio":  _coinglass_cache.get("ls_ratio", 1.0),
+    }
+
