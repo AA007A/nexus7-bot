@@ -199,3 +199,40 @@ async def absorption_alert_msg(symbol: str, direction: str,
         f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
         f"_Grande player absorvendo pressão oposta_"
     )
+
+# ── SESSÃO DE MERCADO ─────────────────────────────────────────────
+async def session_change_msg(session: str, quality: int,
+                              emoji: str, description: str) -> str:
+    return (
+        f"{emoji} *SESSÃO: {session}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"📊 Qualidade: `{quality}%`\n"
+        f"📋 _{description}_\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`"
+    )
+
+
+# ── CORRELAÇÃO BLOQUEADA ──────────────────────────────────────────
+async def correlation_block_msg(symbol: str, conflict: str,
+                                 group: str) -> str:
+    return (
+        f"⚠️ *CORRELAÇÃO BLOQUEADA — {symbol}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"📊 Grupo: `{group}`\n"
+        f"🔗 Conflito: _{conflict}_\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"_Entrada bloqueada para evitar exposição dupla_"
+    )
+
+
+# ── TWITTER SENTIMENT ─────────────────────────────────────────────
+async def twitter_sentiment_msg(sentiment: str, bull: int,
+                                 bear: int, trending: list) -> str:
+    icon = "🐂" if sentiment == "BULLISH" else "🐻" if sentiment == "BEARISH" else "🐦"
+    return (
+        f"{icon} *TWITTER/X — {sentiment}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"🟢 Bullish: `{bull}` menções\n"
+        f"🔴 Bearish: `{bear}` menções\n"
+        f"📈 Trending: _{', '.join(trending[:3]) if trending else 'sem dados'}_"
+    )
