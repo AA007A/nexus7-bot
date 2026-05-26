@@ -472,3 +472,317 @@ def get_market_sentiment() -> dict:
         "ls_ratio":  _coinglass_cache.get("ls_ratio", 1.0),
     }
 
+# ══════════════════════════════════════════════════════════════════
+# FILTRO DE SESSÃO DE MERCADO
+# Sessões com maior liquidez e melhores oportunidades
+# ══════════════════════════════════════════════════════════════════
+
+def get_market_session() -> dict:
+    """
+    Retorna a sessão de mercado atual e qualidade para trading.
+
+    Sessões de alta qualidade (80%+ das oportunidades):
+    - Londres:    08:00 - 12:00 UTC  ⭐⭐⭐
+    - Nova York:  13:00 - 17:00 UTC  ⭐⭐⭐
+    - Overlap NY: 12:00 - 16:00 UTC  ⭐⭐⭐⭐ (melhor do dia)
+
+    Sessões de baixa qualidade (evitar):
+    - Madrugada:  00:00 - 06:00 UTC  ❌ volume mínimo
+    - Asia tarde: 06:00 - 08:00 UTC  ⚠️  volume médio
+    """
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    hour    = now_utc.hour
+    minute  = now_utc.minute
+    h       = hour + minute / 60.0
+
+    # Classificar sessão
+    if 12.0 <= h < 16.0:
+        session     = "OVERLAP_NY_LONDON"
+        quality     = 100
+        score_bonus = 8
+        emoji       = "🔥"
+        description = "Overlap NY+Londres — melhor liquidez do dia"
+    elif 8.0 <= h < 12.0:
+        session     = "LONDON"
+        quality     = 85
+        score_bonus = 5
+        emoji       = "🇬🇧"
+        description = "Sessão Londres — alta liquidez"
+    elif 13.0 <= h < 17.0:
+        session     = "NEW_YORK"
+        quality     = 90
+        score_bonus = 6
+        emoji       = "🇺🇸"
+        description = "Sessão Nova York — alta liquidez"
+    elif 17.0 <= h < 20.0:
+        session     = "NY_CLOSE"
+        quality     = 65
+        score_bonus = 2
+        emoji       = "🌆"
+        description = "Fechamento NY — liquidez decaindo"
+    elif 0.0 <= h < 3.0 or h >= 23.0:
+        session     = "DEAD_ZONE"
+        quality     = 20
+        score_bonus = -10
+        emoji       = "🌑"
+        description = "Zona morta — volume mínimo, evitar trades"
+    elif 3.0 <= h < 6.0:
+        session     = "ASIA_EARLY"
+        quality     = 45
+        score_bonus = -3
+        emoji       = "🌏"
+        description = "Ásia início — volume baixo"
+    elif 6.0 <= h < 8.0:
+        session     = "ASIA_CLOSE"
+        quality     = 55
+        score_bonus = 0
+        emoji       = "🌅"
+        description = "Fechamento Ásia — volume moderado"
+    else:
+        session     = "NEUTRAL"
+        quality     = 50
+        score_bonus = 0
+        emoji       = "⏳"
+        description = "Entre sessões"
+
+    # Fins de semana têm volume 40% menor
+    weekday = now_utc.weekday()   # 5=Sábado, 6=Domingo
+    is_weekend = weekday >= 5
+    if is_weekend:
+        quality     = int(quality * 0.6)
+        score_bonus = min(score_bonus, -5)
+        description += " (fim de semana — volume reduzido)"
+
+    return {
+        "session":     session,
+        "quality":     quality,
+        "score_bonus": score_bonus,
+        "emoji":       emoji,
+        "description": description,
+        "hour_utc":    hour,
+        "is_weekend":  is_weekend,
+        "tradeable":   quality >= 50,
+    }
+
+
+def should_trade_now() -> tuple:
+    """
+    Retorna (pode_operar: bool, motivo: str).
+    Bloqueia trades em horas de baixíssimo volume.
+    """
+    sess = get_market_session()
+    if not sess["tradeable"]:
+        return False, f"Sessão {sess['session']} — qualidade {sess['quality']}% abaixo do mínimo"
+    return True, sess["description"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# CORRELAÇÃO ENTRE PARES — evita posições duplicadas
+# ══════════════════════════════════════════════════════════════════
+
+# Grupos de correlação alta (>0.85 histórico)
+CORRELATION_GROUPS = {
+    "BTC_FAMILY":    ["BTCUSDT"],
+    "ETH_LAYER1":    ["ETHUSDT", "AVAXUSDT", "SOLUSDT", "DOTUSDT", "ADAUSDT"],
+    "BNB_CEX":       ["BNBUSDT"],
+    "MEME_DOGE":     ["DOGEUSDT"],
+    "DEFI_LINK":     ["LINKUSDT", "MATICUSDT"],
+    "LEGACY_ALTS":   ["LTCUSDT", "XRPUSDT"],
+}
+
+def get_correlation_group(symbol: str) -> str:
+    """Retorna o grupo de correlação do símbolo."""
+    for group, symbols in CORRELATION_GROUPS.items():
+        if symbol in symbols:
+            return group
+    return f"SOLO_{symbol}"
+
+
+def check_correlation_conflict(symbol: str, open_positions: dict) -> dict:
+    """
+    Verifica se abrir posição em 'symbol' cria conflito de correlação.
+
+    Regras profissionais:
+    1. Máximo 1 posição por grupo de correlação
+    2. ETH_LAYER1 é o maior grupo — nunca ter AVAX+SOL+ETH ao mesmo tempo
+    3. Se BTC e ETH ambos LONG = permitido (são os principais)
+    4. Altcoins correlacionadas = bloqueia segunda posição
+
+    Retorna:
+      conflict: True se há conflito
+      reason:   motivo
+      group:    grupo do símbolo
+    """
+    my_group = get_correlation_group(symbol)
+
+    conflicts = []
+    for pos_symbol, pos in open_positions.items():
+        if pos_symbol == symbol:
+            continue
+        pos_group = get_correlation_group(pos_symbol)
+
+        # Mesmo grupo = conflito direto
+        if pos_group == my_group and my_group != "BTC_FAMILY":
+            conflicts.append(f"{pos_symbol} (mesmo grupo {my_group})")
+
+        # ETH_LAYER1 especial: permite no máx 2 posições se direções opostas
+        if my_group == "ETH_LAYER1" and pos_group == "ETH_LAYER1":
+            if pos.direction == (open_positions.get(symbol, pos)).direction:
+                conflicts.append(f"{pos_symbol} mesma direção ETH_LAYER1")
+
+    if conflicts:
+        return {
+            "conflict": True,
+            "reason":   f"Correlação alta com: {', '.join(conflicts)}",
+            "group":    my_group,
+            "penalty":  -15,
+        }
+
+    return {
+        "conflict": False,
+        "reason":   f"Sem conflito (grupo: {my_group})",
+        "group":    my_group,
+        "penalty":  0,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# X/TWITTER SENTIMENT — via API gratuita (nitter/RSS)
+# ══════════════════════════════════════════════════════════════════
+
+_twitter_cache: dict = {
+    "sentiment": "NEUTRAL",
+    "score":     0,
+    "mentions":  {},
+    "trending":  [],
+    "last_update": 0,
+}
+
+_BULLISH_WORDS = [
+    "bullish", "moon", "pump", "breakout", "buy", "long", "ath",
+    "bull", "surge", "rally", "🚀", "🟢", "💎", "hodl", "accumulate"
+]
+_BEARISH_WORDS = [
+    "bearish", "dump", "crash", "sell", "short", "bear", "drop",
+    "correction", "fall", "rekt", "📉", "🔴", "panic", "fear", "liquidation"
+]
+
+async def update_twitter_sentiment():
+    """
+    Busca sentimento do X/Twitter via:
+    1. CryptoCompare social stats (gratuito)
+    2. RSS do Nitter (espelho público do Twitter)
+    3. Trending topics via API alternativa
+
+    Fallback para cada fonte — não quebra o bot se falhar.
+    """
+    global _twitter_cache
+    import time as _t
+
+    # Throttle: atualiza no máx a cada 10 minutos
+    if _t.time() - _twitter_cache.get("last_update", 0) < 600:
+        return
+
+    bull_score = 0
+    bear_score = 0
+    mentions   = {}
+    trending   = []
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            # 1. CryptoCompare Social Stats — gratuito, sem auth
+            url = ("https://min-api.cryptocompare.com/data/social/coin/latest"
+                   "?coinId=1182&extraParams=AA_Capital")
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    tw   = data.get("Data", {}).get("Twitter", {})
+                    if tw:
+                        followers   = tw.get("followers", 0)
+                        statuses    = tw.get("statuses",  0)
+                        favourites  = tw.get("favourites", 0)
+                        # Engagement alto = sentimento ativo
+                        if statuses > 1000:
+                            bull_score += 5
+                            trending.append(f"BTC Twitter: {statuses} posts")
+
+            # 2. Nitter RSS — tweets recentes sobre BTC/ETH/crypto
+            rss_sources = [
+                "https://nitter.net/search/rss?q=bitcoin+OR+crypto+OR+BTC&f=tweets",
+                "https://nitter.poast.org/search/rss?q=bitcoin+bullish+OR+bearish",
+            ]
+            for rss_url in rss_sources:
+                try:
+                    async with s.get(
+                        rss_url,
+                        timeout=aiohttp.ClientTimeout(total=6),
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    ) as r:
+                        if r.status == 200:
+                            text = await r.text()
+                            # Contar palavras bullish/bearish no XML
+                            text_lower = text.lower()
+                            for w in _BULLISH_WORDS:
+                                cnt = text_lower.count(w)
+                                if cnt > 0:
+                                    bull_score += min(cnt, 3)
+                            for w in _BEARISH_WORDS:
+                                cnt = text_lower.count(w)
+                                if cnt > 0:
+                                    bear_score += min(cnt, 3)
+                            break   # se uma fonte funcionar, não precisa da outra
+                except Exception:
+                    continue
+
+            # 3. Menções por símbolo via CryptoCompare
+            symbols_to_check = ["BTC", "ETH", "SOL", "BNB"]
+            coin_ids = {"BTC": 1182, "ETH": 7605, "SOL": 934430, "BNB": 321992}
+            for sym in symbols_to_check[:2]:   # limitar requests
+                try:
+                    coin_url = (f"https://min-api.cryptocompare.com/data/social/coin/latest"
+                               f"?coinId={coin_ids.get(sym, 1182)}")
+                    async with s.get(coin_url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            tw2 = d.get("Data", {}).get("Twitter", {})
+                            mentions[sym] = {
+                                "followers": tw2.get("followers", 0),
+                                "posts":     tw2.get("statuses",  0),
+                            }
+                except Exception:
+                    pass
+
+    except Exception as e:
+        log.warning(f"Twitter sentiment: {e}")
+
+    # Calcular sentimento final
+    total = bull_score + bear_score or 1
+    bull_ratio = bull_score / total
+
+    if bull_ratio >= 0.65:
+        sentiment = "BULLISH"
+        score     = int(bull_ratio * 20)
+    elif bull_ratio <= 0.35:
+        sentiment = "BEARISH"
+        score     = -int((1 - bull_ratio) * 20)
+    else:
+        sentiment = "NEUTRAL"
+        score     = 0
+
+    _twitter_cache = {
+        "sentiment":   sentiment,
+        "score":       score,
+        "bull_score":  bull_score,
+        "bear_score":  bear_score,
+        "mentions":    mentions,
+        "trending":    trending,
+        "last_update": _t.time(),
+    }
+
+    log.info(f"🐦 Twitter: {sentiment} (bull={bull_score} bear={bear_score})")
+
+
+def get_twitter_sentiment() -> dict:
+    return _twitter_cache.copy()
+
