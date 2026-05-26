@@ -398,3 +398,277 @@ def smc_analysis(highs: list, lows: list, closes: list) -> dict:
         "last_swing_high": round(last_swing_high, 6),
         "last_swing_low":  round(last_swing_low, 6),
     }
+
+# ══════════════════════════════════════════════════════════════════
+# ORDER FLOW AVANÇADO — Nível Institucional
+# ══════════════════════════════════════════════════════════════════
+
+# ── Spoofing Detector ─────────────────────────────────────────────
+# Histórico de snapshots do orderbook por símbolo
+_ob_history: dict = {}   # symbol → lista de snapshots {ts, bids, asks}
+_OB_HISTORY_MAX = 20     # manter últimos 20 snapshots (~10 segundos)
+
+def update_orderbook_history(symbol: str, orderbook: dict):
+    """
+    Armazena snapshot do orderbook para análise de spoofing.
+    Deve ser chamado a cada atualização do WebSocket (~500ms).
+    """
+    import time
+    if symbol not in _ob_history:
+        _ob_history[symbol] = []
+    snapshot = {
+        "ts":   time.time(),
+        "bids": {float(b[0]): float(b[1]) for b in orderbook.get("b", [])[:20]},
+        "asks": {float(a[0]): float(a[1]) for a in orderbook.get("a", [])[:20]},
+    }
+    _ob_history[symbol].append(snapshot)
+    if len(_ob_history[symbol]) > _OB_HISTORY_MAX:
+        _ob_history[symbol].pop(0)
+
+
+def detect_spoofing(symbol: str) -> dict:
+    """
+    Spoofing Detector — detecta ordens grandes que aparecem e somem.
+
+    Como funciona:
+    - Compara snapshots consecutivos do orderbook
+    - Se uma ordem grande (>= 3x média) aparece e desaparece
+      em menos de 3 snapshots SEM execução → spoofing detectado
+
+    Retorna:
+      spoofing_bid: True se há spoofing no lado comprador (falsa pressão de compra)
+      spoofing_ask: True se há spoofing no lado vendedor (falsa pressão de venda)
+      score_penalty: penalidade sugerida no score (-10 a -25)
+    """
+    import numpy as np
+    history = _ob_history.get(symbol, [])
+    result  = {"spoofing_bid": False, "spoofing_ask": False,
+                "score_penalty": 0, "detail": ""}
+
+    if len(history) < 4:
+        return result
+
+    # Para cada lado (bid/ask), verificar ordens que aparecem e somem
+    for side in ["bids", "asks"]:
+        all_vols = []
+        for snap in history:
+            all_vols.extend(snap[side].values())
+        if not all_vols:
+            continue
+
+        mean_vol = float(np.mean(all_vols)) if all_vols else 1.0
+        threshold = mean_vol * 3.0   # ordem "grande" = 3x a média
+
+        # Verificar se ordem grande apareceu e desapareceu
+        for i in range(1, len(history) - 1):
+            prev_snap = history[i - 1][side]
+            curr_snap = history[i][side]
+            next_snap = history[i + 1][side]
+
+            for price, vol in curr_snap.items():
+                if vol >= threshold:
+                    # Estava presente antes?
+                    existed_before = price in prev_snap and prev_snap[price] >= threshold * 0.5
+                    # Sumiu depois?
+                    gone_after     = price not in next_snap or next_snap[price] < vol * 0.3
+
+                    if not existed_before and gone_after:
+                        # Apareceu grande e sumiu rápido = spoofing
+                        if side == "bids":
+                            result["spoofing_bid"]   = True
+                            result["score_penalty"] -= 15
+                            result["detail"] += f"SPOOF_BID@{price:.2f}({vol:.0f}) "
+                        else:
+                            result["spoofing_ask"]   = True
+                            result["score_penalty"] -= 15
+                            result["detail"] += f"SPOOF_ASK@{price:.2f}({vol:.0f}) "
+
+    return result
+
+
+# ── Iceberg Detector ──────────────────────────────────────────────
+def detect_iceberg(symbol: str, price: float) -> dict:
+    """
+    Iceberg Detector — detecta ordens ocultas que se repõem no mesmo nível.
+
+    Como funciona:
+    - Monitora um nível de preço específico
+    - Se o volume desaparece (execução) mas o nível se repõe rapidamente
+      com volume similar → iceberg (ordem grande oculta se desmembrando)
+
+    Sinais de iceberg:
+      - Mesmo preço reabastecido 3+ vezes consecutivas
+      - Volume reposto similar ao original (±20%)
+    """
+    history = _ob_history.get(symbol, [])
+    result  = {"iceberg_bid": False, "iceberg_ask": False,
+                "iceberg_price": 0.0, "iceberg_side": "", "detail": ""}
+
+    if len(history) < 5:
+        return result
+
+    # Analisar níveis de preço próximos ao preço atual (±0.5%)
+    price_range = price * 0.005
+
+    for side in ["bids", "asks"]:
+        level_counts: dict = {}   # price → lista de volumes observados
+
+        for snap in history:
+            for p, v in snap[side].items():
+                if abs(p - price) <= price_range and v > 0:
+                    if p not in level_counts:
+                        level_counts[p] = []
+                    level_counts[p].append(v)
+
+        for p, vols in level_counts.items():
+            if len(vols) < 4:
+                continue
+            # Verifica se volume oscila (some e volta) com valor similar
+            reloads = 0
+            for i in range(1, len(vols)):
+                dropped  = vols[i] < vols[i-1] * 0.4   # volume caiu >60%
+                reloaded = vols[i] > vols[i-1] * 0.6   # volume voltou
+                if i >= 2 and dropped and reloaded:
+                    reloads += 1
+
+            if reloads >= 2:
+                if side == "bids":
+                    result["iceberg_bid"]   = True
+                    result["iceberg_price"] = p
+                    result["iceberg_side"]  = "BID"
+                    result["detail"]       += f"ICEBERG_BID@{p:.2f}(reloads={reloads}) "
+                else:
+                    result["iceberg_ask"]   = True
+                    result["iceberg_price"] = p
+                    result["iceberg_side"]  = "ASK"
+                    result["detail"]       += f"ICEBERG_ASK@{p:.2f}(reloads={reloads}) "
+
+    return result
+
+
+# ── Agressão Compradora / Vendedora ───────────────────────────────
+def detect_aggression(trades: list) -> dict:
+    """
+    Detecta agressão compradora ou vendedora com base nos últimos trades.
+
+    'trades' = lista de trades recentes da exchange:
+    [{"price": 1.23, "qty": 100, "side": "Buy"/"Sell", "ts": 123456}, ...]
+
+    Agressão compradora: sequência de market buys grandes e rápidos
+    Agressão vendedora:  sequência de market sells grandes e rápidos
+
+    Retorna:
+      aggressor:      "BUYER" | "SELLER" | "NEUTRAL"
+      buy_ratio:      % de volume que foi compra agressiva
+      sell_ratio:     % de volume que foi venda agressiva
+      momentum:       "ACCELERATING" | "DECELERATING" | "STABLE"
+    """
+    import numpy as np
+
+    if not trades or len(trades) < 5:
+        return {"aggressor": "NEUTRAL", "buy_ratio": 0.5,
+                "sell_ratio": 0.5, "momentum": "STABLE", "detail": ""}
+
+    buy_vol  = sum(float(t.get("qty", t.get("size", 0)))
+                   for t in trades if t.get("side", "").lower() in ("buy", "b"))
+    sell_vol = sum(float(t.get("qty", t.get("size", 0)))
+                   for t in trades if t.get("side", "").lower() in ("sell", "s"))
+    total    = buy_vol + sell_vol or 1
+
+    buy_ratio  = buy_vol  / total
+    sell_ratio = sell_vol / total
+
+    # Detectar aceleração: últimos 30% dos trades vs primeiros 30%
+    n     = len(trades)
+    early = trades[:n//3]
+    late  = trades[-(n//3):]
+
+    early_buy = sum(float(t.get("qty", 0)) for t in early
+                    if t.get("side","").lower() in ("buy","b"))
+    late_buy  = sum(float(t.get("qty", 0)) for t in late
+                    if t.get("side","").lower() in ("buy","b"))
+
+    if early_buy > 0:
+        momentum_ratio = late_buy / early_buy
+        momentum = ("ACCELERATING" if momentum_ratio > 1.3
+                    else "DECELERATING" if momentum_ratio < 0.7
+                    else "STABLE")
+    else:
+        momentum = "STABLE"
+
+    if buy_ratio >= 0.65:
+        aggressor = "BUYER"
+    elif sell_ratio >= 0.65:
+        aggressor = "SELLER"
+    else:
+        aggressor = "NEUTRAL"
+
+    return {
+        "aggressor":   aggressor,
+        "buy_ratio":   round(buy_ratio,  3),
+        "sell_ratio":  round(sell_ratio, 3),
+        "momentum":    momentum,
+        "buy_vol":     round(buy_vol,  2),
+        "sell_vol":    round(sell_vol, 2),
+        "detail":      f"{aggressor} buy={buy_ratio:.0%} sell={sell_ratio:.0%} {momentum}",
+    }
+
+
+# ── Absorção ─────────────────────────────────────────────────────
+def detect_absorption(symbol: str, closes: list, volumes: list,
+                       orderbook: dict) -> dict:
+    """
+    Absorção — grande player absorve pressão do lado oposto sem mover preço.
+
+    Cenário BULLISH (absorção de venda):
+    - Alto volume de venda chegando no bid
+    - Preço não cai (ou cai minimamente)
+    - Bid se mantém firme → buyer absorvendo todo sell
+
+    Cenário BEARISH (absorção de compra):
+    - Alto volume de compra chegando no ask
+    - Preço não sobe (ou sobe minimamente)
+    - Ask se mantém firme → seller absorvendo todo buy
+
+    Retorna:
+      absorption_bull: True = buyer absorvendo vendas (sinal de alta)
+      absorption_bear: True = seller absorvendo compras (sinal de baixa)
+      strength:        0.0 - 1.0
+    """
+    import numpy as np
+
+    result = {"absorption_bull": False, "absorption_bear": False,
+               "strength": 0.0, "detail": ""}
+
+    if len(closes) < 5 or len(volumes) < 5:
+        return result
+
+    closes_arr  = np.array(closes[-10:],  dtype=float)
+    volumes_arr = np.array(volumes[-10:], dtype=float)
+
+    price_change   = abs(closes_arr[-1] - closes_arr[0]) / closes_arr[0] if closes_arr[0] > 0 else 1
+    avg_vol        = float(np.mean(volumes_arr[:-1])) or 1
+    recent_vol     = float(volumes_arr[-1])
+    vol_ratio      = recent_vol / avg_vol
+
+    # Alto volume mas preço não se move = absorção
+    if vol_ratio >= 2.0 and price_change < 0.003:   # vol 2x+ mas movimento < 0.3%
+        # Determinar direção pela pressão do orderbook
+        ob_result = orderbook_imbalance(orderbook) if orderbook else {"imbalance": 0.5}
+        imbalance = ob_result.get("imbalance", 0.5)
+
+        strength = min(1.0, (vol_ratio - 2.0) / 3.0 + 0.3)
+
+        if imbalance < 0.4:
+            # Mais asks que bids mas preço não cai = buyer absorvendo
+            result["absorption_bull"] = True
+            result["strength"]        = round(strength, 2)
+            result["detail"]          = f"ABSORB_BULL vol={vol_ratio:.1f}x Δprice={price_change:.4%}"
+        elif imbalance > 0.6:
+            # Mais bids que asks mas preço não sobe = seller absorvendo
+            result["absorption_bear"] = True
+            result["strength"]        = round(strength, 2)
+            result["detail"]          = f"ABSORB_BEAR vol={vol_ratio:.1f}x Δprice={price_change:.4%}"
+
+    return result
+
