@@ -1,11 +1,16 @@
 """
-AA Capital Trading Engine v7.1
+AA Capital Trading Engine v10.0
   ✅ Meta diária de $100 de lucro
   ✅ Stop-loss diário de $50 (para tudo se perder $50 no dia)
   ✅ Modo agressivo até bater a meta → modo conservador depois
-  ✅ Máximo 3 posições simultâneas
-  ✅ Score mínimo 80/100 para entrar (88 após bater a meta)
-  ✅ Trailing stop progressivo
+  ✅ Máximo 4 posições simultâneas
+  ✅ Score mínimo 60/100 para entrar (80 após bater a meta)
+  ✅ Trailing stop progressivo com TP parcial 50%/50%
+  ✅ SL/TP baseados em níveis técnicos reais (swing points)
+  ✅ Alavancagem dinâmica baseada em Fear & Greed + volatilidade
+  ✅ Order Flow: Spoofing, Iceberg, Agressão, Absorção
+  ✅ Sentimento: Coinglass + Binance Announcements + CoinMarketCal
+  ✅ CVD persistente com janela de 4h
   ✅ Sincronização em tempo real com Bybit
 """
 import asyncio, time
