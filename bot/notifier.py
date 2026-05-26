@@ -161,3 +161,41 @@ async def consecutive_losses_msg(n: int, saldo: float, poder: float) -> str:
         f"`{'━'*28}`\n"
         f"_Bot continua operando com cautela_"
     )
+
+# ── SPOOFING DETECTADO ────────────────────────────────────────────
+async def spoofing_alert_msg(symbol: str, detail: str) -> str:
+    return (
+        f"🚨 *SPOOFING DETECTADO — {symbol}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"⚠️ Manipulação de orderbook identificada\n"
+        f"📋 Detalhe: `{detail}`\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"_Entrada bloqueada por proteção anti-spoofing_"
+    )
+
+
+# ── ICEBERG DETECTADO ─────────────────────────────────────────────
+async def iceberg_alert_msg(symbol: str, side: str, price: float) -> str:
+    icon = "🐋" 
+    return (
+        f"{icon} *ICEBERG DETECTADO — {symbol}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"🔍 Ordem oculta no lado: `{side}`\n"
+        f"📍 Nível de preço: `${price:,.4f}`\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"_Grande player identificado neste nível_"
+    )
+
+
+# ── ABSORÇÃO DETECTADA ────────────────────────────────────────────
+async def absorption_alert_msg(symbol: str, direction: str,
+                                strength: float, detail: str) -> str:
+    icon = "🟢" if direction == "BULL" else "🔴"
+    return (
+        f"{icon} *ABSORÇÃO {direction} — {symbol}*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"💪 Intensidade: `{strength:.0%}`\n"
+        f"📋 `{detail}`\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"_Grande player absorvendo pressão oposta_"
+    )
