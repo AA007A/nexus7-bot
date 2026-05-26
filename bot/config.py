@@ -15,7 +15,7 @@ class Config:
     # ── Risk ─────────────────────────────────────────────────────
     LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "50"))
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.35"))  # 35% por trade
-    MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.80"))  # 80% DD máximo
+    MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.15"))  # 15% DD máximo — profissional
     INITIAL_CAP:     float = float(os.environ.get("INITIAL_CAP",  "0"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "4"))     # até 4 simultâneas
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.75"))
