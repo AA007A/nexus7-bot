@@ -599,6 +599,22 @@ class TradingEngine:
             log.error(f"_sync_positions: {e}")
 
     # ── Trailing stop DESATIVADO ────────────────────────────────
+
+    async def _notify_session_info(self):
+        """Envia info da sessão atual no Telegram uma vez por hora."""
+        sess = get_market_session()
+        if sess["quality"] < 50:
+            await notify(
+                f"{sess['emoji']} *SESSÃO FRACA — Bot em modo cauteloso*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"⏰ Sessão: `{sess['session']}`\n"
+                f"📊 Qualidade: `{sess['quality']}%`\n"
+                f"📋 `{sess['description']}`\n"
+                f"_Aguardando sessão de maior liquidez..._"
+            )
+        else:
+            log.info(f"{sess['emoji']} Sessão: {sess['session']} (q={sess['quality']}%)")
+
     async def _apply_trailing_stops(self):
         """
         Trailing SL desativado por configuração do usuário.
