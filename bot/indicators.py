@@ -1,5 +1,5 @@
 """
-AA Capital — Indicators v3.0
+BGX Capital — Indicators v3.0
 ADX, ATR, Bollinger Width, Choppiness Index,
 EMA, RSI, MACD, VWAP, Volume Profile,
 SMC (BOS, CHoCH, HH/HL/LH/LL)
