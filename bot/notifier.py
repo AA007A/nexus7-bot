@@ -22,7 +22,7 @@ async def notify(text: str):
 # ── BOT ONLINE ────────────────────────────────────────────────────
 async def online_msg(saldo: float, poder: float, pares: int, max_pos: int) -> str:
     return (
-        f"🤖 *AA Capital — ONLINE*\n"
+        f"🤖 *BGX Capital — ONLINE*\n"
         f"`{'━'*28}`\n"
         f"💰 Saldo:        `${saldo:,.2f} USDT`\n"
         f"⚡ Poder compra: `${poder:,.2f} USDT`\n"
@@ -99,7 +99,7 @@ async def daily_report_msg(pnl_dia: float, saldo: float, poder: float,
     win_rate = round(wins / trades * 100) if trades > 0 else 0
     pct_meta = round(pnl_dia / meta * 100) if meta > 0 else 0
     return (
-        f"{icon} *RELATÓRIO DIÁRIO — AA Capital*\n"
+        f"{icon} *RELATÓRIO DIÁRIO — BGX Capital*\n"
         f"`{'━'*28}`\n"
         f"💵 PnL do dia:   `{'+' if pnl_dia >= 0 else ''}${pnl_dia:,.2f} USDT`\n"
         f"🎯 Meta diária:  `${meta:,.0f}` ({pct_meta}% atingido)\n"
