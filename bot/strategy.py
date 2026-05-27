@@ -1,5 +1,5 @@
 """
-AA Capital Strategy v11.0
+BGX Capital Strategy v11.0
 Multi-Timeframe: 4H → 1H → 15M
 Entrada antecipada: BOS_BREAK > MOMENTUM > PULLBACK
 Indicadores: ADX, BB Width, Choppiness, VWAP, SMC, Delta, OB Imbalance
