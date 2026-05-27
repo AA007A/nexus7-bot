@@ -1,5 +1,5 @@
 """
-AA Capital — Market Data Module
+BGX Capital — Market Data Module
 - CVD (Cumulative Volume Delta) em tempo real
 - Liquidation Heatmap
 - Correlações Macro (BTC x DXY, S&P500, BTC.D)
