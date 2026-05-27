@@ -1,5 +1,5 @@
 """
-AA Capital — Bybit V5 Client
+BGX Capital — Bybit V5 Client
 - HMAC-SHA256 corrigido (recv_window consistente)
 - REST para ordens e account
 - WebSocket para dados de mercado em tempo real
