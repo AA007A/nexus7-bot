@@ -1,5 +1,5 @@
 """
-AA Capital — Backtesting Engine
+BGX Capital — Backtesting Engine
 Busca dados históricos OHLCV da Bybit e roda as estratégias.
 Calcula: Win Rate, Profit Factor, Sharpe, Sortino, Max DD,
          Expectancy, melhor/pior horário UTC, melhor/pior dia da semana,
