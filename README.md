@@ -1,4 +1,4 @@
-# 🤖 AA Capital — Trading Bot
+# 🤖 BGX Capital — Trading Bot
 
 Bot de trading automatizado para futuros Bybit com análise multi-timeframe, gestão de risco avançada e alertas em tempo real.
 
@@ -76,4 +76,4 @@ Acesse: `https://nexus7-bot-production.up.railway.app/dashboard`
 ```
 
 ---
-*AA Capital — Automated Trading System*
+*BGX Capital — Automated Trading System*
