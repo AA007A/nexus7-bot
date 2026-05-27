@@ -5,24 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BGX Capital · AI Terminal</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root{
-  --bg:#020408;--bg1:#060d12;--bg2:#091520;--dim2:#0d2030;
-  --yellow:#f5d800;--green:#00ff7f;--cyan:#00e5d4;
-  --mag:#ff2d7a;--orange:#ff6b00;--purple:#9b59b6;
-  --text:#7ab8c8;--dim:#1e3d50;
-  --mono:'Share Tech Mono',monospace;--orb:'Orbitron',monospace;
+  --bg:#0A0A0B;--bg1:#111114;--bg2:#18181C;--dim2:#1E1E24;
+  --gold:#C9A84C;--gold2:#E8C96A;--green:#00C076;--red:#FF4444;
+  --blue:#4A9EFF;--yellow:#C9A84C;--cyan:#4A9EFF;
+  --mag:#FF4444;--orange:#E8974A;--purple:#8B7EC8;
+  --text:#D4CFC8;--dim:#3A3A44;--muted:#5A5A6A;--silver:#8A8A9A;
+  --mono:'JetBrains Mono','Courier New',monospace;
+  --orb:'Inter',sans-serif;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:12px;min-height:100vh;overflow-x:hidden}
-body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.04) 3px,rgba(0,0,0,0.04) 4px)}
+
 
 /* TOPBAR */
 .topbar{height:40px;background:var(--bg1);border-bottom:1px solid var(--dim);display:flex;align-items:center;padding:0 12px;gap:0;position:sticky;top:0;z-index:100}
 .logo{font-family:var(--orb);font-size:14px;font-weight:900;letter-spacing:4px;color:var(--yellow);text-shadow:0 0 20px var(--yellow);border-right:1px solid var(--dim);padding-right:14px;margin-right:14px}
 .logo span{color:var(--gold2);opacity:0.8}
 .sync-badge{display:flex;align-items:center;gap:6px;font-family:var(--orb);font-size:8px;letter-spacing:3px;color:var(--green);border:1px solid rgba(0,255,127,.3);border-radius:2px;padding:2px 8px;background:rgba(0,255,127,.06);margin-right:14px}
-.sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 1s infinite}
+.sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:none;animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
 .tb-tickers{display:flex;flex:1;gap:0;overflow:hidden}
 .tb-tick{display:flex;align-items:center;gap:6px;padding:0 11px;border-right:1px solid var(--dim);height:40px}
@@ -67,7 +69,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 
 /* LEFT PANEL */
 .left{grid-column:1;grid-row:1/3;display:flex;flex-direction:column;gap:6px}
-.wallet{background:linear-gradient(135deg,rgba(245,216,0,.05),transparent 60%);border:1px solid rgba(245,216,0,.2);border-radius:3px;padding:12px}
+.wallet{background:linear-gradient(135deg,rgba(201,168,76,.04),transparent 60%);border:1px solid rgba(201,168,76,.15);border-radius:3px;padding:12px}
 .w-addr{font-size:9px;color:var(--dim);margin-bottom:4px}
 .w-live{display:inline-block;background:rgba(0,255,127,.1);border:1px solid rgba(0,255,127,.3);border-radius:2px;padding:1px 7px;font-family:var(--orb);font-size:8px;letter-spacing:2px;color:var(--green);margin-bottom:8px}
 .w-pnl{font-family:var(--orb);font-size:24px;font-weight:900;line-height:1}
@@ -116,7 +118,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 .news-bull{color:var(--green)}.news-bear{color:var(--mag)}.news-neu{color:var(--dim)}
 
 /* KILL SWITCH */
-.killswitch{border:1px solid rgba(255,45,122,.4);background:rgba(255,45,122,.06);border-radius:3px;padding:8px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .2s}
+.killswitch{border:1px solid rgba(255,68,68,.25);background:rgba(255,68,68,.03);border-radius:3px;padding:8px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .2s}
 .killswitch:hover{background:rgba(255,68,68,.10)}
 .ks-text{font-family:var(--orb);font-size:8px;letter-spacing:2px;color:var(--mag)}
 
