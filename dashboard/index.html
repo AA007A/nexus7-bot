@@ -22,7 +22,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:12
 /* TOPBAR */
 .topbar{height:40px;background:var(--bg1);border-bottom:1px solid var(--dim);display:flex;align-items:center;padding:0 12px;gap:0;position:sticky;top:0;z-index:100}
 .logo{font-family:var(--orb);font-size:14px;font-weight:900;letter-spacing:4px;color:var(--yellow);text-shadow:0 0 20px var(--yellow);border-right:1px solid var(--dim);padding-right:14px;margin-right:14px}
-.logo span{color:var(--gold2);opacity:0.8}
+.logo span{color:#C8C4BE;opacity:1}
 .sync-badge{display:flex;align-items:center;gap:6px;font-family:var(--orb);font-size:8px;letter-spacing:3px;color:var(--green);border:1px solid rgba(0,255,127,.3);border-radius:2px;padding:2px 8px;background:rgba(0,255,127,.06);margin-right:14px}
 .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:none;animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
@@ -221,7 +221,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:12
   <div class="panel panel-y">
     <div class="ph"><span class="ph-title ph-y">BOT METRICS</span><span class="ph-badge badge-y" id="bot-badge">BOOT</span></div>
     <div class="mr"><span class="mr-l">POSIÇÕES</span><span class="mr-v" id="m-pos">—</span></div>
-    <div class="mr"><span class="mr-l">SCORE MÍN.</span><span class="mr-v" style="color:var(--yellow)">80/100</span></div>
+    <div class="mr"><span class="mr-l">SCORE MÍN.</span><span class="mr-v" id="m-score-min" style="color:var(--gold)">60/100</span></div>
     <div class="mr"><span class="mr-l">LEVERAGE</span><span class="mr-v">50×</span></div>
     <div class="mr"><span class="mr-l">DRAWDOWN</span><span class="mr-v" id="m-dd">—</span></div>
     <div class="mr"><span class="mr-l">PODER COMPRA</span><span class="mr-v" id="m-bp">—</span></div>
