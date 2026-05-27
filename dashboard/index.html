@@ -20,7 +20,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 /* TOPBAR */
 .topbar{height:40px;background:var(--bg1);border-bottom:1px solid var(--dim);display:flex;align-items:center;padding:0 12px;gap:0;position:sticky;top:0;z-index:100}
 .logo{font-family:var(--orb);font-size:14px;font-weight:900;letter-spacing:4px;color:var(--yellow);text-shadow:0 0 20px var(--yellow);border-right:1px solid var(--dim);padding-right:14px;margin-right:14px}
-.logo span{color:var(--cyan)}
+.logo span{color:var(--gold2);opacity:0.8}
 .sync-badge{display:flex;align-items:center;gap:6px;font-family:var(--orb);font-size:8px;letter-spacing:3px;color:var(--green);border:1px solid rgba(0,255,127,.3);border-radius:2px;padding:2px 8px;background:rgba(0,255,127,.06);margin-right:14px}
 .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
@@ -36,27 +36,27 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 .tb-time{font-family:var(--orb);font-size:12px;color:var(--cyan);letter-spacing:2px;padding-left:12px;border-left:1px solid var(--dim)}
 
 /* TAPE */
-.tape{background:var(--bg);border-bottom:1px solid rgba(245,216,0,.15);height:22px;overflow:hidden;display:flex;align-items:center}
+.tape{background:var(--bg);border-bottom:1px solid rgba(201,168,76,.12);height:22px;overflow:hidden;display:flex;align-items:center}
 .tape-inner{display:flex;gap:30px;padding:0 20px;animation:tape-scroll 60s linear infinite;white-space:nowrap}
 @keyframes tape-scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
 .tape-item{font-size:10px;display:flex;gap:6px;align-items:center}
-.tape-sym{color:var(--yellow);font-weight:bold}
+.tape-sym{color:var(--gold);font-weight:600}
 
 /* MAIN GRID */
 .main{display:grid;grid-template-columns:260px 1fr 280px;gap:6px;padding:6px}
 
 /* PANELS */
-.panel{background:rgba(6,13,18,.94);border:1px solid var(--dim);border-radius:3px;position:relative;overflow:hidden}
+.panel{background:var(--bg1);border:1px solid var(--dim);border-radius:2px;position:relative;overflow:hidden}
 .panel::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.5}
-.panel-y::before{background:linear-gradient(90deg,transparent,var(--yellow),transparent)}
-.panel-g::before{background:linear-gradient(90deg,transparent,var(--green),transparent)}
-.panel-m::before{background:linear-gradient(90deg,transparent,var(--mag),transparent)}
+.panel-y::before{background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:0.5}
+.panel-g::before{background:linear-gradient(90deg,transparent,var(--green),transparent);opacity:0.5}
+.panel-m::before{background:linear-gradient(90deg,transparent,var(--red),transparent);opacity:0.5}
 .ph{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--dim2);background:rgba(0,0,0,.3)}
-.ph-title{font-family:var(--orb);font-size:8px;letter-spacing:3px;color:var(--cyan);text-transform:uppercase}
-.ph-y{color:var(--yellow)}.ph-g{color:var(--green)}.ph-m{color:var(--mag)}
+.ph-title{font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--silver);text-transform:uppercase;font-weight:500}
+.ph-y{color:var(--gold)}.ph-g{color:var(--green)}.ph-m{color:var(--mag)}
 .ph-badge{font-family:var(--mono);font-size:8px;padding:1px 6px;border-radius:2px;margin-left:auto;border:1px solid;white-space:nowrap}
-.badge-c{color:var(--cyan);border-color:rgba(0,229,212,.3);background:rgba(0,229,212,.08)}
-.badge-y{color:var(--yellow);border-color:rgba(245,216,0,.3);background:rgba(245,216,0,.08)}
+.badge-c{color:var(--blue);border-color:rgba(74,158,255,.25);background:rgba(74,158,255,.06)}
+.badge-y{color:var(--gold);border-color:rgba(201,168,76,.25);background:rgba(201,168,76,.06)}
 .badge-g{color:var(--green);border-color:rgba(0,255,127,.3);background:rgba(0,255,127,.08)}
 .badge-m{color:var(--mag);border-color:rgba(255,45,122,.3);background:rgba(255,45,122,.08)}
 
@@ -79,7 +79,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 
 /* SCORE DISPLAY */
 .score-ring{display:flex;align-items:center;gap:12px;padding:10px}
-.score-num{font-family:var(--orb);font-size:26px;font-weight:900}
+.score-num{font-family:var(--mono);font-size:24px;font-weight:600;letter-spacing:-0.5px}
 .score-bars{flex:1;display:flex;flex-direction:column;gap:3px}
 .sbar-row{display:flex;align-items:center;gap:6px;font-size:9px}
 .sbar-l{color:var(--dim);min-width:55px;text-transform:uppercase;font-size:8px;letter-spacing:1px}
@@ -117,7 +117,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 
 /* KILL SWITCH */
 .killswitch{border:1px solid rgba(255,45,122,.4);background:rgba(255,45,122,.06);border-radius:3px;padding:8px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:all .2s}
-.killswitch:hover{background:rgba(255,45,122,.15)}
+.killswitch:hover{background:rgba(255,68,68,.10)}
 .ks-text{font-family:var(--orb);font-size:8px;letter-spacing:2px;color:var(--mag)}
 
 /* PERF TABLE */
@@ -153,7 +153,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
 .log-score.pass{color:var(--green);}
 .log-msg{color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .log-regime{font-size:9px;color:var(--dim);min-width:70px;}
-.log-row.signal-row{background:rgba(0,255,127,0.04);border-left:2px solid var(--green);}
+.log-row.signal-row{background:rgba(0,192,118,0.05);border-left:2px solid var(--green);}
 .log-row.signal-row .log-sym{color:var(--green);}
 
 
@@ -207,7 +207,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;b
   <div class="wallet">
     <div class="w-addr">BGX Capital · BYBIT FUTURES · v10.0</div>
     <div class="w-live">● LIVE</div>
-    <div class="w-pnl" id="w-pnl" style="color:var(--green);text-shadow:0 0 20px rgba(0,255,127,.4)">$0.00</div>
+    <div class="w-pnl" id="w-pnl" style="color:var(--green)">$0.00</div>
     <div class="w-sub" style="color:var(--green)">PnL LÍQUIDO HOJE</div>
     <div class="w-stats">
       <div class="ws"><span class="ws-l">SALDO</span><span class="ws-v" id="w-bal">—</span></div>
