@@ -12,20 +12,20 @@ from bot import database as db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 AA Capital iniciando...")
+    log.info("🚀 BGX Capital iniciando...")
     client = BybitClient()
     engine = TradingEngine(client)
     app.state.client = client
     app.state.engine = engine
     asyncio.create_task(engine.run())
-    log.info("✅ AA Capital online")
+    log.info("✅ BGX Capital online")
     yield
     engine.stop()
     await asyncio.sleep(0.5)
     await client.close()
 
 
-app = FastAPI(title="AA Capital", version="10.0.0", lifespan=lifespan)
+app = FastAPI(title="BGX Capital", version="10.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -37,7 +37,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "10.0.0", "name": "AA Capital"}
+    return {"status": "online", "version": "10.0.0", "name": "BGX Capital"}
 
 
 # ── Bot status ───────────────────────────────────────────────────
@@ -319,7 +319,7 @@ async def test_notify():
         return {"ok": False, "error": "TELEGRAM_CHAT não configurado no Railway"}
     try:
         await notify(
-            "✅ *AA Capital — Teste OK!*\n"
+            "✅ *BGX Capital — Teste OK!*\n"
             "`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
             "🤖 Bot conectado e enviando alertas\n"
             f"💬 Chat ID: `{cfg.TELEGRAM_CHAT}`\n"
@@ -356,7 +356,7 @@ async def telegram_webhook(request: Request):
             st  = eng.get_status()
             bal = await client.get_balance()
             resp_text = (
-                f"🤖 *AA Capital — STATUS*\n"
+                f"🤖 *BGX Capital — STATUS*\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                 f"{'🟢 ATIVO' if st.get('running') else '🔴 PAUSADO'}\n"
                 f"💼 Saldo:        `${bal:,.2f} USDT`\n"
@@ -369,7 +369,7 @@ async def telegram_webhook(request: Request):
         elif text.startswith("/balance"):
             bal = await client.get_balance()
             resp_text = (
-                f"💼 *SALDO AA Capital*\n"
+                f"💼 *SALDO BGX Capital*\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                 f"💰 Saldo:        `${bal:,.2f} USDT`\n"
                 f"⚡ Poder compra: `${bal*cfg.LEVERAGE:,.2f} USDT`\n"
@@ -399,7 +399,7 @@ async def telegram_webhook(request: Request):
         elif text.startswith("/pnl"):
             st = eng.get_status()
             resp_text = (
-                f"📈 *PnL AA Capital*\n"
+                f"📈 *PnL BGX Capital*\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                 f"📅 Hoje:    `${st.get('daily_pnl',0):+.2f} USDT`\n"
                 f"📆 Sessão:  `${st.get('session_pnl',0):+.2f} USDT`\n"
@@ -408,7 +408,7 @@ async def telegram_webhook(request: Request):
             )
         elif text.startswith("/help"):
             resp_text = (
-                f"🤖 *AA Capital — Comandos*\n"
+                f"🤖 *BGX Capital — Comandos*\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
                 f"/status — status completo do bot\n"
                 f"/balance — saldo e poder de compra\n"
