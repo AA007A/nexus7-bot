@@ -435,7 +435,7 @@ def score_tf(closes, highs, lows, opens, volumes, direction,
 # ─── Analyzer Principal ───────────────────────────────────────────
 class Analyzer:
     def analyze_mtf(self, symbol, k15, k1h, k4h,
-                    min_score=80, fee_mult=3.0, vol_mult=1.0) -> Optional[Signal]:
+                    min_score=60, fee_mult=2.0, vol_mult=1.0) -> Optional[Signal]:
         if len(k4h) < 10 or len(k1h) < 15 or len(k15) < 20:
             return None
 
@@ -480,10 +480,8 @@ class Analyzer:
             direction = "SHORT"
         elif bull_1h and not bear_4h:
             direction = "LONG"
-            min_score = max(min_score, min_score + 3)
         elif bear_1h and not bull_4h:
             direction = "SHORT"
-            min_score = max(min_score, min_score + 3)
         else:
             log.debug(f"[{symbol}] 4H/1H conflito → HOLD")
             return None
