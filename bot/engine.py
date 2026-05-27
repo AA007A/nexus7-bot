@@ -1,5 +1,5 @@
 """
-AA Capital Trading Engine v10.0
+BGX Capital Trading Engine v10.0
   ✅ Meta diária de $100 de lucro
   ✅ Stop-loss diário de $50 (para tudo se perder $50 no dia)
   ✅ Modo agressivo até bater a meta → modo conservador depois
