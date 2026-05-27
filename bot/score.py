@@ -1,5 +1,5 @@
 """
-AA Capital — Pre-Trade Score System
+BGX Capital — Pre-Trade Score System
 Score 0-100 antes de qualquer entrada.
 Entra apenas se score >= 70.
 Bot NUNCA rejeita trade por perdas anteriores.
