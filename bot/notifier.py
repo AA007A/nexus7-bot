@@ -236,3 +236,35 @@ async def twitter_sentiment_msg(sentiment: str, bull: int,
         f"🔴 Bearish: `{bear}` menções\n"
         f"📈 Trending: _{', '.join(trending[:3]) if trending else 'sem dados'}_"
     )
+
+# ── NOTÍCIA DE ALTO IMPACTO ───────────────────────────────────────
+async def high_impact_news_msg(title: str, source: str, sentiment: str,
+                                relevance: int, score_pts: int) -> str:
+    icon = "🟢📰" if sentiment == "BULLISH" else "🔴📰" if sentiment == "BEARISH" else "📰"
+    return (
+        f"{icon} *NOTÍCIA ALTO IMPACTO*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"📋 `{title[:100]}`\n"
+        f"📰 Fonte: `{source}`\n"
+        f"🎯 Sentimento: `{sentiment}`\n"
+        f"⭐ Relevância: `{relevance}/100`\n"
+        f"📊 Score: `{score_pts:+d}pts`\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`"
+    )
+
+
+# ── RESUMO DO PIPELINE DE NOTÍCIAS ───────────────────────────────
+async def news_summary_msg(total: int, bull: int, bear: int,
+                            sources: list, top_news: list) -> str:
+    return (
+        f"📰 *NEWS PIPELINE — BGX Capital*\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        f"📊 Total: `{total}` notícias processadas\n"
+        f"🟢 Bullish: `{bull}` | 🔴 Bearish: `{bear}`\n"
+        f"📡 Fontes: _{', '.join(sources[:4])}_\n"
+        f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+        + "\n".join([
+            f"• [{n['sentiment'][0]}] `{n['source']}` — {n['title'][:60]}"
+            for n in top_news[:3]
+        ])
+    )
