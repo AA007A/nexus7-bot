@@ -71,35 +71,77 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
         tp     = sig.tp
         opened = klines_15[i].get("c", entry)
 
-        result = None
-        hold   = 0
-        for j in range(i+1, min(i+21, len(klines_15))):
+        # ── Simula TP parcial 50%/50% ────────────────────────────
+        tp1 = getattr(sig, 'tp1', tp)
+        tp2 = getattr(sig, 'tp2', tp)
+        # Se tp1 == tp2 (sem TP parcial definido), usa TP único
+        has_partial = tp1 != tp2 and tp1 != 0
+
+        result    = None
+        hold      = 0
+        tp1_hit   = False
+        pnl_pct   = 0.0
+        fee_pct   = 0.0016   # 0.16% total (entrada + saída)
+
+        for j in range(i+1, min(i+41, len(klines_15))):  # até 40 candles (~10h)
             future = klines_15[j]
             hold  += 1
+
             if sig.direction == "LONG":
+                # SL atingido
                 if future["l"] <= sl:
-                    result = "LOSS"; break
-                if future["h"] >= tp:
-                    result = "WIN";  break
-            else:
+                    if tp1_hit:
+                        # Metade já garantida — SL está em break-even
+                        pnl_tp1  = abs(tp1 - entry) / entry * 0.5
+                        pnl_sl   = 0.0   # SL = break-even, sem perda adicional
+                        pnl_pct  = pnl_tp1 + pnl_sl - fee_pct
+                        result   = "PARTIAL_WIN"
+                    else:
+                        pnl_pct = -(abs(sl - entry) / entry) - fee_pct
+                        result  = "LOSS"
+                    break
+                # TP1 atingido (50%)
+                if has_partial and not tp1_hit and future["h"] >= tp1:
+                    tp1_hit = True
+                    sl      = entry   # move SL para break-even
+                # TP2 atingido (50% restante)
+                if tp1_hit and future["h"] >= tp2:
+                    pnl_tp1 = abs(tp1 - entry) / entry * 0.5
+                    pnl_tp2 = abs(tp2 - entry) / entry * 0.5
+                    pnl_pct = pnl_tp1 + pnl_tp2 - fee_pct
+                    result  = "WIN"; break
+                # TP único (sem parcial)
+                if not has_partial and future["h"] >= tp:
+                    pnl_pct = abs(tp - entry) / entry - fee_pct
+                    result  = "WIN"; break
+
+            else:  # SHORT
                 if future["h"] >= sl:
-                    result = "LOSS"; break
-                if future["l"] <= tp:
-                    result = "WIN";  break
+                    if tp1_hit:
+                        pnl_tp1 = abs(tp1 - entry) / entry * 0.5
+                        pnl_pct = pnl_tp1 - fee_pct
+                        result  = "PARTIAL_WIN"
+                    else:
+                        pnl_pct = -(abs(sl - entry) / entry) - fee_pct
+                        result  = "LOSS"
+                    break
+                if has_partial and not tp1_hit and future["l"] <= tp1:
+                    tp1_hit = True
+                    sl      = entry
+                if tp1_hit and future["l"] <= tp2:
+                    pnl_tp1 = abs(tp1 - entry) / entry * 0.5
+                    pnl_tp2 = abs(tp2 - entry) / entry * 0.5
+                    pnl_pct = pnl_tp1 + pnl_tp2 - fee_pct
+                    result  = "WIN"; break
+                if not has_partial and future["l"] <= tp:
+                    pnl_pct = abs(tp - entry) / entry - fee_pct
+                    result  = "WIN"; break
 
         if result is None:
             result = "TIMEOUT"
-
-        # PnL estimado
-        fee_pct = 0.0016
-        if result == "WIN":
-            pnl_pct = abs(tp - entry) / entry - fee_pct
-        elif result == "LOSS":
-            pnl_pct = -(abs(sl - entry) / entry) - fee_pct
-        else:
-            # Timeout: fechado no preço atual
-            last   = klines_15[min(i+20, len(klines_15)-1)]["c"]
-            pnl_pct= (last - entry) / entry * (1 if sig.direction == "LONG" else -1) - fee_pct
+            last    = klines_15[min(i+40, len(klines_15)-1)]["c"]
+            base    = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
+            pnl_pct = (base * (0.5 if tp1_hit else 1.0)) - fee_pct
 
         # Timestamp do candle
         candle_idx = i
@@ -126,10 +168,12 @@ def _calc_metrics(trades: List[dict], strategy: str = "MTF") -> dict:
         return {}
 
     pnls    = np.array([t["pnl_pct"] for t in trades])
+    # PARTIAL_WIN conta como win nas métricas
     wins    = pnls[pnls > 0]
     losses  = pnls[pnls < 0]
     total   = len(pnls)
-    win_rate= len(wins) / total * 100 if total else 0
+    partial = [t for t in trades if t.get("result") == "PARTIAL_WIN"]
+    win_rate= (len(wins) + len(partial) * 0.5) / total * 100 if total else 0
 
     # Profit Factor
     gross_profit = wins.sum() if len(wins) else 0
