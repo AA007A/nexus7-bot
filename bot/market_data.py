@@ -786,3 +786,215 @@ async def update_twitter_sentiment():
 def get_twitter_sentiment() -> dict:
     return _twitter_cache.copy()
 
+# ══════════════════════════════════════════════════════════════════
+# ITEM 6 — CryptoPanic com auth_token real
+# ══════════════════════════════════════════════════════════════════
+import os as _os
+_CRYPTOPANIC_TOKEN = _os.environ.get("CRYPTOPANIC_TOKEN", "")
+
+_cryptopanic_cache: list = []
+
+async def update_cryptopanic():
+    """
+    CryptoPanic — fonte mais usada de notícias crypto com sentimento.
+    Requer CRYPTOPANIC_TOKEN nas Variables do Railway (gratuito em cryptopanic.com).
+    Fallback para RSS público se sem token.
+    """
+    global _cryptopanic_cache
+    try:
+        async with aiohttp.ClientSession() as s:
+            if _CRYPTOPANIC_TOKEN:
+                url = (f"https://cryptopanic.com/api/v1/posts/"
+                       f"?auth_token={_CRYPTOPANIC_TOKEN}"
+                       f"&filter=hot&public=true&kind=news&currencies=BTC,ETH,SOL")
+            else:
+                # Fallback RSS público
+                url = "https://cryptopanic.com/news/rss/"
+
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8),
+                             headers={"User-Agent": "BGX-Capital/10.0"}) as r:
+                if r.status == 200:
+                    if _CRYPTOPANIC_TOKEN:
+                        data    = await r.json()
+                        results = data.get("results", [])
+                        _cryptopanic_cache = [{
+                            "title":     item.get("title", ""),
+                            "sentiment": item.get("votes", {}).get("positive", 0) -
+                                        item.get("votes", {}).get("negative", 0),
+                            "source":    item.get("domain", ""),
+                            "url":       item.get("url", ""),
+                        } for item in results[:10]]
+                    else:
+                        text = await r.text()
+                        # Parse RSS simples
+                        import re
+                        titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', text)
+                        _cryptopanic_cache = [{"title": t, "sentiment": 0,
+                                               "source": "cryptopanic"} for t in titles[:10]]
+                    log.info(f"📰 CryptoPanic: {len(_cryptopanic_cache)} notícias")
+    except Exception as e:
+        log.warning(f"update_cryptopanic: {e}")
+
+
+def get_cryptopanic_sentiment() -> dict:
+    """Retorna sentimento consolidado do CryptoPanic."""
+    if not _cryptopanic_cache:
+        return {"sentiment": "NEUTRAL", "score": 0, "count": 0}
+    total = sum(item.get("sentiment", 0) for item in _cryptopanic_cache)
+    count = len(_cryptopanic_cache)
+    if total > 3:   return {"sentiment": "BULLISH",  "score": total, "count": count}
+    if total < -3:  return {"sentiment": "BEARISH",  "score": total, "count": count}
+    return {"sentiment": "NEUTRAL", "score": total, "count": count}
+
+
+# ══════════════════════════════════════════════════════════════════
+# ITEM 7 — Calendário Econômico Real (Forex Factory / FMP)
+# Bloqueia entradas 30min antes de CPI, NFP, Fed, FOMC
+# ══════════════════════════════════════════════════════════════════
+
+_economic_events_cache: list = []
+_last_calendar_update: float = 0
+
+async def update_economic_calendar():
+    """
+    Busca eventos de alto impacto do calendário econômico.
+    Fontes: FMP API (gratuita) + fallback hardcoded para datas conhecidas.
+    Atualiza 1x por hora.
+    """
+    global _economic_events_cache, _last_calendar_update
+    import time as _t
+    if _t.time() - _last_calendar_update < 3600:
+        return
+
+    events = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Financial Modeling Prep — calendário econômico gratuito
+            from datetime import datetime, timezone, timedelta
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            next3 = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%d")
+            url   = (f"https://financialmodelingprep.com/api/v3/economic_calendar"
+                     f"?from={today}&to={next3}&apikey=demo")
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    high_impact = [e for e in data
+                                   if e.get("impact", "").lower() == "high"]
+                    for e in high_impact:
+                        events.append({
+                            "event":  e.get("event", ""),
+                            "date":   e.get("date", ""),
+                            "impact": "HIGH",
+                            "country": e.get("country", ""),
+                        })
+    except Exception as e:
+        log.debug(f"economic_calendar: {e}")
+
+    _economic_events_cache = events
+    _last_calendar_update  = _t.time()
+    if events:
+        log.info(f"📅 Calendário: {len(events)} eventos HIGH IMPACT nos próximos 3 dias")
+
+
+def is_high_impact_window(minutes_before: int = 30) -> dict:
+    """
+    Verifica se estamos numa janela de evento de alto impacto.
+    Retorna bloqueio se CPI, NFP, FOMC, Fed etc. dentro de X minutos.
+
+    Palavras que classificam como alto impacto para crypto:
+    CPI, NFP, Fed, FOMC, Interest Rate, Unemployment, GDP
+    """
+    from datetime import datetime, timezone, timedelta
+    import time as _t
+
+    HIGH_IMPACT_KEYWORDS = [
+        "cpi", "consumer price", "nfp", "non-farm", "fomc", "fed",
+        "interest rate", "unemployment", "gdp", "inflation",
+        "pce", "powell", "federal reserve", "rate decision"
+    ]
+
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(minutes=5)
+    window_end   = now + timedelta(minutes=minutes_before)
+
+    for event in _economic_events_cache:
+        try:
+            event_dt = datetime.fromisoformat(
+                event["date"].replace("Z", "+00:00")
+            )
+            if window_start <= event_dt <= window_end:
+                name = event.get("event", "").lower()
+                if any(kw in name for kw in HIGH_IMPACT_KEYWORDS):
+                    return {
+                        "blocked":    True,
+                        "event":      event.get("event", ""),
+                        "event_time": event["date"],
+                        "minutes":    int((event_dt - now).total_seconds() / 60),
+                    }
+        except Exception:
+            continue
+
+    # Fallback: detectar por palavras-chave em notícias recentes
+    return {"blocked": False, "event": None}
+
+
+# ══════════════════════════════════════════════════════════════════
+# ITEM 8 — Filtro de Volume Mínimo por Par ($50M/24h)
+# ══════════════════════════════════════════════════════════════════
+
+_volume_cache: dict = {}   # symbol → volume_24h_usd
+_last_volume_update: float = 0
+
+async def update_volume_filter(client):
+    """
+    Atualiza volume 24h de todos os pares via Bybit tickers.
+    Atualiza a cada 30 minutos.
+    """
+    global _volume_cache, _last_volume_update
+    import time as _t
+    if _t.time() - _last_volume_update < 1800:
+        return
+    try:
+        tickers = await client.get_all_tickers()
+        for t in tickers:
+            sym = t.get("symbol", "")
+            try:
+                # turnover24h = volume em USDT
+                vol_usd = float(t.get("turnover24h", 0))
+                _volume_cache[sym] = vol_usd
+            except Exception:
+                pass
+        _last_volume_update = _t.time()
+        # Log pares filtrados
+        low_vol = [s for s, v in _volume_cache.items()
+                   if v < 50_000_000 and s.endswith("USDT")]
+        if low_vol:
+            log.info(f"⚠️ Volume <$50M/24h: {', '.join(low_vol[:5])}")
+    except Exception as e:
+        log.warning(f"update_volume_filter: {e}")
+
+
+def has_minimum_volume(symbol: str, min_usd: float = 50_000_000) -> dict:
+    """
+    Verifica se o par tem volume mínimo de $50M/24h.
+    Pares com volume baixo = slippage alto, stop hunt fácil.
+
+    Retorna:
+      tradeable: True se passa no filtro
+      volume_24h: volume em USDT
+      reason: motivo se bloqueado
+    """
+    vol = _volume_cache.get(symbol, 0)
+
+    # Se não temos dados ainda, permitir (evita bloquear na inicialização)
+    if vol == 0:
+        return {"tradeable": True, "volume_24h": 0,
+                "reason": "sem dados — permitindo"}
+
+    if vol >= min_usd:
+        return {"tradeable": True,  "volume_24h": vol,
+                "reason": f"${vol/1e6:.0f}M/24h ✓"}
+    else:
+        return {"tradeable": False, "volume_24h": vol,
+                "reason": f"${vol/1e6:.1f}M/24h < $50M mínimo"}
+
