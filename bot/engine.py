@@ -600,6 +600,50 @@ class TradingEngine:
 
     # ── Trailing stop DESATIVADO ────────────────────────────────
 
+
+    async def _monitor_news_pipeline(self):
+        """
+        Monitora o pipeline e alerta quando notícia de alto impacto aparece.
+        Rodado a cada ciclo de background (30min).
+        """
+        try:
+            from bot.news_pipeline import _pipeline_cache, get_pipeline_status
+            from bot.notifier import high_impact_news_msg, news_summary_msg
+
+            if not _pipeline_cache:
+                return
+
+            # Alertar top notícia se relevância >= 80 e recente (<30min)
+            import time as _t
+            for item in _pipeline_cache[:5]:
+                if (item.relevance >= 80 and
+                    item.sentiment != "NEUTRAL" and
+                    (_t.time() - item.timestamp) < 1800):
+                    from bot.news_pipeline import get_news_impact
+                    impact = get_news_impact("LONG")
+                    await notify(await high_impact_news_msg(
+                        item.title, item.source, item.sentiment,
+                        item.relevance, impact.get("score_pts", 0)
+                    ))
+                    break   # apenas 1 alerta por ciclo
+
+            # Resumo a cada 6h
+            now_h = __import__("datetime").datetime.utcnow().hour
+            if now_h in (0, 6, 12, 18):
+                st = get_pipeline_status()
+                if st["total"] > 0:
+                    top = [
+                        {"source": i.source, "sentiment": i.sentiment,
+                         "title": i.title}
+                        for i in _pipeline_cache[:3]
+                    ]
+                    await notify(await news_summary_msg(
+                        st["total"], st["bullish"], st["bearish"],
+                        st["sources"], top
+                    ))
+        except Exception as e:
+            log.debug(f"_monitor_news_pipeline: {e}")
+
     async def _notify_session_info(self):
         """Envia info da sessão atual no Telegram uma vez por hora."""
         sess = get_market_session()
