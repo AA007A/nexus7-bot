@@ -426,6 +426,51 @@ async def telegram_webhook(request: Request):
         log.error(f"telegram_webhook: {e}")
     return {"ok": True}
 
+
+@app.get("/api/news")
+async def get_news(limit: int = 20, sentiment: str = ""):
+    """Retorna notícias processadas pelo pipeline com score de impacto."""
+    from bot.news_pipeline import _pipeline_cache, get_pipeline_status
+    items = _pipeline_cache
+    if sentiment:
+        items = [i for i in items if i.sentiment.upper() == sentiment.upper()]
+    return {
+        "news": [
+            {
+                "title":      i.title,
+                "source":     i.source,
+                "tier":       i.source_tier,
+                "sentiment":  i.sentiment,
+                "confidence": i.confidence,
+                "impact":     i.impact,
+                "relevance":  i.relevance,
+                "entities":   i.entities[:5],
+                "url":        i.url,
+                "age_min":    int(((__import__("time").time() - i.timestamp)) / 60),
+            }
+            for i in items[:limit]
+        ],
+        "status": get_pipeline_status(),
+    }
+
+
+@app.get("/api/news/impact")
+async def get_news_impact_endpoint(direction: str = "LONG", symbol: str = "BTC"):
+    """Retorna impacto das notícias para uma direção e símbolo específico."""
+    from bot.news_pipeline import get_news_impact
+    return get_news_impact(direction, symbol)
+
+
+@app.post("/api/news/refresh")
+async def refresh_news():
+    """Força atualização imediata do pipeline de notícias."""
+    from bot.news_pipeline import run_news_pipeline, _pipeline_last_run
+    import bot.news_pipeline as np_mod
+    np_mod._pipeline_last_run = 0   # força re-execução
+    import asyncio
+    asyncio.create_task(run_news_pipeline())
+    return {"ok": True, "message": "Pipeline de notícias será atualizado em breve"}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
