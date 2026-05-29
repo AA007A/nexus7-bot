@@ -264,7 +264,7 @@ class BybitClient:
                     f"({len(symbols)} símbolos: {', '.join(symbols)})"
                 )
                 async with websockets.connect(
-                    WS_PUBLIC, ping_interval=20, ping_timeout=10
+                    WS_PUBLIC, ping_interval=30, ping_timeout=20, close_timeout=10
                 ) as ws:
                     # Subscreve tickers e klines
                     topics = []
@@ -299,11 +299,23 @@ class BybitClient:
                     if sub_errors:
                         log.warning(f"⚠️ WebSocket: {sub_errors} batch(es) com erro de subscrição")
                     else:
-                        log.info(f"✅ WebSocket subscrito: {len(topics)} topics em {(len(topics) + 9) // 10} batch(es)")
+                        self._ws_retry = 0   # reset backoff
+                    log.info(f"✅ WebSocket subscrito: {len(topics)} topics em {(len(topics) + 9) // 10} batch(es)")
 
+                    # Ping manual Bybit a cada 20s (mais confiável que TCP ping)
+                    last_ping = asyncio.get_event_loop().time()
                     async for raw in ws:
+                        now = asyncio.get_event_loop().time()
+                        if now - last_ping > 20:
+                            try:
+                                await ws.send('{"op":"ping"}')
+                                last_ping = now
+                            except Exception:
+                                break
                         try:
                             msg = json.loads(raw)
+                            if msg.get("op") == "pong":
+                                continue   # ignora pong
                             await self._handle_ws(msg)
                         except Exception as e:
                             log.error(f"WS parse: {e}")
