@@ -256,56 +256,59 @@ class RiskManager:
         return True
 
     def size(self, symbol: str, entry: float, instruments: dict) -> float:
+        """
+        Calcula quantidade segura para a ordem.
+        REGRA ABSOLUTA: margem usada nunca excede 95% do saldo real.
+        """
         if entry <= 0 or not self._ready or self.balance <= 0:
             return 0.0
+
         info     = instruments.get(symbol, {})
-        min_qty  = info.get("minQty",  0.001)
-        qty_step = info.get("qtyStep", 0.001)
-        min_not  = info.get("minNotional", 1.0)
+        min_qty  = float(info.get("minQty",  0.001))
+        qty_step = float(info.get("qtyStep", 0.001))
+        min_not  = float(info.get("minNotional", 1.0))
 
-        # Margem disponível real (saldo atual — nunca usar valor antigo)
-        balance      = self.balance
-        leverage     = cfg.LEVERAGE
-        buying_power = balance * leverage
+        balance  = self.balance           # saldo real atual em USDT
+        leverage = cfg.LEVERAGE
 
-        # Quanto arriscar por trade (% do buying power)
-        risk_pct     = cfg.MAX_RISK_PCT
-        target_not   = buying_power * risk_pct
+        # CAP ABSOLUTO: nunca usar mais de 80% do saldo como margem
+        max_margin   = balance * 0.80
+        max_notional = max_margin * leverage
 
-        # Nunca exceder 90% do buying power disponível
-        target_not   = min(target_not, buying_power * 0.90)
-        # Garantir notional mínimo da exchange
-        target_not   = max(target_not, min_not)
-
-        # Verificar margem necessária (notional / leverage)
-        margin_needed = target_not / leverage
-        if margin_needed > balance * 0.95:
-            # Reduzir para caber na margem disponível
-            target_not    = balance * 0.90 * leverage
-            margin_needed = target_not / leverage
-            log.warning(f"📐 {symbol}: ajustando para margem disponível ${balance:.2f}")
+        # Target: MAX_RISK_PCT do buying power
+        target_not = balance * leverage * cfg.MAX_RISK_PCT
+        
+        # Aplicar cap absoluto
+        target_not = min(target_not, max_notional)
+        target_not = max(target_not, min_not)
 
         # Calcular quantidade
         qty   = target_not / entry
-        steps = int(qty / qty_step)
+        steps = max(1, int(qty / qty_step))
         qty   = round(steps * qty_step, 8)
         qty   = max(qty, min_qty)
 
-        # Verificação final
-        notional = qty * entry
-        margin   = notional / leverage
-        if margin > balance:
-            log.warning(f"📐 {symbol}: margem ${margin:.2f} > saldo ${balance:.2f} — reduzindo")
-            qty   = (balance * 0.85 * leverage) / entry
-            steps = int(qty / qty_step)
+        # Verificação HARD: margem da ordem nunca > saldo
+        final_notional = qty * entry
+        final_margin   = final_notional / leverage
+        if final_margin > balance * 0.90:
+            qty   = (balance * 0.80 * leverage) / entry
+            steps = max(1, int(qty / qty_step))
             qty   = round(steps * qty_step, 8)
+            qty   = max(qty, min_qty)
 
+        # Rejeitar se ainda insuficiente
         if qty <= 0 or qty * entry < min_not:
-            log.warning(f"📐 {symbol}: qty insuficiente ({qty}) para notional mínimo ${min_not}")
+            log.warning(
+                f"📐 {symbol}: saldo ${balance:.2f} insuficiente para "
+                f"notional mínimo ${min_not} (entry=${entry})"
+            )
             return 0.0
 
-        log.info(f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f} "
-                 f"margem=${qty*entry/leverage:.2f} saldo=${balance:.2f}")
+        log.info(
+            f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f} "
+            f"margem=${qty*entry/leverage:.2f} / saldo=${balance:.2f}"
+        )
         return qty
 
 
