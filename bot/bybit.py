@@ -190,6 +190,7 @@ class BybitClient:
     # ── Private REST ────────────────────────────────────────────
     async def get_balance(self) -> float:
         if not API_KEY:
+            log.warning("get_balance: BYBIT_API_KEY não configurada no Railway")
             return 1000.0
         try:
             res = await self._get("/v5/account/wallet-balance",
@@ -198,6 +199,9 @@ class BybitClient:
                 if coin.get("coin") == "USDT":
                     return float(coin.get("walletBalance", 0))
             return 0.0
+        except json.JSONDecodeError as e:
+            log.error(f"get_balance: resposta inválida da Bybit (chaves API inválidas/expiradas?) — {e}")
+            return -1.0
         except Exception as e:
             log.error(f"get_balance: {e}")
             return -1.0
