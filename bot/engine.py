@@ -936,23 +936,39 @@ class TradingEngine:
                 return
 
             # ── Score pré-trade ───────────────────────────────
-            c  = [sig.entry]   # usa entry como proxy se não tiver cache
+            # Buscar klines para pré-trade — REST se cache insuficiente
             kl = self.client.get_cached_klines(sig.symbol, "15", 50)
+            if len(kl) < 20:
+                try:
+                    kl = await self.client.get_klines(sig.symbol, "15", 50)
+                except Exception:
+                    kl = []
+
             if len(kl) >= 10:
-                c = [k["c"] for k in kl]
-                h = [k["h"] for k in kl]
-                l = [k["l"] for k in kl]
-                v = [k["v"] for k in kl]
+                c = [float(k.get("c", k[4]) if isinstance(k, dict) else k[4]) for k in kl]
+                h = [float(k.get("h", k[2]) if isinstance(k, dict) else k[2]) for k in kl]
+                l = [float(k.get("l", k[3]) if isinstance(k, dict) else k[3]) for k in kl]
+                v = [float(k.get("v", k[5]) if isinstance(k, dict) else k[5]) for k in kl]
             else:
-                h = c; l = c; v = [1000]*len(c)
+                c = [sig.entry] * 20
+                h = [sig.entry * 1.001] * 20
+                l = [sig.entry * 0.999] * 20
+                v = [1000.0] * 20
 
             pre_score = await scoring.calculate(
                 sig.symbol, sig.direction, c, h, l, v, self.client
             )
             if not pre_score["aprovado"]:
+                # Log detalhado mostrando o que bloqueou
+                det = pre_score.get("detalhes", {})
+                tec = pre_score.get("tecnico", 0)
+                of  = pre_score.get("orderflow", 0)
+                mac = pre_score.get("macro", 0)
+                news= pre_score.get("news_mod", 0)
                 log.info(
-                    f"[{sig.symbol}] Score pré-trade {pre_score['total']}/100 "
-                    f"< {scoring.MIN_SCORE} → HOLD"
+                    f"[{sig.symbol}] Pré-trade REPROVADO {pre_score['total']}/100 "
+                    f"(TEC={tec} OF={of} MAC={mac} NEWS={news:+d}) "
+                    f"mínimo={scoring.MIN_SCORE}"
                 )
                 return
 
