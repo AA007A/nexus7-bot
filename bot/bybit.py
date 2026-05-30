@@ -108,35 +108,27 @@ class BybitClient:
     # ── Public REST ─────────────────────────────────────────────
     async def ping(self) -> bool:
         """
-        Ping robusto com 3 tentativas e timeout progressivo.
-        Tenta /v5/market/time, fallback para /v5/market/tickers.
+        Ping leve — verifica se a API está acessível.
+        Nunca lança exceção. Retorna True se OK, False se falhar.
         """
-        for attempt in range(3):
-            try:
-                timeout = aiohttp.ClientTimeout(total=15 + attempt * 5)
-                async with aiohttp.ClientSession(timeout=timeout) as s:
-                    async with s.get(
-                        f"{BASE}/v5/market/time",
-                        headers={"User-Agent": "BGX-Capital/10.0"}
-                    ) as r:
-                        if r.status == 200:
-                            return True
-            except Exception as e:
-                log.debug(f"ping tentativa {attempt+1}: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2)
-        # Fallback: tentar endpoint alternativo
         try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as s:
-                async with s.get(
-                    "https://api.bybit.com/v5/market/tickers"
-                    "?category=linear&symbol=BTCUSDT"
-                ) as r:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.get(f"{BASE}/v5/market/time") as r:
                     return r.status == 200
         except Exception:
-            return False
+            # Fallback: tentar endpoint alternativo
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as s:
+                    async with s.get(
+                        f"{BASE}/v5/market/tickers"
+                        "?category=linear&symbol=BTCUSDT"
+                    ) as r:
+                        return r.status == 200
+            except Exception:
+                return False
 
     async def get_klines(self, symbol: str, interval: str = "15", limit: int = 100) -> list:
         iv  = INTERVALS.get(interval, interval)
