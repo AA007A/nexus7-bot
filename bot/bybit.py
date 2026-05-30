@@ -112,8 +112,11 @@ class BybitClient:
                 except json.JSONDecodeError:
                     log.error(f"POST {path}: resposta não-JSON ({r.status}): {raw[:200]}")
                     raise RuntimeError(f"POST {path}: resposta inválida ({r.status})")
-            if data.get("retCode", 0) not in (0, 110043):
-                raise RuntimeError(f"Bybit {data.get('retCode')}: {data.get('retMsg')}")
+            rc  = data.get("retCode", 0)
+            msg = data.get("retMsg", "")
+            if rc not in (0, 110043):
+                log.error(f"Bybit API erro {rc}: {msg} | body={str(body)[:200]}")
+                raise RuntimeError(f"Bybit {rc}: {msg}")
             return data.get("result", {})
         except RuntimeError:
             raise
@@ -251,14 +254,20 @@ class BybitClient:
         if not API_KEY:
             log.info(f"[DEMO] {side} {qty} {symbol} SL={sl} TP={tp}")
             return {"orderId": "demo"}
+        # Arredondar qty para evitar erros de precisão
+        qty_str = str(qty)
         body = {
-            "category": "linear", "symbol": symbol,
-            "side": side, "orderType": "Market",
-            "qty": str(qty), "timeInForce": "IOC",
+            "category":    "linear",
+            "symbol":      symbol,
+            "side":        side,
+            "orderType":   "Market",
+            "qty":         qty_str,
+            "timeInForce": "GTC",
             "positionIdx": 0,
         }
-        if sl > 0: body["stopLoss"]   = str(round(sl, 6))
-        if tp > 0: body["takeProfit"] = str(round(tp, 6))
+        if sl > 0: body["stopLoss"]   = str(round(sl, 4))
+        if tp > 0: body["takeProfit"] = str(round(tp, 4))
+        log.info(f"📤 place_order {symbol} {side} qty={qty_str} sl={sl:.4f} tp={tp:.4f}")
         return await self._post("/v5/order/create", body)
 
     async def set_sl(self, symbol: str, sl: float):
