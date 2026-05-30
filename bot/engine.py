@@ -423,19 +423,11 @@ class TradingEngine:
     # ── Connect ────────────────────────────────────────────────
     async def _connect(self):
         try:
-            # Ping com até 3 tentativas antes de desistir
-            ping_ok = False
-            for _p in range(3):
-                ping_ok = await self.client.ping()
-                if ping_ok:
-                    break
-                log.warning(f"⚠️ Bybit ping tentativa {_p+1}/3 falhou, aguardando...")
-                await asyncio.sleep(5)
+            # Ping é opcional — não bloqueia o bot se falhar
+            # O bot tenta operar mesmo sem ping (REST pode funcionar)
+            ping_ok = await self.client.ping()
             if not ping_ok:
-                log.error("❌ Bybit ping falhou após 3 tentativas — reconectando em 30s")
-                self.connected = False
-                await asyncio.sleep(30)
-                return
+                log.warning("⚠️ Bybit ping falhou — continuando mesmo assim (REST pode funcionar)")
 
             bal = await self.client.get_balance()
             if bal < 0:
