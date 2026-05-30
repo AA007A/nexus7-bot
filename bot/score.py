@@ -31,7 +31,7 @@ import asyncio, time
 from typing import Optional
 from bot.logger import log
 
-MIN_SCORE = 60   # score mínimo para entrar
+MIN_SCORE = 50   # score mínimo pré-trade (técnico já filtra em 60)
 
 # Cache de dados macro (atualiza a cada 5min)
 _macro_cache = {
@@ -222,13 +222,16 @@ def score_macro(direction: str) -> dict:
     if direction == "LONG":
         if 45 <= fg <= 75:
             score += 10
-            details["fear_greed"] = f"{fg} (favorável)"
+            details["fear_greed"] = f"{fg} (neutro/favorável)"
         elif fg > 75:
             score += 5
-            details["fear_greed"] = f"{fg} (greed extremo)"
+            details["fear_greed"] = f"{fg} (greed extremo — cautela)"
+        elif fg <= 25:
+            score += 7   # Fear extremo = potencial reversão contrária (buy the fear)
+            details["fear_greed"] = f"{fg} (fear extremo — reversão potencial)"
         else:
-            score += 3
-            details["fear_greed"] = f"{fg} (medo)"
+            score += 4
+            details["fear_greed"] = f"{fg} (medo moderado)"
     else:
         if fg < 45:
             score += 10
