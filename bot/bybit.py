@@ -78,10 +78,10 @@ class BybitClient:
         qs  = "&".join(f"{k}={v}" for k, v in (params or {}).items())
         headers = _auth_params(qs) if auth else {}
         try:
+            req_headers = {**headers, "Content-Type": "application/json"}
             async with self._sess().get(
-                url, params=params, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
-                headers={**headers, "Content-Type": "application/json"}
+                url, params=params, headers=req_headers,
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as r:
                 raw = await r.text()
                 try:
