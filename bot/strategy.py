@@ -512,9 +512,9 @@ class Analyzer:
         if s15["rsi_v"] > 82 or s15["rsi_v"] < 18:
             log.debug(f"[{symbol}] RSI extremo {s15['rsi_v']:.0f} → HOLD")
             return None
-        # Volume muito fraco
-        if s15["vol_r"] < 0.5:
-            log.debug(f"[{symbol}] Volume fraco {s15['vol_r']:.2f}x → HOLD")
+        # Volume muito fraco — threshold baixo para não bloquear em períodos normais
+        if s15["vol_r"] < 0.15:
+            log.debug(f"[{symbol}] Volume muito fraco {s15['vol_r']:.2f}x → HOLD")
             return None
         # 15M não alinhado
         if not s15["aligned"]:
