@@ -264,8 +264,7 @@ class RiskManager:
         min_not  = info.get("minNotional", 1.0)
 
         buying_power = self.balance * cfg.LEVERAGE
-        # Usa risco reduzido após meta diária ser batida
-        risk_pct = self._effective_risk_pct()
+        # Usa MAX_RISK_PCT direto (o TradingEngine já filtra pelo effective)
         target_not   = buying_power * cfg.MAX_RISK_PCT
         target_not   = max(target_not, min_not)
 
