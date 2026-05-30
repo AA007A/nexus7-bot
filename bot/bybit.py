@@ -80,12 +80,20 @@ class BybitClient:
         try:
             async with self._sess().get(
                 url, params=params, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={**headers, "Content-Type": "application/json"}
             ) as r:
-                data = await r.json()
+                raw = await r.text()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    log.error(f"GET {path}: resposta não-JSON ({r.status}): {raw[:200]}")
+                    raise RuntimeError(f"GET {path}: resposta inválida ({r.status})")
             if data.get("retCode", 0) != 0:
                 raise RuntimeError(f"Bybit {data.get('retCode')}: {data.get('retMsg')}")
             return data.get("result", {})
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"GET {path}: {e}")
 
@@ -96,12 +104,19 @@ class BybitClient:
         try:
             async with self._sess().post(
                 url, data=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as r:
-                data = await r.json()
+                raw = await r.text()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    log.error(f"POST {path}: resposta não-JSON ({r.status}): {raw[:200]}")
+                    raise RuntimeError(f"POST {path}: resposta inválida ({r.status})")
             if data.get("retCode", 0) not in (0, 110043):
                 raise RuntimeError(f"Bybit {data.get('retCode')}: {data.get('retMsg')}")
             return data.get("result", {})
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"POST {path}: {e}")
 
