@@ -207,22 +207,33 @@ class BybitClient:
 
     # ── Private REST ────────────────────────────────────────────
     async def get_balance(self) -> float:
+        """Retorna saldo USDT disponível. Retorna 0.0 se sem API key ou erro."""
         if not API_KEY:
-            log.warning("get_balance: BYBIT_API_KEY não configurada no Railway")
-            return 1000.0
+            log.warning("get_balance: BYBIT_API_KEY não configurada — retornando 0")
+            return 0.0
         try:
             res = await self._get("/v5/account/wallet-balance",
                                   {"accountType": "UNIFIED"}, auth=True)
-            for coin in res.get("list", [{}])[0].get("coin", []):
+            account = res.get("list", [{}])[0]
+            # Tentar walletBalance por coin primeiro
+            for coin in account.get("coin", []):
                 if coin.get("coin") == "USDT":
-                    return float(coin.get("walletBalance", 0))
+                    bal = float(coin.get("walletBalance", 0) or 0)
+                    if bal > 0:
+                        log.info(f"💰 Saldo USDT: ${bal:.4f}")
+                        return bal
+            # Fallback: totalEquity da conta
+            equity = float(account.get("totalEquity", 0) or 0)
+            if equity > 0:
+                log.info(f"💰 Saldo (equity): ${equity:.4f}")
+                return equity
             return 0.0
         except json.JSONDecodeError as e:
-            log.error(f"get_balance: resposta inválida da Bybit (chaves API inválidas/expiradas?) — {e}")
-            return -1.0
+            log.error(f"get_balance: resposta inválida — {e}")
+            return 0.0
         except Exception as e:
             log.error(f"get_balance: {e}")
-            return -1.0
+            return 0.0
 
     async def get_positions(self, symbol: str = None) -> list:
         if not API_KEY:
