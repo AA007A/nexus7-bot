@@ -282,9 +282,10 @@ class RiskManager:
         target_not = min(target_not, max_notional)
         target_not = max(target_not, min_not)
 
-        # Calcular quantidade
+        # Calcular quantidade — usar math.floor para evitar ruído de ponto flutuante
+        import math
         qty   = target_not / entry
-        steps = max(1, int(qty / qty_step))
+        steps = max(1, math.floor(qty / qty_step))
         qty   = round(steps * qty_step, 8)
         qty   = max(qty, min_qty)
 
@@ -293,7 +294,7 @@ class RiskManager:
         final_margin   = final_notional / leverage
         if final_margin > balance * 0.90:
             qty   = (balance * 0.80 * leverage) / entry
-            steps = max(1, int(qty / qty_step))
+            steps = max(1, math.floor(qty / qty_step))
             qty   = round(steps * qty_step, 8)
             qty   = max(qty, min_qty)
 
@@ -1011,9 +1012,66 @@ class TradingEngine:
             )
 
             side = "Buy" if sig.direction == "LONG" else "Sell"
+
+            # ── Validação de parâmetros antes de enviar à API ─────
+            info      = self.instruments.get(sig.symbol, {})
+            qty_step  = float(info.get("qtyStep",  0.001))
+            tick_size = float(info.get("tickSize", 0.01))
+            min_qty   = float(info.get("minQty",   0.001))
+            min_not   = float(info.get("minNotional", 1.0))
+
+            # Validar qty
+            if qty < min_qty:
+                log.error(
+                    f"❌ _open {sig.symbol}: qty={qty} < minQty={min_qty} — abortando"
+                )
+                return
+            if qty * sig.entry < min_not:
+                log.error(
+                    f"❌ _open {sig.symbol}: notional={qty * sig.entry:.4f} < minNotional={min_not} — abortando"
+                )
+                return
+
+            # Validar SL/TP — devem estar no lado correto da entrada
+            if sig.sl <= 0 or sig.tp <= 0:
+                log.error(
+                    f"❌ _open {sig.symbol}: SL={sig.sl} ou TP={sig.tp} inválido (≤ 0) — abortando"
+                )
+                return
+            if sig.direction == "LONG":
+                if sig.sl >= sig.entry:
+                    log.error(
+                        f"❌ _open {sig.symbol} LONG: SL={sig.sl:.6f} >= entry={sig.entry:.6f} — abortando"
+                    )
+                    return
+                if sig.tp <= sig.entry:
+                    log.error(
+                        f"❌ _open {sig.symbol} LONG: TP={sig.tp:.6f} <= entry={sig.entry:.6f} — abortando"
+                    )
+                    return
+            else:  # SHORT
+                if sig.sl <= sig.entry:
+                    log.error(
+                        f"❌ _open {sig.symbol} SHORT: SL={sig.sl:.6f} <= entry={sig.entry:.6f} — abortando"
+                    )
+                    return
+                if sig.tp >= sig.entry:
+                    log.error(
+                        f"❌ _open {sig.symbol} SHORT: TP={sig.tp:.6f} >= entry={sig.entry:.6f} — abortando"
+                    )
+                    return
+
+            log.info(
+                f"🔎 _open {sig.symbol} {sig.direction} | "
+                f"entry={sig.entry} sl={sig.sl} tp={sig.tp} | "
+                f"qty={qty} qty_step={qty_step} tick={tick_size} | "
+                f"notional={qty * sig.entry:.2f} min_not={min_not}"
+            )
+
             await self.client.place_order(
                 symbol=sig.symbol, side=side, qty=qty,
                 sl=sig.sl, tp=sig.tp,
+                instruments=self.instruments,
             )
 
             pos = Position(sig, qty)
