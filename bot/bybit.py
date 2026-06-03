@@ -174,12 +174,14 @@ class BybitClient:
         })
         out = {}
         for item in res.get("list", []):
-            sym = item.get("symbol", "")
-            lot = item.get("lotSizeFilter", {})
+            sym   = item.get("symbol", "")
+            lot   = item.get("lotSizeFilter", {})
+            price = item.get("priceFilter", {})
             out[sym] = {
                 "minQty":      float(lot.get("minOrderQty",  0.001)),
                 "qtyStep":     float(lot.get("qtyStep",      0.001)),
                 "minNotional": float(lot.get("minOrderAmt",  1.0)),
+                "tickSize":    float(price.get("tickSize",   0.01)),
             }
         return out
 
@@ -261,12 +263,35 @@ class BybitClient:
                 log.warning(f"set_leverage {symbol}: {e}")
 
     async def place_order(self, symbol: str, side: str, qty: float,
-                          sl: float = 0, tp: float = 0) -> dict:
+                          sl: float = 0, tp: float = 0,
+                          instruments: dict = None) -> dict:
         if not API_KEY:
             log.info(f"[DEMO] {side} {qty} {symbol} SL={sl} TP={tp}")
             return {"orderId": "demo"}
-        # Arredondar qty para evitar erros de precisão
-        qty_str = str(qty)
+
+        # ── Obter precisão do instrumento ────────────────────────
+        info      = (instruments or {}).get(symbol, {})
+        qty_step  = float(info.get("qtyStep",  0.001))
+        tick_size = float(info.get("tickSize", 0.01))
+
+        # ── Arredondar qty ao múltiplo exato de qtyStep ──────────
+        # Usar divisão inteira para evitar ruído de ponto flutuante
+        import math
+        qty_steps = math.floor(qty / qty_step)
+        qty_clean = round(qty_steps * qty_step, 8)
+        # Calcular casas decimais necessárias a partir do qtyStep
+        qty_decimals = max(0, -int(math.floor(math.log10(qty_step)))) if qty_step < 1 else 0
+        qty_str = f"{qty_clean:.{qty_decimals}f}"
+
+        # ── Arredondar SL/TP ao múltiplo exato de tickSize ───────
+        def round_price(price: float) -> str:
+            if price <= 0:
+                return "0"
+            ticks = round(price / tick_size)
+            clean = round(ticks * tick_size, 8)
+            price_decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
+            return f"{clean:.{price_decimals}f}"
+
         body = {
             "category":    "linear",
             "symbol":      symbol,
@@ -276,9 +301,18 @@ class BybitClient:
             "timeInForce": "GTC",
             "positionIdx": 0,
         }
-        if sl > 0: body["stopLoss"]   = str(round(sl, 4))
-        if tp > 0: body["takeProfit"] = str(round(tp, 4))
-        log.info(f"📤 place_order {symbol} {side} qty={qty_str} sl={sl:.4f} tp={tp:.4f}")
+        if sl > 0:
+            body["stopLoss"]   = round_price(sl)
+        if tp > 0:
+            body["takeProfit"] = round_price(tp)
+
+        log.info(
+            f"📤 place_order {symbol} {side} | "
+            f"qty_raw={qty} qty_step={qty_step} → qty='{qty_str}' | "
+            f"tick={tick_size} sl_raw={sl} → sl='{body.get('stopLoss', '-')}' | "
+            f"tp_raw={tp} → tp='{body.get('takeProfit', '-')}' | "
+            f"body={body}"
+        )
         return await self._post("/v5/order/create", body)
 
     async def set_sl(self, symbol: str, sl: float):
