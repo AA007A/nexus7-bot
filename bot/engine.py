@@ -494,6 +494,23 @@ class TradingEngine:
             )
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
 
+            # ── Verificação de configuração do Telegram ───────────
+            if not cfg.TELEGRAM_TOKEN:
+                log.warning(
+                    "⚠️ TELEGRAM_TOKEN não configurado — alertas do Telegram desativados. "
+                    "Configure a variável de ambiente TELEGRAM_TOKEN no Railway."
+                )
+            elif not cfg.TELEGRAM_CHAT:
+                log.warning(
+                    "⚠️ TELEGRAM_CHAT não configurado — alertas do Telegram desativados. "
+                    "Configure a variável de ambiente TELEGRAM_CHAT no Railway."
+                )
+            else:
+                log.info(
+                    f"✅ Telegram configurado — token={'***' + cfg.TELEGRAM_TOKEN[-4:]} "
+                    f"chat_id={cfg.TELEGRAM_CHAT}"
+                )
+
             await notify(await online_msg(bal, bal*cfg.LEVERAGE, len(self.viable_symbols), cfg.MAX_POSITIONS))
             await notify(
                 f"Score mínimo: `{cfg.MIN_ENTRY_SCORE}/100`\n"
