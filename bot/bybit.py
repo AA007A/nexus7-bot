@@ -115,7 +115,10 @@ class BybitClient:
             rc  = data.get("retCode", 0)
             msg = data.get("retMsg", "")
             if rc not in (0, 110043):
-                log.error(f"Bybit API erro {rc}: {msg} | body={str(body)[:200]}")
+                log.error(
+                    f"Bybit API erro retCode={rc} retMsg='{msg}' | "
+                    f"path={path} | body={json.dumps(body or {})}"
+                )
                 raise RuntimeError(f"Bybit {rc}: {msg}")
             return data.get("result", {})
         except RuntimeError:
@@ -310,9 +313,9 @@ class BybitClient:
             f"📤 place_order {symbol} {side} | "
             f"qty_raw={qty} qty_step={qty_step} → qty='{qty_str}' | "
             f"tick={tick_size} sl_raw={sl} → sl='{body.get('stopLoss', '-')}' | "
-            f"tp_raw={tp} → tp='{body.get('takeProfit', '-')}' | "
-            f"body={body}"
+            f"tp_raw={tp} → tp='{body.get('takeProfit', '-')}'"
         )
+        log.info(f"📦 place_order body completo: {json.dumps(body)}")
         return await self._post("/v5/order/create", body)
 
     async def set_sl(self, symbol: str, sl: float):
