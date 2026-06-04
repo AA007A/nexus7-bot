@@ -6,17 +6,39 @@ from bot.logger import log
 async def notify(text: str):
     """Envia mensagem para o Telegram."""
     if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
+        log.warning(
+            "Telegram: TELEGRAM_TOKEN or TELEGRAM_CHAT is missing — "
+            "notification skipped (token=%s, chat=%s)",
+            "set" if cfg.TELEGRAM_TOKEN else "MISSING",
+            "set" if cfg.TELEGRAM_CHAT else "MISSING",
+        )
         return
+    token_hint = f"{cfg.TELEGRAM_TOKEN[:6]}...{cfg.TELEGRAM_TOKEN[-4:]}" \
+        if len(cfg.TELEGRAM_TOKEN) > 10 else "***"
+    log.info(
+        "Telegram: sending notification (token=%s, chat=%s)",
+        token_hint,
+        cfg.TELEGRAM_CHAT,
+    )
     try:
         url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
         async with aiohttp.ClientSession() as s:
-            await s.post(url, json={
+            resp = await s.post(url, json={
                 "chat_id": cfg.TELEGRAM_CHAT,
                 "text": text,
                 "parse_mode": "Markdown",
             })
+            if resp.status == 200:
+                log.info("Telegram: notification sent successfully (HTTP %s)", resp.status)
+            else:
+                body = await resp.text()
+                log.error(
+                    "Telegram: unexpected HTTP %s — response: %s",
+                    resp.status,
+                    body,
+                )
     except Exception as e:
-        log.warning(f"Telegram: {e}")
+        log.error("Telegram: request failed — %s: %s", type(e).__name__, e)
 
 
 # ── BOT ONLINE ────────────────────────────────────────────────────
