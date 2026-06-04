@@ -5,18 +5,34 @@ from bot.logger import log
 
 async def notify(text: str):
     """Envia mensagem para o Telegram."""
-    if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
+    log.debug(f"notify() chamado — texto: {text[:80]!r}...")
+
+    if not cfg.TELEGRAM_TOKEN:
+        log.warning("Telegram: TELEGRAM_TOKEN não configurado — mensagem não enviada")
         return
+    if not cfg.TELEGRAM_CHAT:
+        log.warning("Telegram: TELEGRAM_CHAT não configurado — mensagem não enviada")
+        return
+
+    url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
+    log.debug(f"Telegram: enviando para chat_id={cfg.TELEGRAM_CHAT}")
     try:
-        url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
         async with aiohttp.ClientSession() as s:
-            await s.post(url, json={
+            resp = await s.post(url, json={
                 "chat_id": cfg.TELEGRAM_CHAT,
                 "text": text,
                 "parse_mode": "Markdown",
             })
+            if resp.status != 200:
+                body = await resp.text()
+                log.error(
+                    f"Telegram: API retornou HTTP {resp.status} — "
+                    f"chat_id={cfg.TELEGRAM_CHAT} | resposta: {body[:200]}"
+                )
+            else:
+                log.debug(f"Telegram: mensagem entregue (HTTP 200)")
     except Exception as e:
-        log.warning(f"Telegram: {e}")
+        log.error(f"Telegram: erro ao enviar mensagem — {e}")
 
 
 # ── BOT ONLINE ────────────────────────────────────────────────────
