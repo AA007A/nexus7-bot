@@ -310,7 +310,16 @@ async def decisions(limit: int = 60):
 
 @app.get("/api/test-notify")
 async def test_notify():
-    """Envia mensagem de teste no Telegram para verificar configuração."""
+    """
+    Testa a conectividade com o Telegram.
+
+    Use este endpoint para verificar se TELEGRAM_TOKEN e TELEGRAM_CHAT estão
+    configurados corretamente no Railway. Uma mensagem de teste será enviada
+    ao chat configurado e o resultado (sucesso ou erro HTTP) aparecerá nos logs.
+
+    Exemplo de uso:
+        curl https://<seu-dominio>/api/test-notify
+    """
     from bot.notifier import notify
     from bot.config import cfg
     if not cfg.TELEGRAM_TOKEN:
