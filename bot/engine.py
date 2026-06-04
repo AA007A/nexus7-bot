@@ -976,10 +976,10 @@ class TradingEngine:
                     kl = []
 
             if len(kl) >= 10:
-                c = [float(k.get("c", k[4]) if isinstance(k, dict) else k[4]) for k in kl]
-                h = [float(k.get("h", k[2]) if isinstance(k, dict) else k[2]) for k in kl]
-                l = [float(k.get("l", k[3]) if isinstance(k, dict) else k[3]) for k in kl]
-                v = [float(k.get("v", k[5]) if isinstance(k, dict) else k[5]) for k in kl]
+                c = [float(k.get("c", sig.entry) if isinstance(k, dict) else (k[4] if len(k) > 4 else sig.entry)) for k in kl]
+                h = [float(k.get("h", sig.entry) if isinstance(k, dict) else (k[2] if len(k) > 2 else sig.entry)) for k in kl]
+                l = [float(k.get("l", sig.entry) if isinstance(k, dict) else (k[3] if len(k) > 3 else sig.entry)) for k in kl]
+                v = [float(k.get("v", 1000.0) if isinstance(k, dict) else (k[5] if len(k) > 5 else 1000.0)) for k in kl]
             else:
                 c = [sig.entry] * 20
                 h = [sig.entry * 1.001] * 20
