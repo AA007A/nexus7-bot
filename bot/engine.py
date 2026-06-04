@@ -450,6 +450,15 @@ class TradingEngine:
     # ── Connect ────────────────────────────────────────────────
     async def _connect(self):
         try:
+            # ── Verificação de configuração do Telegram ─────────────
+            if not cfg.TELEGRAM_TOKEN:
+                log.warning("⚠️ TELEGRAM_TOKEN não configurado — alertas Telegram desativados")
+            elif not cfg.TELEGRAM_CHAT:
+                log.warning("⚠️ TELEGRAM_CHAT não configurado — alertas Telegram desativados")
+            else:
+                token_suffix = cfg.TELEGRAM_TOKEN[-4:]
+                log.info(f"✅ Telegram configurado — token=...{token_suffix} | chat_id={cfg.TELEGRAM_CHAT}")
+
             # Ping é opcional — não bloqueia o bot se falhar
             # O bot tenta operar mesmo sem ping (REST pode funcionar)
             ping_ok = await self.client.ping()
