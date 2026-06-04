@@ -1068,11 +1068,81 @@ class TradingEngine:
                 f"notional={qty * sig.entry:.2f} min_not={min_not}"
             )
 
-            await self.client.place_order(
-                symbol=sig.symbol, side=side, qty=qty,
-                sl=sig.sl, tp=sig.tp,
-                instruments=self.instruments,
-            )
+            # ── Retry com backoff exponencial (3 tentativas) ─────
+            MAX_RETRIES   = 3
+            RETRY_DELAYS  = [1.0, 2.0, 4.0]   # segundos entre tentativas
+            last_exc: Exception | None = None
+
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    log.info(
+                        f"📡 _open {sig.symbol} tentativa {attempt}/{MAX_RETRIES} | "
+                        f"side={side} qty={qty} entry={sig.entry:.6f} "
+                        f"sl={sig.sl:.6f} tp={sig.tp:.6f} "
+                        f"qty_step={qty_step} tick={tick_size} "
+                        f"notional={qty * sig.entry:.4f} balance={self.risk.balance:.4f}"
+                    )
+                    await self.client.place_order(
+                        symbol=sig.symbol, side=side, qty=qty,
+                        sl=sig.sl, tp=sig.tp,
+                        instruments=self.instruments,
+                    )
+                    last_exc = None
+                    break   # sucesso — sai do loop de retry
+                except Exception as exc:
+                    last_exc = exc
+                    err_str  = str(exc)
+
+                    # Extrai retCode e retMsg da mensagem de erro estruturada
+                    import re as _re
+                    rc_match  = _re.search(r"Bybit\s+(\d+):\s*(.*)", err_str)
+                    ret_code  = rc_match.group(1) if rc_match else "?"
+                    ret_msg   = rc_match.group(2).strip() if rc_match else err_str
+
+                    log.error(
+                        f"❌ _open {sig.symbol} tentativa {attempt}/{MAX_RETRIES} FALHOU | "
+                        f"retCode={ret_code} retMsg='{ret_msg}' | "
+                        f"params: side={side} qty={qty} qty_step={qty_step} "
+                        f"entry={sig.entry:.6f} sl={sig.sl:.6f} tp={sig.tp:.6f} "
+                        f"tick={tick_size} notional={qty * sig.entry:.4f} "
+                        f"balance={self.risk.balance:.4f} leverage={cfg.LEVERAGE} | "
+                        f"raw_error={err_str}"
+                    )
+
+                    # Erros não-recuperáveis — não faz sentido tentar de novo
+                    NON_RETRYABLE = {
+                        "10001",  # parâmetro inválido
+                        "10004",  # assinatura inválida
+                        "110007", # saldo insuficiente
+                        "110013", # qty abaixo do mínimo
+                        "110017", # SL/TP inválido
+                        "110025", # posição não existe
+                        "110043", # alavancagem já configurada
+                    }
+                    if ret_code in NON_RETRYABLE:
+                        log.error(
+                            f"🚫 _open {sig.symbol}: retCode={ret_code} é não-recuperável "
+                            f"— abortando sem retry"
+                        )
+                        break
+
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_DELAYS[attempt - 1]
+                        log.warning(
+                            f"⏳ _open {sig.symbol}: aguardando {delay}s antes da "
+                            f"tentativa {attempt + 1}/{MAX_RETRIES}..."
+                        )
+                        await asyncio.sleep(delay)
+
+            if last_exc is not None:
+                # Todas as tentativas falharam — loga resumo final e aborta
+                log.error(
+                    f"💀 _open {sig.symbol}: todas as {MAX_RETRIES} tentativas falharam | "
+                    f"último erro: {last_exc} | "
+                    f"parâmetros finais: side={side} qty={qty} "
+                    f"sl={sig.sl:.6f} tp={sig.tp:.6f} entry={sig.entry:.6f}"
+                )
+                return
 
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
@@ -1083,7 +1153,8 @@ class TradingEngine:
                 cfg.LEVERAGE, pre_score["total"],
             )
             self._trade_ids[sig.symbol] = trade_id
-            entry_type = "BOS_BREAK" if "ENTRY:BOS_BREAK" in sig.reason else                          "MOMENTUM" if "ENTRY:MOMENTUM" in sig.reason else "PULLBACK"
+            entry_type = "BOS_BREAK" if "ENTRY:BOS_BREAK" in sig.reason else \
+                         "MOMENTUM" if "ENTRY:MOMENTUM" in sig.reason else "PULLBACK"
             log.info(
                 f"✅ ABERTO {sig.direction} {qty} {sig.symbol} @ ${sig.entry:.4f} "
                 f"SL=${sig.sl:.4f} TP=${sig.tp:.4f} "
@@ -1109,7 +1180,13 @@ class TradingEngine:
                 await notify(await signal_msg(sig))
             await notify(await order_opened_msg(sig, qty, _obal, _obal*cfg.LEVERAGE))
         except Exception as e:
-            log.error(f"_open {sig.symbol}: {e}")
+            import traceback
+            log.error(
+                f"❌ _open {sig.symbol}: exceção inesperada — {e}\n"
+                f"Parâmetros do sinal: direction={sig.direction} entry={sig.entry} "
+                f"sl={sig.sl} tp={sig.tp} score={sig.score} rr={sig.rr}\n"
+                f"Traceback:\n{traceback.format_exc()}"
+            )
 
     # ── Load existing positions on startup ─────────────────────
     async def _load_existing_positions(self):
