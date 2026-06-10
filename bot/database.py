@@ -366,3 +366,37 @@ async def get_recent_decisions(limit: int = 60) -> list:
         from bot.logger import log
         log.error(f"get_recent_decisions: {e}")
         return []
+
+
+async def save_performance(periodo: str, strategy: str, win_rate: float,
+                            profit_factor: float, sharpe_ratio: float,
+                            sortino_ratio: float, max_drawdown: float,
+                            expectancy: float, total_trades: int):
+    """Persiste resultado de backtest na tabela performance."""
+    if not _conn:
+        return
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        if _is_pg:
+            await _conn.execute(
+                """INSERT INTO performance (periodo, strategy, win_rate, profit_factor,
+                   sharpe_ratio, sortino_ratio, max_drawdown, expectancy_por_trade,
+                   total_trades, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                periodo, strategy, win_rate, profit_factor, sharpe_ratio,
+                sortino_ratio, max_drawdown, expectancy, total_trades, ts,
+            )
+        else:
+            await _conn.execute(
+                """INSERT INTO performance (periodo, strategy, win_rate, profit_factor,
+                   sharpe_ratio, sortino_ratio, max_drawdown, expectancy_por_trade,
+                   total_trades, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (periodo, strategy, win_rate, profit_factor, sharpe_ratio,
+                 sortino_ratio, max_drawdown, expectancy, total_trades, ts),
+            )
+            await _conn.commit()
+    except Exception as e:
+        from bot.logger import log
+        log.error(f"save_performance: {e}")
