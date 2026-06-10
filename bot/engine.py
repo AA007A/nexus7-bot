@@ -1,17 +1,23 @@
 """
-BGX Capital Trading Engine v10.0
-  ✅ Meta diária de $100 de lucro
-  ✅ Stop-loss diário de $50 (para tudo se perder $50 no dia)
+BGX Capital Trading Engine v11.0
+  ✅ Meta diária em % do saldo (escala com o capital)
+  ✅ Stop-loss diário em % do saldo (proporcional ao capital)
   ✅ Modo agressivo até bater a meta → modo conservador depois
-  ✅ Máximo 4 posições simultâneas
-  ✅ Score mínimo 60/100 para entrar (80 após bater a meta)
-  ✅ Trailing stop progressivo com TP parcial 50%/50%
+  ✅ Máximo 3 posições simultâneas (reduzido para controle de correlação)
+  ✅ Score mínimo 60/100 para entrar (72 após meta diária)
+  ✅ Trailing stop progressivo reativado — ATR-based
+  ✅ TP parcial 50%/50% nos dois alvos técnicos
   ✅ SL/TP baseados em níveis técnicos reais (swing points)
-  ✅ Alavancagem dinâmica baseada em Fear & Greed + volatilidade
-  ✅ Order Flow: Spoofing, Iceberg, Agressão, Absorção
-  ✅ Sentimento: Coinglass + Binance Announcements + CoinMarketCal
+  ✅ Controle de correlação entre pares (bloqueia corr > 0.70)
+  ✅ filters.run_all_filters() conectado ao fluxo de execução real
+  ✅ LEVERAGE=10, MAX_RISK_PCT=1% (era 50x/15% = 750% do saldo)
+  ✅ Order Flow: CVD, OI, Funding, Delta Footprint
+  ✅ Sentimento: Fear & Greed, News Pipeline
   ✅ CVD persistente com janela de 4h
   ✅ Sincronização em tempo real com Bybit
+  ✅ Bug _update_balance corrigido (NameError silenciado)
+  ✅ Bug pause/resume corrigido (_running flag)
+  ✅ Endpoint /api/close-all disponível
 """
 import asyncio, time
 from datetime import datetime, timedelta
@@ -27,6 +33,9 @@ from bot import database as db
 from bot import score as scoring
 from bot import market_data as mdata
 from bot import backtest as bt
+from bot import filters as flts
+from bot import correlation as corr_guard
+from bot.risk import RiskManager  # v11: RiskManager unificado (substitui classe local)
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -223,7 +232,11 @@ class Stats:
 
 
 # ─── Risk Manager ─────────────────────────────────────────────────────────────
-class RiskManager:
+# ──────────────────────────────────────────────────────────────
+# DEPRECADO em v11: RiskManager local substituído por bot.risk.RiskManager
+# Mantido apenas para referência. NÃO INSTANCIAR — usa o import acima.
+# ──────────────────────────────────────────────────────────────
+# class RiskManager_DEPRECATED:
     def __init__(self):
         self.peak     = 0.0
         self.balance  = 0.0
@@ -330,25 +343,34 @@ class TradingEngine:
         self._scan_idx    = 0
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
 
-        # ── Meta diária ──────────────────────────────────────────
-        self.daily_pnl        = 0.0      # PnL acumulado no dia (USDT)
-        self.daily_target     = cfg.DAILY_TARGET      # $100
-        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # -$50
-        self.daily_target_hit = False    # meta batida hoje?
-        self.daily_stopped    = False    # stop-loss diário ativado?
-        self._last_reset_day  = -1       # último dia (UTC) que resetou
+        # ── Meta diária (calculada em % do saldo real) ───────────
+        self.daily_pnl        = 0.0
+        self.daily_target     = cfg.DAILY_TARGET      # fallback USD
+        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # fallback USD
+        self.daily_target_hit = False
+        self.daily_stopped    = False
+        self._last_reset_day  = -1
+
+    def _recalc_daily_limits(self):
+        """Recalcula meta/stop diários em % do saldo (escala com capital)."""
+        bal = self.risk.balance
+        if bal > 0:
+            self.daily_target    = bal * cfg.DAILY_TARGET_PCT
+            self.daily_stop_loss = bal * cfg.DAILY_STOP_LOSS_PCT
 
     # ── Lifecycle ──────────────────────────────────────────────
     async def run(self):
         if self._running:
             return
         self._running = True
-        log.info("⚡ Engine v10 iniciando...")
+        log.info("⚡ Engine v11 iniciando...")
         await db.init()   # inicia DB (PostgreSQL ou SQLite)
-        asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
-        asyncio.create_task(scoring.news_reader_loop())           # news 24/7
-        asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
-        asyncio.create_task(bt.weekly_backtest_loop(self.client))  # backtest semanal
+        asyncio.create_task(scoring.update_macro_cache())          # scoring cache
+        asyncio.create_task(scoring.news_reader_loop())             # news 24/7
+        asyncio.create_task(mdata.update_macro_correlations())      # DXY/S&P
+        asyncio.create_task(bt.weekly_backtest_loop(self.client))   # backtest semanal
+        asyncio.create_task(flts.update_fear_greed())               # Fear&Greed (v11: conectado)
+        asyncio.create_task(flts.update_macro_events())             # Macro events USD (v11: conectado)
         await self._connect()
 
         while self._running:
@@ -380,8 +402,54 @@ class TradingEngine:
                 await asyncio.sleep(5)
 
     def stop(self):
-        self.active = False
-        log.info("⏸️ Bot pausado (servidor continua rodando)")
+        """
+        Pausa o bot: para entradas novas mas mantém posições abertas protegidas.
+        BUG CORRIGIDO: _running=False garante que run() pode ser reiniciado.
+        """
+        self.active   = False
+        self._running = False   # era: apenas active=False → run() ficava preso
+        log.info("⏸️ Bot pausado (servidor continua | posições mantidas com SL/TP na exchange)")
+
+    async def close_all_positions(self) -> dict:
+        """
+        Fecha TODAS as posições abertas imediatamente.
+        Endpoint de emergência: POST /api/close-all
+        """
+        if not self.positions:
+            return {"closed": 0, "errors": 0, "symbols": []}
+
+        closed, errors, symbols = 0, 0, []
+        log.warning(f"🚨 EMERGENCY CLOSE ALL — {len(self.positions)} posições")
+
+        for sym, pos in list(self.positions.items()):
+            try:
+                side = "Sell" if pos.direction == "LONG" else "Buy"
+                await self.client.place_order(
+                    symbol=sym, side=side, qty=pos.qty, sl=0, tp=0,
+                )
+                pnl_gross = pos.pnl
+                fee_open  = pos.qty * pos.entry * TAKER_FEE
+                fee_close = pos.qty * pos.current_price * TAKER_FEE
+                pnl_net   = pnl_gross - fee_open - fee_close
+                trade = Trade(
+                    sym, pos.direction, pos.entry, pos.current_price,
+                    pos.qty, pnl_gross, pos.opened_at,
+                    fee_open=fee_open, fee_close=fee_close,
+                )
+                self.stats.add(trade)
+                del self.positions[sym]
+                symbols.append(sym)
+                closed += 1
+                log.info(f"✅ Emergency close {sym}: PnL net=${pnl_net:+.4f}")
+                await notify(
+                    f"🚨 *EMERGENCY CLOSE* `{sym}`\n"
+                    f"PnL: `${pnl_net:+.4f}` | Dir: `{pos.direction}`"
+                )
+            except Exception as e:
+                errors += 1
+                log.error(f"Emergency close {sym}: {e}")
+
+        return {"closed": closed, "errors": errors, "symbols": symbols}
 
     # ── Meta diária ────────────────────────────────────────────
     def _check_daily_reset(self):
@@ -400,7 +468,8 @@ class TradingEngine:
             self.daily_stopped    = False
             self._last_reset_day  = today
             # Volta ao score padrão após reset
-            log.info(f"🎯 Meta diária: ${self.daily_target:.0f} | Stop-loss dia: -${self.daily_stop_loss:.0f}")
+            self._recalc_daily_limits()
+            log.info(f"🎯 Meta diária: ${self.daily_target:.2f} ({cfg.DAILY_TARGET_PCT*100:.1f}% saldo) | Stop: -${self.daily_stop_loss:.2f}")
 
     def _update_daily_pnl(self):
         """Soma PnL realizado + não-realizado do dia e verifica meta/stop."""
@@ -688,11 +757,35 @@ class TradingEngine:
 
     async def _apply_trailing_stops(self):
         """
-        Trailing SL desativado por configuração do usuário.
-        SL permanece no nível técnico original.
-        Trade fecha somente por: TP, SL técnico ou R:R dobrado.
+        Trailing Stop REATIVADO — ATR-based progressivo.
+        Ativa quando lucro >= TRAILING_TRIGGER (50%) do alvo.
+        Trava TRAILING_LOCK (25%) abaixo do pico de preço.
+        SL nunca recua além do SL técnico original.
+        Atualiza SL na exchange via set_sl() (server-side).
         """
-        pass
+        for sym, pos in list(self.positions.items()):
+            try:
+                new_sl = pos.calc_trailing_sl()
+                if new_sl is None:
+                    continue
+
+                # Verifica se o novo SL é melhor que o atual
+                if pos.direction == "LONG":
+                    better = new_sl > pos.trailing_sl
+                else:
+                    better = new_sl < pos.trailing_sl
+
+                if better:
+                    old_sl = pos.trailing_sl
+                    pos.trailing_sl = new_sl
+                    await self.client.set_sl(sym, new_sl)
+                    log.info(
+                        f"🔄 Trailing SL {sym} {pos.direction}: "
+                        f"{old_sl:.4f} → {new_sl:.4f} "
+                        f"(pico PnL=${pos.peak_pnl:.4f})"
+                    )
+            except Exception as e:
+                log.error(f"_apply_trailing_stops {sym}: {e}")
 
     # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
     def _effective_risk_pct(self) -> float:
@@ -739,8 +832,7 @@ class TradingEngine:
                     fee_close = pos.qty * price     * TAKER_FEE
                     total_fee = fee_open + fee_close
                     pnl_net   = pnl_gross - total_fee
-                    fee_open  = pos.qty * pos.entry * 0.00055
-                    fee_close = pos.qty * price     * 0.00055
+                    # BUG CORRIGIDO: taxa não é mais recalculada (código morto removido)
                     trade = Trade(
                         sym, pos.direction, pos.entry, price,
                         pos.qty, pnl_gross, pos.opened_at,
@@ -867,6 +959,11 @@ class TradingEngine:
                     fee_mult=cfg.FEE_MULTIPLIER,
                     vol_mult=cfg.MIN_VOLUME_MULT,
                 )
+                # Alimenta cache de correlação com closes recentes
+                if k15:
+                    closes_15 = [k["c"] for k in k15[-50:]]
+                    corr_guard.seed_closes(sym, closes_15)
+
                 if sig:
                     if sig.expected_pnl <= 0:
                         log.info(f"[{sym}] PnL negativo após taxas → HOLD")
@@ -957,11 +1054,36 @@ class TradingEngine:
 
     async def _open(self, sig: Signal):
         try:
-            # Atualizar saldo real antes de calcular qty
+            # ── 0. Filtros de proteção (CONECTADOS ao fluxo real) ────
+            # BUG CORRIGIDO: filters.run_all_filters() agora é chamado aqui
+            filter_result = await flts.run_all_filters(
+                self.client, sig.symbol, sig.direction
+            )
+            if not filter_result["ok"]:
+                log.info(
+                    f"[{sig.symbol}] 🚫 Filtro '{filter_result['blocked_by']}' "
+                    f"bloqueou entrada: {filter_result['details'].get(filter_result['blocked_by'], {}).get('reason', '')}"
+                )
+                return
+
+            size_mult = filter_result.get("size_mult", 1.0)
+
+            # ── 1. Controle de correlação ────────────────────────────
+            corr_result = corr_guard.check_correlation(sig.symbol, self.positions)
+            if not corr_result["ok"]:
+                log.info(f"[{sig.symbol}] 🔗 {corr_result['reason']}")
+                return
+
+            # ── 2. Atualizar saldo real antes de calcular qty ────────
             fresh_bal = await self.client.get_balance()
             if fresh_bal > 0:
                 self.risk.update(fresh_bal)
-            qty = self.risk.size(sig.symbol, sig.entry, self.instruments)
+                self._recalc_daily_limits()
+            # Combina size_mult do filtro (horário/weekend) com size_mult do regime (volatilidade)
+            # O sinal já foi aprovado pelo strategy.analyze_mtf que inclui regime.classify()
+            regime_mult = getattr(sig, "regime_size_mult", 1.0)
+            combined_mult = size_mult * regime_mult
+            qty = self.risk.size(sig.symbol, sig.entry, self.instruments, combined_mult)
             if qty <= 0:
                 log.warning(f"⚠️ {sig.symbol}: qty=0 — saldo insuficiente (${self.risk.balance:.2f})")
                 return
@@ -1227,17 +1349,26 @@ class TradingEngine:
             log.error(f"_load_existing: {e}")
 
     async def _update_balance(self):
+        """
+        BUG CORRIGIDO: _dbal era NameError silenciado por except:pass
+        Agora: notificação de drawdown disparada corretamente.
+        """
         try:
             bal = await self.client.get_balance()
-            if bal >= 0:
-                self.risk.update(bal)
-                if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
-                    log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
-                    self.active = False
-                    _dbal = await self.client.get_balance()
-            await notify(await drawdown_msg(self.risk.drawdown, _dbal))
-        except Exception:
-            pass
+            if bal < 0:
+                return
+            self.risk.update(bal)
+            self._recalc_daily_limits()   # atualiza meta/stop com saldo atual
+            if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+                log.warning(
+                    f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite "
+                    f"{cfg.MAX_DRAWDOWN:.0%} → pausando entradas"
+                )
+                self.active = False
+                _dbal = bal   # inicializa antes de usar (fix NameError)
+                await notify(await drawdown_msg(self.risk.drawdown, _dbal))
+        except Exception as e:
+            log.error(f"_update_balance: {e}")
 
     # ── Status (endpoint /api/status) ──────────────────────────
     def get_status(self) -> dict:
@@ -1273,4 +1404,12 @@ class TradingEngine:
             "daily_progress":   round(min(self.daily_pnl / self.daily_target * 100, 100), 1) if self.daily_target else 0,
             "effective_score":  self._effective_score(),
             "mode":             "CONSERVADOR" if self.daily_target_hit else ("PARADO" if self.daily_stopped else "AGRESSIVO"),
+            # Campos novos v11
+            "daily_target_pct":    cfg.DAILY_TARGET_PCT * 100,
+            "daily_stop_loss_pct": cfg.DAILY_STOP_LOSS_PCT * 100,
+            "leverage":            cfg.LEVERAGE,
+            "max_risk_pct":        cfg.MAX_RISK_PCT * 100,
+            "correlation_matrix":  corr_guard.get_correlation_matrix(
+                list(self.positions.keys()) + self.viable_symbols[:6]
+            ),
         }
