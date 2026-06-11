@@ -1,114 +1,109 @@
 # BGX Capital — Changelog
 
-## v11.0.0 — Melhorias Críticas de Risco e Segurança
+## v12.0.0 — Melhorias de Robustez, Performance e Arquitetura
 
-### 🔴 Correções Críticas (Risco de Perda de Capital)
+### 🔴 Curto Prazo — Bugs e Configuração
 
-#### Parâmetros de Risco — CORRIGIDO
-- **LEVERAGE**: `50` → `10` (era: risco por trade = 750% do saldo)
-- **MAX_RISK_PCT**: `0.15` → `0.01` (1% do buying power)
-- **Risco real por trade**: `750%` → `10%` do saldo
-- **MAX_POSITIONS**: `4` → `3` (para controle de correlação)
-- **POST_TARGET_RISK**: `0.20` → `0.005` (corrigido proporcional)
+#### Item 2 — MATICUSDT → POLUSDT — CORRIGIDO
+- `bot/config.py`: Par renomeado pela Bybit em outubro/2024
+- Evita erros silenciosos no scan e tentativas de operar par inexistente
 
-#### Bug `_update_balance` — CORRIGIDO
-- `_dbal` era `NameError` silenciado por `except: pass`
-- Notificações de drawdown **nunca eram enviadas**
-- Corrigido: `_dbal = bal` inicializado antes do bloco condicional
+#### Item 3 — `_ws_retry` backoff exponencial — CORRIGIDO
+- `bot/bybit.py`: `_ws_retry` agora incrementado a cada falha de conexão WS
+- Backoff: `wait = min(2^retry, 60)` segundos (era sempre 5s)
+- Evita flood de conexões em queda do servidor Bybit
 
-#### Bug `stop()` / Pause-Resume — CORRIGIDO
-- `stop()` agora seta `self._running = False` (antes só `active = False`)
-- Bot ficava preso após primeiro pause — impossível retomar sem restart
-- `resume` verifica se task está viva antes de criar nova (evita double-engine)
+#### Item 4 — `__import__` dinâmicos removidos do hot path — CORRIGIDO
+- `bot/engine.py`: 8 chamadas `__import__` no loop de 5s eliminadas
+- Substituídas por imports estáticos: `_np`, `_dt`, `_ema_fn`
+- Impacto: elimina 69.120+ lookups de módulo por hora
 
-#### Bug `_check_rr_double` — CORRIGIDO
-- Taxa era recalculada duas vezes (código morto sobrescrevia variáveis)
-- Removida duplicação: `fee_open`/`fee_close` calculados uma única vez
+#### Item 5 — `check_partial_tps` conectado ao engine — CORRIGIDO
+- `bot/engine.py`: `check_partial_tps` de `bot/risk.py` agora chamado no loop
+- TPs parciais 50%/50% funcionam de fato (era código morto)
+- TP1: fecha 50% + move SL para break-even
+- TP2: fecha 50% restante
 
-### 🟠 Correções de Segurança
+#### Item 6 — `MIN_SCORE` alinhado com `cfg.MIN_ENTRY_SCORE` — CORRIGIDO
+- `bot/score.py`: `MIN_SCORE = cfg.MIN_ENTRY_SCORE` (era hardcoded 50 vs 60 no engine)
+- Elimina diagnóstico enganoso nos logs
 
-#### Autenticação nos Endpoints — ADICIONADO
-- Bearer token em todos os endpoints sensíveis (`/api/pause`, `/api/resume`, etc.)
-- Configure `BOT_API_SECRET` no Railway para ativar
-- Rate limiting: máx 10 req/min por IP nos endpoints de controle
+### 🟡 Médio Prazo
 
-#### CORS Restrito — CORRIGIDO
-- `allow_origins=["*"]` → `cfg.ALLOWED_ORIGINS` (configurável via env var)
-- Configure `ALLOWED_ORIGINS=https://seudominio.railway.app` no Railway
+#### Item 7 — `set_sl` respeita `tickSize` — CORRIGIDO
+- `bot/bybit.py`: SL arredondado ao múltiplo exato de `tickSize`
+- Antes: `round(sl, 6)` rejeitado silenciosamente pela Bybit (ex: BTCUSDT tickSize=0.10)
+- Agora: `round(sl / tick) * tick` com formatação de casas decimais correta
+- Trailing stop server-side agora efetivamente chega à exchange
 
-#### Endpoint de Emergência — ADICIONADO
-- `POST /api/close-all`: fecha todas as posições imediatamente
-- Para o engine + executa market orders para fechar posições
+#### Item 8 — Proteção contra ordens duplicadas — ADICIONADO
+- `bot/bybit.py`: `orderLinkId` gerado como hash MD5 de `symbol+side+qty+timestamp`
+- Bybit usa `orderLinkId` como idempotency key — reenvio do mesmo ID não cria posição dupla
+- Elimina risco de posição dupla em retry de ordem
 
-### 🟡 Correções de Lógica
+#### Item 9 — Cache de filtros inicializado com timestamp válido — CORRIGIDO
+- `bot/filters.py`: `ts = time.time()` em vez de `ts = 0`
+- Antes: `age_h = (now - 0)/3600 ≈ 488.000h > 25` → filtros F&G e macro inativos no startup
+- Agora: filtros aguardam a primeira atualização real das tasks
 
-#### `filters.run_all_filters()` — CONECTADO
-- Era código morto (nunca chamado no fluxo real)
-- Agora executado no início de `_open()` antes de qualquer cálculo
-- Tasks `update_fear_greed` e `update_macro_events` iniciadas no `engine.run()`
-- Timeout de 5s por filtro assíncrono (evita travamentos)
+#### Item 10 — `TRAILING_LOCK` parametrizado e corrigido — CORRIGIDO
+- `bot/config.py`: novo parâmetro `TRAILING_LOCK_R_MULT = 1.0` (default)
+- `bot/engine.py`: lock = `R × TRAILING_LOCK_R_MULT` (era `peak_price × TRAILING_LOCK × 0.1` = 2.5% efetivo)
+- Novo lock efetivo = 1x o risco original → mais espaço para respirar em tendências
 
-#### Trailing Stop — REATIVADO
-- Estava deliberadamente desativado (`pass`)
-- Reativado com ATR-based progressivo
-- Ativa quando lucro >= 50% do alvo (TRAILING_TRIGGER)
-- Trava 0.5× R abaixo do pico de preço
+#### Item 11 — `PAPER_TRADE` integrado ao estado do engine — CORRIGIDO
+- `bot/engine.py`: `self.paper_trade = PAPER_TRADE`
+- Visível em `/api/status` → `"paper_trade": true/false`
+- Warning no log ao iniciar em modo paper
+- Impede que posições paper contaminem RiskManager real
 
-#### Meta/Stop Diário em % do Saldo — CORRIGIDO
-- `DAILY_TARGET = $100` e `DAILY_STOP_LOSS = $50` (valores fixos)
-- Agora: `DAILY_TARGET_PCT = 2%` e `DAILY_STOP_LOSS_PCT = 1%` do saldo real
-- Escala automaticamente com o capital (positivo e negativo)
-- `_recalc_daily_limits()` chamado a cada atualização de saldo
+#### Item 12 — Look-ahead bias removido do backtest — CORRIGIDO
+- `bot/backtest.py`: `WARMUP = max(WINDOW, 320)` em vez de `WINDOW=100`
+- 320 candles de 15M = 20 candles de 4H mínimos antes da primeira iteração
+- Elimina sinais inválidos nas primeiras semanas do backtest histórico
 
-### 🔵 Novas Funcionalidades
+### 🔵 Melhorias Avançadas
 
-#### Controle de Correlação — NOVO
-- Novo módulo `bot/correlation.py`
-- Bloqueia abertura de par com correlação > 0.70 com posição já aberta
-- Usa retornos percentuais (mais estável que preços absolutos)
-- Cache alimentado via WebSocket a cada candle
-- Endpoint `GET /api/correlation` no dashboard
+#### Item 13 — Splitting do engine.py em submódulos — IMPLEMENTADO
+- `bot/daily_tracker.py`: DailyTracker class — meta/stop diário desacoplados
+- `bot/position_manager.py`: PositionManagerMixin — trailing stop, close all, partial TPs
+- `bot/signal_processor.py`: SignalProcessorMixin — helpers de scan e score
+- `engine.py`: herda de `PositionManagerMixin` e `SignalProcessorMixin`
+- Reduz acoplamento e facilita testes unitários por módulo
 
-#### RSI Completo — CORRIGIDO
-- Antes: apenas `out[-1]` calculado, `out[:-1] = 50` (placeholder)
-- Agora: todos os índices calculados com Wilder smoothing completo
-- Permite: divergências, padrões históricos, cruzamentos de nível
+#### Item 14 — Filtro de correlação/posições replicado no backtest — IMPLEMENTADO
+- `bot/backtest.py`: controle de `MAX_POSITIONS` simultâneas no `_run_strategy`
+- Trades rastreados com `status: open/closed` e `close_candle`
+- Resultados do backtest mais próximos da operação real
 
-#### Backtesting Robusto — REESCRITO
-- **Janela**: 10 dias → **6 meses** (17.280 candles de 15M)
-- **Paginação**: busca histórico completo via múltiplas chamadas à API Bybit
-- **In-sample/Out-of-sample**: split 80%/20% obrigatório
-- **Walk-forward validation**: 4 janelas rolantes (75% treino + 25% teste)
-- **Monte Carlo**: 1.000 permutações → probabilidade de ruína
-- **Simula TP parcial** 50%/50% e trailing stop no backtesting
-- **Métricas**: Sharpe, Sortino, Win Rate, Profit Factor, Max DD, Expectancy
+#### Item 15 — Monte Carlo seed dinâmico — CORRIGIDO
+- `bot/backtest.py`: `np.random.default_rng(int(time.time_ns()) % 2**32)`
+- Era seed fixo=42 → cada run semanal produzia estimativas idênticas
+- Agora: estimativas independentes e acumuláveis semana a semana
 
-#### Regime Classifier — APRIMORADO
-- Novo regime `COMPRESSED` para squeeze de Bollinger + volatilidade muito baixa
-- `volatility_rank`: percentil do ATR atual vs 100 períodos
-- `size_mult` dinâmico por volatilidade:
-  - `vol_rank > 80%` → 70% do tamanho normal (alta volatilidade)
-  - `vol_rank < 20%` → 80% do tamanho normal (baixa liquidez)
-  - Normal → 100%
+#### Item 16 — Kelly Criterion fracionado — IMPLEMENTADO
+- `bot/backtest.py`: função `kelly_criterion(win_rate, avg_win, avg_loss, fraction=0.25)`
+- Fórmula: `K = (W×R - L) / R`, usando 25% do Kelly pleno
+- Calculado com métricas out-of-sample e incluído no resultado do backtest
+- Cap: máximo de 5% de risco sugerido, independente do Kelly calculado
 
-#### RiskManager — UNIFICADO
-- Dois `RiskManager` com parâmetros contraditórios (`engine.py` e `risk.py`)
-- Unificado em `bot/risk.py` — única fonte de verdade
-- Classe local no `engine.py` marcada como `DEPRECATED`
-- `size()` com cap absoluto: margem nunca excede 80% do saldo
+#### Item 17 — Alertas de degradação e Kelly negativo — IMPLEMENTADO
+- `bot/backtest.py`: alerta Telegram se `test_wr < train_wr × 0.80`
+- Segundo alerta se Kelly calculado ≤ 0 (estratégia sem expectativa positiva)
+- Inclui: janelas afetadas, degradação média, Sharpe OOS, recomendação de ação
 
 ---
 
-## Configuração Necessária no Railway
+## Configuração de Variáveis de Ambiente (Railway)
 
-Adicione estas variáveis de ambiente:
-```
+```env
 BOT_API_SECRET=<token-secreto-forte>
-ALLOWED_ORIGINS=https://seu-dashboard.railway.app
+ALLOWED_ORIGINS=https://seu-dominio.railway.app
 LEVERAGE=10
 MAX_RISK_PCT=0.01
 MAX_DRAWDOWN=0.10
 DAILY_TARGET_PCT=0.02
 DAILY_STOP_LOSS_PCT=0.01
 MAX_CORRELATION=0.70
+TRAILING_LOCK_R_MULT=1.0
 ```
