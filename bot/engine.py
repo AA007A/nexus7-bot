@@ -1,5 +1,5 @@
 """
-BGX Capital Trading Engine v11.0
+BGX Capital Trading Engine v12.0
   ✅ Meta diária em % do saldo (escala com o capital)
   ✅ Stop-loss diário em % do saldo (proporcional ao capital)
   ✅ Modo agressivo até bater a meta → modo conservador depois
@@ -23,7 +23,7 @@ import asyncio, time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
-from bot.bybit import BybitClient
+from bot.bybit import BybitClient, PAPER_TRADE
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
@@ -35,7 +35,14 @@ from bot import market_data as mdata
 from bot import backtest as bt
 from bot import filters as flts
 from bot import correlation as corr_guard
-from bot.risk import RiskManager  # v11: RiskManager unificado (substitui classe local)
+from bot.daily_tracker import DailyTracker
+from bot.position_manager import PositionManagerMixin
+from bot.signal_processor import SignalProcessorMixin
+from bot.risk import RiskManager, check_partial_tps
+# v12: imports estáticos — eliminam __import__ dinâmicos do hot path (69k+ lookups/hora)
+import numpy as _np
+from datetime import datetime as _dt
+from bot.indicators import ema as _ema_fn  # v11: RiskManager unificado (substitui classe local)
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -132,11 +139,18 @@ class Position:
         # Trava TRAILING_LOCK % abaixo do pico de preço
         if self.direction == "LONG":
             peak_price = self.entry + (self.peak_pnl / self.qty if self.qty > 0 else 0)
-            new_sl = peak_price * (1 - cfg.TRAILING_LOCK * 0.1)
+            # v12: lock baseado em R × TRAILING_LOCK_R_MULT (era: peak_price × TRAILING_LOCK × 0.1)
+            # R = distância entry→SL original; default = 1.0 × R abaixo do pico
+            _r    = abs(self.entry - self.sl)
+            _lock = _r * cfg.TRAILING_LOCK_R_MULT
+            new_sl = peak_price - _lock
             return max(new_sl, self.sl)   # nunca recua abaixo do SL original
         else:
             peak_price = self.entry - (self.peak_pnl / self.qty if self.qty > 0 else 0)
-            new_sl = peak_price * (1 + cfg.TRAILING_LOCK * 0.1)
+            # v12: lock baseado em R × TRAILING_LOCK_R_MULT
+            _r    = abs(self.entry - self.sl)
+            _lock = _r * cfg.TRAILING_LOCK_R_MULT
+            new_sl = peak_price + _lock
             return min(new_sl, self.sl)   # nunca recua acima do SL original
 
     def to_dict(self) -> dict:
@@ -327,7 +341,7 @@ class Stats:
 
 
 # ─── Trading Engine ───────────────────────────────────────────────────────────
-class TradingEngine:
+class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
     def __init__(self, client: BybitClient):
         self.client       = client
         self.analyzer     = Analyzer()
@@ -342,6 +356,17 @@ class TradingEngine:
         self._running     = False
         self._scan_idx    = 0
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
+
+        # ── Paper Trade ───────────────────────────────────────────
+        self.paper_trade = PAPER_TRADE
+
+        # ── Daily Tracker (submódulo extraído do engine) ──────────
+        self.daily_tracker = DailyTracker()
+        if self.paper_trade:
+            log.warning(
+                "🟡 PAPER TRADE MODE — posições NÃO afetam capital real. "
+                "Risk manager opera em modo simulado."
+            )
 
         # ── Meta diária (calculada em % do saldo real) ───────────
         self.daily_pnl        = 0.0
@@ -385,6 +410,17 @@ class TradingEngine:
                     await self._update_balance()
                     await self._sync_positions()
                     await self._apply_trailing_stops()
+                    # v12: TPs parciais 50%/50% via risk.py (era ignorado)
+                    # check_partial_tps: TP1 fecha 50% e move SL para BE
+                    #                    TP2 fecha os 50% restantes
+                    #                    trailing stop entre TP1 e TP2
+                    for _sym, _pos in list(self.positions.items()):
+                        _cur = _pos.current_price or _pos.entry
+                        if _cur > 0 and hasattr(_pos, "tp1"):
+                            from bot.risk import PositionRisk as _PR
+                            _pr = self.risk.positions.get(_sym)
+                            if _pr and isinstance(_pr, _PR):
+                                await check_partial_tps(_pr, _cur, self.client)
                     await self._check_rr_double()
                     self._update_daily_pnl()
                     
@@ -724,7 +760,7 @@ class TradingEngine:
                     break   # apenas 1 alerta por ciclo
 
             # Resumo a cada 6h
-            now_h = __import__("datetime").datetime.utcnow().hour
+            now_h = _dt.utcnow().hour  # v12: static import
             if now_h in (0, 6, 12, 18):
                 st = get_pipeline_status()
                 if st["total"] > 0:
@@ -995,14 +1031,15 @@ class TradingEngine:
                         av15,ag15=get_atr(h15,l15,c15)
                         av1h,ag1h=get_atr(h1h,l1h,c1h)
                         av4h,ag4h=get_atr(h4h,l4h,c4h)
-                        e20_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,20)[-1]
-                        e50_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,50)[-1]
-                        e20_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,20)[-1]
-                        e50_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,50)[-1]
-                        bull_4h = not __import__('numpy').isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
-                        bear_4h = not __import__('numpy').isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
-                        bull_1h = not __import__('numpy').isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
-                        bear_1h = not __import__('numpy').isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
+                        # v12: imports estáticos — removidos __import__ dinâmicos do hot path
+                        e20_4h = _ema_fn(c4h, 20)[-1]
+                        e50_4h = _ema_fn(c4h, 50)[-1]
+                        e20_1h = _ema_fn(c1h, 20)[-1]
+                        e50_1h = _ema_fn(c1h, 50)[-1]
+                        bull_4h = not _np.isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
+                        bear_4h = not _np.isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
+                        bull_1h = not _np.isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
+                        bear_1h = not _np.isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
                         direction = "LONG" if (bull_4h or bull_1h) else "SHORT"
                         s4=score_tf(c4h,h4h,l4h,o4h,v4h,direction,av4h,ag4h)
                         s1=score_tf(c1h,h1h,l1h,o1h,v1h,direction,av1h,ag1h)
@@ -1011,7 +1048,7 @@ class TradingEngine:
                         regime=detect_regime(c4h,h4h,l4h,av4h)
                         from bot.indicators import rsi as rsi_fn
                         rsi_v=rsi_fn(c15)[-1]
-                        vols=__import__('numpy').array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1
+                        vols=_np.array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1  # v12: static import
                         vol_r=vols[-1]/avg_vol
                         log.info(
                             f"[{sym}] Score={combined}/100 (4H:{s4['total']} 1H:{s1['total']} 15M:{s15['total']}) "
@@ -1404,6 +1441,7 @@ class TradingEngine:
             "daily_progress":   round(min(self.daily_pnl / self.daily_target * 100, 100), 1) if self.daily_target else 0,
             "effective_score":  self._effective_score(),
             "mode":             "CONSERVADOR" if self.daily_target_hit else ("PARADO" if self.daily_stopped else "AGRESSIVO"),
+            "paper_trade":      self.paper_trade,   # v12: visível no dashboard
             # Campos novos v11
             "daily_target_pct":    cfg.DAILY_TARGET_PCT * 100,
             "daily_stop_loss_pct": cfg.DAILY_STOP_LOSS_PCT * 100,
