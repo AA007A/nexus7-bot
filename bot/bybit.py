@@ -295,14 +295,22 @@ class BybitClient:
             price_decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
             return f"{clean:.{price_decimals}f}"
 
+        # Idempotency key: hash de symbol+side+qty+timestamp truncado a 36 chars
+        # A Bybit usa orderLinkId para deduplicação — reenvio com mesmo ID
+        # não cria posição dupla, prevenindo ordens duplicadas em retry.
+        _ts    = str(int(time.time() * 1000))
+        _raw   = f"{symbol}_{side}_{qty_str}_{_ts}"
+        _link  = hashlib.md5(_raw.encode()).hexdigest()[:36]
+
         body = {
-            "category":    "linear",
-            "symbol":      symbol,
-            "side":        side,
-            "orderType":   "Market",
-            "qty":         qty_str,
-            "timeInForce": "GTC",
-            "positionIdx": 0,
+            "category":     "linear",
+            "symbol":       symbol,
+            "side":         side,
+            "orderType":    "Market",
+            "qty":          qty_str,
+            "timeInForce":  "GTC",
+            "positionIdx":  0,
+            "orderLinkId":  _link,   # idempotency key — evita posição dupla em retry
         }
         if sl > 0:
             body["stopLoss"]   = round_price(sl)
@@ -318,14 +326,30 @@ class BybitClient:
         log.info(f"📦 place_order body completo: {json.dumps(body)}")
         return await self._post("/v5/order/create", body)
 
-    async def set_sl(self, symbol: str, sl: float):
+    async def set_sl(self, symbol: str, sl: float, instruments: dict = None):
+        """
+        BUG CORRIGIDO v12: sl agora arredondado ao múltiplo correto de tickSize.
+        Antes: round(sl, 6) era rejeitado silenciosamente pela Bybit em pares
+        com tickSize > 0.000001 (ex: BTCUSDT tickSize=0.10).
+        """
         if not API_KEY:
             return
         try:
+            import math
+            info      = (instruments or {}).get(symbol, {})
+            tick_size = float(info.get("tickSize", 0.01))
+            # Arredonda ao múltiplo exato de tickSize (igual a round_price em place_order)
+            ticks     = round(sl / tick_size)
+            sl_clean  = round(ticks * tick_size, 8)
+            price_dec = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
+            sl_str    = f"{sl_clean:.{price_dec}f}"
             await self._post("/v5/position/trading-stop", {
-                "category": "linear", "symbol": symbol,
-                "stopLoss": str(round(sl, 6)), "positionIdx": 0,
+                "category":   "linear",
+                "symbol":     symbol,
+                "stopLoss":   sl_str,
+                "positionIdx": 0,
             })
+            log.debug(f"set_sl {symbol}: {sl:.6f} → tick={tick_size} → '{sl_str}'")
         except Exception as e:
             log.error(f"set_sl {symbol}: {e}")
 
@@ -414,8 +438,15 @@ class BybitClient:
                             log.error(f"WS parse: {e}")
 
             except Exception as e:
-                log.warning(f"⚡ WebSocket desconectado: {e} — reconectando em 5s")
-                await asyncio.sleep(5)
+                # BUG CORRIGIDO v12: _ws_retry agora é incrementado a cada falha
+                # Backoff exponencial: 2^retry segundos, máximo 60s
+                self._ws_retry += 1
+                wait = min(2 ** self._ws_retry, 60)
+                log.warning(
+                    f"⚡ WebSocket desconectado: {e} "
+                    f"— tentativa #{self._ws_retry}, reconectando em {wait}s"
+                )
+                await asyncio.sleep(wait)
 
     async def _handle_ws(self, msg: dict):
         topic = msg.get("topic", "")
