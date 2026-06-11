@@ -10,9 +10,14 @@ from datetime import datetime, timezone
 from bot.logger import log
 
 # ── Cache global ──────────────────────────────────────────────────
+# BUG CORRIGIDO v12: ts inicializado com time.time() em vez de 0.
+# Com ts=0, age_h = (now - 0)/3600 ≈ 488.000h > 25 → filtros F&G e macro
+# retornavam "permitindo" imediatamente no startup sem dados reais.
+# Agora: ts=time.time() → age_h=0 → filtros aguardam a primeira atualização
+# real das tasks (update_fear_greed / update_macro_events).
 _cache = {
-    "fear_greed":    {"value": 50, "label": "Neutral", "ts": 0},
-    "macro_events":  {"events": [], "ts": 0},
+    "fear_greed":    {"value": 50, "label": "Neutral", "ts": time.time()},
+    "macro_events":  {"events": [], "ts": time.time()},
     "oi_history":    {},
 }
 
