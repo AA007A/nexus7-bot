@@ -13,7 +13,7 @@ class Config:
     SYMBOLS: list = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
         "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT",
-        "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT",
+        "AVAXUSDT", "POLUSDT", "DOTUSDT", "LTCUSDT",
     ]
 
     # ── Risk ─────────────────────────────────────────────────────
@@ -27,8 +27,13 @@ class Config:
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))    # era 4 → reduzido para controle de correlação
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.75"))
     MIN_RR_RATIO:    float = float(os.environ.get("MIN_RR_RATIO",  "2.0"))  # R/R mínimo 2:1
-    TRAILING_TRIGGER: float = float(os.environ.get("TRAILING_TRIGGER", "0.50"))  # ativa trailing com 50% do alvo
-    TRAILING_LOCK:    float = float(os.environ.get("TRAILING_LOCK",    "0.25"))  # trava 25% abaixo do pico
+    TRAILING_TRIGGER:   float = float(os.environ.get("TRAILING_TRIGGER",   "0.50"))  # ativa trailing com 50% do alvo
+    TRAILING_LOCK:      float = float(os.environ.get("TRAILING_LOCK",      "0.25"))  # trava 25% abaixo do pico
+    # v12: multiplicador do trailing lock em unidades de R (distância ao SL original)
+    # lock_distance = R * TRAILING_LOCK_R_MULT
+    # Antes: r * 0.5 → lock efetivo de 2.5% (muito apertado para crypto)
+    # Agora: r * 1.0 → lock efetivo de 1x o risco → mais espaço para respirar
+    TRAILING_LOCK_R_MULT: float = float(os.environ.get("TRAILING_LOCK_R_MULT", "1.0"))
 
     # ── Correlação entre pares ────────────────────────────────────
     MAX_CORRELATION: float = float(os.environ.get("MAX_CORRELATION", "0.70"))  # bloqueia par se corr > 0.70
