@@ -31,7 +31,10 @@ import asyncio, time
 from typing import Optional
 from bot.logger import log
 
-MIN_SCORE = 50   # score mínimo pré-trade (técnico já filtra em 60)
+# MIN_SCORE alinhado com cfg.MIN_ENTRY_SCORE para eliminar conflito de diagnóstico
+# v11 tinha MIN_SCORE=50 aqui vs MIN_ENTRY_SCORE=60 no engine — logs enganosos
+from bot.config import cfg as _cfg
+MIN_SCORE = _cfg.MIN_ENTRY_SCORE  # sincronizado: usa sempre o valor de config.py
 
 # Cache de dados macro (atualiza a cada 5min)
 _macro_cache = {
