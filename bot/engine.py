@@ -245,99 +245,18 @@ class Stats:
         return total
 
 
-# ─── Risk Manager ─────────────────────────────────────────────────────────────
-# ──────────────────────────────────────────────────────────────
-# DEPRECADO em v11: RiskManager local substituído por bot.risk.RiskManager
-# Mantido apenas para referência. NÃO INSTANCIAR — usa o import acima.
-# ──────────────────────────────────────────────────────────────
-# class RiskManager_DEPRECATED:
-    def __init__(self):
-        self.peak     = 0.0
-        self.balance  = 0.0
-        self.drawdown = 0.0
-        self._ready   = False
-
-    def init(self, balance: float):
-        if not self._ready and balance > 0:
-            self.peak    = balance
-            self.balance = balance
-            self._ready  = True
-            log.info(f"📊 RiskManager: ${balance:.4f} | poder=${balance*cfg.LEVERAGE:.2f}")
-
-    def update(self, balance: float):
-        if balance <= 0:
-            return
-        self.balance  = balance
-        self.peak     = max(self.peak, balance)
-        self.drawdown = (self.peak - balance) / self.peak if self.peak > 0 else 0.0
-
-    def can_open(self, n_open: int) -> bool:
-        if not self._ready:
-            return False
-        if self.drawdown >= cfg.MAX_DRAWDOWN:
-            log.warning(f"🚨 Drawdown {self.drawdown:.1%} >= limite {cfg.MAX_DRAWDOWN:.0%} → bloqueado")
-            return False
-        if n_open >= cfg.MAX_POSITIONS:
-            log.info(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando fechamento")
-            return False
-        return True
-
-    def size(self, symbol: str, entry: float, instruments: dict) -> float:
-        """
-        Calcula quantidade segura para a ordem.
-        REGRA ABSOLUTA: margem usada nunca excede 95% do saldo real.
-        """
-        if entry <= 0 or not self._ready or self.balance <= 0:
-            return 0.0
-
-        info     = instruments.get(symbol, {})
-        min_qty  = float(info.get("minQty",  0.001))
-        qty_step = float(info.get("qtyStep", 0.001))
-        min_not  = float(info.get("minNotional", 1.0))
-
-        balance  = self.balance           # saldo real atual em USDT
-        leverage = cfg.LEVERAGE
-
-        # CAP ABSOLUTO: nunca usar mais de 80% do saldo como margem
-        max_margin   = balance * 0.80
-        max_notional = max_margin * leverage
-
-        # Target: MAX_RISK_PCT do buying power
-        target_not = balance * leverage * cfg.MAX_RISK_PCT
-        
-        # Aplicar cap absoluto
-        target_not = min(target_not, max_notional)
-        target_not = max(target_not, min_not)
-
-        # Calcular quantidade — usar math.floor para evitar ruído de ponto flutuante
-        import math
-        qty   = target_not / entry
-        steps = max(1, math.floor(qty / qty_step))
-        qty   = round(steps * qty_step, 8)
-        qty   = max(qty, min_qty)
-
-        # Verificação HARD: margem da ordem nunca > saldo
-        final_notional = qty * entry
-        final_margin   = final_notional / leverage
-        if final_margin > balance * 0.90:
-            qty   = (balance * 0.80 * leverage) / entry
-            steps = max(1, math.floor(qty / qty_step))
-            qty   = round(steps * qty_step, 8)
-            qty   = max(qty, min_qty)
-
-        # Rejeitar se ainda insuficiente
-        if qty <= 0 or qty * entry < min_not:
-            log.warning(
-                f"📐 {symbol}: saldo ${balance:.2f} insuficiente para "
-                f"notional mínimo ${min_not} (entry=${entry})"
-            )
-            return 0.0
-
-        log.info(
-            f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f} "
-            f"margem=${qty*entry/leverage:.2f} / saldo=${balance:.2f}"
-        )
-        return qty
+# ──────────────────────────────────────────────────────────────────────────────
+# DEPRECADO em v11/v12: RiskManager local substituído por bot.risk.RiskManager
+#
+# BUG CRÍTICO v12 CORRIGIDO: o bloco antigo abaixo tinha "class RiskManager_DEPRECATED:"
+# como COMENTÁRIO, mas o corpo da classe (def __init__, def init, etc.) permaneceu
+# com a MESMA indentação da classe Stats acima. O parser Python tratou esses métodos
+# como pertencentes à classe Stats, sobrescrevendo Stats.__init__ — removendo
+# "self.trades = []" do __init__ efetivo. Resultado: 'Stats' object has no
+# attribute 'trades' em toda chamada self.stats.add(trade) / self.stats.daily_pnl().
+#
+# Bloco inteiro removido (RiskManager unificado já está em bot/risk.py).
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 # ─── Trading Engine ───────────────────────────────────────────────────────────
@@ -826,7 +745,10 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
     # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
     def _effective_risk_pct(self) -> float:
         """Retorna o risco efetivo, reduzido se a meta diária foi batida."""
-        if self.stats.daily_pnl >= cfg.DAILY_TARGET:
+        # BUG CORRIGIDO v12.1: daily_pnl é MÉTODO de Stats, faltava "()"
+        # Comparar método (bound method) com número sempre seria TypeError/ambiguo.
+        # Usa self.daily_tracker (já calcula meta corretamente) em vez de duplicar lógica.
+        if self.daily_tracker.daily_target_hit:
             return cfg.POST_TARGET_RISK
         return cfg.MAX_RISK_PCT
 
