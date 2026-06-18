@@ -141,6 +141,7 @@ class Signal:
     expected_pnl: float = 0.0
     total_fees:   float = 0.0
     entry_type:   str  = "PULLBACK"
+    regime:       str  = "RANGING"   # regime de mercado detectado no 4H
     tp1:          float = 0.0   # TP parcial 50% — primeiro alvo técnico
     tp2:          float = 0.0   # TP final  50% — segundo alvo técnico
     rr1:          float = 0.0   # R/R do TP1
@@ -156,6 +157,19 @@ class Signal:
             self.tp1 = self.tp
         if self.tp2 == 0.0:
             self.tp2 = self.tp
+        # ARCH-2: validações de integridade — falha rápida com mensagem clara
+        assert self.entry > 0,    f"Signal.entry inválido: {self.entry}"
+        assert self.sl > 0,       f"Signal.sl inválido: {self.sl}"
+        assert self.tp > 0,       f"Signal.tp inválido: {self.tp}"
+        assert self.direction in ("LONG", "SHORT"), f"Signal.direction inválido: {self.direction}"
+        if self.direction == "LONG":
+            assert self.sl < self.entry < self.tp, (
+                f"LONG inválido: sl={self.sl} entry={self.entry} tp={self.tp}"
+            )
+        else:
+            assert self.tp < self.entry < self.sl, (
+                f"SHORT inválido: tp={self.tp} entry={self.entry} sl={self.sl}"
+            )
 
 
 # ─── Regime Detector ─────────────────────────────────────────────
@@ -195,15 +209,21 @@ def detect_entry(closes, highs, lows, opens, volumes, direction, atr_v) -> Tuple
     if len(closes) < 6:
         return False, "NONE"
 
+    # Usar candle [-2] (fechado) para evitar repainting
+    # closes[-1] já é o candle fechado pois analyze_mtf faz k15[:-1]
     price = closes[-1]
 
     # 1) BOS Entry: preço fecha acima do swing high (LONG) ou abaixo do swing low (SHORT)
-    # É a entrada MAIS ANTECIPADA — pega o início do movimento
-    swing_high = max(highs[-8:-1]) if len(highs) > 8 else highs[-2]
-    swing_low  = min(lows[-8:-1])  if len(lows)  > 8 else lows[-2]
+    # LOGIC-1: lookback aumentado de 7 para 20 candles para reduzir falsos BOS por ruído.
+    # Exige também que o breakout seja > 0.1× ATR (filtra micro-rompimentos)
+    bos_lookback = 20
+    swing_high = max(highs[-bos_lookback:-1]) if len(highs) > bos_lookback else max(highs[:-1])
+    swing_low  = min(lows[-bos_lookback:-1])  if len(lows)  > bos_lookback else min(lows[:-1])
 
-    if direction == "LONG"  and price > swing_high: return True, "BOS_BREAK"
-    if direction == "SHORT" and price < swing_low:  return True, "BOS_BREAK"
+    if direction == "LONG"  and price > swing_high and (price - swing_high) > atr_v * 0.1:
+        return True, "BOS_BREAK"
+    if direction == "SHORT" and price < swing_low  and (swing_low - price)  > atr_v * 0.1:
+        return True, "BOS_BREAK"
 
     # 2) Momentum: vela forte na direção sem esperar pullback
     body_size = abs(closes[-1] - opens[-1]) if opens else abs(closes[-1] - closes[-2])
@@ -444,10 +464,15 @@ class Analyzer:
                     [k["l"] for k in kl], [k["o"] for k in kl],
                     [k["v"] for k in kl])
 
-        c4h,h4h,l4h,o4h,v4h = ga(k4h)
-        c1h,h1h,l1h,o1h,v1h = ga(k1h)
-        c15,h15,l15,o15,v15 = ga(k15)
-        price = c15[-1]
+        # ── Confirmação de candle fechado ────────────────────────
+        # O candle [-1] está ABERTO (ainda se formando).
+        # Usar [-2] como último candle confirmado evita sinais que "reapintam":
+        # um sinal gerado em candle aberto pode desaparecer antes do fechamento.
+        # Excluímos o candle atual de TODOS os timeframes por consistência.
+        c4h,h4h,l4h,o4h,v4h = ga(k4h[:-1] if len(k4h) > 10 else k4h)
+        c1h,h1h,l1h,o1h,v1h = ga(k1h[:-1] if len(k1h) > 15 else k1h)
+        c15,h15,l15,o15,v15 = ga(k15[:-1] if len(k15) > 20 else k15)
+        price = c15[-1]   # último candle FECHADO do 15M
 
         def get_atr(h, l, c):
             a = atr(h, l, c)
@@ -539,12 +564,17 @@ class Analyzer:
         else:
             sl_mult, tp_mult = 2.0, 4.0   # R:R 1:2 — pullback clássico
 
+        # ── ATR consistente: usa ATR do 15M para entrada do 15M ─
+        # ATR_1H é 3-5x maior que ATR_15M → stops desnecessariamente largos
+        # Usamos atr_15 para stops mais ajustados ao timeframe de entrada,
+        # com um floor de 0.5× atr_1h para evitar stops muito apertados.
+        sl_atr = max(atr_15, atr_1h * 0.5)
         if direction == "LONG":
-            sl = round(price - atr_1h * sl_mult, 6)
-            tp = round(price + atr_1h * tp_mult, 6)
+            sl = round(price - sl_atr * sl_mult, 6)
+            tp = round(price + sl_atr * tp_mult, 6)
         else:
-            sl = round(price + atr_1h * sl_mult, 6)
-            tp = round(price - atr_1h * tp_mult, 6)
+            sl = round(price + sl_atr * sl_mult, 6)
+            tp = round(price - sl_atr * tp_mult, 6)
 
         rr = abs(tp - price) / abs(sl - price) if abs(sl - price) > 0 else 0
         if rr < cfg.MIN_RR_RATIO:
@@ -591,6 +621,7 @@ class Analyzer:
             expected_pnl=round(expected_net, 3),
             total_fees=round(cost_pct, 4),
             entry_type=entry_type,
+            regime=regime,
         )
 
     def analyze(self, symbol, klines):

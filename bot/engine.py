@@ -1,29 +1,31 @@
 """
-BGX Capital Trading Engine v12.0
-  ✅ Meta diária em % do saldo (escala com o capital)
-  ✅ Stop-loss diário em % do saldo (proporcional ao capital)
-  ✅ Modo agressivo até bater a meta → modo conservador depois
-  ✅ Máximo 3 posições simultâneas (reduzido para controle de correlação)
-  ✅ Score mínimo 60/100 para entrar (72 após meta diária)
-  ✅ Trailing stop progressivo reativado — ATR-based
-  ✅ TP parcial 50%/50% nos dois alvos técnicos
-  ✅ SL/TP baseados em níveis técnicos reais (swing points)
-  ✅ Controle de correlação entre pares (bloqueia corr > 0.70)
-  ✅ filters.run_all_filters() conectado ao fluxo de execução real
-  ✅ LEVERAGE=10, MAX_RISK_PCT=1% (era 50x/15% = 750% do saldo)
-  ✅ Order Flow: CVD, OI, Funding, Delta Footprint
-  ✅ Sentimento: Fear & Greed, News Pipeline
-  ✅ CVD persistente com janela de 4h
-  ✅ Sincronização em tempo real com Bybit
-  ✅ Bug _update_balance corrigido (NameError silenciado)
-  ✅ Bug pause/resume corrigido (_running flag)
-  ✅ Endpoint /api/close-all disponível
+BGX Capital Trading Engine v11.0
+  ✅ Multi-Timeframe: 4H regime → 1H direção → 15M entrada
+  ✅ Score MTF ponderado (4H:25% / 1H:30% / 15M:45%)
+  ✅ Candle fechado confirmado — sem repainting
+  ✅ ATR por timeframe de entrada (15M para entrada 15M)
+  ✅ Regime Switching: TRENDING/RANGING/COMPRESSED
+  ✅ Trailing stop progressivo (50% do alvo → ativa)
+  ✅ Partial TP: fecha 50% no TP1, SL → breakeven, corre até TP2
+  ✅ Circuit breaker por ativo (3 perdas consecutivas → 24h cooldown)
+  ✅ Filtro de correlação entre pares (máx 1 posição por grupo)
+  ✅ Filtro de sessão de mercado (penaliza altcoins em sessão ASIA)
+  ✅ Meta diária: $100 lucro / $50 stop-loss (escala com saldo)
+  ✅ Máximo 3 posições simultâneas (com controle de correlação)
+  ✅ Score mínimo 60/100 (72 após meta diária)
+  ✅ Order Flow: Spoofing, Iceberg, Agressão, CVD 4h
+  ✅ Sentimento: Fear&Greed + Notícias NLP + Macro correlações
+  ✅ Otimização semanal Optuna + Walk-Forward + Monte Carlo
+  ✅ PostgreSQL/SQLite persistente com reconciliação de posições
+  ✅ WebSocket Bybit com reconnect automático + fallback REST
+  ✅ Paper Trade mode funcional (PAPER_TRADE=true)
 """
-import asyncio, time
+import asyncio, time, itertools, os
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
+import numpy as np
 
-from bot.bybit import BybitClient, PAPER_TRADE
+from bot.bybit import BybitClient
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
@@ -33,16 +35,7 @@ from bot import database as db
 from bot import score as scoring
 from bot import market_data as mdata
 from bot import backtest as bt
-from bot import filters as flts
-from bot import correlation as corr_guard
-from bot.daily_tracker import DailyTracker
-from bot.position_manager import PositionManagerMixin
-from bot.signal_processor import SignalProcessorMixin
-from bot.risk import RiskManager, check_partial_tps
-# v12: imports estáticos — eliminam __import__ dinâmicos do hot path (69k+ lookups/hora)
-import numpy as _np
-from datetime import datetime as _dt
-from bot.indicators import ema as _ema_fn  # v11: RiskManager unificado (substitui classe local)
+from bot import optimizer as opt
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -139,18 +132,11 @@ class Position:
         # Trava TRAILING_LOCK % abaixo do pico de preço
         if self.direction == "LONG":
             peak_price = self.entry + (self.peak_pnl / self.qty if self.qty > 0 else 0)
-            # v12: lock baseado em R × TRAILING_LOCK_R_MULT (era: peak_price × TRAILING_LOCK × 0.1)
-            # R = distância entry→SL original; default = 1.0 × R abaixo do pico
-            _r    = abs(self.entry - self.sl)
-            _lock = _r * cfg.TRAILING_LOCK_R_MULT
-            new_sl = peak_price - _lock
+            new_sl = peak_price * (1 - cfg.TRAILING_LOCK * 0.1)
             return max(new_sl, self.sl)   # nunca recua abaixo do SL original
         else:
             peak_price = self.entry - (self.peak_pnl / self.qty if self.qty > 0 else 0)
-            # v12: lock baseado em R × TRAILING_LOCK_R_MULT
-            _r    = abs(self.entry - self.sl)
-            _lock = _r * cfg.TRAILING_LOCK_R_MULT
-            new_sl = peak_price + _lock
+            new_sl = peak_price * (1 + cfg.TRAILING_LOCK * 0.1)
             return min(new_sl, self.sl)   # nunca recua acima do SL original
 
     def to_dict(self) -> dict:
@@ -234,6 +220,71 @@ class Stats:
             "30d":     self.summary(30),
         }
 
+    def live_metrics(self) -> dict:
+        """
+        Métricas quantitativas avançadas em tempo real.
+        Calculadas sobre TODOS os trades da sessão.
+        Expostas via /api/metrics para monitoramento de qualidade.
+        """
+        import itertools
+        trades = self.trades
+        if not trades:
+            return {"status": "Sem trades na sessão"}
+
+        rets = [
+            t.pnl / (t.entry * t.qty) if t.entry * t.qty > 0 else 0
+            for t in trades
+        ]
+        arr  = np.array(rets)
+        wins    = arr[arr > 0]
+        losses  = arr[arr < 0]
+        total   = len(arr)
+
+        # Expectância: ganho médio esperado por trade
+        wr       = len(wins) / total if total else 0
+        avg_win  = float(wins.mean())  if len(wins)  > 0 else 0.0
+        avg_loss = float(losses.mean()) if len(losses) > 0 else 0.0
+        expectancy = wr * avg_win + (1 - wr) * avg_loss
+
+        # Consistência: desvio padrão dos retornos (menor = mais consistente)
+        consistency = float(arr.std()) if total > 1 else 0.0
+
+        # Sharpe simples (sem risk-free rate)
+        sharpe = float(arr.mean() / arr.std()) if arr.std() > 0 and total > 1 else 0.0
+
+        # Recovery Factor: lucro total / max drawdown
+        cum   = np.cumsum(arr)
+        peak  = np.maximum.accumulate(cum)
+        dd    = peak - cum
+        max_dd = float(dd.max()) if len(dd) > 0 else 0.0
+        recovery_factor = round(float(cum[-1]) / max_dd, 2) if max_dd > 0 else float("inf")
+
+        # Maior sequência consecutiva de perdas
+        max_consec = 0
+        for is_loss, group in itertools.groupby(rets, lambda x: x < 0):
+            if is_loss:
+                max_consec = max(max_consec, len(list(group)))
+
+        # Profit Factor
+        gp = float(wins.sum())  if len(wins)   > 0 else 0.0
+        gl = float(abs(losses.sum())) if len(losses) > 0 else 1e-9
+        pf = round(gp / gl, 2)
+
+        return {
+            "total_trades":       total,
+            "win_rate_pct":       round(wr * 100, 1),
+            "expectancy_pct":     round(expectancy * 100, 4),
+            "profit_factor":      pf,
+            "sharpe_ratio":       round(sharpe, 3),
+            "consistency_std":    round(consistency * 100, 4),
+            "max_drawdown_pct":   round(max_dd * 100, 2),
+            "recovery_factor":    recovery_factor,
+            "max_consec_losses":  max_consec,
+            "avg_win_pct":        round(avg_win * 100, 3),
+            "avg_loss_pct":       round(avg_loss * 100, 3),
+            "edge_ratio":         round(abs(avg_win / avg_loss), 2) if avg_loss != 0 else 0,
+        }
+
     def daily_pnl(self) -> float:
         """PnL realizado apenas hoje (UTC)."""
         from datetime import datetime, timezone
@@ -245,22 +296,99 @@ class Stats:
         return total
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# DEPRECADO em v11/v12: RiskManager local substituído por bot.risk.RiskManager
-#
-# BUG CRÍTICO v12 CORRIGIDO: o bloco antigo abaixo tinha "class RiskManager_DEPRECATED:"
-# como COMENTÁRIO, mas o corpo da classe (def __init__, def init, etc.) permaneceu
-# com a MESMA indentação da classe Stats acima. O parser Python tratou esses métodos
-# como pertencentes à classe Stats, sobrescrevendo Stats.__init__ — removendo
-# "self.trades = []" do __init__ efetivo. Resultado: 'Stats' object has no
-# attribute 'trades' em toda chamada self.stats.add(trade) / self.stats.daily_pnl().
-#
-# Bloco inteiro removido (RiskManager unificado já está em bot/risk.py).
-# ──────────────────────────────────────────────────────────────────────────────
+# ─── Risk Manager ─────────────────────────────────────────────────────────────
+class RiskManager:
+    def __init__(self):
+        self.peak     = 0.0
+        self.balance  = 0.0
+        self.drawdown = 0.0
+        self._ready   = False
+
+    def init(self, balance: float):
+        if not self._ready and balance > 0:
+            self.peak    = balance
+            self.balance = balance
+            self._ready  = True
+            log.info(f"📊 RiskManager: ${balance:.4f} | poder=${balance*cfg.LEVERAGE:.2f}")
+
+    def update(self, balance: float):
+        if balance <= 0:
+            return
+        self.balance  = balance
+        self.peak     = max(self.peak, balance)
+        self.drawdown = (self.peak - balance) / self.peak if self.peak > 0 else 0.0
+
+    def can_open(self, n_open: int) -> bool:
+        if not self._ready:
+            return False
+        if self.drawdown >= cfg.MAX_DRAWDOWN:
+            log.warning(f"🚨 Drawdown {self.drawdown:.1%} >= limite {cfg.MAX_DRAWDOWN:.0%} → bloqueado")
+            return False
+        if n_open >= cfg.MAX_POSITIONS:
+            log.info(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando fechamento")
+            return False
+        return True
+
+    def size(self, symbol: str, entry: float, instruments: dict) -> float:
+        """
+        Calcula quantidade segura para a ordem.
+        REGRA ABSOLUTA: margem usada nunca excede 95% do saldo real.
+        """
+        if entry <= 0 or not self._ready or self.balance <= 0:
+            return 0.0
+
+        info     = instruments.get(symbol, {})
+        min_qty  = float(info.get("minQty",  0.001))
+        qty_step = float(info.get("qtyStep", 0.001))
+        min_not  = float(info.get("minNotional", 1.0))
+
+        balance  = self.balance           # saldo real atual em USDT
+        leverage = cfg.LEVERAGE
+
+        # CAP ABSOLUTO: nunca usar mais de 80% do saldo como margem
+        max_margin   = balance * 0.80
+        max_notional = max_margin * leverage
+
+        # Target: MAX_RISK_PCT do buying power
+        target_not = balance * leverage * cfg.MAX_RISK_PCT
+        
+        # Aplicar cap absoluto
+        target_not = min(target_not, max_notional)
+        target_not = max(target_not, min_not)
+
+        # Calcular quantidade — usar math.floor para evitar ruído de ponto flutuante
+        import math
+        qty   = target_not / entry
+        steps = max(1, math.floor(qty / qty_step))
+        qty   = round(steps * qty_step, 8)
+        qty   = max(qty, min_qty)
+
+        # Verificação HARD: margem da ordem nunca > saldo
+        final_notional = qty * entry
+        final_margin   = final_notional / leverage
+        if final_margin > balance * 0.90:
+            qty   = (balance * 0.80 * leverage) / entry
+            steps = max(1, math.floor(qty / qty_step))
+            qty   = round(steps * qty_step, 8)
+            qty   = max(qty, min_qty)
+
+        # Rejeitar se ainda insuficiente
+        if qty <= 0 or qty * entry < min_not:
+            log.warning(
+                f"📐 {symbol}: saldo ${balance:.2f} insuficiente para "
+                f"notional mínimo ${min_not} (entry=${entry})"
+            )
+            return 0.0
+
+        log.info(
+            f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f} "
+            f"margem=${qty*entry/leverage:.2f} / saldo=${balance:.2f}"
+        )
+        return qty
 
 
 # ─── Trading Engine ───────────────────────────────────────────────────────────
-class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
+class TradingEngine:
     def __init__(self, client: BybitClient):
         self.client       = client
         self.analyzer     = Analyzer()
@@ -274,47 +402,34 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
         self.active       = False
         self._running     = False
         self._scan_idx    = 0
+        # Parâmetros otimizados pelo Optuna (carregados do JSON se disponível)
+        self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
+        self._consec_losses: Dict[str, int] = {}  # símbolo → perdas consecutivas
 
-        # ── Paper Trade ───────────────────────────────────────────
-        self.paper_trade = PAPER_TRADE
-
-        # ── Daily Tracker (submódulo extraído do engine) ──────────
-        self.daily_tracker = DailyTracker()
-        if self.paper_trade:
-            log.warning(
-                "🟡 PAPER TRADE MODE — posições NÃO afetam capital real. "
-                "Risk manager opera em modo simulado."
-            )
-
-        # ── Meta diária (calculada em % do saldo real) ───────────
-        self.daily_pnl        = 0.0
-        self.daily_target     = cfg.DAILY_TARGET      # fallback USD
-        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # fallback USD
-        self.daily_target_hit = False
-        self.daily_stopped    = False
-        self._last_reset_day  = -1
-
-    def _recalc_daily_limits(self):
-        """Recalcula meta/stop diários em % do saldo (escala com capital)."""
-        bal = self.risk.balance
-        if bal > 0:
-            self.daily_target    = bal * cfg.DAILY_TARGET_PCT
-            self.daily_stop_loss = bal * cfg.DAILY_STOP_LOSS_PCT
+        # ── Meta diária ──────────────────────────────────────────
+        self.daily_pnl        = 0.0      # PnL acumulado no dia (USDT)
+        # RISK-4: meta e stop diário escalam com saldo (1% lucro / 0.5% stop)
+        # Se DAILY_TARGET > 0: usa valor fixo. Se = 0: calcula dinamicamente.
+        self.daily_target     = cfg.DAILY_TARGET      # $100 fixo ou recalcula no reset
+        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # $50 fixo ou recalcula no reset
+        self.daily_target_hit = False    # meta batida hoje?
+        self.daily_stopped    = False    # stop-loss diário ativado?
+        self._last_reset_day  = -1       # último dia (UTC) que resetou
 
     # ── Lifecycle ──────────────────────────────────────────────
     async def run(self):
         if self._running:
             return
         self._running = True
-        log.info("⚡ Engine v11 iniciando...")
+        log.info("⚡ Engine v10 iniciando...")
         await db.init()   # inicia DB (PostgreSQL ou SQLite)
-        asyncio.create_task(scoring.update_macro_cache())          # scoring cache
-        asyncio.create_task(scoring.news_reader_loop())             # news 24/7
-        asyncio.create_task(mdata.update_macro_correlations())      # DXY/S&P
+        asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
+        asyncio.create_task(scoring.news_reader_loop())           # news 24/7
+        asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
         asyncio.create_task(bt.weekly_backtest_loop(self.client))   # backtest semanal
-        asyncio.create_task(flts.update_fear_greed())               # Fear&Greed (v11: conectado)
-        asyncio.create_task(flts.update_macro_events())             # Macro events USD (v11: conectado)
+        asyncio.create_task(opt.weekly_optimization_loop(self.client)) # otimização semanal
+        asyncio.create_task(self._monitor_news_pipeline())               # pipeline de notícias
         await self._connect()
 
         while self._running:
@@ -328,18 +443,8 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                     self._check_daily_reset()
                     await self._update_balance()
                     await self._sync_positions()
+                    await self._manage_partial_tp()
                     await self._apply_trailing_stops()
-                    # v12: TPs parciais 50%/50% via risk.py (era ignorado)
-                    # check_partial_tps: TP1 fecha 50% e move SL para BE
-                    #                    TP2 fecha os 50% restantes
-                    #                    trailing stop entre TP1 e TP2
-                    for _sym, _pos in list(self.positions.items()):
-                        _cur = _pos.current_price or _pos.entry
-                        if _cur > 0 and hasattr(_pos, "tp1"):
-                            from bot.risk import PositionRisk as _PR
-                            _pr = self.risk.positions.get(_sym)
-                            if _pr and isinstance(_pr, _PR):
-                                await check_partial_tps(_pr, _cur, self.client)
                     await self._check_rr_double()
                     self._update_daily_pnl()
                     
@@ -357,54 +462,9 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                 await asyncio.sleep(5)
 
     def stop(self):
-        """
-        Pausa o bot: para entradas novas mas mantém posições abertas protegidas.
-        BUG CORRIGIDO: _running=False garante que run() pode ser reiniciado.
-        """
         self.active   = False
-        self._running = False   # era: apenas active=False → run() ficava preso
-        log.info("⏸️ Bot pausado (servidor continua | posições mantidas com SL/TP na exchange)")
-
-    async def close_all_positions(self) -> dict:
-        """
-        Fecha TODAS as posições abertas imediatamente.
-        Endpoint de emergência: POST /api/close-all
-        """
-        if not self.positions:
-            return {"closed": 0, "errors": 0, "symbols": []}
-
-        closed, errors, symbols = 0, 0, []
-        log.warning(f"🚨 EMERGENCY CLOSE ALL — {len(self.positions)} posições")
-
-        for sym, pos in list(self.positions.items()):
-            try:
-                side = "Sell" if pos.direction == "LONG" else "Buy"
-                await self.client.place_order(
-                    symbol=sym, side=side, qty=pos.qty, sl=0, tp=0,
-                )
-                pnl_gross = pos.pnl
-                fee_open  = pos.qty * pos.entry * TAKER_FEE
-                fee_close = pos.qty * pos.current_price * TAKER_FEE
-                pnl_net   = pnl_gross - fee_open - fee_close
-                trade = Trade(
-                    sym, pos.direction, pos.entry, pos.current_price,
-                    pos.qty, pnl_gross, pos.opened_at,
-                    fee_open=fee_open, fee_close=fee_close,
-                )
-                self.stats.add(trade)
-                del self.positions[sym]
-                symbols.append(sym)
-                closed += 1
-                log.info(f"✅ Emergency close {sym}: PnL net=${pnl_net:+.4f}")
-                await notify(
-                    f"🚨 *EMERGENCY CLOSE* `{sym}`\n"
-                    f"PnL: `${pnl_net:+.4f}` | Dir: `{pos.direction}`"
-                )
-            except Exception as e:
-                errors += 1
-                log.error(f"Emergency close {sym}: {e}")
-
-        return {"closed": closed, "errors": errors, "symbols": symbols}
+        self._running = False   # FIX: permite que run() seja recriado no resume
+        log.info("⏸️ Bot pausado (servidor continua rodando)")
 
     # ── Meta diária ────────────────────────────────────────────
     def _check_daily_reset(self):
@@ -422,9 +482,14 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
             self.daily_target_hit = False
             self.daily_stopped    = False
             self._last_reset_day  = today
-            # Volta ao score padrão após reset
-            self._recalc_daily_limits()
-            log.info(f"🎯 Meta diária: ${self.daily_target:.2f} ({cfg.DAILY_TARGET_PCT*100:.1f}% saldo) | Stop: -${self.daily_stop_loss:.2f}")
+            # RISK-4: Recalcula meta/stop com saldo atual se configurados como dinâmicos
+            # cfg.DAILY_TARGET=0 → usa 1% do saldo; cfg.DAILY_STOP_LOSS=0 → usa 0.5% do saldo
+            bal = self.risk.balance or 1000.0
+            if cfg.DAILY_TARGET == 0:
+                self.daily_target    = round(bal * 0.01, 2)   # 1% do saldo
+            if cfg.DAILY_STOP_LOSS == 0:
+                self.daily_stop_loss = round(bal * 0.005, 2)  # 0.5% do saldo
+            log.info(f"🎯 Meta diária: ${self.daily_target:.2f} | Stop-loss dia: -${self.daily_stop_loss:.2f} | Saldo: ${bal:.2f}")
 
     def _update_daily_pnl(self):
         """Soma PnL realizado + não-realizado do dia e verifica meta/stop."""
@@ -595,6 +660,9 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
 
+                    # ── Circuit breaker individual por ativo ───────────
+                    await self._record_trade_result(sym, pnl_net)
+
                     # ── 3 perdas consecutivas: registra, bot CONTINUA ──
                     consecutive = await db.update_consecutive_losses(pnl_net)
                     if consecutive >= 3:
@@ -679,7 +747,7 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                     break   # apenas 1 alerta por ciclo
 
             # Resumo a cada 6h
-            now_h = _dt.utcnow().hour  # v12: static import
+            now_h = __import__("datetime").datetime.utcnow().hour
             if now_h in (0, 6, 12, 18):
                 st = get_pipeline_status()
                 if st["total"] > 0:
@@ -710,42 +778,192 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
         else:
             log.info(f"{sess['emoji']} Sessão: {sess['session']} (q={sess['quality']}%)")
 
-    async def _apply_trailing_stops(self):
+
+    # ── Configuração do circuit breaker por ativo ─────────────────────────
+    _MAX_CONSEC_LOSSES: int = int(os.environ.get('MAX_CONSEC_LOSSES', '3'))  # configurável via env var
+    _CB_COOLDOWN_HOURS:  int = int(os.environ.get('CB_COOLDOWN_HOURS',  '24')) # configurável via env var
+
+    async def _record_trade_result(self, symbol: str, pnl: float):
         """
-        Trailing Stop REATIVADO — ATR-based progressivo.
-        Ativa quando lucro >= TRAILING_TRIGGER (50%) do alvo.
-        Trava TRAILING_LOCK (25%) abaixo do pico de preço.
-        SL nunca recua além do SL técnico original.
-        Atualiza SL na exchange via set_sl() (server-side).
+        Registra resultado de um trade e ativa circuit breaker
+        se o símbolo atingir MAX_CONSEC_LOSSES perdas consecutivas.
+
+        Circuit breaker individual: mais cirúrgico que o drawdown global.
+        Permite continuar operando outros pares enquanto um par problemático
+        fica em cooldown de 24h.
+        """
+        if pnl < 0:
+            self._consec_losses[symbol] = self._consec_losses.get(symbol, 0) + 1
+            count = self._consec_losses[symbol]
+
+            if count >= self._MAX_CONSEC_LOSSES:
+                cooldown_until = time.time() + self._CB_COOLDOWN_HOURS * 3600
+                self._cooldown[symbol] = cooldown_until
+                log.warning(
+                    f"🚫 [{symbol}] Circuit breaker ativado: "
+                    f"{count} perdas consecutivas → "
+                    f"cooldown de {self._CB_COOLDOWN_HOURS}h"
+                )
+                await notify(
+                    f"🚫 *Circuit Breaker — {symbol}*\n"
+                    f"`{count}` perdas consecutivas\n"
+                    f"Cooldown: `{self._CB_COOLDOWN_HOURS}h`\n"
+                    f"Retoma às: `{__import__('datetime').datetime.utcfromtimestamp(cooldown_until).strftime('%H:%M UTC')}`"
+                )
+        else:
+            # Reset após lucro
+            if self._consec_losses.get(symbol, 0) > 0:
+                log.info(
+                    f"✅ [{symbol}] Trade lucrativo — "
+                    f"reset de perdas consecutivas "
+                    f"({self._consec_losses[symbol]} → 0)"
+                )
+            self._consec_losses[symbol] = 0
+
+    async def _manage_partial_tp(self):
+        """
+        Partial Take Profit: fecha 50% da posição ao atingir TP1,
+        move SL para breakeven e deixa os 50% restantes correrem até TP2.
+
+        TP1 = entry ± 1× risco (1:1 R:R) — captura rápida
+        TP2 = tp original    — alvo final com trailing
+
+        RISK-2: TP1 inclui custo de funding estimado (8h × taxa média 0.01%)
+        para evitar fechar "lucrativo" com funding negativo acumulado.
+
+        Benefício: garante lucro parcial, elimina risco de breakeven,
+        melhora consistência do win rate ajustado por expectativa.
         """
         for sym, pos in list(self.positions.items()):
             try:
+                if pos.tp1_hit:
+                    continue   # já executou o parcial
+
+                cur = pos.current_price
+                if not cur or cur <= 0:
+                    continue
+
+                # TP1 = entry ± distância do SL (1:1 R:R)
+                # RISK-2: adiciona custo estimado de funding (8h × 0.01% = 0.08%)
+                # para garantir que partial TP seja genuinamente lucrativo
+                risk_dist    = abs(pos.entry - pos.sl)
+                if risk_dist <= 0:
+                    continue
+                funding_cost = pos.entry * 0.0001 * 3  # 3 períodos de 8h = 0.03%
+                tp1_long  = pos.entry + risk_dist + funding_cost
+                tp1_short = pos.entry - risk_dist - funding_cost
+                tp1_price = tp1_long if pos.direction == "LONG" else tp1_short
+
+                # Verificar se TP1 foi atingido
+                tp1_hit = (
+                    (pos.direction == "LONG"  and cur >= tp1_price) or
+                    (pos.direction == "SHORT" and cur <= tp1_price)
+                )
+                if not tp1_hit:
+                    continue
+
+                # Calcular qty parcial (50% da posição original)
+                # RISK-3: respeita qty_step do instrumento para evitar rejeição
+                raw_partial = pos.qty_original * 0.5
+                qty_step = 0.001  # fallback conservador
+                if self.instruments:
+                    inst = self.instruments.get(sym, {})
+                    qty_step = float(inst.get("lotSizeFilter", {}).get("qtyStep", 0.001))
+                if qty_step > 0:
+                    partial_qty = round(raw_partial - (raw_partial % qty_step), len(str(qty_step).rstrip("0").split(".")[-1]))
+                else:
+                    partial_qty = round(raw_partial, 4)
+                if partial_qty <= 0 or partial_qty > pos.qty:
+                    continue
+
+                # Fechar 50% da posição
+                close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                result = await self.client.place_order(
+                    symbol=sym, side=close_side,
+                    qty=partial_qty, sl=0, tp=0,
+                    instruments=self.instruments,
+                )
+
+                # Mover SL para breakeven
+                await self.client.set_sl(sym, pos.entry)
+
+                # Atualizar estado da posição
+                pnl_partial = risk_dist * partial_qty   # PnL gross do parcial
+                fee_p = partial_qty * cur * 0.00055 * 2
+                pnl_net = pnl_partial - fee_p
+
+                pos.tp1_hit     = True
+                pos.sl          = pos.entry   # SL no breakeven
+                pos.trailing_sl = pos.entry
+                pos.qty         = pos.qty - partial_qty   # atualiza qty restante
+
+                log.info(
+                    f"✂️  [{sym}] Partial TP1: fechou {partial_qty} @ {cur:.6f} "
+                    f"| PnL parcial: ${pnl_net:.2f} "
+                    f"| SL → breakeven {pos.entry:.6f} "
+                    f"| Restante: {pos.qty:.4f} até TP2={pos.tp:.6f}"
+                )
+                await notify(
+                    f"✂️ *Partial TP1 — {sym}*\n"
+                    f"Fechou 50% @ `{cur:.4f}`\n"
+                    f"PnL parcial: `${pnl_net:.2f}`\n"
+                    f"SL movido para breakeven\n"
+                    f"Restante correndo até TP2 `{pos.tp:.4f}`"
+                )
+            except Exception as e:
+                log.error(f"_manage_partial_tp {sym}: {e}")
+
+    async def _apply_trailing_stops(self):
+        """
+        Trailing Stop progressivo.
+        Ativa quando lucro >= 50% do alvo (cfg.TRAILING_TRIGGER).
+        Trava 25% * 10% = 2.5% abaixo do pico (cfg.TRAILING_LOCK * 0.1).
+        Nunca recua abaixo do SL original — protege capital sem cortar early.
+        Move o SL na exchange via /v5/position/trading-stop.
+        """
+        for sym, pos in list(self.positions.items()):
+            try:
+                # Atualiza PnL com preço atual
+                cur = pos.current_price
+                if not cur or cur <= 0:
+                    continue
+                pos.update_pnl(cur)
+
+                # Calcula novo SL via método da Position
                 new_sl = pos.calc_trailing_sl()
                 if new_sl is None:
                     continue
 
-                # Verifica se o novo SL é melhor que o atual
-                if pos.direction == "LONG":
-                    better = new_sl > pos.trailing_sl
-                else:
-                    better = new_sl < pos.trailing_sl
+                # Só move se o SL melhorou (LONG: sobe, SHORT: desce)
+                improved = (
+                    (pos.direction == "LONG"  and new_sl > pos.trailing_sl) or
+                    (pos.direction == "SHORT" and new_sl < pos.trailing_sl)
+                )
+                if not improved:
+                    continue
 
-                if better:
-                    old_sl = pos.trailing_sl
-                    pos.trailing_sl = new_sl
-                    await self.client.set_sl(sym, new_sl)
-                    log.info(
-                        f"🔄 Trailing SL {sym} {pos.direction}: "
-                        f"{old_sl:.4f} → {new_sl:.4f} "
-                        f"(pico PnL=${pos.peak_pnl:.4f})"
-                    )
+                old_sl = pos.trailing_sl
+
+                # Move SL na exchange
+                await self.client.set_sl(sym, new_sl)
+                pos.trailing_sl = new_sl
+                pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
+
+                log.info(
+                    f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
+                    f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
+                    f"(ativo={pos.trailing_active})"
+                )
             except Exception as e:
                 log.error(f"_apply_trailing_stops {sym}: {e}")
 
     # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
-    # NOTA v12.2: _effective_risk_pct já está definido acima (linha ~468).
-    # A versão que existia aqui era uma duplicata redundante (mesmo comportamento:
-    # lê self.daily_target_hit) — removida para eliminar a redefinição de método.
+    def _effective_risk_pct(self) -> float:
+        """Retorna o risco efetivo, reduzido se a meta diária foi batida."""
+        if self.stats.daily_pnl >= cfg.DAILY_TARGET:
+            return cfg.POST_TARGET_RISK
+        return cfg.MAX_RISK_PCT
+
     async def _check_rr_double(self):
         """
         Fecha a posição quando o lucro atingir o dobro do risco original.
@@ -784,7 +1002,8 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                     fee_close = pos.qty * price     * TAKER_FEE
                     total_fee = fee_open + fee_close
                     pnl_net   = pnl_gross - total_fee
-                    # BUG CORRIGIDO: taxa não é mais recalculada (código morto removido)
+                    fee_open  = pos.qty * pos.entry * 0.00055
+                    fee_close = pos.qty * price     * 0.00055
                     trade = Trade(
                         sym, pos.direction, pos.entry, price,
                         pos.qty, pnl_gross, pos.opened_at,
@@ -800,6 +1019,9 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                         )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
+
+                    # ── Circuit breaker individual por ativo ───────────
+                    await self._record_trade_result(sym, pnl_net)
 
                     # ── 3 perdas consecutivas: registra, bot CONTINUA ──
                     consecutive = await db.update_consecutive_losses(pnl_net)
@@ -820,6 +1042,130 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                 log.error(f"_check_rr_double {sym}: {e}")
 
     # ── Scan & Enter ────────────────────────────────────────────
+    # ── Grupos de correlação — pares com beta > 0.8 entre si ─────────
+    # Limite: no máximo 1 posição aberta por grupo simultaneamente
+    _CORR_GROUPS: list = [
+        {"BTCUSDT", "ETHUSDT"},              # BTC e ETH: correlação ~0.92
+        {"SOLUSDT", "AVAXUSDT", "DOTUSDT"},  # L1 alternativos: correlação ~0.88
+        {"BNBUSDT"},                          # BNB: isolado (exchange token)
+        {"XRPUSDT", "ADAUSDT"},              # pagamentos/contratos: correlação ~0.85
+        {"DOGEUSDT", "MATICUSDT"},           # meme/polygon: correlação ~0.80
+        {"LINKUSDT", "LTCUSDT"},             # oráculos/store-of-value
+    ]
+
+
+    # ── Sessões de mercado e penalidades por par ──────────────────────────
+    # Cripto tem comportamento diferente por sessão:
+    # ASIA (00-08 UTC): volume baixo, altcoins fracas, BTC/ETH ok
+    # LONDON (08-16 UTC): tendências se formam, liquidez crescente
+    # NEW_YORK (16-24 UTC): maior volume, breakouts mais confiáveis
+    _SESSION_PENALTY: dict = {
+        "ASIA":     {"SOLUSDT": -8, "BNBUSDT": -8, "XRPUSDT": -5,
+                     "DOGEUSDT": -10, "MATICUSDT": -8, "AVAXUSDT": -8},
+        "LONDON":   {},   # sem penalidades — boa sessão para todos
+        "NEW_YORK": {},   # sem penalidades — melhor sessão para breakouts
+    }
+
+
+    # ── Regime Switching: parâmetros por regime de mercado ────────────────
+    # Comportamento diferente para cada condição de mercado:
+    #   TRENDING_UP/DOWN: score relaxado, direção bloqueada, TP maior
+    #   RANGING:          score alto, ambas direções, TP menor (mean reversion)
+    #   COMPRESSED:       não opera — aguarda breakout (bloqueado no analyze_mtf)
+    _REGIME_PARAMS: dict = {
+        "TRENDING_UP": {
+            "min_score":      55,    # entrada mais fácil com tendência
+            "allowed_sides":  ["LONG"],   # só long — não nadar contra a maré
+            "sl_mult_adj":    +0.2,  # SL um pouco mais largo em tendência
+            "tp_mult_adj":    +0.5,  # TP maior — tendências andam mais
+            "score_bonus":    +5,    # bônus de score por estar na direção certa
+        },
+        "TRENDING_DOWN": {
+            "min_score":      55,
+            "allowed_sides":  ["SHORT"],
+            "sl_mult_adj":    +0.2,
+            "tp_mult_adj":    +0.5,
+            "score_bonus":    +5,
+        },
+        "RANGING": {
+            "min_score":      72,    # exige score alto — sem tendência, mais falsos
+            "allowed_sides":  ["LONG", "SHORT"],
+            "sl_mult_adj":    -0.2,  # SL mais apertado em range
+            "tp_mult_adj":    -0.8,  # TP menor — range não anda muito
+            "score_bonus":    -5,    # penalidade por mercado lateral
+        },
+        "COMPRESSED": {
+            "min_score":      999,   # nunca opera (bloqueado)
+            "allowed_sides":  [],
+            "sl_mult_adj":    0.0,
+            "tp_mult_adj":    0.0,
+            "score_bonus":    0,
+        },
+    }
+
+    def _get_regime_params(self, regime: str) -> dict:
+        """Retorna parâmetros ajustados para o regime atual."""
+        return self._REGIME_PARAMS.get(regime, self._REGIME_PARAMS["RANGING"])
+
+    def _regime_allows_direction(self, regime: str, direction: str) -> bool:
+        """Verifica se o regime atual permite a direção do sinal."""
+        rp = self._get_regime_params(regime)
+        allowed = rp.get("allowed_sides", ["LONG", "SHORT"])
+        if direction not in allowed:
+            log.info(
+                f"[Regime {regime}] Direção {direction} bloqueada "
+                f"— apenas {allowed} permitido neste regime"
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _get_market_session() -> str:
+        """Retorna a sessão de mercado atual com base no horário UTC."""
+        from datetime import datetime, timezone
+        hour = datetime.now(timezone.utc).hour
+        if 0 <= hour < 8:
+            return "ASIA"
+        elif 8 <= hour < 16:
+            return "LONDON"
+        else:
+            return "NEW_YORK"
+
+    def _session_score_adjustment(self, symbol: str, base_score: int) -> int:
+        """
+        Ajusta o score de entrada com base na sessão de mercado.
+        Penaliza altcoins de baixa liquidez na sessão asiática.
+        Retorna score ajustado (nunca abaixo de 0).
+        """
+        session = self._get_market_session()
+        penalty = self._SESSION_PENALTY.get(session, {}).get(symbol, 0)
+        if penalty != 0:
+            log.debug(
+                f"[{symbol}] Sessão {session}: "
+                f"score {base_score} {penalty:+d} = {base_score + penalty}"
+            )
+        return max(0, base_score + penalty)
+
+    def _correlation_allows(self, symbol: str) -> bool:
+        """
+        Retorna True se é seguro abrir posição em 'symbol'.
+        Regra: máximo 1 posição aberta por grupo de correlação.
+        Isso garante que MAX_POSITIONS=3 representa 3 apostas DISTINTAS,
+        não 3x a mesma aposta direcional em cripto.
+        """
+        for group in self._CORR_GROUPS:
+            if symbol not in group:
+                continue
+            # Verifica se já existe posição aberta em outro membro do grupo
+            for open_sym in self.positions:
+                if open_sym != symbol and open_sym in group:
+                    log.info(
+                        f"[{symbol}] Bloqueado por correlação: "
+                        f"{open_sym} já aberto no mesmo grupo {group}"
+                    )
+                    return False
+        return True
+
     async def _scan_all_and_enter(self):
         """
         Multi-Timeframe scan: busca 15m, 1h e 4h para cada símbolo.
@@ -841,6 +1187,9 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
 
         for sym in self.viable_symbols:
             if sym in self.positions:
+                continue
+            # Filtro de correlação: não abre posição em par do mesmo grupo
+            if not self._correlation_allows(sym):
                 continue
             cooldown_left = self._cooldown.get(sym, 0) - time.time()
             if cooldown_left > 0:
@@ -911,11 +1260,23 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                     fee_mult=cfg.FEE_MULTIPLIER,
                     vol_mult=cfg.MIN_VOLUME_MULT,
                 )
-                # Alimenta cache de correlação com closes recentes
-                if k15:
-                    closes_15 = [k["c"] for k in k15[-50:]]
-                    corr_guard.seed_closes(sym, closes_15)
+                if sig:
+                    # ── Ajuste de sessão de mercado ──────────────
+                    adjusted = self._session_score_adjustment(sym, sig.score)
+                    if adjusted < min_score:
+                        log.info(
+                            f"[{sym}] Score {sig.score}→{adjusted} após "
+                            f"ajuste sessão {self._get_market_session()} → HOLD"
+                        )
+                        continue
+                    sig.score = adjusted
 
+                    # ── Regime Switching: filtro de direção ───────
+                    # O regime é detectado no 4H pelo analyze_mtf.
+                    # Aqui bloqueamos direções proibidas pelo regime atual.
+                    regime_from_sig = getattr(sig, "regime", "RANGING")
+                    if not self._regime_allows_direction(regime_from_sig, sig.direction):
+                        continue
                 if sig:
                     if sig.expected_pnl <= 0:
                         log.info(f"[{sym}] PnL negativo após taxas → HOLD")
@@ -947,15 +1308,14 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                         av15,ag15=get_atr(h15,l15,c15)
                         av1h,ag1h=get_atr(h1h,l1h,c1h)
                         av4h,ag4h=get_atr(h4h,l4h,c4h)
-                        # v12: imports estáticos — removidos __import__ dinâmicos do hot path
-                        e20_4h = _ema_fn(c4h, 20)[-1]
-                        e50_4h = _ema_fn(c4h, 50)[-1]
-                        e20_1h = _ema_fn(c1h, 20)[-1]
-                        e50_1h = _ema_fn(c1h, 50)[-1]
-                        bull_4h = not _np.isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
-                        bear_4h = not _np.isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
-                        bull_1h = not _np.isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
-                        bear_1h = not _np.isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
+                        e20_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,20)[-1]
+                        e50_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,50)[-1]
+                        e20_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,20)[-1]
+                        e50_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,50)[-1]
+                        bull_4h = not __import__('numpy').isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
+                        bear_4h = not __import__('numpy').isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
+                        bull_1h = not __import__('numpy').isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
+                        bear_1h = not __import__('numpy').isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
                         direction = "LONG" if (bull_4h or bull_1h) else "SHORT"
                         s4=score_tf(c4h,h4h,l4h,o4h,v4h,direction,av4h,ag4h)
                         s1=score_tf(c1h,h1h,l1h,o1h,v1h,direction,av1h,ag1h)
@@ -964,7 +1324,7 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
                         regime=detect_regime(c4h,h4h,l4h,av4h)
                         from bot.indicators import rsi as rsi_fn
                         rsi_v=rsi_fn(c15)[-1]
-                        vols=_np.array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1  # v12: static import
+                        vols=__import__('numpy').array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1
                         vol_r=vols[-1]/avg_vol
                         log.info(
                             f"[{sym}] Score={combined}/100 (4H:{s4['total']} 1H:{s1['total']} 15M:{s15['total']}) "
@@ -1007,36 +1367,11 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
 
     async def _open(self, sig: Signal):
         try:
-            # ── 0. Filtros de proteção (CONECTADOS ao fluxo real) ────
-            # BUG CORRIGIDO: filters.run_all_filters() agora é chamado aqui
-            filter_result = await flts.run_all_filters(
-                self.client, sig.symbol, sig.direction
-            )
-            if not filter_result["ok"]:
-                log.info(
-                    f"[{sig.symbol}] 🚫 Filtro '{filter_result['blocked_by']}' "
-                    f"bloqueou entrada: {filter_result['details'].get(filter_result['blocked_by'], {}).get('reason', '')}"
-                )
-                return
-
-            size_mult = filter_result.get("size_mult", 1.0)
-
-            # ── 1. Controle de correlação ────────────────────────────
-            corr_result = corr_guard.check_correlation(sig.symbol, self.positions)
-            if not corr_result["ok"]:
-                log.info(f"[{sig.symbol}] 🔗 {corr_result['reason']}")
-                return
-
-            # ── 2. Atualizar saldo real antes de calcular qty ────────
+            # Atualizar saldo real antes de calcular qty
             fresh_bal = await self.client.get_balance()
             if fresh_bal > 0:
                 self.risk.update(fresh_bal)
-                self._recalc_daily_limits()
-            # Combina size_mult do filtro (horário/weekend) com size_mult do regime (volatilidade)
-            # O sinal já foi aprovado pelo strategy.analyze_mtf que inclui regime.classify()
-            regime_mult = getattr(sig, "regime_size_mult", 1.0)
-            combined_mult = size_mult * regime_mult
-            qty = self.risk.size(sig.symbol, sig.entry, self.instruments, combined_mult)
+            qty = self.risk.size(sig.symbol, sig.entry, self.instruments)
             if qty <= 0:
                 log.warning(f"⚠️ {sig.symbol}: qty=0 — saldo insuficiente (${self.risk.balance:.2f})")
                 return
@@ -1302,26 +1637,18 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
             log.error(f"_load_existing: {e}")
 
     async def _update_balance(self):
-        """
-        BUG CORRIGIDO: _dbal era NameError silenciado por except:pass
-        Agora: notificação de drawdown disparada corretamente.
-        """
         try:
             bal = await self.client.get_balance()
-            if bal < 0:
-                return
-            self.risk.update(bal)
-            self._recalc_daily_limits()   # atualiza meta/stop com saldo atual
-            if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
-                log.warning(
-                    f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite "
-                    f"{cfg.MAX_DRAWDOWN:.0%} → pausando entradas"
-                )
-                self.active = False
-                _dbal = bal   # inicializa antes de usar (fix NameError)
+            if bal >= 0:
+                self.risk.update(bal)
+                _dbal = bal   # FIX: sempre definida, independente do drawdown
+                if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+                    log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
+                    self.active = False
+                    _dbal = await self.client.get_balance()
                 await notify(await drawdown_msg(self.risk.drawdown, _dbal))
-        except Exception as e:
-            log.error(f"_update_balance: {e}")
+        except Exception:
+            pass
 
     # ── Status (endpoint /api/status) ──────────────────────────
     def get_status(self) -> dict:
@@ -1357,13 +1684,4 @@ class TradingEngine(PositionManagerMixin, SignalProcessorMixin):
             "daily_progress":   round(min(self.daily_pnl / self.daily_target * 100, 100), 1) if self.daily_target else 0,
             "effective_score":  self._effective_score(),
             "mode":             "CONSERVADOR" if self.daily_target_hit else ("PARADO" if self.daily_stopped else "AGRESSIVO"),
-            "paper_trade":      self.paper_trade,   # v12: visível no dashboard
-            # Campos novos v11
-            "daily_target_pct":    cfg.DAILY_TARGET_PCT * 100,
-            "daily_stop_loss_pct": cfg.DAILY_STOP_LOSS_PCT * 100,
-            "leverage":            cfg.LEVERAGE,
-            "max_risk_pct":        cfg.MAX_RISK_PCT * 100,
-            "correlation_matrix":  corr_guard.get_correlation_matrix(
-                list(self.positions.keys()) + self.viable_symbols[:6]
-            ),
         }

@@ -91,13 +91,22 @@ _DDL = [
         id SERIAL PRIMARY KEY,
         count INTEGER DEFAULT 0, last_loss TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS key_value (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT
+    )""",
     """CREATE TABLE IF NOT EXISTS decisions (
         id SERIAL PRIMARY KEY,
         timestamp TEXT, symbol TEXT, type TEXT, score INTEGER, reason TEXT
     )""",
 ]
 
-_DDL_SQLITE = [s.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT") for s in _DDL]
+_DDL_SQLITE = [
+    s.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+     .replace("TEXT PRIMARY KEY", "TEXT PRIMARY KEY")  # key_value usa TEXT PK
+    for s in _DDL
+]
 
 
 async def _create_tables():
@@ -368,11 +377,11 @@ async def get_recent_decisions(limit: int = 60) -> list:
         return []
 
 
-async def save_performance(periodo: str, strategy: str, win_rate: float,
-                            profit_factor: float, sharpe_ratio: float,
-                            sortino_ratio: float, max_drawdown: float,
-                            expectancy: float, total_trades: int):
-    """Persiste resultado de backtest na tabela performance."""
+async def save_key_value(key: str, value: str):
+    """
+    Persiste par chave-valor no banco.
+    Usado para salvar parâmetros do Optuna que sobrevivem a deploys (INFRA-3).
+    """
     if not _conn:
         return
     try:
@@ -380,23 +389,31 @@ async def save_performance(periodo: str, strategy: str, win_rate: float,
         ts = datetime.now(timezone.utc).isoformat()
         if _is_pg:
             await _conn.execute(
-                """INSERT INTO performance (periodo, strategy, win_rate, profit_factor,
-                   sharpe_ratio, sortino_ratio, max_drawdown, expectancy_por_trade,
-                   total_trades, updated_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
-                periodo, strategy, win_rate, profit_factor, sharpe_ratio,
-                sortino_ratio, max_drawdown, expectancy, total_trades, ts,
+                "INSERT INTO key_value (key, value, updated_at) VALUES ($1,$2,$3) "
+                "ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3",
+                key, value, ts
             )
         else:
             await _conn.execute(
-                """INSERT INTO performance (periodo, strategy, win_rate, profit_factor,
-                   sharpe_ratio, sortino_ratio, max_drawdown, expectancy_por_trade,
-                   total_trades, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (periodo, strategy, win_rate, profit_factor, sharpe_ratio,
-                 sortino_ratio, max_drawdown, expectancy, total_trades, ts),
+                "INSERT OR REPLACE INTO key_value (key, value, updated_at) VALUES (?,?,?)",
+                (key, value, ts)
             )
             await _conn.commit()
     except Exception as e:
         from bot.logger import log
-        log.error(f"save_performance: {e}")
+        log.warning(f"save_key_value {key}: {e}")
+
+
+async def load_key_value(key: str) -> str:
+    """Carrega valor por chave. Retorna None se não encontrar."""
+    if not _conn:
+        return None
+    try:
+        if _is_pg:
+            row = await _conn.fetchrow("SELECT value FROM key_value WHERE key=$1", key)
+        else:
+            async with _conn.execute("SELECT value FROM key_value WHERE key=?", (key,)) as cur:
+                row = await cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
