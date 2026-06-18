@@ -19,7 +19,7 @@ API_SECRET = os.environ.get("BYBIT_API_SECRET", os.environ.get("BINANCE_API_SECR
 RECV_WINDOW = "20000"
 
 # ── Paper Trading Mode ───────────────────────────────────────────
-PAPER_TRADE: bool = os.environ.get("PAPER_TRADE", "false").lower() in ("1","true","yes").lower() == "true"
+PAPER_TRADE: bool = os.environ.get("PAPER_TRADE", "false").lower() in ("1", "true", "yes")
 if PAPER_TRADE:
     log.info("🟡 PAPER TRADE MODE ATIVO — nenhuma ordem real será enviada")
 

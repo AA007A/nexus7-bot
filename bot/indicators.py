@@ -733,3 +733,35 @@ def detect_absorption(symbol: str, closes: list, volumes: list,
 
     return result
 
+def returns_correlation(closes_a: list, closes_b: list, period: int = 20) -> float:
+    """
+    Correlação de Pearson entre os retornos percentuais de dois ativos.
+    Usada pelo Correlation Guard para bloquear pares altamente correlacionados.
+
+    Retorna valor entre -1.0 e 1.0:
+      > 0.75  → correlação alta (bloqueia entrada)
+      0 a 0.75 → correlação aceitável
+      < 0     → correlação negativa (diversificação real)
+    """
+    n = min(len(closes_a), len(closes_b), period + 1)
+    if n < 5:
+        return 0.0   # dados insuficientes — sem bloqueio
+
+    a = np.array(closes_a[-n:], dtype=float)
+    b = np.array(closes_b[-n:], dtype=float)
+
+    # Retornos percentuais (mais estável que preços absolutos)
+    ret_a = np.diff(a) / a[:-1]
+    ret_b = np.diff(b) / b[:-1]
+
+    if len(ret_a) < 4 or len(ret_b) < 4:
+        return 0.0
+
+    # Correlação de Pearson
+    std_a = ret_a.std()
+    std_b = ret_b.std()
+    if std_a == 0 or std_b == 0:
+        return 0.0
+
+    corr = float(np.corrcoef(ret_a, ret_b)[0, 1])
+    return round(corr, 4) if not np.isnan(corr) else 0.0
