@@ -24,7 +24,7 @@ _cache = {
 # ── Thresholds configuráveis ──────────────────────────────────────
 FUNDING_BLOCK_LONG  =  0.0005    # bloqueia LONG se funding > +0.05%
 FUNDING_BLOCK_SHORT = -0.0005    # bloqueia SHORT se funding < -0.05%
-LIQUIDITY_HOURS     = (6, 23)    # UTC — janela de liquidez
+LIQUIDITY_HOURS     = (2, 23)    # UTC — inclui moves noturnos BTC (02-06 UTC = alta atividade asiática)
 SPREAD_MAX_PCT      =  0.0005    # 0.05% máximo
 MACRO_BLOCK_MIN     =  30        # minutos antes/depois de eventos macro USD
 
@@ -94,21 +94,42 @@ async def update_fear_greed():
 
 
 def check_fear_greed(direction: str) -> dict:
-    fg  = _cache["fear_greed"]
-    val = fg["value"]
+    """
+    Filtro Fear & Greed com lógica corrigida.
+
+    Lógica CORRETA (corrigido RISK-3):
+      - Extremo MEDO (<=25): o pânico JÁ aconteceu → bons LONGs de recuperação.
+        Bloquear LONGs aqui seria perder a melhor oportunidade de compra.
+        Bloqueia SHORTS (o move de queda já foi, risco/retorno ruim).
+        → Permite LONG, bloqueia SHORT.
+
+      - Extremo GANÂNCIA (>=80): euforia no topo → risco de reversão alta.
+        Permite SHORTs (oportunidade), reduz confiança em LONGs.
+        → Permite SHORT, penaliza LONG (não bloqueia — pode ser breakout).
+
+      - Zona neutra (26-79): sem restrição.
+    """
+    fg    = _cache["fear_greed"]
+    val   = fg["value"]
     age_h = (time.time() - fg["ts"]) / 3600
+
     if age_h > 25:
-        log.debug("fear_greed: cache desatualizado (>25h) — skip check")
+        log.debug("fear_greed: cache desatualizado (>25h) — skip")
         return {"ok": True, "value": val, "label": fg["label"],
                 "reason": "F&G cache desatualizado — permitindo"}
+
+    # Extremo MEDO: bloqueia SHORT (move já foi), libera LONG (recuperação)
     if val <= 25 and direction == "SHORT":
         return {"ok": False, "value": val, "label": fg["label"],
-                "reason": f"Extremo MEDO ({val}) — apenas LONGs em pânico"}
-    if val >= 75 and direction == "LONG":
+                "reason": f"Extremo MEDO F&G={val} — SHORT arriscado pós-pânico, aguardando recuperação"}
+
+    # Extremo GANÂNCIA: bloqueia LONG (risco de topo), libera SHORT (reversão)
+    if val >= 80 and direction == "LONG":
         return {"ok": False, "value": val, "label": fg["label"],
-                "reason": f"Extremo GANÂNCIA ({val}) — apenas SHORTs em euforia"}
+                "reason": f"Extremo GANÂNCIA F&G={val} — LONG no topo de euforia bloqueado"}
+
     return {"ok": True, "value": val, "label": fg["label"],
-            "reason": f"F&G {val} ({fg['label']}) OK"}
+            "reason": f"F&G {val} ({fg['label']}) — sem restrição direcional"}
 
 
 # ── Horário de liquidez ───────────────────────────────────────────
@@ -154,11 +175,14 @@ async def update_macro_events():
         fetched = False
         # Fonte 1: ForexFactory JSON (sem auth)
         try:
+            import ssl as _ssl
+            _ctx = _ssl.create_default_context()
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                     "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
                     timeout=aiohttp.ClientTimeout(total=10),
                     headers={"User-Agent": "Mozilla/5.0"},
+                    ssl=_ctx,
                 ) as r:
                     evs  = await r.json()
                     high = [

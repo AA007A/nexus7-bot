@@ -4,19 +4,29 @@ from bot.logger import log
 
 
 async def notify(text: str):
-    """Envia mensagem para o Telegram."""
+    """
+    Envia mensagem para o Telegram.
+    SEC: URL com token nunca aparece em logs — exception captura só a mensagem.
+    """
     if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
         return
+    url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
     try:
-        url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
         async with aiohttp.ClientSession() as s:
-            await s.post(url, json={
-                "chat_id": cfg.TELEGRAM_CHAT,
-                "text": text,
+            resp = await s.post(url, json={
+                "chat_id":    cfg.TELEGRAM_CHAT,
+                "text":       text,
                 "parse_mode": "Markdown",
-            })
-    except Exception as e:
-        log.warning(f"Telegram: {e}")
+            }, timeout=aiohttp.ClientTimeout(total=8))
+            if resp.status not in (200, 201):
+                # Loga só o status — nunca a URL (que contém o token)
+                log.warning(f"Telegram: HTTP {resp.status}")
+    except aiohttp.ClientError as e:
+        # Captura erro de rede sem logar a URL
+        log.warning(f"Telegram: erro de conexão ({type(e).__name__})")
+    except Exception:
+        # Silencioso para outros erros — notificação não pode derrubar o bot
+        pass
 
 
 # ── BOT ONLINE ────────────────────────────────────────────────────

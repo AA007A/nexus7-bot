@@ -60,22 +60,35 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
 # ── Simulador de estratégia MTF ──────────────────────────────────
 def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                   min_score: int = 75,
-                  min_rr: float = 2.0) -> List[dict]:
+                  min_rr: float = 2.0,
+                  sl_mult: float = None,
+                  tp_mult: float = None) -> List[dict]:
     """
     Simula a estratégia MTF sobre dados históricos.
-    Retorna lista de trades simulados.
+    sl_mult e tp_mult substituem os defaults do cfg quando fornecidos
+    (usados pelo Optuna para injetar parâmetros otimizados).
+    Usa k15[:-1] para confirmar candle fechado — consistente com produção.
     """
     from bot.strategy import Analyzer
     from bot.indicators import atr
+
+    # Injeta sl_mult/tp_mult no cfg temporariamente se fornecidos
+    _orig_sl = getattr(cfg, "SL_ATR_MULT", 1.5)
+    _orig_tp = getattr(cfg, "TP_ATR_MULT", 3.0)
+    if sl_mult is not None:
+        cfg.SL_ATR_MULT = sl_mult
+    if tp_mult is not None:
+        cfg.TP_ATR_MULT = tp_mult
 
     analyzer = Analyzer()
     trades   = []
 
     # Janela deslizante: usa 60 candles para análise, avança 1 a 1
+    # Exclui último candle de cada janela (candle fechado = k15[:-1])
     WINDOW = 60
     for i in range(WINDOW, len(klines_15) - 1):
-        k15 = klines_15[max(0, i-WINDOW):i]
-        k1h = klines_1h[max(0, i//4-20):i//4]   # approx
+        k15 = klines_15[max(0, i-WINDOW):i]      # candle i-1 é o último fechado
+        k1h = klines_1h[max(0, i//4-20):i//4]
         k4h = klines_4h[max(0, i//16-15):i//16]
 
         if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
@@ -189,6 +202,10 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
             "day_of_week":day_of_week,
             "rr":         sig.rr,
         })
+
+    # Restaura cfg original após simulação (sl_mult/tp_mult injetados pelo Optuna)
+    cfg.SL_ATR_MULT = _orig_sl
+    cfg.TP_ATR_MULT = _orig_tp
 
     return trades
 

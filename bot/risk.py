@@ -214,10 +214,22 @@ class RiskManager:
             return False
         return True
 
+    def _margin_in_use(self) -> float:
+        """
+        Calcula margem total já comprometida pelas posições abertas.
+        Usado pelo sizing para evitar superalocação de capital.
+        """
+        total = 0.0
+        for pr in self.positions.values():
+            if hasattr(pr, "entry") and hasattr(pr, "qty_remain"):
+                total += (pr.entry * pr.qty_remain) / cfg.LEVERAGE
+        return total
+
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0) -> float:
         """
         Sizing com regra absoluta: margem nunca excede 80% do saldo.
+        Desconta margem já em uso por posições abertas (FIX RISK-sizing).
         Risco por trade = balance × LEVERAGE × MAX_RISK_PCT
         """
         if entry <= 0 or not self._ready or self.balance <= 0:
@@ -228,10 +240,21 @@ class RiskManager:
         qty_step = float(info.get("qtyStep",     0.001))
         min_not  = float(info.get("minNotional", 1.0))
 
+        # Margem livre = saldo - margem já em uso por posições abertas
+        margin_used = self._margin_in_use()
+        free_margin = max(0.0, self.balance - margin_used)
+
+        if free_margin < min_not / cfg.LEVERAGE:
+            log.warning(
+                f"📐 {symbol}: margem livre insuficiente "
+                f"(${free_margin:.2f} | em uso: ${margin_used:.2f})"
+            )
+            return 0.0
+
         # Notional alvo: balance × leverage × MAX_RISK_PCT
         target_not   = self.balance * cfg.LEVERAGE * cfg.MAX_RISK_PCT * size_mult
-        # Cap absoluto: nunca usar mais de 80% do saldo como margem
-        max_notional = self.balance * 0.80 * cfg.LEVERAGE
+        # Cap absoluto: nunca usar mais de 80% do saldo LIVRE como margem
+        max_notional = free_margin * 0.80 * cfg.LEVERAGE
         target_not   = min(target_not, max_notional)
         target_not   = max(target_not, min_not)
 

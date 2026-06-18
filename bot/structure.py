@@ -1,4 +1,4 @@
-"""KAKAZITO TRADE — Structure: OB, FVG, BOS/CHoCH, Stop Hunt, MTF"""
+"""BGX Capital — Structure Analysis: OB, FVG, BOS/CHoCH, Stop Hunt, MTF Confluence"""
 import numpy as np
 from bot.logger import log
 
@@ -93,29 +93,78 @@ def detect_stop_hunt(closes, highs, lows, opens) -> dict:
             "wick_ratio": round(max(wick_up, wick_dn) / body, 2)}
 
 
-def mtf_entry_signal(k_1h, k_15m, k_5m) -> dict:
-    if len(k_1h) < 10 or len(k_15m) < 10 or len(k_5m) < 5:
+def mtf_entry_signal(k_1h, k_15m, k_5m=None) -> dict:
+    """
+    Confluência Multi-Timeframe: 1H bias → 15M setup.
+    k_5m é opcional — engine não coleta 5M por padrão.
+    Quando k_5m não disponível, usa confirmação do 15M como micro-entrada.
+    """
+    if len(k_1h) < 10 or len(k_15m) < 10:
         return {"aligned": False, "direction": None, "reason": "dados insuficientes"}
-    def ga(kl): return ([k["c"] for k in kl],[k["h"] for k in kl],[k["l"] for k in kl],[k["o"] for k in kl])
-    c1h,h1h,l1h,o1h = ga(k_1h); c15,h15,l15,o15 = ga(k_15m); c5,h5,l5,o5 = ga(k_5m)
+
+    def ga(kl):
+        return (
+            [k["c"] for k in kl], [k["h"] for k in kl],
+            [k["l"] for k in kl], [k["o"] for k in kl]
+        )
+
+    c1h, h1h, l1h, o1h = ga(k_1h)
+    c15, h15, l15, o15 = ga(k_15m)
+
     from bot.indicators import ema
-    e20 = float(ema(c1h, 20)[-1]); e50 = float(ema(c1h, min(50,len(c1h)-1))[-1])
+    e20 = float(ema(c1h, 20)[-1])
+    e50 = float(ema(c1h, min(50, len(c1h) - 1))[-1])
     bos1h = detect_bos_choch(c1h, h1h, l1h)
-    if e20 > e50 and c1h[-1] > e20: bias = "LONG"
+
+    if   e20 > e50 and c1h[-1] > e20: bias = "LONG"
     elif e20 < e50 and c1h[-1] < e20: bias = "SHORT"
-    else: return {"aligned": False, "direction": None, "reason": "1H sem bias"}
-    if bos1h["choch"]: return {"aligned": False, "direction": None, "reason": "1H CHoCH"}
-    ob15 = detect_order_blocks(c15,h15,l15,o15); fvg15 = detect_fvg(c15,h15,l15); bos15 = detect_bos_choch(c15,h15,l15)
-    ob_ok = ob15["price_in_ob"] and ob15["ob_type"] == ("BULL" if bias=="LONG" else "BEAR")
-    fvg_ok = fvg15["price_in_fvg"] and fvg15["fvg_type"] == ("BULL" if bias=="LONG" else "BEAR")
+    else: return {"aligned": False, "direction": None, "reason": "1H sem bias claro"}
+
+    if bos1h["choch"]:
+        return {"aligned": False, "direction": None, "reason": "1H CHoCH — estrutura quebrada"}
+
+    ob15  = detect_order_blocks(c15, h15, l15, o15)
+    fvg15 = detect_fvg(c15, h15, l15)
+    bos15 = detect_bos_choch(c15, h15, l15)
+    hunt15 = detect_stop_hunt(c15, h15, l15, o15)
+
+    ob_ok  = ob15["price_in_ob"]  and ob15["ob_type"]  == ("BULL" if bias == "LONG" else "BEAR")
+    fvg_ok = fvg15["price_in_fvg"] and fvg15["fvg_type"] == ("BULL" if bias == "LONG" else "BEAR")
     bos_ok = bos15["bos_dir"] == bias
-    if not (ob_ok or fvg_ok or bos_ok): return {"aligned": False, "direction": None, "reason": f"15M sem setup"}
-    hunt5 = detect_stop_hunt(c5,h5,l5,o5)
-    if hunt5["wait_confirmation"]: return {"aligned": False, "direction": None, "reason": "5M stop hunt não confirmado"}
-    e20_5 = float(ema(c5, min(20,len(c5)-1))[-1])
-    if bias=="LONG" and c5[-1] < e20_5: return {"aligned": False, "direction": None, "reason": "5M abaixo EMA20"}
-    if bias=="SHORT" and c5[-1] > e20_5: return {"aligned": False, "direction": None, "reason": "5M acima EMA20"}
+
+    if not (ob_ok or fvg_ok or bos_ok):
+        return {"aligned": False, "direction": None, "reason": "15M sem setup (OB/FVG/BOS)"}
+
+    # ── Confirmação de micro-entrada ──────────────────────────────
+    # Usa 5M se disponível, caso contrário usa últimos 10 candles do 15M como proxy
+    if k_5m and len(k_5m) >= 5:
+        c5, h5, l5, o5 = ga(k_5m)
+    else:
+        # Proxy: últimos 10 candles do 15M simulam resolução mais fina
+        c5, h5, l5, o5 = (c15[-10:], h15[-10:], l15[-10:], o15[-10:])
+
+    hunt_micro = detect_stop_hunt(c5, h5, l5, o5)
+    if hunt_micro["wait_confirmation"]:
+        return {"aligned": False, "direction": None,
+                "reason": "Stop hunt não confirmado na micro-entrada"}
+
+    e20_micro = float(ema(c5, min(20, len(c5) - 1))[-1])
+    if bias == "LONG"  and c5[-1] < e20_micro:
+        return {"aligned": False, "direction": None, "reason": "Micro abaixo EMA20"}
+    if bias == "SHORT" and c5[-1] > e20_micro:
+        return {"aligned": False, "direction": None, "reason": "Micro acima EMA20"}
+
     setup = "OB" if ob_ok else ("FVG" if fvg_ok else "BOS")
-    log.info(f"MTF ✅ {bias} | 15M:{setup} 5M:OK")
-    return {"aligned": True, "direction": bias, "setup_type": setup,
-            "ob": ob15, "fvg": fvg15, "bos": bos15, "stop_hunt": hunt5, "reason": f"1H:{bias} 15M:{setup} 5M:OK"}
+    tf_micro = "5M" if (k_5m and len(k_5m) >= 5) else "15M_proxy"
+    log.info(f"MTF ✅ {bias} | 15M:{setup} micro:{tf_micro}:OK")
+
+    return {
+        "aligned":    True,
+        "direction":  bias,
+        "setup_type": setup,
+        "ob":         ob15,
+        "fvg":        fvg15,
+        "bos":        bos15,
+        "stop_hunt":  hunt_micro,
+        "reason":     f"1H:{bias} 15M:{setup} micro:{tf_micro}:OK",
+    }

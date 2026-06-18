@@ -30,9 +30,13 @@ class Config:
     MIN_VOLUME_MULT:  float = float(os.environ.get("MIN_VOLUME_MULT", "0.5")) # volume mínimo 0.5x média
     FEE_MULTIPLIER:   float = float(os.environ.get("FEE_MULTIPLIER",  "2.0")) # lucro >= 2x taxas
 
-    # ── Meta diária ───────────────────────────────────────────────
-    DAILY_TARGET:    float = float(os.environ.get("DAILY_TARGET",    "100.0"))
-    DAILY_STOP_LOSS: float = float(os.environ.get("DAILY_STOP_LOSS", "50.0"))
+    # ── Meta diária ──────────────────────────────────────────────
+    # Modo dinâmico (recomendado): DAILY_TARGET_PCT e DAILY_STOP_LOSS_PCT
+    # Modo fixo (legacy): DAILY_TARGET e DAILY_STOP_LOSS em USD
+    DAILY_TARGET:         float = float(os.environ.get("DAILY_TARGET",         "0"))     # 0 = dinâmico
+    DAILY_STOP_LOSS:      float = float(os.environ.get("DAILY_STOP_LOSS",      "0"))     # 0 = dinâmico
+    DAILY_TARGET_PCT:     float = float(os.environ.get("DAILY_TARGET_PCT",     "0.01"))  # 1% do saldo
+    DAILY_STOP_LOSS_PCT:  float = float(os.environ.get("DAILY_STOP_LOSS_PCT",  "0.005")) # 0.5% do saldo
 
     # ── Relatório diário ─────────────────────────────────────────
     REPORT_INTERVAL_H: int = int(os.environ.get("REPORT_INTERVAL_H", "24"))
@@ -47,7 +51,15 @@ class Config:
     TP_ATR_MULT: float = float(os.environ.get("TP_ATR_MULT", "3.0"))
 
     # ── Cooldown ─────────────────────────────────────────────────
-    COOLDOWN_SECONDS: int = int(os.environ.get("COOLDOWN_SECONDS", "900"))  # 15 min (era 30)
+    COOLDOWN_SECONDS: int = int(os.environ.get("COOLDOWN_SECONDS", "900"))  # 15 min pós-trade
+
+    # ── Correlação entre pares ────────────────────────────────────
+    # Par com correlação > MAX_CORRELATION com posição aberta é bloqueado
+    MAX_CORRELATION: float = float(os.environ.get("MAX_CORRELATION", "0.75"))  # 75% de correlação
+
+    # ── Circuit breaker por ativo ─────────────────────────────────
+    MAX_CONSEC_LOSSES:   int = int(os.environ.get("MAX_CONSEC_LOSSES",   "3"))   # perdas → cooldown
+    CB_COOLDOWN_HOURS:   int = int(os.environ.get("CB_COOLDOWN_HOURS",   "24"))  # horas de cooldown
 
     # ── Sistema ──────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")

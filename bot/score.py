@@ -1,7 +1,7 @@
 """
 BGX Capital — Pre-Trade Score System
 Score 0-100 antes de qualquer entrada.
-Entra apenas se score >= 70.
+Entra apenas se score >= cfg.MIN_ENTRY_SCORE (padrão: 60).
 Bot NUNCA rejeita trade por perdas anteriores.
 
 [TÉCNICO — 40pts]

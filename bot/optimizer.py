@@ -58,23 +58,57 @@ DEFAULT_PARAMS = {
 
 def load_optimized_params() -> dict:
     """
-    Carrega parâmetros otimizados do JSON.
-    Retorna DEFAULT_PARAMS se não existir ou estiver corrompido.
+    Carrega parâmetros otimizados com prioridade:
+      1. Arquivo local (params_optimized.json) — rápido
+      2. Banco de dados (key_value) — fallback pós-deploy Railway
+      3. DEFAULT_PARAMS — se nada encontrado
     """
+    # Tenta arquivo local primeiro
     try:
         if PARAMS_FILE.exists():
             with open(PARAMS_FILE, "r") as f:
                 data = json.load(f)
             params = data.get("best_params", DEFAULT_PARAMS)
             log.info(
-                f"✅ Parâmetros otimizados carregados: "
-                f"score≥{params.get('min_score')}, "
-                f"sl×{params.get('sl_mult')}, "
+                f"✅ Params otimizados (arquivo): "
+                f"score≥{params.get('min_score')} "
+                f"sl×{params.get('sl_mult')} "
                 f"tp×{params.get('tp_mult')}"
             )
             return params
     except Exception as e:
-        log.warning(f"load_optimized_params: {e} — usando defaults")
+        log.warning(f"load_optimized_params (arquivo): {e}")
+
+    # Tenta banco de dados como fallback (Railway sem volume persistente)
+    try:
+        import asyncio as _ai
+        from bot import database as _db
+
+        async def _load_from_db():
+            val = await _db.load_key_value("optimizer_params")
+            if val:
+                data = json.loads(val)
+                return data.get("best_params", DEFAULT_PARAMS)
+            return None
+
+        loop = _ai.get_event_loop()
+        if loop.is_running():
+            # Ambiente async — agenda como task (não bloqueia)
+            log.info("load_optimized_params: agendando carga do DB...")
+        else:
+            params = loop.run_until_complete(_load_from_db())
+            if params:
+                log.info(
+                    f"✅ Params otimizados (DB): "
+                    f"score≥{params.get('min_score')} "
+                    f"sl×{params.get('sl_mult')} "
+                    f"tp×{params.get('tp_mult')}"
+                )
+                return params
+    except Exception as e:
+        log.warning(f"load_optimized_params (DB): {e}")
+
+    log.info("load_optimized_params: usando defaults conservadores")
     return DEFAULT_PARAMS.copy()
 
 
@@ -108,13 +142,17 @@ def save_optimized_params(params: dict, metadata: dict = None):
 
 def _run_strategy_with_params(klines_15, klines_1h, klines_4h, params: dict) -> list:
     """
-    Roda a estratégia com parâmetros customizados.
-    Wrapper sobre _run_strategy do backtest com injeção de params.
+    Roda a estratégia com parâmetros customizados injetados.
+    Passa sl_mult, tp_mult, min_score e min_rr ao _run_strategy
+    para que a otimização realmente afete o comportamento simulado.
     """
     from bot.backtest import _run_strategy as _rsp
     return _rsp(
         klines_15, klines_1h, klines_4h,
-        min_score=params.get("min_score", 60),
+        min_score = params.get("min_score",  60),
+        min_rr    = params.get("tp_mult", 3.0) / max(params.get("sl_mult", 1.5), 0.1),
+        sl_mult   = params.get("sl_mult",   1.5),
+        tp_mult   = params.get("tp_mult",   3.0),
     )
 
 
