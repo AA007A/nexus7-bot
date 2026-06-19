@@ -35,6 +35,7 @@ from bot import database as db
 from bot import score as scoring
 from bot import market_data as mdata
 from bot import backtest as bt
+from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
 
 
@@ -413,6 +414,7 @@ class TradingEngine:
         # Se DAILY_TARGET > 0: usa valor fixo. Se = 0: calcula dinamicamente.
         self.daily_target     = cfg.DAILY_TARGET      # $100 fixo ou recalcula no reset
         self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # $50 fixo ou recalcula no reset
+        self.daily_tracker    = DailyTracker()        # usado pelo SignalProcessorMixin
         self.daily_target_hit = False    # meta batida hoje?
         self.daily_stopped    = False    # stop-loss diário ativado?
         self._last_reset_day  = -1       # último dia (UTC) que resetou
@@ -958,12 +960,6 @@ class TradingEngine:
                 log.error(f"_apply_trailing_stops {sym}: {e}")
 
     # ── Fecha posição quando lucro = 2x o risco (R:R dobrado) ──
-    def _effective_risk_pct(self) -> float:
-        """Retorna o risco efetivo, reduzido se a meta diária foi batida."""
-        if self.stats.daily_pnl >= cfg.DAILY_TARGET:
-            return cfg.POST_TARGET_RISK
-        return cfg.MAX_RISK_PCT
-
     async def _check_rr_double(self):
         """
         Fecha a posição quando o lucro atingir o dobro do risco original.

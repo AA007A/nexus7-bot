@@ -29,6 +29,7 @@ app = FastAPI(title="BGX Capital", version="11.0.0", lifespan=lifespan)
 # SEC-1: CORS restrito via env var ALLOWED_ORIGINS (separe por vírgula)
 # Exemplo Railway: ALLOWED_ORIGINS=https://meu-dashboard.vercel.app
 import os as _cors_os
+import time
 _ALLOWED_ORIGINS = [
     o.strip() for o in
     _cors_os.environ.get("ALLOWED_ORIGINS", "*").split(",")
@@ -477,7 +478,7 @@ async def get_news(limit: int = 20, sentiment: str = ""):
                 "relevance":  i.relevance,
                 "entities":   i.entities[:5],
                 "url":        i.url,
-                "age_min":    int(((__import__("time").time() - i.timestamp)) / 60),
+                "age_min":    int((time.time() - i.timestamp) / 60),
             }
             for i in items[:limit]
         ],
