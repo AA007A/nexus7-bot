@@ -322,7 +322,6 @@ async def dashboard():
 async def decisions(limit: int = 60):
     """Retorna as últimas decisões do scan (SIGNAL e HOLD) para o dashboard."""
     try:
-        from bot import database as db
         rows = await db.get_recent_decisions(limit)
         return {"decisions": rows}
     except Exception as e:

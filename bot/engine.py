@@ -288,7 +288,6 @@ class Stats:
 
     def daily_pnl(self) -> float:
         """PnL realizado apenas hoje (UTC)."""
-        from datetime import datetime, timezone
         today = datetime.now(timezone.utc).date()
         total = 0.0
         for t in self.trades:
@@ -471,7 +470,6 @@ class TradingEngine:
     # ── Meta diária ────────────────────────────────────────────
     def _check_daily_reset(self):
         """Reseta contadores de PnL diário à meia-noite UTC."""
-        from datetime import datetime, timezone
         today = datetime.now(timezone.utc).day
         if today != self._last_reset_day:
             if self._last_reset_day != -1:
@@ -1118,7 +1116,6 @@ class TradingEngine:
     @staticmethod
     def _get_market_session() -> str:
         """Retorna a sessão de mercado atual com base no horário UTC."""
-        from datetime import datetime, timezone
         hour = datetime.now(timezone.utc).hour
         if 0 <= hour < 8:
             return "ASIA"
@@ -1294,7 +1291,6 @@ class TradingEngine:
                     try:
                         from bot.strategy import score_tf, detect_regime
                         from bot.indicators import atr as atr_fn
-                        import numpy as np
                         def ga(kl): return ([k["c"] for k in kl],[k["h"] for k in kl],[k["l"] for k in kl],[k["o"] for k in kl],[k["v"] for k in kl])
                         c15,h15,l15,o15,v15 = ga(k15)
                         c1h,h1h,l1h,o1h,v1h = ga(k1h)

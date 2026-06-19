@@ -1,3 +1,4 @@
+import time
 """
 BGX Capital — Market Data Module
 - CVD (Cumulative Volume Delta) em tempo real
@@ -490,7 +491,6 @@ def get_market_session() -> dict:
     - Madrugada:  00:00 - 06:00 UTC  ❌ volume mínimo
     - Asia tarde: 06:00 - 08:00 UTC  ⚠️  volume médio
     """
-    from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
     hour    = now_utc.hour
     minute  = now_utc.minute
@@ -678,7 +678,6 @@ async def update_twitter_sentiment():
     Fallback para cada fonte — não quebra o bot se falhar.
     """
     global _twitter_cache
-    import time as _t
 
     # Throttle: atualiza no máx a cada 10 minutos
     if _t.time() - _twitter_cache.get("last_update", 0) < 600:
@@ -862,7 +861,6 @@ async def update_economic_calendar():
     Atualiza 1x por hora.
     """
     global _economic_events_cache, _last_calendar_update
-    import time as _t
     if _t.time() - _last_calendar_update < 3600:
         return
 
@@ -870,7 +868,6 @@ async def update_economic_calendar():
     try:
         async with aiohttp.ClientSession() as s:
             # Financial Modeling Prep — calendário econômico gratuito
-            from datetime import datetime, timezone, timedelta
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             next3 = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%d")
             url   = (f"https://financialmodelingprep.com/api/v3/economic_calendar"
@@ -904,8 +901,6 @@ def is_high_impact_window(minutes_before: int = 30) -> dict:
     Palavras que classificam como alto impacto para crypto:
     CPI, NFP, Fed, FOMC, Interest Rate, Unemployment, GDP
     """
-    from datetime import datetime, timezone, timedelta
-    import time as _t
 
     HIGH_IMPACT_KEYWORDS = [
         "cpi", "consumer price", "nfp", "non-farm", "fomc", "fed",
@@ -951,7 +946,6 @@ async def update_volume_filter(client):
     Atualiza a cada 30 minutos.
     """
     global _volume_cache, _last_volume_update
-    import time as _t
     if _t.time() - _last_volume_update < 1800:
         return
     try:

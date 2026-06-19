@@ -501,7 +501,6 @@ def detect_spoofing(symbol: str) -> dict:
       spoofing_ask: True se há spoofing no lado vendedor (falsa pressão de venda)
       score_penalty: penalidade sugerida no score (-10 a -25)
     """
-    import numpy as np
     history = _ob_history.get(symbol, [])
     result  = {"spoofing_bid": False, "spoofing_ask": False,
                 "score_penalty": 0, "detail": ""}
@@ -624,7 +623,6 @@ def detect_aggression(trades: list) -> dict:
       sell_ratio:     % de volume que foi venda agressiva
       momentum:       "ACCELERATING" | "DECELERATING" | "STABLE"
     """
-    import numpy as np
 
     if not trades or len(trades) < 5:
         return {"aggressor": "NEUTRAL", "buy_ratio": 0.5,
@@ -696,7 +694,6 @@ def detect_absorption(symbol: str, closes: list, volumes: list,
       absorption_bear: True = seller absorvendo compras (sinal de baixa)
       strength:        0.0 - 1.0
     """
-    import numpy as np
 
     result = {"absorption_bull": False, "absorption_bear": False,
                "strength": 0.0, "detail": ""}

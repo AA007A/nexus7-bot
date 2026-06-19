@@ -1,3 +1,5 @@
+import aiohttp
+from bot import database as db
 """
 BGX Capital — Pre-Trade Score System
 Score 0-100 antes de qualquer entrada.
@@ -401,7 +403,6 @@ async def calculate(
 
     # Persiste no banco
     try:
-        from bot import database as db
         await db.save_signal(
             symbol, direction,
             {"total": total, "tecnico": s_tec["score"],
@@ -421,7 +422,6 @@ async def update_macro_cache():
     """Atualiza Fear & Greed + BTC Dominance a cada 5 minutos."""
     while True:
         try:
-            import aiohttp
             async with aiohttp.ClientSession() as s:
                 async with s.get("https://api.alternative.me/fng/?limit=1",
                                   timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -432,7 +432,6 @@ async def update_macro_cache():
         except Exception:
             pass
         try:
-            import aiohttp
             async with aiohttp.ClientSession() as s:
                 async with s.get("https://api.coingecko.com/api/v3/global",
                                   timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -478,7 +477,6 @@ def _classify_news(text: str) -> tuple:
 
 async def news_reader_loop():
     """Monitora CryptoPanic + RSS 24/7. Fault-tolerant."""
-    import aiohttp
     CRYPTOPANIC = "https://cryptopanic.com/api/v1/posts/?auth_token=&filter=important&currencies=BTC"
     RSS_FEEDS   = [
         "https://cointelegraph.com/rss",
@@ -505,7 +503,6 @@ async def news_reader_loop():
                                 "fomc_window":    is_fomc,
                             })
                             try:
-                                from bot import database as db
                                 await db.save_news(title, "CryptoPanic",
                                                    classif, conf, impacto)
                             except Exception:

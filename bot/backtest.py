@@ -601,7 +601,6 @@ async def weekly_backtest_loop(client):
     """
     while True:
         try:
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             if now.weekday() == 6 and now.hour == 3 and now.minute < 5:
                 if _backtest_lock.locked():

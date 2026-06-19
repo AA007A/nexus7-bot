@@ -24,11 +24,9 @@ async def init():
             _conn  = await asyncpg.connect(DATABASE_URL)
             _is_pg = True
             await _create_tables()
-            from bot.logger import log
             log.info("✅ PostgreSQL conectado")
             return
         except Exception as e:
-            from bot.logger import log
             log.warning(f"PostgreSQL falhou ({e}) → usando SQLite")
     # SQLite fallback
     try:
@@ -37,10 +35,8 @@ async def init():
         _conn  = await aiosqlite.connect(SQLITE_PATH)
         _is_pg = False
         await _create_tables()
-        from bot.logger import log
         log.info(f"✅ SQLite: {SQLITE_PATH}")
     except Exception as e:
-        from bot.logger import log
         log.error(f"DB init falhou: {e} — sem persistência")
         _conn = None
 
@@ -121,7 +117,6 @@ async def _create_tables():
                 await _conn.execute(stmt)
                 await _conn.commit()
         except Exception as e:
-            from bot.logger import log
             log.warning(f"DDL: {e}")
 
 
@@ -148,7 +143,6 @@ async def _exec(sql: str, params: tuple = ()):
             await _conn.execute(sql, params)
             await _conn.commit()
     except Exception as e:
-        from bot.logger import log
         log.error(f"DB exec: {e}")
 
 
@@ -166,7 +160,6 @@ async def _fetchone(sql: str, params: tuple = ()):
                     new += c
             return await _conn.fetchrow(new, *params)
         else:
-            import aiosqlite
             async with _conn.execute(sql, params) as cur:
                 return await cur.fetchone()
     except Exception:
@@ -187,7 +180,6 @@ async def _fetchall(sql: str, params: tuple = ()):
                     new += c
             return await _conn.fetch(new, *params)
         else:
-            import aiosqlite
             async with _conn.execute(sql, params) as cur:
                 return await cur.fetchall()
     except Exception:
@@ -372,7 +364,6 @@ async def get_recent_decisions(limit: int = 60) -> list:
             return [{"timestamp": str(r[0]), "symbol": r[1],
                      "type": r[2], "score": r[3], "reason": r[4] or ""} for r in rows]
     except Exception as e:
-        from bot.logger import log
         log.error(f"get_recent_decisions: {e}")
         return []
 
@@ -400,7 +391,6 @@ async def save_key_value(key: str, value: str):
             )
             await _conn.commit()
     except Exception as e:
-        from bot.logger import log
         log.warning(f"save_key_value {key}: {e}")
 
 

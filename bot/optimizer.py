@@ -36,6 +36,7 @@ except ImportError:
     OPTUNA_AVAILABLE = False
 
 from bot.logger import log
+from bot import database as _db
 from bot.config import cfg
 from bot.backtest import fetch_history, _calc_metrics, run_strategy_public
 
@@ -81,8 +82,6 @@ def load_optimized_params() -> dict:
 
     # Tenta banco de dados como fallback (Railway sem volume persistente)
     try:
-        import asyncio as _ai
-        from bot import database as _db
 
         async def _load_from_db():
             val = await _db.load_key_value("optimizer_params")
@@ -131,8 +130,6 @@ def save_optimized_params(params: dict, metadata: dict = None):
     # SEC-4/INFRA-3: salva também como variável de ambiente persistente via DB
     # Isso garante que os params sobrevivem a deploys no Railway
     try:
-        from bot import database as _db
-        import asyncio as _ai
         _ai.get_event_loop().create_task(
             _db.save_key_value("optimizer_params", json.dumps(payload))
         ) if _ai.get_event_loop().is_running() else None

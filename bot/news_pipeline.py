@@ -1,3 +1,4 @@
+import feedparser
 """
 BGX Capital — News Intelligence Pipeline v1.0
 Pipeline unificado: RSS Premium + Twitter + CryptoPanic
@@ -143,7 +144,6 @@ async def _fetch_rss(session, source, max_items=5):
             if r.status != 200:
                 return []
             text = await r.text()
-        import feedparser
         feed = feedparser.parse(text)
         for entry in feed.entries[:max_items]:
             title = entry.get("title", "").strip()
@@ -179,7 +179,6 @@ async def _fetch_twitter_nitter(session) -> list:
                     if r.status != 200:
                         continue
                     text = await r.text()
-                import feedparser
                 feed = feedparser.parse(text)
                 for entry in feed.entries[:3]:
                     title = entry.get("title", "").strip()
@@ -212,7 +211,6 @@ async def _fetch_twitter_nitter(session) -> list:
                     if r.status != 200:
                         continue
                     text = await r.text()
-                import feedparser
                 feed = feedparser.parse(text)
                 for entry in feed.entries[:5]:
                     title = entry.get("title", "").strip()
@@ -265,7 +263,6 @@ async def _fetch_cryptopanic(session) -> list:
                     item.relevance = calc_relevance(item)
                     items.append(item)
             else:
-                import feedparser
                 feed = feedparser.parse(await r.text())
                 for entry in feed.entries[:8]:
                     title = entry.get("title", "").strip()

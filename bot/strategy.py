@@ -24,7 +24,6 @@ def find_support_resistance(highs: list, lows: list, closes: list, atr_v: float)
     Encontra suporte e resistência REAIS baseados em swing points.
     Trader profissional: SL SEMPRE atrás de um nível técnico real.
     """
-    import numpy as np
     h = np.array(highs[-50:], dtype=float)
     l = np.array(lows[-50:],  dtype=float)
     c = np.array(closes[-50:],dtype=float)
