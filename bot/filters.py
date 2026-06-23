@@ -294,3 +294,109 @@ def get_filter_summary() -> dict:
         "trading_hours": LIQUIDITY_HOURS[0] <= now.hour < LIQUIDITY_HOURS[1],
         "current_hour":  now.hour,
     }
+
+
+# ── Checklist pré-trade ───────────────────────────────────────────────────────
+def pre_trade_checklist(symbol: str, price: float,
+                        ask: float, bid: float,
+                        funding_rate: float,
+                        direction: str,
+                        score: int,
+                        regime: str,
+                        session: str) -> dict:
+    """
+    Checklist completo antes de qualquer entrada.
+    Itens 20, 24, 28 da lista de melhorias.
+    Retorna {"ok": bool, "blocked_by": str, "details": dict}
+    """
+    details = {}
+
+    # ── 1. Spread máximo (0.05%) ──────────────────────────────
+    spread_pct = ((ask - bid) / price * 100) if price > 0 else 0
+    MAX_SPREAD_PCT = 0.05
+    details["spread_pct"]    = round(spread_pct, 4)
+    details["spread_ok"]     = spread_pct <= MAX_SPREAD_PCT
+    if not details["spread_ok"]:
+        return {"ok": False, "blocked_by": f"SPREAD_ALTO {spread_pct:.3f}% > {MAX_SPREAD_PCT}%",
+                "details": details}
+
+    # ── 2. Regime permitido ────────────────────────────────────
+    ALLOWED_REGIMES = {"TRENDING_UP", "TRENDING_DOWN"}
+    details["regime"]    = regime
+    details["regime_ok"] = regime in ALLOWED_REGIMES
+    if not details["regime_ok"]:
+        return {"ok": False, "blocked_by": f"REGIME_{regime}_PROIBIDO",
+                "details": details}
+
+    # ── 3. Score mínimo ────────────────────────────────────────
+    MIN_SCORE = 65
+    details["score"]    = score
+    details["score_ok"] = score >= MIN_SCORE
+    if not details["score_ok"]:
+        return {"ok": False, "blocked_by": f"SCORE_{score}_ABAIXO_{MIN_SCORE}",
+                "details": details}
+
+    # ── 4. Funding rate ────────────────────────────────────────
+    fr = funding_rate
+    MAX_FUNDING_LONG  = 0.0005   # 0.05%
+    MAX_FUNDING_SHORT = -0.0005  # -0.05%
+    details["funding_rate"] = fr
+    funding_ok = True
+    if direction == "LONG"  and fr > MAX_FUNDING_LONG:
+        funding_ok = False
+    if direction == "SHORT" and fr < MAX_FUNDING_SHORT:
+        funding_ok = False
+    details["funding_ok"] = funding_ok
+    if not funding_ok:
+        return {"ok": False, "blocked_by": f"FUNDING_{fr:.5f}_ALTO_PARA_{direction}",
+                "details": details}
+
+    # ── 5. Horário de liquidez ─────────────────────────────────
+    from datetime import datetime, timezone
+    hour = datetime.now(timezone.utc).hour
+    details["hour_utc"]   = hour
+    details["session"]    = session
+    details["session_ok"] = (hour >= 2 and hour < 23)
+    if not details["session_ok"]:
+        return {"ok": False, "blocked_by": f"FORA_HORARIO_UTC_{hour}h",
+                "details": details}
+
+    # ── Tudo passou ────────────────────────────────────────────
+    details["all_passed"] = True
+    return {"ok": True, "blocked_by": "", "details": details}
+
+
+def calc_trade_cost(entry: float, qty: float,
+                    funding_rate: float = 0.0001,
+                    periods_estimated: int = 3) -> dict:
+    """
+    Modelo de custos real por trade.
+    Item 28 da lista de melhorias.
+
+    Inclui: taxa de abertura + taxa de fechamento + funding estimado + slippage
+    Retorna break-even mínimo e custo total em USD e %.
+    """
+    TAKER_FEE  = 0.00055  # Bybit taker 0.055%
+    SLIPPAGE   = 0.0002   # 0.02% estimado
+    notional   = entry * qty
+
+    fee_open     = notional * TAKER_FEE
+    fee_close    = notional * TAKER_FEE
+    slippage_est = notional * SLIPPAGE * 2  # abertura + fechamento
+    funding_est  = notional * abs(funding_rate) * periods_estimated
+
+    total_cost  = fee_open + fee_close + slippage_est + funding_est
+    cost_pct    = (total_cost / notional * 100) if notional > 0 else 0
+    breakeven   = entry + (total_cost / qty) if qty > 0 else entry
+
+    return {
+        "notional":     round(notional, 2),
+        "fee_open":     round(fee_open, 4),
+        "fee_close":    round(fee_close, 4),
+        "slippage_est": round(slippage_est, 4),
+        "funding_est":  round(funding_est, 4),
+        "total_cost":   round(total_cost, 4),
+        "cost_pct":     round(cost_pct, 4),
+        "breakeven":    round(breakeven, 6),
+        "min_tp_to_profit": round(breakeven * 1.001, 6),  # 0.1% acima do breakeven
+    }

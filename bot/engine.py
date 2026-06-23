@@ -444,6 +444,7 @@ class TradingEngine:
                     self._check_daily_reset()
                     await self._update_balance()
                     await self._sync_positions()
+                    await self._check_stagnation_and_invalidation()
                     await self._manage_partial_tp()
                     await self._apply_trailing_stops()
                     await self._check_rr_double()
@@ -497,18 +498,19 @@ class TradingEngine:
         unrealized  = sum(p.pnl for p in self.positions.values())
         self.daily_pnl = realized + unrealized
 
-        # ── Stop-loss diário ──────────────────────────────────────
-        if not self.daily_stopped and self.daily_pnl <= -self.daily_stop_loss:
-            self.daily_stopped = True
-            log.warning(
-                f"🛑 STOP-LOSS DIÁRIO ATINGIDO: ${self.daily_pnl:.4f} ≤ -${self.daily_stop_loss:.0f}"
-                f" — Bot pausado até meia-noite UTC"
-            )
-            asyncio.create_task(notify(
-                f"🛑 *STOP-LOSS DIÁRIO ATINGIDO*\n"
-                f"Perda: `${self.daily_pnl:.2f}` | Limite: `-${self.daily_stop_loss:.0f}`\n"
-                f"Bot pausado até meia-noite UTC"
-            ))
+        # ── Stop/meta via DailyTracker (diário + semanal + mensal) ───
+        result = self.daily_tracker.check_limits()
+        if result == 'TARGET' and not self.daily_target_hit:
+            self.daily_target_hit = True
+        elif result in ('STOP', 'WEEKLY_STOP', 'MONTHLY_STOP'):
+            if not self.daily_stopped:
+                self.daily_stopped = True
+                label = {'STOP':'DIÁRIO','WEEKLY_STOP':'SEMANAL','MONTHLY_STOP':'MENSAL'}[result]
+                log.warning(f"🛑 STOP-LOSS {label} ATINGIDO: ${self.daily_pnl:.2f}")
+                asyncio.create_task(notify(
+                    f"🛑 *Stop-Loss {label}*\n"
+                    f"PnL: `${self.daily_pnl:.2f}` → bot pausado"
+                ))
 
         # ── Meta batida ───────────────────────────────────────────
         if not self.daily_target_hit and self.daily_pnl >= self.daily_target:
@@ -662,6 +664,16 @@ class TradingEngine:
 
                     # ── Circuit breaker individual por ativo ───────────
                     await self._record_trade_result(sym, pnl_net)
+                    # ── Journal estruturado com metadados ─────────────
+                    rr_achieved = abs(pnl_net / max(abs(pos.entry - pos.sl), 0.0001) / pos.qty) if pos.sl else 0
+                    self.daily_tracker.add_pnl(
+                        pnl_net,
+                        symbol=sym,
+                        entry_type=getattr(pos, "entry_type", ""),
+                        regime=getattr(pos, "regime", ""),
+                        session=self._get_market_session(),
+                        rr_achieved=round(rr_achieved, 2),
+                    )
 
                     # ── 3 perdas consecutivas: registra, bot CONTINUA ──
                     consecutive = await db.update_consecutive_losses(pnl_net)
@@ -819,6 +831,115 @@ class TradingEngine:
                     f"({self._consec_losses[symbol]} → 0)"
                 )
             self._consec_losses[symbol] = 0
+
+
+    async def _check_stagnation_and_invalidation(self):
+        """
+        Saída por tempo: fecha posição se em 4h o preço não se moveu > 0.5x ATR.
+        Saída por invalidação: fecha se CHoCH oposto aparece após a entrada.
+        Saída por regime: fecha se regime mudou para RANGING/COMPRESSED/CHOPPY.
+        Itens 8, 9, 15 da lista de melhorias.
+        """
+        from bot.indicators import atr as calc_atr
+        from bot.strategy import detect_regime
+
+        for sym, pos in list(self.positions.items()):
+            try:
+                k15 = self.client.get_kline_cache(sym, "15") or []
+                if len(k15) < 20:
+                    continue
+
+                closes = [float(k["c"]) for k in k15[:-1]]
+                highs  = [float(k["h"]) for k in k15[:-1]]
+                lows   = [float(k["l"]) for k in k15[:-1]]
+                cur    = pos.current_price or closes[-1]
+
+                atr_val = float(calc_atr(highs, lows, closes, 14)[-1])
+                if atr_val <= 0:
+                    continue
+
+                # ── Saída por TEMPO ────────────────────────────────
+                # Fecha se após 4h (16 candles 15M) o preço não se moveu > 0.5x ATR
+                STAGNATION_BARS  = 16
+                STAGNATION_MULT  = 0.5
+                movement = abs(cur - pos.entry)
+                bars_open = len(k15)  # proxy de tempo em trade
+                if (bars_open >= STAGNATION_BARS
+                        and movement < atr_val * STAGNATION_MULT):
+                    log.info(
+                        f"⏱️  [{sym}] Saída por TEMPO: {bars_open} candles aberto, "
+                        f"movimento={movement:.4f} < {atr_val*STAGNATION_MULT:.4f} "
+                        f"(0.5×ATR) → fechando para evitar funding acumulado"
+                    )
+                    close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                    await self.client.place_order(
+                        symbol=sym, side=close_side,
+                        qty=pos.qty, sl=0, tp=0,
+                        instruments=self.instruments
+                    )
+                    continue
+
+                # ── Saída por INVALIDAÇÃO (CHoCH oposto) ──────────
+                # Se após entrada LONG aparece CHoCH de baixa → setup invalidado
+                if len(closes) >= 10:
+                    recent_c = closes[-10:]
+                    recent_h = highs[-10:]
+                    recent_l = lows[-10:]
+
+                    # CHoCH simples: HH seguido de LL (topos e fundos)
+                    choch_bear = (
+                        recent_h[-1] < recent_h[-3] and
+                        recent_l[-1] < recent_l[-3] and
+                        recent_c[-1] < recent_c[-3]
+                    )
+                    choch_bull = (
+                        recent_l[-1] > recent_l[-3] and
+                        recent_h[-1] > recent_h[-3] and
+                        recent_c[-1] > recent_c[-3]
+                    )
+
+                    invalidated = (
+                        (pos.direction == "LONG"  and choch_bear) or
+                        (pos.direction == "SHORT" and choch_bull)
+                    )
+
+                    if invalidated and not pos.tp1_hit:
+                        log.info(
+                            f"❌ [{sym}] Saída por INVALIDAÇÃO: CHoCH oposto detectado "
+                            f"após entrada {pos.direction} → fechando antes do SL"
+                        )
+                        close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                        await self.client.place_order(
+                            symbol=sym, side=close_side,
+                            qty=pos.qty, sl=0, tp=0,
+                            instruments=self.instruments
+                        )
+                        continue
+
+                # ── Saída por MUDANÇA DE REGIME ────────────────────
+                # Se o regime mudou para RANGING/COMPRESSED/CHOPPY após a entrada
+                k4h = self.client.get_kline_cache(sym, "240") or []
+                if len(k4h) >= 20:
+                    c4h   = [float(k["c"]) for k in k4h[:-1]]
+                    h4h   = [float(k["h"]) for k in k4h[:-1]]
+                    l4h   = [float(k["l"]) for k in k4h[:-1]]
+                    atr4h = float(calc_atr(h4h, l4h, c4h, 14)[-1])
+                    regime_now = detect_regime(c4h, h4h, l4h, atr4h)
+
+                    if regime_now in ("RANGING", "COMPRESSED", "CHOPPY") and not pos.tp1_hit:
+                        log.info(
+                            f"🔄 [{sym}] Saída por REGIME: mercado mudou para "
+                            f"{regime_now} → setup trend-follow inválido, fechando"
+                        )
+                        close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                        await self.client.place_order(
+                            symbol=sym, side=close_side,
+                            qty=pos.qty, sl=0, tp=0,
+                            instruments=self.instruments
+                        )
+
+            except Exception as e:
+                log.error(f"_check_stagnation_and_invalidation {sym}: {e}")
 
     async def _manage_partial_tp(self):
         """
@@ -1016,6 +1137,16 @@ class TradingEngine:
 
                     # ── Circuit breaker individual por ativo ───────────
                     await self._record_trade_result(sym, pnl_net)
+                    # ── Journal estruturado com metadados ─────────────
+                    rr_achieved = abs(pnl_net / max(abs(pos.entry - pos.sl), 0.0001) / pos.qty) if pos.sl else 0
+                    self.daily_tracker.add_pnl(
+                        pnl_net,
+                        symbol=sym,
+                        entry_type=getattr(pos, "entry_type", ""),
+                        regime=getattr(pos, "regime", ""),
+                        session=self._get_market_session(),
+                        rr_achieved=round(rr_achieved, 2),
+                    )
 
                     # ── 3 perdas consecutivas: registra, bot CONTINUA ──
                     consecutive = await db.update_consecutive_losses(pnl_net)

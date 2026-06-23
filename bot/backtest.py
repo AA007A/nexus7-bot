@@ -504,14 +504,16 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
     log.info(f"🔬 Iniciando backtest 90 dias {symbol}...")
     start = time.time()
 
-    # 90 dias de dados: 15M ≈ 8640 candles, 1H ≈ 2160, 4H ≈ 540
-    CANDLES_90D_15M = 8640
-    CANDLES_90D_1H  = 2160
-    CANDLES_90D_4H  = 540
+    # FIX-3: 2 anos de dados (era 90 dias — insuficiente para validação)
+    # 2 anos: 15M = 70080 candles, 1H = 17520, 4H = 4380
+    # Bybit suporta até 1000 candles por request — fetch em lotes
+    CANDLES_2Y_15M = 70080
+    CANDLES_2Y_1H  = 17520
+    CANDLES_2Y_4H  =  4380
 
-    k15 = await fetch_history(client, symbol, "15",  CANDLES_90D_15M)
-    k1h = await fetch_history(client, symbol, "60",  CANDLES_90D_1H)
-    k4h = await fetch_history(client, symbol, "240", CANDLES_90D_4H)
+    k15 = await fetch_history(client, symbol, "15",  CANDLES_2Y_15M)
+    k1h = await fetch_history(client, symbol, "60",  CANDLES_2Y_1H)
+    k4h = await fetch_history(client, symbol, "240", CANDLES_2Y_4H)
 
     if not k15 or len(k15) < 100:
         return {"error": "Dados históricos insuficientes (min 100 candles 15M)"}
@@ -527,7 +529,8 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
     metrics = _calc_metrics(trades, "MTF-4H-1H-15M")
 
     # ── Walk-Forward Testing (out-of-sample) ─────────────────────
-    wf = _walk_forward(k15, k1h, k4h, n_windows=3, train_ratio=0.70)
+    # FIX: 3 → 6 janelas walk-forward para melhor cobertura estatística
+    wf = _walk_forward(k15, k1h, k4h, n_windows=6, train_ratio=0.70)
 
     elapsed = round(time.time() - start, 1)
     metrics["elapsed_seconds"]  = elapsed
@@ -554,6 +557,14 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
             f"Sharpe no percentil {mc.get('sharpe_percentile','?')}% das simulações"
         )
 
+    # Critério formal de invalidação
+    validity = check_strategy_validity(metrics, wf, mc)
+    metrics["strategy_validity"] = validity
+    if not validity["valid"]:
+        log.warning(
+            f"⚠️  ESTRATÉGIA {validity['verdict']} | "
+            f"Ação: {validity['action']}"
+        )
     log.info(
         f"✅ Backtest {symbol} | {actual_days:.0f} dias | {elapsed}s | "
         f"{len(trades)} trades | WR={metrics.get('win_rate')}% | "
@@ -618,3 +629,87 @@ async def weekly_backtest_loop(client):
         except Exception as e:
             log.error(f"weekly_backtest_loop: {e}")
         await asyncio.sleep(60)
+
+
+# ── Critério formal de invalidação da estratégia ─────────────────────────────
+def check_strategy_validity(metrics: dict, wf: dict, mc: dict) -> dict:
+    """
+    Critério formal de invalidação da estratégia.
+    Item 26 da lista de melhorias.
+
+    Retorna: {"valid": bool, "verdict": str, "warnings": list, "action": str}
+
+    Thresholds mínimos para continuar operando:
+      - Profit Factor OOS >= 1.10 (mínimo absoluto)
+      - Win Rate OOS >= 35% (dado R:R >= 2:1)
+      - Monte Carlo p-value < 0.10 (mínimo 90% confiança)
+      - Overfit risk != 'HIGH'
+      - Sharpe OOS >= 0.5
+    """
+    warnings = []
+    critical = []
+
+    pf_oos = wf.get("oos_pf", 0)
+    wr_oos = wf.get("oos_win_rate", 0)
+    sharpe_oos = wf.get("windows", [{}])[-1].get("test", {}).get("sharpe", 0)
+    overfit = wf.get("overfit_risk", "UNKNOWN")
+    p_value = mc.get("p_value", 1.0)
+    total_trades = metrics.get("total_trades", 0)
+
+    # Amostra mínima
+    if total_trades < 100:
+        warnings.append(f"Amostra pequena: {total_trades} trades (mín 200 para significância)")
+    if total_trades < 50:
+        critical.append(f"CRÍTICO: {total_trades} trades insuficientes para qualquer conclusão")
+
+    # Profit Factor
+    if pf_oos < 1.0:
+        critical.append(f"CRÍTICO: PF OOS={pf_oos:.2f} < 1.0 — estratégia perde dinheiro out-of-sample")
+    elif pf_oos < 1.10:
+        warnings.append(f"PF OOS={pf_oos:.2f} marginal — muito próximo de 1.0")
+
+    # Win Rate
+    if wr_oos < 35:
+        critical.append(f"CRÍTICO: WR OOS={wr_oos:.1f}% < 35% — esperado mínimo para R:R 2:1")
+
+    # Monte Carlo
+    if p_value >= 0.10:
+        critical.append(f"CRÍTICO: p-value={p_value:.4f} >= 0.10 — sem evidência estatística de edge")
+    elif p_value >= 0.05:
+        warnings.append(f"p-value={p_value:.4f} — edge fraco, monitorar")
+
+    # Overfitting
+    if overfit == "HIGH":
+        critical.append("CRÍTICO: Overfit risk=HIGH — parâmetros não generalizam")
+    elif overfit == "MEDIUM":
+        warnings.append("Overfit risk=MEDIUM — considerar simplificar")
+
+    # Veredito
+    if critical:
+        valid  = False
+        verdict = "INVALIDADA"
+        action  = "SUSPENDER capital real. Revisar parâmetros e re-testar."
+    elif len(warnings) >= 3:
+        valid  = False
+        verdict = "QUESTIONÁVEL"
+        action  = "Operar apenas em paper trade. Monitorar por 30 dias antes de capital real."
+    elif warnings:
+        valid  = True
+        verdict = "ACEITÁVEL_COM_RESSALVAS"
+        action  = "Operar com capital mínimo ($500-1000). Revisar em 50 trades."
+    else:
+        valid  = True
+        verdict = "VÁLIDA"
+        action  = "Operar com confiança moderada. Revisar trimestralmente."
+
+    return {
+        "valid":    valid,
+        "verdict":  verdict,
+        "action":   action,
+        "warnings": warnings,
+        "critical": critical,
+        "pf_oos":   pf_oos,
+        "wr_oos":   wr_oos,
+        "p_value":  p_value,
+        "overfit":  overfit,
+    }

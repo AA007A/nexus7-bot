@@ -309,10 +309,84 @@ async def weekly_optimization_loop(client):
                         log.info("📅 Otimização semanal automática iniciando...")
                         for sym in ["BTCUSDT", "ETHUSDT"]:
                             try:
-                                await run_optimization(client, sym, n_trials=200)
+                                await run_optimization(client, sym, n_trials=500)  # FIX: 200→500 para melhor cobertura
                             except Exception as e:
                                 log.error(f"weekly_optimization {sym}: {e}")
                 await asyncio.sleep(3600)
         except Exception as e:
             log.error(f"weekly_optimization_loop: {e}")
         await asyncio.sleep(60)
+
+
+def test_parameter_robustness(k15: list, k1h: list, k4h: list,
+                               best_params: dict,
+                               perturbation: float = 0.10) -> dict:
+    """
+    Teste de robustez por perturbação de parâmetros (±10%).
+    Item 38 da lista de melhorias.
+
+    Um sistema robusto mantém performance similar com pequenas variações
+    nos parâmetros. Se performance cai muito com ±10%, está overfitado.
+
+    Retorna: {"robust": bool, "avg_degradation_pct": float, "details": list}
+    """
+    from bot.backtest import _run_strategy as _rsp, _calc_metrics
+
+    base_trades  = _rsp(k15, k1h, k4h, min_score=best_params.get("min_score", 65))
+    base_metrics = _calc_metrics(base_trades)
+    base_sharpe  = base_metrics.get("sharpe_ratio", 0)
+    base_pf      = base_metrics.get("profit_factor", 0)
+
+    if not base_trades or base_sharpe <= 0:
+        return {"robust": False, "reason": "Base sem trades ou Sharpe negativo"}
+
+    perturbable = ["sl_mult", "tp_mult", "min_score"]
+    results = []
+
+    for param in perturbable:
+        if param not in best_params:
+            continue
+        base_val = best_params[param]
+        for direction in [1 + perturbation, 1 - perturbation]:
+            perturbed = dict(best_params)
+            if param == "min_score":
+                perturbed[param] = int(base_val * direction)
+            else:
+                perturbed[param] = round(base_val * direction, 4)
+
+            try:
+                trades  = _rsp(k15, k1h, k4h,
+                               min_score=perturbed.get("min_score", 65),
+                               sl_mult=perturbed.get("sl_mult", 1.5),
+                               tp_mult=perturbed.get("tp_mult", 3.0))
+                metrics = _calc_metrics(trades) if trades else {}
+                sharpe  = metrics.get("sharpe_ratio", 0)
+                pf      = metrics.get("profit_factor", 0)
+
+                sharpe_deg = ((base_sharpe - sharpe) / max(base_sharpe, 0.01)) * 100
+                pf_deg     = ((base_pf - pf) / max(base_pf, 0.01)) * 100
+
+                results.append({
+                    "param":      param,
+                    "direction":  f"{'+' if direction>1 else '-'}{perturbation*100:.0f}%",
+                    "value":      perturbed[param],
+                    "sharpe":     round(sharpe, 3),
+                    "pf":         round(pf, 2),
+                    "sharpe_deg": round(sharpe_deg, 1),
+                    "pf_deg":     round(pf_deg, 1),
+                })
+            except Exception:
+                pass
+
+    if not results:
+        return {"robust": True, "reason": "Sem parâmetros perturbáveis"}
+
+    avg_deg = float(np.mean([abs(r["sharpe_deg"]) for r in results]))
+    robust  = avg_deg < 30  # degradação < 30% é aceitável
+
+    return {
+        "robust":               robust,
+        "avg_degradation_pct":  round(avg_deg, 1),
+        "details":              results,
+        "verdict":              "ROBUSTO" if robust else "OVERFITADO",
+    }

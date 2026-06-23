@@ -24,7 +24,11 @@ class Config:
     TRAILING_LOCK:    float = 0.25
 
     # ── Qualidade de entrada (usado pelo engine.py) ───────────────
-    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "60"))   # score mínimo MTF
+    # FIX-4: Score 60→65 (conservador até calibração Optuna com 2 anos de dados)
+    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "65"))   # score mínimo MTF
+    MAX_SPREAD_PCT:   float = float(os.environ.get("MAX_SPREAD_PCT",  "0.05")) # 0.05% spread máximo
+    STAGNATION_BARS:  int   = int(os.environ.get("STAGNATION_BARS",  "16"))   # 4h em candles 15M
+    STAGNATION_MULT:  float = float(os.environ.get("STAGNATION_MULT","0.5"))  # 0.5xATR sem movimento
     POST_TARGET_SCORE:int   = int(os.environ.get("POST_TARGET_SCORE","72"))   # após meta diária
     POST_TARGET_RISK: float = float(os.environ.get("POST_TARGET_RISK","0.01"))  # SEGURO: 1% pos-meta (conservador)
     MIN_VOLUME_MULT:  float = float(os.environ.get("MIN_VOLUME_MULT", "0.5")) # volume mínimo 0.5x média
@@ -35,8 +39,10 @@ class Config:
     # Modo fixo (legacy): DAILY_TARGET e DAILY_STOP_LOSS em USD
     DAILY_TARGET:         float = float(os.environ.get("DAILY_TARGET",         "0"))     # 0 = dinâmico
     DAILY_STOP_LOSS:      float = float(os.environ.get("DAILY_STOP_LOSS",      "0"))     # 0 = dinâmico
-    DAILY_TARGET_PCT:     float = float(os.environ.get("DAILY_TARGET_PCT",     "0.01"))  # 1% do saldo
-    DAILY_STOP_LOSS_PCT:  float = float(os.environ.get("DAILY_STOP_LOSS_PCT",  "0.005")) # 0.5% do saldo
+    DAILY_TARGET_PCT:     float = float(os.environ.get("DAILY_TARGET_PCT",     "0.01"))   # 1% do saldo
+    DAILY_STOP_LOSS_PCT:  float = float(os.environ.get("DAILY_STOP_LOSS_PCT",  "0.01"))   # FIX: 0.5%→1% (era restritivo demais)
+    WEEKLY_STOP_PCT:      float = float(os.environ.get("WEEKLY_STOP_PCT",      "0.03"))   # 3% por semana
+    MONTHLY_STOP_PCT:     float = float(os.environ.get("MONTHLY_STOP_PCT",     "0.08"))   # 8% por mês
 
     # ── Relatório diário ─────────────────────────────────────────
     REPORT_INTERVAL_H: int = int(os.environ.get("REPORT_INTERVAL_H", "24"))

@@ -550,6 +550,80 @@ async def trigger_optimization(request: Request, _auth=Depends(_require_auth)):
         "status":  "running_in_background"
     }
 
+@app.get("/api/journal")
+async def get_journal_analysis(request: Request):
+    """
+    Análise do journal por tipo de entrada, sessão e regime.
+    Identifica quais condições geram alpha real.
+    """
+    engine = request.app.state.engine
+    return engine.daily_tracker.journal_analysis()
+
+
+@app.get("/api/validity")
+async def get_strategy_validity(request: Request):
+    """
+    Critério formal de invalidação da estratégia.
+    Retorna se o sistema está válido para operar com capital real.
+    """
+    try:
+        from bot.backtest import check_strategy_validity
+        engine = request.app.state.engine
+        # Busca último backtest do banco
+        import asyncio
+        from bot import database as db
+        results = await db.get_backtest_results("BTCUSDT", limit=1)
+        if not results:
+            return {"status": "Sem backtest disponível — rode /api/backtest/run primeiro"}
+        r = results[0]
+        validity = check_strategy_validity(
+            metrics=r.get("metrics", {}),
+            wf=r.get("walk_forward", {}),
+            mc=r.get("monte_carlo", {}),
+        )
+        return validity
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/trade-cost")
+async def simulate_trade_cost(
+    request: Request,
+    symbol: str = "BTCUSDT",
+    qty: float = 0.01,
+    funding_rate: float = 0.0001,
+):
+    """
+    Simula o custo real de um trade: taxas + funding + slippage.
+    Retorna breakeven mínimo para o trade ser lucrativo.
+    """
+    from bot.filters import calc_trade_cost
+    engine = request.app.state.engine
+    d = (engine.client.get_kline_cache(symbol, "15") or [{}])
+    price = float(d[-1].get("c", 0)) if d else 0
+    if not price:
+        return {"error": "Preço não disponível"}
+    return calc_trade_cost(price, qty, funding_rate)
+
+
+@app.get("/api/weekly-performance")
+async def get_weekly_performance(request: Request):
+    """Performance semanal e mensal com status de limites."""
+    engine = request.app.state.engine
+    dt = engine.daily_tracker
+    return {
+        "daily_pnl":         round(dt.daily_pnl, 4),
+        "weekly_pnl":        round(dt.weekly_pnl, 4),
+        "monthly_pnl":       round(dt.monthly_pnl, 4),
+        "weekly_stop_loss":  round(dt.weekly_stop_loss, 2),
+        "monthly_stop_loss": round(dt.monthly_stop_loss, 2),
+        "weekly_stopped":    dt.weekly_stopped,
+        "monthly_stopped":   dt.monthly_stopped,
+        "can_trade":         dt.can_trade(),
+        "mode":              dt.to_dict().get("mode", "ATIVO"),
+    }
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

@@ -139,8 +139,10 @@ class Signal:
     tf_15m:       str  = ""
     expected_pnl: float = 0.0
     total_fees:   float = 0.0
-    entry_type:   str  = "PULLBACK"
-    regime:       str  = "RANGING"   # regime de mercado detectado no 4H
+    entry_type:       str   = "PULLBACK"
+    regime:           str   = "RANGING"   # regime de mercado detectado no 4H
+    choch_exit_price: float = 0.0         # preço de saída por invalidação CHoCH (0 = não ativo)
+    stagnation_bars:  int   = 0           # candles sem movimento (para saída por tempo)
     tp1:          float = 0.0   # TP parcial 50% — primeiro alvo técnico
     tp2:          float = 0.0   # TP final  50% — segundo alvo técnico
     rr1:          float = 0.0   # R/R do TP1
@@ -162,13 +164,15 @@ class Signal:
         assert self.tp > 0,       f"Signal.tp inválido: {self.tp}"
         assert self.direction in ("LONG", "SHORT"), f"Signal.direction inválido: {self.direction}"
         if self.direction == "LONG":
-            assert self.sl < self.entry < self.tp, (
-                f"LONG inválido: sl={self.sl} entry={self.entry} tp={self.tp}"
-            )
+            if not (self.sl < self.entry < self.tp):
+                raise ValueError(
+                    f"LONG inválido: sl={self.sl} entry={self.entry} tp={self.tp}"
+                )
         else:
-            assert self.tp < self.entry < self.sl, (
-                f"SHORT inválido: tp={self.tp} entry={self.entry} sl={self.sl}"
-            )
+            if not (self.tp < self.entry < self.sl):
+                raise ValueError(
+                    f"SHORT inválido: tp={self.tp} entry={self.entry} sl={self.sl}"
+                )
 
 
 # ─── Regime Detector ─────────────────────────────────────────────
@@ -231,15 +235,20 @@ def detect_entry(closes, highs, lows, opens, volumes, direction, atr_v) -> Tuple
     if direction == "SHORT" and closes[-1] < closes[-2] and body_size > atr_v * 0.25:
         return True, "MOMENTUM"
 
-    # 3) Pullback clássico
+    # 3) Pullback clássico — FIX-4: lookback 6 → 20 candles
+    # 6 velas = 1.5h no 15M = micro-range sem significado estrutural
+    # 20 velas = 5h no 15M = suporte/resistência real com significado
+    pb_window = 20
     if direction == "LONG":
-        local_min = min(lows[-6:])
-        if ((max(highs[-6:]) - local_min) >= atr_v * 0.35
+        local_min = min(lows[-pb_window:]) if len(lows) >= pb_window else min(lows)
+        local_max = max(highs[-pb_window:]) if len(highs) >= pb_window else max(highs)
+        if ((local_max - local_min) >= atr_v * 0.35
                 and price > local_min + atr_v * 0.12):
             return True, "PULLBACK"
     else:
-        local_max = max(highs[-6:])
-        if ((local_max - min(lows[-6:])) >= atr_v * 0.35
+        local_max = max(highs[-pb_window:]) if len(highs) >= pb_window else max(highs)
+        local_min = min(lows[-pb_window:]) if len(lows) >= pb_window else min(lows)
+        if ((local_max - local_min) >= atr_v * 0.35
                 and price < local_max - atr_v * 0.12):
             return True, "PULLBACK"
 
@@ -483,8 +492,10 @@ class Analyzer:
 
         # ── PASSO 1: Regime 4H ──────────────────────────────────
         regime = detect_regime(c4h, h4h, l4h, atr_4h)
-        if regime == "COMPRESSED":
-            log.debug(f"[{symbol}] 4H COMPRESSED → HOLD")
+        # FIX-1: Bloquear RANGING, COMPRESSED e CHOPPY — sistema é trend-follow
+        # Em lateralização (60-70% do tempo) o edge desaparece sistematicamente
+        if regime in ("COMPRESSED", "RANGING", "CHOPPY"):
+            log.debug(f"[{symbol}] 4H {regime} → HOLD (trend-follow só opera TRENDING)")
             return None
 
         # ── PASSO 2: Direção (4H + 1H) ─────────────────────────
@@ -498,16 +509,19 @@ class Analyzer:
         bull_1h = e20_1h > e50_1h and c1h[-1] > e20_1h
         bear_1h = e20_1h < e50_1h and c1h[-1] < e20_1h
 
+        # FIX-3: Direção sem zona cinzenta — 4H E 1H obrigatoriamente alinhados
+        # Versão anterior permitia entrar se 1H estava em alta mas 4H era neutro
+        # Isso gerava entradas em correções de tendências maiores contrárias
         if bull_4h and bull_1h:
             direction = "LONG"
         elif bear_4h and bear_1h:
             direction = "SHORT"
-        elif bull_1h and not bear_4h:
-            direction = "LONG"
-        elif bear_1h and not bull_4h:
-            direction = "SHORT"
         else:
-            log.debug(f"[{symbol}] 4H/1H conflito → HOLD")
+            # Qualquer ambiguidade: não entra
+            log.debug(
+                f"[{symbol}] 4H/1H não alinhados "
+                f"(bull4h={bull_4h} bear4h={bear_4h} bull1h={bull_1h} bear1h={bear_1h}) → HOLD"
+            )
             return None
 
         # ── PASSO 3: Score confluência ──────────────────────────
@@ -536,9 +550,11 @@ class Analyzer:
         if s15["rsi_v"] > 82 or s15["rsi_v"] < 18:
             log.debug(f"[{symbol}] RSI extremo {s15['rsi_v']:.0f} → HOLD")
             return None
-        # Volume muito fraco — threshold baixo para não bloquear em períodos normais
-        if s15["vol_r"] < 0.15:
-            log.debug(f"[{symbol}] Volume muito fraco {s15['vol_r']:.2f}x → HOLD")
+        # FIX-2: Volume threshold 0.15 → 0.60 — filtro anterior não funcionava
+        # 0.15x = só bloqueia quando volume está 85% abaixo do normal (nunca acontece)
+        # 0.60x = garante liquidez mínima para execução sem slippage excessivo
+        if s15["vol_r"] < 0.60:
+            log.debug(f"[{symbol}] Volume insuficiente {s15['vol_r']:.2f}x < 0.60x → HOLD")
             return None
         # 15M não alinhado
         if not s15["aligned"]:
