@@ -50,9 +50,9 @@ DEFAULT_PARAMS = {
     "rsi_ob":             75,
     "rsi_os":             25,
     "min_adx":            22,
-    "vol_threshold":      0.15,
-    "min_score":          60,
-    "bos_lookback":       8,
+    "vol_threshold":      0.60,   # FIX: 0.15→0.60 consistente com strategy.py
+    "min_score":          65,     # FIX: 60→65 consistente com config.py
+    "bos_lookback":       20,     # FIX: 8→20 consistente com strategy.py
     "momentum_atr_mult":  0.25,
 }
 
@@ -90,7 +90,7 @@ def load_optimized_params() -> dict:
                 return data.get("best_params", DEFAULT_PARAMS)
             return None
 
-        loop = _ai.get_event_loop()
+        loop = asyncio.get_event_loop()
         if loop.is_running():
             # Ambiente async — agenda como task (não bloqueia)
             log.info("load_optimized_params: agendando carga do DB...")
@@ -130,9 +130,9 @@ def save_optimized_params(params: dict, metadata: dict = None):
     # SEC-4/INFRA-3: salva também como variável de ambiente persistente via DB
     # Isso garante que os params sobrevivem a deploys no Railway
     try:
-        _ai.get_event_loop().create_task(
+        asyncio.get_event_loop().create_task(
             _db.save_key_value("optimizer_params", json.dumps(payload))
-        ) if _ai.get_event_loop().is_running() else None
+        ) if asyncio.get_event_loop().is_running() else None
     except Exception:
         pass   # silencioso — arquivo local é suficiente em dev
 
