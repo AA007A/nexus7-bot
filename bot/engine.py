@@ -845,7 +845,7 @@ class TradingEngine:
 
         for sym, pos in list(self.positions.items()):
             try:
-                k15 = self.client.get_kline_cache(sym, "15") or []
+                k15 = self.client.get_cached_klines(sym, "15", limit=100) or []
                 if len(k15) < 20:
                     continue
 
@@ -918,7 +918,7 @@ class TradingEngine:
 
                 # ── Saída por MUDANÇA DE REGIME ────────────────────
                 # Se o regime mudou para RANGING/COMPRESSED/CHOPPY após a entrada
-                k4h = self.client.get_kline_cache(sym, "240") or []
+                k4h = self.client.get_cached_klines(sym, "240", limit=50) or []
                 if len(k4h) >= 20:
                     c4h   = [float(k["c"]) for k in k4h[:-1]]
                     h4h   = [float(k["h"]) for k in k4h[:-1]]
