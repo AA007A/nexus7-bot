@@ -7,6 +7,7 @@ Fault-tolerant: se DB cair, bot continua operando.
 """
 import os, json, asyncio
 from datetime import datetime, timezone, date
+from bot.logger import log
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
 SQLITE_PATH  = "/tmp/bgx_capital.db"
