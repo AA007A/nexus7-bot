@@ -20,9 +20,11 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . .
 
 # Variáveis de ambiente padrão (sobrescritas no Railway)
+# IMPORTANTE: LOG_LEVEL deve ser minúsculo — uvicorn exige
+# 'critical'|'error'|'warning'|'info'|'debug'|'trace'
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    LOG_LEVEL=INFO \
+    LOG_LEVEL=info \
     PORT=8000
 
 # Healthcheck
