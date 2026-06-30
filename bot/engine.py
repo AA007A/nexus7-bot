@@ -21,7 +21,7 @@ BGX Capital Trading Engine v11.0
   ✅ Paper Trade mode funcional (PAPER_TRADE=true)
 """
 import asyncio, time, itertools, os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List
 import numpy as np
 

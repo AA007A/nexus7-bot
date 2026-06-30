@@ -5,6 +5,7 @@ EMA, RSI, MACD, VWAP, Volume Profile,
 SMC (BOS, CHoCH, HH/HL/LH/LL)
 """
 import numpy as np
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 
@@ -258,7 +259,7 @@ def vwap(highs: list, lows: list, closes: list, volumes: list,
         else:  # week
             # Âncora: segunda-feira da semana atual às 00:00 UTC
             days_since_monday = now_dt.weekday()
-            anchor_dt = (now_dt - __import__("datetime").timedelta(days=days_since_monday)
+            anchor_dt = (now_dt - timedelta(days=days_since_monday)
                         ).replace(hour=0, minute=0, second=0, microsecond=0)
 
         anchor_ts = anchor_dt.timestamp()

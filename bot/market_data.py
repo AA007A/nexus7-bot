@@ -16,6 +16,7 @@ from bot.logger import log
 
 import time as _time
 from collections import deque
+from datetime import datetime, timezone, timedelta
 
 _CVD_WINDOW_SECONDS = 4 * 3600   # janela de 4 horas
 
