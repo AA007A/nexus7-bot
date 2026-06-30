@@ -1,7 +1,11 @@
 import logging, sys, os
 
 def _make(name):
-    lvl = getattr(logging, os.environ.get("LOG_LEVEL","INFO"), logging.INFO)
+    # .upper() garante que 'info'/'INFO'/'Info' todos viram 'INFO'
+    # sem isso, getattr(logging, "info") retorna a funcao logging.info
+    # em vez da constante logging.INFO, causando TypeError no setLevel
+    level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    lvl = getattr(logging, level_str, logging.INFO)
     lg = logging.getLogger(name)
     if not lg.handlers:
         lg.setLevel(lvl)
