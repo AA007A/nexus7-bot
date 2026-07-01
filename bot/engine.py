@@ -1336,7 +1336,7 @@ class TradingEngine:
                 )
 
                 if ws_hit:
-                    log.info(
+                    log.debug(
                         f"🔍 [{sym}] WS cache hit "
                         f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) — sem REST"
                     )
@@ -1350,7 +1350,7 @@ class TradingEngine:
                     if len(k4h) < WS_MIN_4H:
                         missing.append(("240", 100))
 
-                    log.info(
+                    log.debug(
                         f"🔍 [{sym}] WS cache miss "
                         f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) "
                         f"— REST paralelo para {[m[0] for m in missing]}"
@@ -1392,7 +1392,7 @@ class TradingEngine:
                     # ── Ajuste de sessão de mercado ──────────────
                     adjusted = self._session_score_adjustment(sym, sig.score)
                     if adjusted < min_score:
-                        log.info(
+                        log.debug(
                             f"[{sym}] Score {sig.score}→{adjusted} após "
                             f"ajuste sessão {self._get_market_session()} → HOLD"
                         )
@@ -1407,10 +1407,10 @@ class TradingEngine:
                         continue
                 if sig:
                     if sig.expected_pnl <= 0:
-                        log.info(f"[{sym}] PnL negativo após taxas → HOLD")
+                        log.debug(f"[{sym}] PnL negativo após taxas → HOLD")
                         continue
                     candidates.append(sig)
-                    log.info(
+                    log.debug(
                         f"🎯 SINAL PREMIUM: {sym} score={sig.score}/100 "
                         f"{sig.direction} R:R={sig.rr} "
                         f"PnL_líq≈+{sig.expected_pnl:.2f}% | {sig.reason}"
@@ -1453,14 +1453,14 @@ class TradingEngine:
                         rsi_v=rsi_fn(c15)[-1]
                         vols=__import__('numpy').array(v15); avg_vol=vols[-21:-1].mean() if len(vols)>21 else vols.mean() or 1
                         vol_r=vols[-1]/avg_vol
-                        log.info(
+                        log.debug(
                             f"[{sym}] Score={combined}/100 (4H:{s4['total']} 1H:{s1['total']} 15M:{s15['total']}) "
                             f"| regime={regime} RSI={rsi_v:.0f} vol={vol_r:.2f}x "
                             f"| 4H={'↑' if bull_4h else '↓' if bear_4h else '→'} "
                             f"1H={'↑' if bull_1h else '↓' if bear_1h else '→'} → HOLD"
                         )
                     except Exception as ex:
-                        log.info(f"[{sym}] ✗ Sem sinal")
+                        log.debug(f"[{sym}] ✗ Sem sinal")
                         combined = 0
                         regime = "UNKNOWN"
                         rsi_v = 0

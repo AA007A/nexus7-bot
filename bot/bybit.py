@@ -322,7 +322,7 @@ class BybitClient:
             f"tick={tick_size} sl_raw={sl} → sl='{body.get('stopLoss', '-')}' | "
             f"tp_raw={tp} → tp='{body.get('takeProfit', '-')}'"
         )
-        log.info(f"📦 place_order body completo: {json.dumps(body)}")
+        log.debug(f"📦 place_order body completo: {json.dumps(body)}")  # debug
         return await self._post("/v5/order/create", body)
 
     async def set_sl(self, symbol: str, sl: float):
