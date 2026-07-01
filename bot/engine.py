@@ -309,7 +309,7 @@ class RiskManager:
             self.peak    = balance
             self.balance = balance
             self._ready  = True
-            log.info(f"📊 RiskManager: ${balance:.4f} | poder=${balance*cfg.LEVERAGE:.2f}")
+            log.debug(f"📊 RiskManager: ${balance:.4f} | poder=${balance*cfg.LEVERAGE:.2f}")  # debug: evita spam
 
     def update(self, balance: float):
         if balance <= 0:
@@ -325,7 +325,7 @@ class RiskManager:
             log.warning(f"🚨 Drawdown {self.drawdown:.1%} >= limite {cfg.MAX_DRAWDOWN:.0%} → bloqueado")
             return False
         if n_open >= cfg.MAX_POSITIONS:
-            log.info(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando fechamento")
+            log.debug(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando")  # debug
             return False
         return True
 

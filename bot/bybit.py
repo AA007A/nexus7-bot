@@ -225,12 +225,12 @@ class BybitClient:
                 if coin.get("coin") == "USDT":
                     bal = float(coin.get("walletBalance", 0) or 0)
                     if bal > 0:
-                        log.info(f"💰 Saldo USDT: ${bal:.4f}")
+                        log.debug(f"💰 Saldo USDT: ${bal:.4f}")  # debug: evita log a cada 5s
                         return bal
             # Fallback: totalEquity da conta
             equity = float(account.get("totalEquity", 0) or 0)
             if equity > 0:
-                log.info(f"💰 Saldo (equity): ${equity:.4f}")
+                log.debug(f"💰 Saldo (equity): ${equity:.4f}")  # debug
                 return equity
             return 0.0
         except json.JSONDecodeError as e:
