@@ -451,7 +451,8 @@ class TradingEngine:
                     self._update_daily_pnl()
                     
                     if self.daily_stopped:
-                        log.warning("🛑 Stop-loss diário ativado")
+                        # FIX: logar apenas 1x — não a cada 5s em loop infinito
+                        pass   # já logado em _update_daily_pnl, não repetir aqui
                     elif self.risk.can_open(len(self.positions)):
                         await self._scan_all_and_enter()
 
@@ -487,9 +488,12 @@ class TradingEngine:
             # cfg.DAILY_TARGET=0 → usa 1% do saldo; cfg.DAILY_STOP_LOSS=0 → usa 0.5% do saldo
             bal = self.risk.balance or 1000.0
             if cfg.DAILY_TARGET == 0:
-                self.daily_target    = round(bal * 0.01, 2)   # 1% do saldo
+                self.daily_target    = round(bal * cfg.DAILY_TARGET_PCT, 2)    # dinâmico
             if cfg.DAILY_STOP_LOSS == 0:
-                self.daily_stop_loss = round(bal * 0.005, 2)  # 0.5% do saldo
+                # FIX: mínimo absoluto de $1.00 para evitar stop em PnL ínfimo
+                # Com saldo de $16, 1% = $0.17 — qualquer taxa ativa o stop
+                raw_stop = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = max(raw_stop, 1.00)   # nunca menos que $1.00
             log.info(f"🎯 Meta diária: ${self.daily_target:.2f} | Stop-loss dia: -${self.daily_stop_loss:.2f} | Saldo: ${bal:.2f}")
 
     def _update_daily_pnl(self):

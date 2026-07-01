@@ -48,10 +48,13 @@ class DailyTracker:
         MELHORIA: stop diário 0.5% → 1%, + semanal 3%, + mensal 8%
         """
         if balance > 0:
-            self.daily_target     = balance * cfg.DAILY_TARGET_PCT    # 1%
-            self.daily_stop_loss  = balance * cfg.DAILY_STOP_LOSS_PCT # 1%
-            self.weekly_stop_loss = balance * getattr(cfg, "WEEKLY_STOP_PCT",  0.03)  # 3%
-            self.monthly_stop_loss= balance * getattr(cfg, "MONTHLY_STOP_PCT", 0.08)  # 8%
+            self.daily_target     = round(balance * cfg.DAILY_TARGET_PCT, 2)
+            # FIX: mínimo absoluto $1.00 — com saldos pequenos (<$100) o stop
+            # percentual fica tão pequeno que qualquer taxa de exchange ativa
+            raw_daily_stop        = balance * cfg.DAILY_STOP_LOSS_PCT
+            self.daily_stop_loss  = max(round(raw_daily_stop, 2), 1.00)
+            self.weekly_stop_loss = max(round(balance * getattr(cfg, "WEEKLY_STOP_PCT",  0.03), 2), 3.00)
+            self.monthly_stop_loss= max(round(balance * getattr(cfg, "MONTHLY_STOP_PCT", 0.08), 2), 8.00)
 
     def check_reset(self, balance: float):
         """
