@@ -158,11 +158,15 @@ class Signal:
             self.tp1 = self.tp
         if self.tp2 == 0.0:
             self.tp2 = self.tp
-        # ARCH-2: validações de integridade — falha rápida com mensagem clara
-        assert self.entry > 0,    f"Signal.entry inválido: {self.entry}"
-        assert self.sl > 0,       f"Signal.sl inválido: {self.sl}"
-        assert self.tp > 0,       f"Signal.tp inválido: {self.tp}"
-        assert self.direction in ("LONG", "SHORT"), f"Signal.direction inválido: {self.direction}"
+        # Validações de integridade — usando ValueError (funciona mesmo com python -O)
+        if self.entry <= 0:
+            raise ValueError(f"Signal.entry inválido: {self.entry}")
+        if self.sl <= 0:
+            raise ValueError(f"Signal.sl inválido: {self.sl}")
+        if self.tp <= 0:
+            raise ValueError(f"Signal.tp inválido: {self.tp}")
+        if self.direction not in ("LONG", "SHORT"):
+            raise ValueError(f"Signal.direction inválido: {self.direction}")
         if self.direction == "LONG":
             if not (self.sl < self.entry < self.tp):
                 raise ValueError(

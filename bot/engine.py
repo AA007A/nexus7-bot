@@ -1762,9 +1762,9 @@ class TradingEngine:
     async def _update_balance(self):
         try:
             bal = await self.client.get_balance()
+            _dbal = bal if bal >= 0 else (self.risk.balance or 0.0)  # sempre definida
             if bal >= 0:
                 self.risk.update(bal)
-                _dbal = bal   # FIX: sempre definida, independente do drawdown
                 if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                     log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
                     self.active = False

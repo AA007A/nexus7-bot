@@ -5,6 +5,7 @@ EMA, RSI, MACD, VWAP, Volume Profile,
 SMC (BOS, CHoCH, HH/HL/LH/LL)
 """
 import numpy as np
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -475,7 +476,6 @@ def update_orderbook_history(symbol: str, orderbook: dict):
     Armazena snapshot do orderbook para análise de spoofing.
     Deve ser chamado a cada atualização do WebSocket (~500ms).
     """
-    import time
     if symbol not in _ob_history:
         _ob_history[symbol] = []
     snapshot = {
