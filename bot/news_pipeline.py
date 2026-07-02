@@ -1,4 +1,6 @@
 import feedparser
+import time
+import os
 """
 BGX Capital — News Intelligence Pipeline v1.0
 Pipeline unificado: RSS Premium + Twitter + CryptoPanic

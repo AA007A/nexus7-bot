@@ -1,5 +1,6 @@
 import aiohttp
 from bot import database as db
+import time
 """
 BGX Capital — Pre-Trade Score System
 Score 0-100 antes de qualquer entrada.

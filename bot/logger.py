@@ -1,4 +1,5 @@
 import logging, sys, os
+import os
 
 def _make(name):
     # .upper() garante que 'info'/'INFO'/'Info' todos viram 'INFO'

@@ -27,6 +27,8 @@ Parâmetros otimizados:
 import asyncio, json, os, argparse, time
 from pathlib import Path
 import numpy as np
+import time
+import json
 
 try:
     import optuna

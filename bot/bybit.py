@@ -9,6 +9,9 @@ import asyncio, hashlib, hmac, json, time, os
 import aiohttp
 from bot.logger import log
 from bot.indicators import update_orderbook_history
+import time
+import json
+import os
 
 BASE        = "https://api.bybit.com"
 WS_PUBLIC   = "wss://stream.bybit.com/v5/public/linear"

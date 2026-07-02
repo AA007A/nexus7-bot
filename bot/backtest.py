@@ -13,6 +13,7 @@ from typing import List, Dict
 import numpy as np
 from bot.logger import log
 from bot.config import cfg
+import time
 
 
 # ── Busca histórico OHLCV ────────────────────────────────────────

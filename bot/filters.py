@@ -8,6 +8,7 @@ run_all_filters() conectado ao fluxo real de _open() no engine.py
 import asyncio, time, aiohttp
 from datetime import datetime, timezone
 from bot.logger import log
+import time
 
 # ── Cache global ──────────────────────────────────────────────────
 # BUG CORRIGIDO v12: ts inicializado com time.time() em vez de 0.
