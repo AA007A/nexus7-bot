@@ -554,11 +554,9 @@ class Analyzer:
         if s15["rsi_v"] > 82 or s15["rsi_v"] < 18:
             log.debug(f"[{symbol}] RSI extremo {s15['rsi_v']:.0f} → HOLD")
             return None
-        # FIX-2: Volume threshold 0.15 → 0.60 — filtro anterior não funcionava
-        # 0.15x = só bloqueia quando volume está 85% abaixo do normal (nunca acontece)
-        # 0.60x = garante liquidez mínima para execução sem slippage excessivo
-        if s15["vol_r"] < 0.60:
-            log.debug(f"[{symbol}] Volume insuficiente {s15['vol_r']:.2f}x < 0.60x → HOLD")
+        # Volume mínimo: 0.40x da média (equilibrio entre liquidez e frequência)
+        if s15["vol_r"] < 0.40:
+            log.debug(f"[{symbol}] Volume insuficiente {s15['vol_r']:.2f}x < 0.40x → HOLD")
             return None
         # 15M não alinhado
         if not s15["aligned"]:

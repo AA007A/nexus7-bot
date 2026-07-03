@@ -14,7 +14,7 @@ class Config:
 
     # ── Risk ─────────────────────────────────────────────────────
     LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "5"))      # SEGURO: 5x — use env var para aumentar
-    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.01"))   # SEGURO: 1% por trade (padrao institucional)
+    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.06"))   # 6% para atingir notional mínimo Bybit com saldo pequeno
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.08"))   # SEGURO: 8% DD maximo
     INITIAL_CAP:     float = float(os.environ.get("INITIAL_CAP",  "0"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))      # SEGURO: max 3 (correlacao entre pares)
@@ -24,8 +24,7 @@ class Config:
     TRAILING_LOCK:    float = 0.25
 
     # ── Qualidade de entrada (usado pelo engine.py) ───────────────
-    # FIX-4: Score 60→65 (conservador até calibração Optuna com 2 anos de dados)
-    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "65"))   # score mínimo MTF
+    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "60"))   # score mínimo MTF
     MAX_SPREAD_PCT:   float = float(os.environ.get("MAX_SPREAD_PCT",  "0.05")) # 0.05% spread máximo
     STAGNATION_BARS:  int   = int(os.environ.get("STAGNATION_BARS",  "16"))   # 4h em candles 15M
     STAGNATION_MULT:  float = float(os.environ.get("STAGNATION_MULT","0.5"))  # 0.5xATR sem movimento
