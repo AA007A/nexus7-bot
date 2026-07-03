@@ -29,11 +29,11 @@ class DailyTracker:
         self.weekly_pnl       = 0.0   # acumulado na semana
         self.monthly_pnl      = 0.0   # acumulado no mês
         self.daily_target     = cfg.DAILY_TARGET      # fallback USD
-        self.daily_stop_loss  = cfg.DAILY_STOP_LOSS   # fallback USD
+        self.daily_stop_loss  = 0.0   # REMOVIDO — sem stop loss diário
         self.weekly_stop_loss = 0.0   # calculado em recalc_limits
         self.monthly_stop_loss= 0.0   # calculado em recalc_limits
         self.daily_target_hit = False
-        self.daily_stopped    = False
+        self.daily_stopped    = False  # mantido por compatibilidade (sempre False)
         self.weekly_stopped   = False
         self.monthly_stopped  = False
         self._last_reset_day  = -1
@@ -51,10 +51,10 @@ class DailyTracker:
             self.daily_target     = round(balance * cfg.DAILY_TARGET_PCT, 2)
             # FIX: mínimo absoluto $1.00 — com saldos pequenos (<$100) o stop
             # percentual fica tão pequeno que qualquer taxa de exchange ativa
-            raw_daily_stop        = balance * cfg.DAILY_STOP_LOSS_PCT
-            self.daily_stop_loss  = max(round(raw_daily_stop, 2), 1.00)
-            self.weekly_stop_loss = max(round(balance * getattr(cfg, "WEEKLY_STOP_PCT",  0.03), 2), 3.00)
-            self.monthly_stop_loss= max(round(balance * getattr(cfg, "MONTHLY_STOP_PCT", 0.08), 2), 8.00)
+            # Stop diário REMOVIDO por configuração do usuário
+            self.daily_stop_loss   = 0.0  # desativado
+            self.weekly_stop_loss  = max(round(balance * getattr(cfg, "WEEKLY_STOP_PCT",  0.03), 2), 3.00)
+            self.monthly_stop_loss = max(round(balance * getattr(cfg, "MONTHLY_STOP_PCT", 0.08), 2), 8.00)
 
     def check_reset(self, balance: float):
         """
@@ -91,8 +91,7 @@ class DailyTracker:
             self.recalc_limits(balance)
             log.info(
                 f"🌅 Reset diário — Meta: ${self.daily_target:.2f} "
-                f"({cfg.DAILY_TARGET_PCT * 100:.1f}% saldo) | "
-                f"Stop: -${self.daily_stop_loss:.2f}"
+                f"({cfg.DAILY_TARGET_PCT * 100:.1f}% saldo)"
             )
 
     def add_pnl(self, pnl_net: float,
@@ -152,18 +151,12 @@ class DailyTracker:
                 f"≥ ${self.daily_target:.2f} → modo conservador"
             )
             return 'TARGET'
-        if self.daily_pnl <= -self.daily_stop_loss and not self.daily_stopped:
-            self.daily_stopped = True
-            log.warning(
-                f"🛑 Stop diário ativado! PnL=${self.daily_pnl:.2f} "
-                f"≤ -${self.daily_stop_loss:.2f} → sem novas entradas"
-            )
-            return 'STOP'
+        # Stop diário REMOVIDO por configuração
         return 'OK'
 
     def can_trade(self) -> bool:
         """True se o bot pode abrir novas posições (verifica todas as camadas)."""
-        return not (self.daily_stopped or self.weekly_stopped or self.monthly_stopped)
+        return not (self.weekly_stopped or self.monthly_stopped)  # sem stop diário
 
     def journal_analysis(self) -> dict:
         """
@@ -221,11 +214,10 @@ class DailyTracker:
         return cfg.POST_TARGET_RISK / cfg.MAX_RISK_PCT if self.daily_target_hit else 1.0
 
     def to_dict(self) -> dict:
-        stopped = self.daily_stopped or self.weekly_stopped or self.monthly_stopped
+        stopped = self.weekly_stopped or self.monthly_stopped
         mode = (
             "PARADO_MÊS"    if self.monthly_stopped else
             "PARADO_SEMANA" if self.weekly_stopped  else
-            "PARADO_DIA"    if self.daily_stopped   else
             "CONSERVADOR"   if self.daily_target_hit else
             "ATIVO"
         )

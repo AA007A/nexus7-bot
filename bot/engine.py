@@ -491,11 +491,7 @@ class TradingEngine:
             bal = self.risk.balance or 1000.0
             if cfg.DAILY_TARGET == 0:
                 self.daily_target    = round(bal * cfg.DAILY_TARGET_PCT, 2)    # dinâmico
-            if cfg.DAILY_STOP_LOSS == 0:
-                # FIX: mínimo absoluto de $1.00 para evitar stop em PnL ínfimo
-                # Com saldo de $16, 1% = $0.17 — qualquer taxa ativa o stop
-                raw_stop = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
-                self.daily_stop_loss = max(raw_stop, 1.00)   # nunca menos que $1.00
+            # Stop diário removido — sem limite de perda diária
             log.info(f"🎯 Meta diária: ${self.daily_target:.2f} | Stop-loss dia: -${self.daily_stop_loss:.2f} | Saldo: ${bal:.2f}")
 
     def _update_daily_pnl(self):

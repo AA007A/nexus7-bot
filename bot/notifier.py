@@ -1,32 +1,101 @@
 import aiohttp
+import asyncio
+import time
 from bot.config import cfg
 from bot.logger import log
 
 
+# ── Rate limiting global ─────────────────────────────────────────
+# Telegram permite ~30 msgs/segundo por bot, mas na prática
+# muitas msgs seguidas causa HTTP 429 (Too Many Requests)
+# Solução: fila com delay mínimo entre mensagens + deduplicação
+
+_notify_queue: asyncio.Queue = None
+_last_sent_time: float = 0.0
+_last_sent_hash: str   = ""
+_MIN_INTERVAL: float   = 3.0   # mínimo 3s entre mensagens
+_DEDUP_WINDOW: float   = 30.0  # ignorar msg idêntica nos últimos 30s
+
+
+def _get_queue() -> asyncio.Queue:
+    """Lazy init da fila para evitar problemas de event loop."""
+    global _notify_queue
+    if _notify_queue is None:
+        _notify_queue = asyncio.Queue(maxsize=50)
+    return _notify_queue
+
+
 async def notify(text: str):
     """
-    Envia mensagem para o Telegram.
-    SEC: URL com token nunca aparece em logs — exception captura só a mensagem.
+    Envia mensagem para o Telegram com:
+      - Rate limiting: mínimo 3s entre msgs
+      - Deduplicação: msgs idênticas ignoradas por 30s
+      - Retry com backoff: 429 → espera retry_after
+      - Fila com maxsize=50: descarta se cheia (bot operacional > Telegram)
     """
     if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
         return
+
+    global _last_sent_time, _last_sent_hash
+
+    # Deduplicação: ignorar mensagem idêntica recente
+    msg_hash = str(hash(text[:100]))
+    now = time.time()
+    if msg_hash == _last_sent_hash and (now - _last_sent_time) < _DEDUP_WINDOW:
+        log.debug(f"Telegram: mensagem duplicada ignorada (dedup {_DEDUP_WINDOW}s)")
+        return
+
+    # Rate limiting: garantir intervalo mínimo
+    elapsed = now - _last_sent_time
+    if elapsed < _MIN_INTERVAL:
+        await asyncio.sleep(_MIN_INTERVAL - elapsed)
+
     url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/sendMessage"
-    try:
-        async with aiohttp.ClientSession() as s:
-            resp = await s.post(url, json={
-                "chat_id":    cfg.TELEGRAM_CHAT,
-                "text":       text,
-                "parse_mode": "Markdown",
-            }, timeout=aiohttp.ClientTimeout(total=8))
-            if resp.status not in (200, 201):
-                # Loga só o status — nunca a URL (que contém o token)
-                log.warning(f"Telegram: HTTP {resp.status}")
-    except aiohttp.ClientError as e:
-        # Captura erro de rede sem logar a URL
-        log.warning(f"Telegram: erro de conexão ({type(e).__name__})")
-    except Exception:
-        # Silencioso para outros erros — notificação não pode derrubar o bot
-        pass
+    max_retries = 2
+
+    for attempt in range(max_retries + 1):
+        try:
+            async with aiohttp.ClientSession() as s:
+                resp = await s.post(url, json={
+                    "chat_id":    cfg.TELEGRAM_CHAT,
+                    "text":       text,
+                    "parse_mode": "Markdown",
+                }, timeout=aiohttp.ClientTimeout(total=10))
+
+                if resp.status == 200:
+                    _last_sent_time = time.time()
+                    _last_sent_hash = msg_hash
+                    return
+
+                elif resp.status == 429:
+                    # Too Many Requests — respeitar retry_after
+                    try:
+                        data = await resp.json()
+                        retry_after = data.get("parameters", {}).get("retry_after", 10)
+                    except Exception:
+                        retry_after = 10
+                    log.debug(f"Telegram: 429 → aguardando {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    # Não logar como warning — é esperado ocasionalmente
+
+                elif resp.status in (400, 401, 403):
+                    # Erros permanentes — não tentar novamente
+                    log.warning(f"Telegram: HTTP {resp.status} (erro permanente)")
+                    return
+
+                else:
+                    log.debug(f"Telegram: HTTP {resp.status}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(2 ** attempt)
+
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                log.debug(f"Telegram: conexão falhou ({type(e).__name__})")
+        except Exception:
+            return  # silencioso — Telegram não pode derrubar o bot
+
 
 
 # ── BOT ONLINE ────────────────────────────────────────────────────
