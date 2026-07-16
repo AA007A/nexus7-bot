@@ -186,24 +186,33 @@ def detect_regime(closes, highs, lows, atr_v) -> str:
     price   = closes[-1]
     atr_arr = atr(highs, lows, closes)
     atr_avg = float(np.mean(atr_arr[-20:])) if len(atr_arr) >= 20 else atr_v
-
-    # Choppiness + ADX como proxy de regime
     try:
-        ci  = chop_fn(highs, lows, closes)
+        ci       = chop_fn(highs, lows, closes)
         adx_data = adx_fn(highs, lows, closes)
-        if atr_v < atr_avg * 0.65:
+        adx_v    = adx_data["adx"]
+        e20      = float(ema(closes, 20)[-1])
+        e50      = float(ema(closes, min(50, len(closes)-1))[-1])
+        if atr_v < atr_avg * 0.60:
             return "COMPRESSED"
-        if ci["chop"] and adx_data["adx"] < 20:
-            return "RANGING"
-        if adx_data["trending"] and adx_data["adx"] > 25:
-            e20 = ema(closes, 20)[-1]
+        if adx_v > 20:
             return "TRENDING_UP" if price > e20 else "TRENDING_DOWN"
+        if e20 > e50 * 1.001 and price > e20:
+            return "TRENDING_UP"
+        if e20 < e50 * 0.999 and price < e20:
+            return "TRENDING_DOWN"
+        if ci["chop"]:
+            return "RANGING"
+        if abs(e20 - e50) / e50 > 0.005:
+            return "TRENDING_UP" if e20 > e50 else "TRENDING_DOWN"
         return "RANGING"
     except Exception:
-        e20 = ema(closes, 20)[-1]
-        e50 = ema(closes, 50)[-1]
-        if e20 > e50 and price > e20: return "TRENDING_UP"
-        if e20 < e50 and price < e20: return "TRENDING_DOWN"
+        try:
+            e20 = float(ema(closes, 20)[-1])
+            e50 = float(ema(closes, min(50, len(closes)-1))[-1])
+            if e20 > e50 and price > e20: return "TRENDING_UP"
+            if e20 < e50 and price < e20: return "TRENDING_DOWN"
+        except Exception:
+            pass
         return "RANGING"
 
 
@@ -375,22 +384,24 @@ def score_tf(closes, highs, lows, opens, volumes, direction,
         fp_ok = True; fp_div = False
 
     if direction == "LONG":
-        if 40 <= rsi_v <= 72:   rsi_s = 10
+        if 40 <= rsi_v <= 80:   rsi_s = 10
         elif 33 <= rsi_v < 40:  rsi_s = 6
-        elif 72 < rsi_v <= 80:  rsi_s = 3
+        elif 80 < rsi_v <= 90:  rsi_s = 4
+        elif rsi_v > 90:        rsi_s = 2
         else:                   rsi_s = 0
         if h0 > 0 and h0 > h1: macd_s = 10
         elif h0 > 0:            macd_s = 6
-        elif h0 > h1:           macd_s = 3
+        elif h0 > h1:           macd_s = 4
         else:                   macd_s = 0
     else:
-        if 28 <= rsi_v <= 60:   rsi_s = 10
+        if 20 <= rsi_v <= 60:   rsi_s = 10
         elif 60 < rsi_v <= 67:  rsi_s = 6
-        elif 20 <= rsi_v < 28:  rsi_s = 3
+        elif 10 <= rsi_v < 20:  rsi_s = 4
+        elif rsi_v < 10:        rsi_s = 2
         else:                   rsi_s = 0
         if h0 < 0 and h0 < h1: macd_s = 10
         elif h0 < 0:            macd_s = 6
-        elif h0 < h1:           macd_s = 3
+        elif h0 < h1:           macd_s = 4
         else:                   macd_s = 0
 
     momentum_s = rsi_s + macd_s
@@ -472,8 +483,8 @@ class Analyzer:
             return None
 
         def ga(kl):
-            return ([k["c"] for k in kl], [k["h"] for k in kl],
-                    [k["l"] for k in kl], [k["o"] for k in kl],
+            return ([float(k["c"]) for k in kl], [float(k["h"]) for k in kl],
+                    [float(k["l"]) for k in kl], [float(k["o"]) for k in kl],
                     [k["v"] for k in kl])
 
         # ── Confirmação de candle fechado ────────────────────────
@@ -551,16 +562,16 @@ class Analyzer:
 
         # ── PASSO 4: Bloqueios críticos ─────────────────────────
         # RSI extremo no 15M
-        if s15["rsi_v"] > 82 or s15["rsi_v"] < 18:
+        if s15["rsi_v"] > 92 or s15["rsi_v"] < 8:
             log.debug(f"[{symbol}] RSI extremo {s15['rsi_v']:.0f} → HOLD")
             return None
         # Volume mínimo: 0.40x da média (equilibrio entre liquidez e frequência)
         if s15["vol_r"] < 0.40:
             log.debug(f"[{symbol}] Volume insuficiente {s15['vol_r']:.2f}x < 0.40x → HOLD")
             return None
-        # 15M não alinhado
-        if not s15["aligned"]:
-            log.debug(f"[{symbol}] 15M não alinhado → HOLD")
+        # 15M não alinhado — só bloqueia se regime não for TRENDING
+        if not s15["aligned"] and regime not in ("TRENDING_UP","TRENDING_DOWN"):
+            log.debug(f"[{symbol}] 15M não alinhado e regime={regime} → HOLD")
             return None
 
         # ── PASSO 5: Tipo de entrada ────────────────────────────

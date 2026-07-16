@@ -19,12 +19,12 @@ class Config:
     INITIAL_CAP:     float = float(os.environ.get("INITIAL_CAP",  "0"))
     MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))      # SEGURO: max 3 (correlacao entre pares)
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.75"))
-    MIN_RR_RATIO:    float = float(os.environ.get("MIN_RR_RATIO",  "2.0"))   # R/R mínimo 2:1
+    MIN_RR_RATIO:    float = float(os.environ.get("MIN_RR_RATIO",  "1.5"))   # R/R mínimo 1.5:1
     TRAILING_TRIGGER: float = 0.50
     TRAILING_LOCK:    float = 0.25
 
     # ── Qualidade de entrada (usado pelo engine.py) ───────────────
-    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "60"))   # score mínimo MTF
+    MIN_ENTRY_SCORE:  int   = int(os.environ.get("MIN_ENTRY_SCORE",  "50"))   # score mínimo MTF
     MAX_SPREAD_PCT:   float = float(os.environ.get("MAX_SPREAD_PCT",  "0.05")) # 0.05% spread máximo
     STAGNATION_BARS:  int   = int(os.environ.get("STAGNATION_BARS",  "16"))   # 4h em candles 15M
     STAGNATION_MULT:  float = float(os.environ.get("STAGNATION_MULT","0.5"))  # 0.5xATR sem movimento
