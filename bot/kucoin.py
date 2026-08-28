@@ -516,11 +516,13 @@ class KuCoinClient:
 
         # KuCoin Futures kline endpoint correto
         # granularity em minutos: 1, 5, 15, 30, 60, 120, 240, 480, 720, 1440, 10080
+        # CORRIGIDO: KuCoin Futures exige 'from'/'to' em MILISSEGUNDOS.
+        # Erro anterior: "300000 Parameter 'from' must be milliseconds"
         data = await self._get("/api/v1/kline/query", {
             "symbol":      kc_sym,
             "granularity": str(gran),
-            "from":        str(start_ts // 1000),  # KuCoin aceita segundos, não ms
-            "to":          str(end_ts   // 1000),
+            "from":        str(start_ts),   # milissegundos
+            "to":          str(end_ts),     # milissegundos
         })
 
         klines = []
@@ -529,8 +531,12 @@ class KuCoinClient:
             # KuCoin Futures kline: [timestamp_ms, open, high, low, close, volume, turnover]
             # Nota: KuCoin retorna do mais recente para o mais antigo — inverter no final
             try:
+                _ts = int(float(k[0]))
+                # KuCoin Futures retorna ts em ms; normaliza caso venha em segundos
+                if _ts < 1e11:
+                    _ts *= 1000
                 klines.append({
-                    "ts": int(float(k[0])) * (1 if int(float(k[0])) > 1e10 else 1000),
+                    "ts": _ts,
                     "o":  float(k[1]),
                     "h":  float(k[2]),
                     "l":  float(k[3]),
