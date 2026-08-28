@@ -42,9 +42,10 @@ import aiohttp
 from bot.logger import log
 
 # ── Credenciais ────────────────────────────────────────────────────
-API_KEY        = os.environ.get("KUCOIN_API_KEY",        "")
-API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "")
-API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "")
+# .strip() automático — espaços acidentais no Railway são a causa #1 de 400004
+API_KEY        = os.environ.get("KUCOIN_API_KEY",        "").strip()
+API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "").strip()
+API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "").strip()
 # PAPER_TRADE FORÇADO TEMPORARIAMENTE — protege capital durante correção de auth
 # Remover esta linha e descomentar a próxima quando autenticação estiver OK
 PAPER_TRADE    = True
@@ -103,11 +104,28 @@ class KuCoinClient:
         self._ws_retry:  int  = 0
         self._ws_token:  str  = ""
         self._ws_token_ts: float = 0.0   # timestamp da obtenção do token WS
+        # Versão da API Key: "2" = passphrase assinada | "1" = texto plano
+        # Fallback automático para "1" se receber 400004 com "2"
+        self._api_version: str = os.environ.get("KUCOIN_API_VERSION", "2")
+        self._version_fallback_done: bool = False
 
         # Diagnóstico de credenciais no startup
         if API_KEY:
             log.info(f"🔑 KuCoin API Key: {API_KEY[:6]}...{API_KEY[-4:]} ({len(API_KEY)} chars)")
-            log.info(f"🔑 API Secret: {len(API_SECRET)} chars | Passphrase: {len(API_PASSPHRASE)} chars")
+            log.info(
+                f"🔑 API Secret: {len(API_SECRET)} chars | "
+                f"Passphrase: {len(API_PASSPHRASE)} chars | "
+                f"API version: v{self._api_version}"
+            )
+            if not API_PASSPHRASE:
+                log.error("❌ KUCOIN_API_PASSPHRASE VAZIA — configure no Railway!")
+            if not API_SECRET:
+                log.error("❌ KUCOIN_API_SECRET VAZIA — configure no Railway!")
+            # Detecta espaços acidentais (causa comum de 400004)
+            if API_PASSPHRASE != API_PASSPHRASE.strip():
+                log.error("❌ Passphrase tem ESPAÇOS no início/fim — remova no Railway!")
+            if API_SECRET != API_SECRET.strip():
+                log.error("❌ API Secret tem ESPAÇOS no início/fim — remova no Railway!")
             # Alertar sobre caracteres problemáticos na passphrase
             import string
             special = [c for c in API_PASSPHRASE if c not in string.ascii_letters + string.digits + "_-!@#$%"]
@@ -156,13 +174,30 @@ class KuCoinClient:
         return b64encode(sig).decode()
 
     def _auth_headers(self, method: str, endpoint: str, body: str = "") -> dict:
+        """
+        Headers de autenticação KuCoin.
+
+        IMPORTANTE — v1 vs v2:
+          API Key v2: passphrase ASSINADA com HMAC-SHA256 (base64)
+          API Key v1: passphrase em TEXTO PLANO
+
+        Enviar passphrase assinada para uma key v1 (ou vice-versa) resulta
+        em "400004 Invalid KC-API-PASSPHRASE".
+
+        self._api_version controla qual formato usar. Começa em "2" e faz
+        fallback automático para "1" se receber 400004.
+        """
         ts = str(int(time.time() * 1000))
+        if self._api_version == "2":
+            passphrase = self._sign_passphrase()   # assinada
+        else:
+            passphrase = API_PASSPHRASE            # texto plano (v1)
         return {
             "KC-API-KEY":         API_KEY,
             "KC-API-SIGN":        self._sign(ts, method, endpoint, body),
             "KC-API-TIMESTAMP":   ts,
-            "KC-API-PASSPHRASE":  self._sign_passphrase(),
-            "KC-API-KEY-VERSION": "2",
+            "KC-API-PASSPHRASE":  passphrase,
+            "KC-API-KEY-VERSION": self._api_version,
             "Content-Type":       "application/json",
         }
 
@@ -192,7 +227,23 @@ class KuCoinClient:
                     data = await r.json()
                     if data.get("code") == "200000":
                         return data.get("data", {})
-                    log.warning(f"KuCoin GET {endpoint}: {data.get('code')} {data.get('msg','')}")
+
+                    code = data.get("code", "")
+                    # FALLBACK AUTOMÁTICO v2 → v1
+                    # 400004 = Invalid KC-API-PASSPHRASE. Se estamos em v2,
+                    # a key pode ser v1 (passphrase em texto plano). Tenta trocar.
+                    if code == "400004" and not self._version_fallback_done:
+                        self._version_fallback_done = True
+                        old_ver = self._api_version
+                        self._api_version = "1" if old_ver == "2" else "2"
+                        log.warning(
+                            f"🔄 400004 com API v{old_ver} → tentando v{self._api_version} "
+                            f"(passphrase {'texto plano' if self._api_version == '1' else 'assinada'})"
+                        )
+                        headers = self._auth_headers("GET", signed_endpoint)
+                        continue   # retenta imediatamente com a outra versão
+
+                    log.warning(f"KuCoin GET {endpoint}: {code} {data.get('msg','')}")
                     return {}
             except Exception as e:
                 wait = 2 ** attempt
@@ -212,10 +263,21 @@ class KuCoinClient:
                     data = await r.json()
                     if data.get("code") == "200000":
                         return data.get("data", {})
-                    # Erros não-recuperáveis
-                    msg = data.get("msg", "")
+                    msg  = data.get("msg", "")
                     code = data.get("code", "")
-                    if code in ("400100", "300004", "200004"):  # param inválido, saldo insuf.
+
+                    # FALLBACK AUTOMÁTICO v2 → v1 (mesmo do _get)
+                    if code == "400004" and not self._version_fallback_done:
+                        self._version_fallback_done = True
+                        old_ver = self._api_version
+                        self._api_version = "1" if old_ver == "2" else "2"
+                        log.warning(
+                            f"🔄 400004 com API v{old_ver} → tentando v{self._api_version}"
+                        )
+                        headers = self._auth_headers("POST", endpoint, body_str)
+                        continue
+
+                    if code in ("400100", "300004", "200004"):
                         log.error(f"KuCoin POST {endpoint} erro permanente {code}: {msg}")
                         return {}
                     log.warning(f"KuCoin POST {endpoint}: {code} {msg}")
@@ -570,7 +632,12 @@ class KuCoinClient:
                 data = (await r.json()).get("data", {})
             self._ws_token    = data.get("token", "")
             self._ws_token_ts = now
-            log.info("✓ WS token KuCoin obtido")
+            # BUG CORRIGIDO: antes logava sucesso mesmo com token vazio,
+            # mascarando falha de autenticação no WS.
+            if self._ws_token:
+                log.info(f"✓ WS token KuCoin obtido ({len(self._ws_token)} chars)")
+            else:
+                log.error("❌ WS token VAZIO — autenticação KuCoin falhou (verifique credenciais)")
             return self._ws_token
         except Exception as e:
             log.error(f"_get_ws_token: {e}")
