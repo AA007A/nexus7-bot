@@ -557,7 +557,7 @@ class TradingEngine:
 
             self.risk.init(bal)
             self.risk.update(bal)
-            self.instruments = await self.client.get_instruments()
+            self.instruments = self.client.get_instruments()
             await self._filter_viable_symbols()
 
             for sym in self.viable_symbols[:15]:
