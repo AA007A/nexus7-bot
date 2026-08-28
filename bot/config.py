@@ -23,10 +23,21 @@ class Config:
 
     # ── Risco ─────────────────────────────────────────────────────
     LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "10"))
-    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "0.01"))
-    MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.10"))
+    # MAX_RISK_PCT = 1.0 → usa 100% do saldo como margem por posição.
+    # notional = balance × LEVERAGE × MAX_RISK_PCT
+    # Com balance=$15, LEVERAGE=10, MAX_RISK_PCT=1.0 → notional $150, margem $15.
+    # ATENÇÃO: movimento de ~10% contra a posição liquida a conta.
+    MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "1.0"))
+    # Cap de margem: 0.98 = usa 98% do saldo, deixando 2% para taxas.
+    # Sem essa folga a exchange rejeita a ordem por saldo insuficiente para fees.
+    MAX_MARGIN_PCT:  float = float(os.environ.get("MAX_MARGIN_PCT", "0.98"))
+    # Drawdown 40%: com sizing de 100% o bot precisa de espaço para operar.
+    # Abaixo disso o bot pausaria após 2-3 trades perdedores.
+    MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.40"))
     INITIAL_CAP:     float = float(os.environ.get("INITIAL_CAP",  "0"))
-    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "3"))
+    # MAX_POSITIONS = 1: com 100% do saldo em uma posição não sobra margem
+    # para outras. Manter 3 faria as posições 2 e 3 serem rejeitadas.
+    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "1"))
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.75"))
     MIN_RR_RATIO:    float = float(os.environ.get("MIN_RR_RATIO",  "2.0"))
 
@@ -46,8 +57,11 @@ class Config:
     FEE_MULTIPLIER:    float = float(os.environ.get("FEE_MULTIPLIER",   "2.0"))
 
     # ── Meta diária ───────────────────────────────────────────────
-    DAILY_TARGET_PCT:    float = float(os.environ.get("DAILY_TARGET_PCT",    "0.02"))
-    DAILY_STOP_LOSS_PCT: float = float(os.environ.get("DAILY_STOP_LOSS_PCT", "0.01"))
+    # Com sizing de 100% do saldo, um único SL representa ~15% do capital.
+    # Stop diário de 1% travaria o bot no primeiro trade perdedor.
+    # Ajustado para 20% — coerente com o perfil de risco escolhido.
+    DAILY_TARGET_PCT:    float = float(os.environ.get("DAILY_TARGET_PCT",    "0.20"))
+    DAILY_STOP_LOSS_PCT: float = float(os.environ.get("DAILY_STOP_LOSS_PCT", "0.20"))
     DAILY_TARGET:        float = float(os.environ.get("DAILY_TARGET",        "100.0"))
     DAILY_STOP_LOSS:     float = float(os.environ.get("DAILY_STOP_LOSS",     "50.0"))
 
