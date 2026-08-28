@@ -508,11 +508,19 @@ class KuCoinClient:
         KuCoin endpoint: GET /api/v1/kline/query
         interval: mesmo formato Bybit (15, 60, 240) — convertido internamente
         """
-        kc_sym      = to_kucoin(symbol)
-        gran        = INTERVAL_MAP.get(str(interval), int(interval))   # granularidade em minutos
-        gran_sec    = gran * 60
-        end_ts      = int(time.time() * 1000)
-        start_ts    = end_ts - gran_sec * limit * 1000
+        kc_sym   = to_kucoin(symbol)
+        gran     = INTERVAL_MAP.get(str(interval), int(interval))   # granularidade em minutos
+
+        # Timestamps em MILISSEGUNDOS (exigência da KuCoin Futures).
+        # int() explícito evita notação científica em números grandes.
+        end_ts   = int(time.time() * 1000)
+        span_ms  = int(gran) * 60 * 1000 * int(limit)   # minutos → ms × qtd candles
+
+        # KuCoin limita o range por requisição. Cap de 200 dias evita
+        # "from" muito antigo, que a API rejeita.
+        MAX_SPAN_MS = 200 * 24 * 60 * 60 * 1000
+        span_ms  = min(span_ms, MAX_SPAN_MS)
+        start_ts = max(0, end_ts - span_ms)
 
         # KuCoin Futures kline endpoint correto
         # granularity em minutos: 1, 5, 15, 30, 60, 120, 240, 480, 720, 1440, 10080
