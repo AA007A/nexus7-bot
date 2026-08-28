@@ -169,19 +169,26 @@ class KuCoinClient:
     # ── Requests base ─────────────────────────────────────────────
     async def _get(self, endpoint: str, params: dict = None, auth: bool = False) -> dict:
         await self._ensure_session()
-        # CORRIGIDO: KuCoin exige que a assinatura de GET inclua a query string
-        # Exemplo: assina "/api/v1/account-overview?currency=USDT" (não só o path)
+        from urllib.parse import urlencode
+
+        # Para autenticação KuCoin: a URL assinada DEVE ser idêntica à URL enviada.
+        # Problema anterior: aiohttp montava a URL com params internamente podendo
+        # reordenar os parâmetros, causando mismatch com a assinatura.
+        # SOLUÇÃO: montar a URL completa manualmente e enviar sem params separados.
         if params:
-            from urllib.parse import urlencode
-            query_string = urlencode(params)
+            query_string   = urlencode(params)
             signed_endpoint = f"{endpoint}?{query_string}"
+            full_url        = REST_BASE + signed_endpoint  # URL idêntica à assinada
         else:
             signed_endpoint = endpoint
-        url     = REST_BASE + endpoint
+            full_url        = REST_BASE + endpoint
+
         headers = self._auth_headers("GET", signed_endpoint) if auth else {}
+
         for attempt in range(3):
             try:
-                async with self._session.get(url, params=params, headers=headers) as r:
+                # params=None — URL já contém os params embutidos (sem risco de reordenação)
+                async with self._session.get(full_url, headers=headers) as r:
                     data = await r.json()
                     if data.get("code") == "200000":
                         return data.get("data", {})
@@ -195,8 +202,9 @@ class KuCoinClient:
 
     async def _post(self, endpoint: str, body: dict) -> dict:
         await self._ensure_session()
-        url      = REST_BASE + endpoint
-        body_str = json.dumps(body)
+        url = REST_BASE + endpoint
+        # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
+        body_str = json.dumps(body, separators=(",", ":"))
         headers  = self._auth_headers("POST", endpoint, body_str)
         for attempt in range(3):
             try:
