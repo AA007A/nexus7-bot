@@ -61,30 +61,56 @@ TAKER_FEE = 0.0006   # 0.06% taker (KuCoin Futures padrão)
 
 # ── Mapa de símbolos Bybit → KuCoin ──────────────────────────────
 # KuCoin Futures USDT-margined usa sufixo "M" (ex: XBTUSDTM, ETHUSDTM)
-SYMBOL_MAP = {
-    "BTCUSDT":  "XBTUSDTM",
-    "ETHUSDT":  "ETHUSDTM",
-    "SOLUSDT":  "SOLUSDTM",
-    "BNBUSDT":  "BNBUSDTM",
-    "XRPUSDT":  "XRPUSDTM",
-    "ADAUSDT":  "ADAUSDTM",
-    "DOGEUSDT": "DOGEUSDTM",
-    "LINKUSDT": "LINKUSDTM",
-    "AVAXUSDT": "AVAXUSDTM",
-    "POLUSDT":  "POLUSDTM",
-    "DOTUSDT":  "DOTUSDTM",
-    "LTCUSDT":  "LTCUSDTM",
+# ── Mapa de símbolos: padrão (BTCUSDT) ↔ KuCoin (XBTUSDTM) ──────
+#
+# CORRIGIDO: antes era hardcoded e continha símbolos que NÃO EXISTEM
+# na KuCoin Futures (ex: BNBUSDTM). Símbolos inexistentes faziam a API
+# retornar erro e o par era silenciosamente ignorado — por isso apenas
+# alguns pares (como SOL) apareciam nos logs.
+#
+# Agora o mapa é construído DINAMICAMENTE em load_instruments() a partir
+# de /api/v1/contracts/active, garantindo que só existam pares reais.
+#
+# Exceções conhecidas de nomenclatura KuCoin:
+#   BTC  → XBT   (KuCoin usa o código XBT para Bitcoin)
+_BASE_ALIAS = {
+    "BTC": "XBT",   # KuCoin nomeia Bitcoin como XBT
 }
-# Mapa reverso: KuCoin → Bybit (para padronizar respostas)
-SYMBOL_MAP_REV = {v: k for k, v in SYMBOL_MAP.items()}
+_BASE_ALIAS_REV = {v: k for k, v in _BASE_ALIAS.items()}
+
+# Preenchidos dinamicamente por KuCoinClient.load_instruments()
+SYMBOL_MAP: dict     = {}
+SYMBOL_MAP_REV: dict = {}
+
+
+def _guess_kucoin(symbol: str) -> str:
+    """
+    Converte BTCUSDT → XBTUSDTM sem consultar a API.
+    Usado apenas como fallback antes do mapa dinâmico ser carregado.
+    """
+    if not symbol.endswith("USDT"):
+        return symbol
+    base = symbol[:-4]                      # BTCUSDT → BTC
+    base = _BASE_ALIAS.get(base, base)      # BTC → XBT
+    return f"{base}USDTM"
+
 
 def to_kucoin(symbol: str) -> str:
-    """Converte símbolo Bybit (BTCUSDT) → KuCoin (XBTUSDTM)."""
-    return SYMBOL_MAP.get(symbol, symbol)
+    """Converte símbolo padrão (BTCUSDT) → KuCoin (XBTUSDTM)."""
+    if symbol in SYMBOL_MAP:
+        return SYMBOL_MAP[symbol]
+    return _guess_kucoin(symbol)
+
 
 def to_standard(symbol: str) -> str:
     """Converte símbolo KuCoin (XBTUSDTM) → padrão (BTCUSDT)."""
-    return SYMBOL_MAP_REV.get(symbol, symbol)
+    if symbol in SYMBOL_MAP_REV:
+        return SYMBOL_MAP_REV[symbol]
+    if symbol.endswith("USDTM"):
+        base = symbol[:-5]                       # XBTUSDTM → XBT
+        base = _BASE_ALIAS_REV.get(base, base)   # XBT → BTC
+        return f"{base}USDT"
+    return symbol
 
 # ── Intervalo: Bybit → KuCoin ────────────────────────────────────
 INTERVAL_MAP = {
@@ -324,18 +350,21 @@ class KuCoinClient:
     # ── Instrumentos ──────────────────────────────────────────────
     async def load_instruments(self):
         """
-        Carrega especificações dos instrumentos KuCoin Futures.
-        Também sincroniza o relógio com o servidor (evita 400005).
-        CORRIGIDO: endpoint público não requer auth; resposta é lista direta.
-        Campos KuCoin: lotSize (tamanho mínimo), tickSize, multiplier (USDT/contrato).
+        Carrega contratos ativos da KuCoin e CONSTRÓI O MAPA DE SÍMBOLOS.
+
+        CORRIGIDO: antes usava um mapa hardcoded com símbolos inventados
+        (ex: BNBUSDTM não existe na KuCoin). Pares inexistentes falhavam
+        silenciosamente, e só os que por acaso batiam apareciam nos logs.
+
+        Agora: descobre os símbolos reais via /api/v1/contracts/active e
+        casa cada par de cfg.SYMBOLS com o contrato correspondente pela
+        baseCurrency, respeitando aliases (BTC↔XBT).
         """
         # Sincroniza relógio ANTES de qualquer chamada autenticada
         if not self._time_synced:
             await self.sync_time()
 
-        data = await self._get("/api/v1/contracts/active")  # endpoint público, sem auth
-        # KuCoin retorna: {"code":"200000","data":[{...}, ...]}
-        # Após _get(), data já é o valor de "data" — pode ser lista ou dict
+        data = await self._get("/api/v1/contracts/active")  # público, sem auth
         if isinstance(data, list):
             contracts = data
         elif isinstance(data, dict):
@@ -343,22 +372,65 @@ class KuCoinClient:
         else:
             contracts = []
 
+        if not contracts:
+            log.error("❌ Nenhum contrato retornado pela KuCoin")
+            return self._instruments
+
+        # Indexa contratos USDT-margined pela baseCurrency
+        by_base = {}
         for c in contracts:
-            kc_sym   = c.get("symbol", "")
-            std_sym  = to_standard(kc_sym)
-            if not std_sym or std_sym == kc_sym:
-                continue   # pula símbolos fora do nosso mapa
-            lot_size = float(c.get("lotSize",    1.0))
+            sym = c.get("symbol", "")
+            if not sym.endswith("USDTM"):
+                continue
+            if c.get("status", "Open") not in ("Open", "open", None):
+                continue
+            base = (c.get("baseCurrency") or sym[:-5]).upper()
+            by_base[base] = c
+
+        from bot.config import cfg as _cfg
+        wanted    = list(getattr(_cfg, "SYMBOLS", []))
+        matched   = []
+        unmatched = []
+
+        for std_sym in wanted:
+            if not std_sym.endswith("USDT"):
+                unmatched.append(std_sym)
+                continue
+            base = std_sym[:-4].upper()             # BTCUSDT → BTC
+            kc_base = _BASE_ALIAS.get(base, base)   # BTC → XBT
+
+            c = by_base.get(kc_base) or by_base.get(base)
+            if not c:
+                unmatched.append(std_sym)
+                continue
+
+            kc_sym = c["symbol"]
+            # Registra nos mapas globais (usados por to_kucoin/to_standard)
+            SYMBOL_MAP[std_sym]      = kc_sym
+            SYMBOL_MAP_REV[kc_sym]   = std_sym
+
+            lot_size = float(c.get("lotSize",    1))
             tick_sz  = float(c.get("tickSize",   0.01))
-            mult     = float(c.get("multiplier", 0.001))  # BTC: 0.001; USDT-margined varia
+            mult     = float(c.get("multiplier", 0.001))
+            max_lev  = float(c.get("maxLeverage", 0) or 0)
+
             self._instruments[std_sym] = {
                 "minQty":      lot_size,
                 "qtyStep":     lot_size,
                 "tickSize":    tick_sz,
                 "multiplier":  mult,
-                "minNotional": lot_size * mult * 100,  # estimativa conservadora
+                "maxLeverage": max_lev,
+                "minNotional": lot_size * mult,
+                "kucoinSymbol": kc_sym,
             }
-        log.info(f"📋 {len(self._instruments)} instrumentos carregados da KuCoin")
+            matched.append(f"{std_sym}→{kc_sym}")
+
+        log.info(f"📋 {len(matched)} pares mapeados na KuCoin: {', '.join(matched)}")
+        if unmatched:
+            log.warning(
+                f"⚠️ {len(unmatched)} pares NÃO existem na KuCoin Futures "
+                f"e serão ignorados: {', '.join(unmatched)}"
+            )
         return self._instruments
 
     def get_instruments(self) -> dict:
