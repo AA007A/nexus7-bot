@@ -42,9 +42,9 @@ import aiohttp
 from bot.logger import log
 
 # ── Credenciais ────────────────────────────────────────────────────
-API_KEY        = os.environ.get("KUCOIN_API_KEY",        "")
-API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "")
-API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "")
+API_KEY        = os.environ.get("KUCOIN_API_KEY",        "").strip()
+API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "").strip()
+API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "").strip()
 PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -146,13 +146,38 @@ class KuCoinClient:
         return b64encode(sig).decode()
 
     def _sign_passphrase(self) -> str:
-        """KuCoin exige passphrase também assinada com HMAC-SHA256."""
+        """
+        KuCoin API v2 exige a passphrase assinada com HMAC-SHA256 e o
+        segredo da API, depois codificada em base64:
+
+            KC-API-PASSPHRASE = base64(hmac_sha256(API_SECRET, API_PASSPHRASE))
+
+        Tanto API_SECRET quanto API_PASSPHRASE são normalizados (strip)
+        para evitar espaços/quebras de linha acidentais vindos de
+        variáveis de ambiente, que causam o erro "400004 Invalid
+        KC-API-PASSPHRASE".
+        """
+        secret     = API_SECRET.strip()
+        passphrase = API_PASSPHRASE.strip()
+
         sig = hmac.new(
-            API_SECRET.encode("utf-8"),
-            API_PASSPHRASE.encode("utf-8"),
+            secret.encode("utf-8"),
+            passphrase.encode("utf-8"),
             hashlib.sha256,
         ).digest()
-        return b64encode(sig).decode()
+        signed = b64encode(sig).decode()
+
+        # Log de debug sem expor credenciais: apenas tamanhos e um hash
+        # curto do resultado, útil para confirmar reprodutibilidade da
+        # assinatura sem vazar o segredo ou a passphrase.
+        fingerprint = hashlib.sha256(signed.encode("utf-8")).hexdigest()[:8]
+        log.debug(
+            f"KC-API-PASSPHRASE assinada: secret_len={len(secret)} "
+            f"passphrase_len={len(passphrase)} signed_len={len(signed)} "
+            f"fingerprint={fingerprint}"
+        )
+
+        return signed
 
     def _auth_headers(self, method: str, endpoint: str, body: str = "") -> dict:
         ts = str(int(time.time() * 1000))
