@@ -490,7 +490,8 @@ class KuCoinClient:
         url      = REST_BASE + endpoint
         try:
             async with self._session.post(url, headers=headers) as r:
-                data = (await r.json()).get("data", {})
+                response = await r.json()
+                data = response.get("data", {})
             self._ws_token    = data.get("token", "")
             self._ws_token_ts = now
             log.info("✓ WS token KuCoin obtido")
