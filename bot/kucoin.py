@@ -108,6 +108,11 @@ class KuCoinClient:
         # Fallback automático para "1" se receber 400004 com "2"
         self._api_version: str = os.environ.get("KUCOIN_API_VERSION", "2")
         self._version_fallback_done: bool = False
+        # Offset entre relógio local e servidor KuCoin (ms).
+        # KuCoin rejeita requests com timestamp fora de ±5s → 400005 Invalid SIGN.
+        self._time_offset_ms: int = 0
+        self._time_synced: bool = False
+        self._sign_logged: bool = False   # loga a primeira assinatura para diagnóstico
 
         # Diagnóstico de credenciais no startup
         if API_KEY:
@@ -155,6 +160,9 @@ class KuCoinClient:
         """
         KuCoin signature: HMAC-SHA256( timestamp + method + endpoint + body )
         Retorna base64 do digest.
+
+        Formato exato exigido pela KuCoin:
+          str_to_sign = timestamp + METHOD + /api/v1/endpoint?query + body
         """
         message = f"{timestamp}{method.upper()}{endpoint}{body}"
         sig = hmac.new(
@@ -162,7 +170,12 @@ class KuCoinClient:
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
-        return b64encode(sig).decode()
+        signature = b64encode(sig).decode()
+        # Log de diagnóstico — mostra o que está sendo assinado (sem expor o secret)
+        if not self._sign_logged:
+            self._sign_logged = True
+            log.info(f"🔏 Assinando: '{message[:80]}...' → sign[:12]={signature[:12]}")
+        return signature
 
     def _sign_passphrase(self) -> str:
         """KuCoin exige passphrase também assinada com HMAC-SHA256."""
@@ -187,7 +200,7 @@ class KuCoinClient:
         self._api_version controla qual formato usar. Começa em "2" e faz
         fallback automático para "1" se receber 400004.
         """
-        ts = str(int(time.time() * 1000))
+        ts = str(self._now_ms())   # timestamp ajustado pelo offset do servidor
         if self._api_version == "2":
             passphrase = self._sign_passphrase()   # assinada
         else:
@@ -229,19 +242,24 @@ class KuCoinClient:
                         return data.get("data", {})
 
                     code = data.get("code", "")
-                    # FALLBACK AUTOMÁTICO v2 → v1
-                    # 400004 = Invalid KC-API-PASSPHRASE. Se estamos em v2,
-                    # a key pode ser v1 (passphrase em texto plano). Tenta trocar.
-                    if code == "400004" and not self._version_fallback_done:
-                        self._version_fallback_done = True
+
+                    # Erros de autenticação: 400004 (passphrase) / 400005 (sign)
+                    # Estratégia: alterna v2↔v1 e re-sincroniza o relógio.
+                    # NÃO trava numa versão — cada erro tenta a alternativa.
+                    if code in ("400004", "400005") and attempt < 2:
                         old_ver = self._api_version
                         self._api_version = "1" if old_ver == "2" else "2"
+
+                        # 400005 = sign inválido → pode ser drift de relógio
+                        if code == "400005" and not self._time_synced:
+                            await self.sync_time()
+
                         log.warning(
-                            f"🔄 400004 com API v{old_ver} → tentando v{self._api_version} "
+                            f"🔄 {code} com API v{old_ver} → tentando v{self._api_version} "
                             f"(passphrase {'texto plano' if self._api_version == '1' else 'assinada'})"
                         )
                         headers = self._auth_headers("GET", signed_endpoint)
-                        continue   # retenta imediatamente com a outra versão
+                        continue   # retenta com a outra versão
 
                     log.warning(f"KuCoin GET {endpoint}: {code} {data.get('msg','')}")
                     return {}
@@ -266,13 +284,14 @@ class KuCoinClient:
                     msg  = data.get("msg", "")
                     code = data.get("code", "")
 
-                    # FALLBACK AUTOMÁTICO v2 → v1 (mesmo do _get)
-                    if code == "400004" and not self._version_fallback_done:
-                        self._version_fallback_done = True
+                    # Erros de autenticação: alterna v2↔v1 + re-sincroniza relógio
+                    if code in ("400004", "400005") and attempt < 2:
                         old_ver = self._api_version
                         self._api_version = "1" if old_ver == "2" else "2"
+                        if code == "400005" and not self._time_synced:
+                            await self.sync_time()
                         log.warning(
-                            f"🔄 400004 com API v{old_ver} → tentando v{self._api_version}"
+                            f"🔄 {code} com API v{old_ver} → tentando v{self._api_version}"
                         )
                         headers = self._auth_headers("POST", endpoint, body_str)
                         continue
@@ -299,9 +318,14 @@ class KuCoinClient:
     async def load_instruments(self):
         """
         Carrega especificações dos instrumentos KuCoin Futures.
+        Também sincroniza o relógio com o servidor (evita 400005).
         CORRIGIDO: endpoint público não requer auth; resposta é lista direta.
         Campos KuCoin: lotSize (tamanho mínimo), tickSize, multiplier (USDT/contrato).
         """
+        # Sincroniza relógio ANTES de qualquer chamada autenticada
+        if not self._time_synced:
+            await self.sync_time()
+
         data = await self._get("/api/v1/contracts/active")  # endpoint público, sem auth
         # KuCoin retorna: {"code":"200000","data":[{...}, ...]}
         # Após _get(), data já é o valor de "data" — pode ser lista ou dict
@@ -783,6 +807,40 @@ class KuCoinClient:
         }
 
     # ── Encerramento ─────────────────────────────────────────────
+    async def sync_time(self) -> bool:
+        """
+        Sincroniza o relógio local com o servidor KuCoin.
+        KuCoin rejeita requisições com timestamp fora de ±5s da hora do servidor,
+        retornando 400005 Invalid KC-API-SIGN (mensagem enganosa).
+        Railway/containers frequentemente têm drift de relógio.
+        """
+        try:
+            await self._ensure_session()
+            local_before = int(time.time() * 1000)
+            async with self._session.get(REST_BASE + "/api/v1/timestamp") as r:
+                data = await r.json()
+            local_after = int(time.time() * 1000)
+            server_ts   = int(data.get("data", 0))
+            if server_ts <= 0:
+                log.warning("sync_time: servidor não retornou timestamp")
+                return False
+            # Compensa latência da requisição (metade do round-trip)
+            local_mid           = (local_before + local_after) // 2
+            self._time_offset_ms = server_ts - local_mid
+            self._time_synced    = True
+            log.info(
+                f"🕐 Tempo sincronizado com KuCoin | offset={self._time_offset_ms}ms"
+                + ("  ⚠️ DRIFT ALTO!" if abs(self._time_offset_ms) > 3000 else "")
+            )
+            return True
+        except Exception as e:
+            log.warning(f"sync_time falhou: {e}")
+            return False
+
+    def _now_ms(self) -> int:
+        """Timestamp em ms ajustado pelo offset do servidor KuCoin."""
+        return int(time.time() * 1000) + self._time_offset_ms
+
     async def ping(self) -> bool:
         """
         Verifica conectividade com a KuCoin API.
