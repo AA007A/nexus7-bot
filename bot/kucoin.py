@@ -117,6 +117,20 @@ class KuCoinClient:
                 timeout=aiohttp.ClientTimeout(total=10)
             )
 
+    # ── Ping ──────────────────────────────────────────────────────
+    async def ping(self) -> bool:
+        """
+        Ping leve — verifica se a KuCoin API está acessível.
+        Nunca lança exceção. Retorna True se OK, False se falhar.
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.get(f"{REST_BASE}/api/v1/status") as r:
+                    return r.status == 200
+        except Exception:
+            return False
+
     # ── Autenticação HMAC-SHA256 ──────────────────────────────────
     def _sign(self, timestamp: str, method: str, endpoint: str, body: str = "") -> str:
         """
