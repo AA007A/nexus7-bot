@@ -104,6 +104,18 @@ class KuCoinClient:
         self._ws_token:  str  = ""
         self._ws_token_ts: float = 0.0   # timestamp da obtenção do token WS
 
+        # Diagnóstico de credenciais no startup
+        if API_KEY:
+            log.info(f"🔑 KuCoin API Key: {API_KEY[:6]}...{API_KEY[-4:]} ({len(API_KEY)} chars)")
+            log.info(f"🔑 API Secret: {len(API_SECRET)} chars | Passphrase: {len(API_PASSPHRASE)} chars")
+            # Alertar sobre caracteres problemáticos na passphrase
+            import string
+            special = [c for c in API_PASSPHRASE if c not in string.ascii_letters + string.digits + "_-!@#$%"]
+            if special:
+                log.warning(f"⚠️  Passphrase contém chars especiais: {special} — pode causar 400004")
+        else:
+            log.warning("⚠️  KUCOIN_API_KEY não configurado")
+
         # Cache de klines e tickers (igual ao BybitClient)
         self._kline_cache: dict = {}    # (symbol, interval) → deque[dict]
         self._ticker_cache: dict = {}   # symbol → dict
@@ -493,24 +505,42 @@ class KuCoinClient:
 
     # ── Posições abertas ──────────────────────────────────────────
     async def get_positions(self) -> list:
-        """Retorna posições abertas formatadas igual ao BybitClient."""
-        data = await self._get("/api/v1/positions", auth=True)
+        """
+        Retorna posições abertas formatadas igual ao BybitClient.
+        CORRIGIDO: trata resposta vazia e erro 400004 sem quebrar o engine.
+        """
+        try:
+            data = await self._get("/api/v1/positions", auth=True)
+        except Exception as e:
+            log.warning(f"get_positions erro: {e}")
+            return []
+
+        if not data:
+            return []
+
         positions = []
-        raw = data if isinstance(data, list) else []
+        # KuCoin pode retornar lista direta ou dict com lista
+        raw = data if isinstance(data, list) else data.get("data", [])
+        if not isinstance(raw, list):
+            return []
+
         for p in raw:
-            qty = float(p.get("currentQty", 0))
-            if qty == 0:
+            try:
+                qty = float(p.get("currentQty", 0))
+                if qty == 0:
+                    continue
+                kc_sym = p.get("symbol", "")
+                positions.append({
+                    "symbol":        to_standard(kc_sym),
+                    "side":          "Buy" if qty > 0 else "Sell",
+                    "size":          abs(qty),
+                    "entryPrice":    float(p.get("avgEntryPrice",  0)),
+                    "markPrice":     float(p.get("markPrice",      0)),
+                    "unrealisedPnl": float(p.get("unrealisedPnl", 0)),
+                    "leverage":      float(p.get("realLeverage",   1)),
+                })
+            except (ValueError, TypeError):
                 continue
-            kc_sym = p.get("symbol", "")
-            positions.append({
-                "symbol":       to_standard(kc_sym),
-                "side":         "Buy" if qty > 0 else "Sell",
-                "size":         abs(qty),
-                "entryPrice":   float(p.get("avgEntryPrice",  0)),
-                "markPrice":    float(p.get("markPrice",      0)),
-                "unrealisedPnl": float(p.get("unrealisedPnl", 0)),
-                "leverage":     float(p.get("realLeverage",   1)),
-            })
         return positions
 
     # ── WebSocket ─────────────────────────────────────────────────
@@ -678,6 +708,19 @@ class KuCoinClient:
         }
 
     # ── Encerramento ─────────────────────────────────────────────
+    async def ping(self) -> bool:
+        """
+        Verifica conectividade com a KuCoin API.
+        Usa endpoint público de tempo do servidor (sem autenticação).
+        Adicionado para compatibilidade com engine.py que chama client.ping().
+        """
+        try:
+            data = await self._get("/api/v1/timestamp")
+            return bool(data)
+        except Exception as e:
+            log.warning(f"KuCoin ping falhou: {e}")
+            return False
+
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
