@@ -433,13 +433,19 @@ class KuCoinClient:
         _raw     = f"{symbol}_{side}_{contracts}_{_ts}"
         _oid     = hashlib.md5(_raw.encode()).hexdigest()[:40]
 
+        # BUG CORRIGIDO: lia os.environ diretamente com default "10", ignorando
+        # o valor de config.py. Se LEVERAGE não estivesse setado no Railway,
+        # a ordem ia com 10x mesmo com o config em 50x.
+        from bot.config import cfg as _cfg
+        _lev = int(_cfg.LEVERAGE)
+
         body: dict = {
             "clientOid": _oid,
             "symbol":    kc_sym,
             "side":      kc_side,
             "type":      "market",
             "size":      str(contracts),
-            "leverage":  str(os.environ.get("LEVERAGE", "10")),
+            "leverage":  str(_lev),
         }
 
         # SL server-side
@@ -453,9 +459,37 @@ class KuCoinClient:
             # KuCoin Futures v2: takeProfit separado
             body["takeProfit"] = self._round_price(tp, symbol)
 
-        data = await self._post("/api/v1/orders", body)
+        data     = await self._post("/api/v1/orders", body)
         order_id = data.get("orderId", "")
-        log.info(f"📤 Ordem {side} {contracts} contratos {symbol} → orderId={order_id}")
+
+        # Fallback de leverage: nem todo par KuCoin permite 50x.
+        # Altcoins costumam ter limite de 20x-25x. Se a ordem falhar,
+        # retenta com valores menores até conseguir.
+        if not order_id and _lev > 20:
+            for fallback_lev in (25, 20, 10):
+                if fallback_lev >= _lev:
+                    continue
+                log.warning(
+                    f"⚠️ Ordem {symbol} falhou com {_lev}x — "
+                    f"retentando com {fallback_lev}x"
+                )
+                body["leverage"] = str(fallback_lev)
+                body["clientOid"] = hashlib.md5(
+                    f"{_raw}_{fallback_lev}".encode()
+                ).hexdigest()[:40]
+                data     = await self._post("/api/v1/orders", body)
+                order_id = data.get("orderId", "")
+                if order_id:
+                    log.info(f"✓ Ordem aceita com {fallback_lev}x")
+                    break
+
+        if order_id:
+            log.info(
+                f"📤 Ordem {side} {contracts} contratos {symbol} "
+                f"@ {body['leverage']}x → orderId={order_id}"
+            )
+        else:
+            log.error(f"❌ Ordem {symbol} rejeitada em todas as tentativas")
         return data
 
     # ── Trailing Stop / Set SL ────────────────────────────────────
