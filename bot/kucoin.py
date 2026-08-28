@@ -237,7 +237,14 @@ class KuCoinClient:
         log.info(f"📋 {len(self._instruments)} instrumentos carregados da KuCoin")
         return self._instruments
 
-    def get_instruments(self) -> dict:
+    async def get_instruments(self) -> dict:
+        """
+        Retorna o dict de instrumentos carregado.
+        Se ainda não foram carregados, carrega sob demanda (garante que
+        engine.py nunca receba um dict vazio na primeira chamada).
+        """
+        if not self._instruments:
+            await self.load_instruments()
         return self._instruments
 
     # ── Alavancagem ───────────────────────────────────────────────
@@ -425,6 +432,28 @@ class KuCoinClient:
 
     def get_cached_ticker(self, symbol: str) -> dict:
         return self._ticker_cache.get(symbol, {})
+
+    # ── Todos os tickers (usado no filtro de símbolos viáveis) ────
+    async def get_all_tickers(self) -> list:
+        """
+        Retorna lista de tickers no formato padrão (Bybit-like), com
+        `symbol` e `lastPrice`, usado por engine._filter_viable_symbols.
+        KuCoin não tem um endpoint único de "all tickers" para futures,
+        então reaproveitamos /api/v1/contracts/active (mesmo endpoint de
+        load_instruments), que já traz o último preço negociado.
+        """
+        data = await self._get("/api/v1/contracts/active")
+        contracts = data if isinstance(data, list) else data.get("dataList", [])
+        tickers = []
+        for c in contracts:
+            kc_sym  = c.get("symbol", "")
+            std_sym = to_standard(kc_sym)
+            last_price = c.get("lastTradePrice", 0)
+            tickers.append({
+                "symbol":    std_sym,
+                "lastPrice": float(last_price or 0),
+            })
+        return tickers
 
     # ── Open Interest ─────────────────────────────────────────────
     async def get_open_interest(self, symbol: str) -> dict:
