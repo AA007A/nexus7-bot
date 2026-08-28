@@ -445,6 +445,7 @@ class TradingEngine:
                 if self.active:
                     self._check_daily_reset()
                     await self._update_balance()
+                    await self._heartbeat_telegram()
                     await self._sync_positions()
                     await self._check_stagnation_and_invalidation()
                     await self._manage_partial_tp()
@@ -1408,6 +1409,34 @@ class TradingEngine:
                         log.debug(f"[{sym}] PnL negativo após taxas → HOLD")
                         continue
                     candidates.append(sig)
+
+                    # Guarda o melhor score visto (usado pelo heartbeat)
+                    _prev = getattr(self, "_last_best_score", None)
+                    if not _prev or sig.score > _prev.get("score", 0):
+                        self._last_best_score = {
+                            "symbol":    sym,
+                            "score":     sig.score,
+                            "direction": sig.direction,
+                        }
+
+                    # Notifica no Telegram TODO sinal detectado, mesmo que a
+                    # ordem não chegue a ser aberta (falta de margem, filtro,
+                    # limite de posições). Antes só havia notificação após a
+                    # ordem ser aceita — por isso nada chegava no Telegram.
+                    asyncio.create_task(notify(
+                        f"{'🟢' if sig.direction == 'LONG' else '🔴'} *SINAL DETECTADO*\n"
+                        f"`━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                        f"📍 Par:     `{sym}`\n"
+                        f"📊 Direção: `{sig.direction}`\n"
+                        f"🧠 Score:   `{sig.score}/100`\n"
+                        f"💰 Entrada: `${sig.entry:,.4f}`\n"
+                        f"🛑 SL:      `${sig.sl:,.4f}`\n"
+                        f"🎯 TP:      `${sig.tp:,.4f}`\n"
+                        f"⚖️ R:R:     `{sig.rr:.2f}`\n"
+                        f"📈 PnL est: `+{sig.expected_pnl:.2f}%`\n"
+                        f"`━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                        f"_{getattr(sig, 'reason', '')[:120]}_"
+                    ))
                     log.debug(
                         f"🎯 SINAL PREMIUM: {sym} score={sig.score}/100 "
                         f"{sig.direction} R:R={sig.rr} "
@@ -1761,19 +1790,81 @@ class TradingEngine:
         except Exception as e:
             log.error(f"_load_existing: {e}")
 
+    async def _heartbeat_telegram(self):
+        """
+        Envia um resumo periódico ao Telegram (default: a cada 30 min).
+        Mostra saldo, posições, PnL do dia e o melhor score visto no scan,
+        para o usuário saber que o bot está vivo e o que ele está enxergando.
+        Configurável via HEARTBEAT_MIN (0 desativa).
+        """
+        try:
+            interval_min = int(os.environ.get("HEARTBEAT_MIN", "30"))
+            if interval_min <= 0:
+                return
+            now  = time.time()
+            last = getattr(self, "_last_heartbeat", 0.0)
+            if now - last < interval_min * 60:
+                return
+            self._last_heartbeat = now
+
+            bal    = self.risk.balance
+            best   = getattr(self, "_last_best_score", None)
+            n_open = len(self.positions)
+
+            best_line = (
+                f"🧠 Melhor score: `{best['score']}/100` em `{best['symbol']}` "
+                f"({best['direction']})\n"
+                if best else
+                "🧠 Melhor score: `nenhum sinal no último scan`\n"
+            )
+
+            await notify(
+                f"💓 *BGX — STATUS*\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                f"💰 Saldo:    `${bal:,.2f}` USDT\n"
+                f"⚡ Poder:    `${bal * cfg.LEVERAGE:,.2f}` ({cfg.LEVERAGE}x)\n"
+                f"📊 Posições: `{n_open}/{cfg.MAX_POSITIONS}`\n"
+                f"📈 PnL dia:  `${self.daily_pnl:+,.2f}`\n"
+                f"🎯 Meta:     `${self.daily_target:,.2f}`\n"
+                f"🔍 Pares:    `{len(self.viable_symbols)}`\n"
+                f"{best_line}"
+                f"⚙️ Score mín: `{cfg.MIN_ENTRY_SCORE}` | R:R mín: `{cfg.MIN_RR_RATIO}`\n"
+                f"`━━━━━━━━━━━━━━━━━━━━━━━━`"
+            )
+        except Exception as e:
+            log.debug(f"_heartbeat_telegram: {e}")
+
     async def _update_balance(self):
+        """
+        BUG CORRIGIDO: o await notify(drawdown_msg) estava FORA do if de
+        drawdown (indentação errada), disparando o alerta "DRAWDOWN ELEVADO"
+        a cada ciclo mesmo com drawdown 0.0%.
+
+        Agora: só notifica quando o limite é realmente ultrapassado, e apenas
+        UMA vez por evento (flag _dd_alerted evita spam).
+        """
         try:
             bal = await self.client.get_balance()
-            _dbal = bal if bal >= 0 else (self.risk.balance or 0.0)  # sempre definida
-            if bal >= 0:
-                self.risk.update(bal)
-                if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
-                    log.warning(f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ limite → pausando entradas")
+            if bal < 0:
+                return
+
+            self.risk.update(bal)
+            self._recalc_daily_limits()
+
+            if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+                if not getattr(self, "_dd_alerted", False):
+                    self._dd_alerted = True
                     self.active = False
-                    _dbal = await self.client.get_balance()
-                await notify(await drawdown_msg(self.risk.drawdown, _dbal))
-        except Exception:
-            pass
+                    log.warning(
+                        f"🚨 Drawdown {self.risk.drawdown:.1%} ≥ "
+                        f"{cfg.MAX_DRAWDOWN:.0%} → pausando entradas"
+                    )
+                    await notify(await drawdown_msg(self.risk.drawdown, bal))
+            else:
+                # Drawdown normalizou → rearma o alerta para o próximo evento
+                self._dd_alerted = False
+        except Exception as e:
+            log.error(f"_update_balance: {e}")
 
     # ── Status (endpoint /api/status) ──────────────────────────
     def get_status(self) -> dict:
