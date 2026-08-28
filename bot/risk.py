@@ -228,7 +228,7 @@ class RiskManager:
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0) -> float:
         """
-        Sizing com regra absoluta: margem nunca excede 80% do saldo.
+        Sizing com cap de margem configurável (cfg.MAX_MARGIN_PCT).
         Desconta margem já em uso por posições abertas (FIX RISK-sizing).
         Risco por trade = balance × LEVERAGE × MAX_RISK_PCT
         """
@@ -253,8 +253,12 @@ class RiskManager:
 
         # Notional alvo: balance × leverage × MAX_RISK_PCT
         target_not   = self.balance * cfg.LEVERAGE * cfg.MAX_RISK_PCT * size_mult
-        # Cap absoluto: nunca usar mais de 80% do saldo LIVRE como margem
-        max_notional = free_margin * 0.80 * cfg.LEVERAGE
+        # Cap de margem: configurável via MAX_MARGIN_PCT (default 0.80)
+        # Com MAX_MARGIN_PCT=0.98 o bot usa praticamente todo o saldo.
+        # Os 2% restantes cobrem as taxas de abertura/fechamento — sem essa
+        # folga a exchange rejeita a ordem por saldo insuficiente.
+        margin_cap   = getattr(cfg, "MAX_MARGIN_PCT", 0.80)
+        max_notional = free_margin * margin_cap * cfg.LEVERAGE
         target_not   = min(target_not, max_notional)
         target_not   = max(target_not, min_not)
 
@@ -263,10 +267,10 @@ class RiskManager:
         qty   = round(steps * qty_step, 8)
         qty   = max(qty, min_qty)
 
-        # Verificação hard: margem final nunca > 80% do saldo
+        # Verificação hard: margem final respeita MAX_MARGIN_PCT
         final_margin = (qty * entry) / cfg.LEVERAGE
-        if final_margin > self.balance * 0.80:
-            qty   = (self.balance * 0.80 * cfg.LEVERAGE) / entry
+        if final_margin > self.balance * margin_cap:
+            qty   = (self.balance * margin_cap * cfg.LEVERAGE) / entry
             steps = max(1, math.floor(qty / qty_step))
             qty   = round(steps * qty_step, 8)
             qty   = max(qty, min_qty)
