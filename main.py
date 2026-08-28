@@ -1,9 +1,5 @@
 """
-BGX Capital — API Server v12.1 (KuCoin)
-Única mudança em relação à versão Bybit:
-  - Import: KuCoinClient em vez de BybitClient
-  - Variável de ambiente: KUCOIN_API_KEY/SECRET/PASSPHRASE
-  - Tudo mais (auth, CORS, endpoints, rate limit) idêntico
+BGX Capital — API Server v12.1 (Bybit)
 """
 import asyncio, os, time
 from collections import defaultdict
@@ -15,9 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# ── ÚNICA LINHA ALTERADA em relação à versão Bybit ───────────────
-from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE
-# ─────────────────────────────────────────────────────────────────
+from bot.bybit import BybitClient as ExchangeClient, PAPER_TRADE
 
 from bot.engine import TradingEngine
 from bot.config import cfg
@@ -54,18 +48,18 @@ def _rate_limit(request: Request):
 # ── Lifespan ──────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 BGX Capital v12.1 (KuCoin) iniciando...")
+    log.info("🚀 BGX Capital v12.1 (Bybit) iniciando...")
     if PAPER_TRADE:
         log.warning("🟡 PAPER TRADE MODE ATIVO")
 
     client = ExchangeClient()
-    await client.load_instruments()          # carrega specs dos instrumentos KuCoin
+    await client.load_instruments()          # carrega specs dos instrumentos Bybit
     engine = TradingEngine(client)
 
     app.state.client = client
     app.state.engine = engine
     app.state.engine_task = asyncio.create_task(engine.run())
-    log.info("✅ BGX Capital online (KuCoin Futures)")
+    log.info("✅ BGX Capital online (Bybit Futures)")
     yield
     engine.stop()
     await asyncio.sleep(1.0)
@@ -73,7 +67,7 @@ async def lifespan(app: FastAPI):
     log.info("👋 Encerrado")
 
 
-app = FastAPI(title="BGX Capital KuCoin", version="12.1.0", lifespan=lifespan)
+app = FastAPI(title="BGX Capital Bybit", version="12.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,11 +81,11 @@ app.add_middleware(
 # ── Health ────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "12.1.0", "exchange": "kucoin"}
+    return {"status": "ok", "version": "12.1.0", "exchange": "bybit"}
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "12.1.0", "exchange": "kucoin"}
+    return {"status": "online", "version": "12.1.0", "exchange": "bybit"}
 
 
 # ── Status / Saldo / Posições ─────────────────────────────────────
@@ -102,7 +96,7 @@ async def status():
 @app.get("/api/balance", dependencies=[Depends(_require_auth)])
 async def balance():
     b = await app.state.client.get_balance()
-    return {"balance": b, "currency": "USDT", "exchange": "kucoin"}
+    return {"balance": b, "currency": "USDT", "exchange": "bybit"}
 
 @app.get("/api/positions", dependencies=[Depends(_require_auth)])
 async def positions():
@@ -110,7 +104,7 @@ async def positions():
     return {
         "open":     [p.to_dict() for p in eng.positions.values()],
         "count":    len(eng.positions),
-        "exchange": "kucoin",
+        "exchange": "bybit",
     }
 
 
