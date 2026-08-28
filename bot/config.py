@@ -15,10 +15,14 @@ class Config:
     # KuCoin usa sufixo M internamente (XBTUSDTM) mas o bot
     # continua usando o formato padrão (BTCUSDT) — conversão
     # é feita automaticamente dentro do KuCoinClient.
+    # O bot usa o formato padrão (BTCUSDT). A conversão para o nome real
+    # da KuCoin (XBTUSDTM) é feita dinamicamente em load_instruments(),
+    # que consulta /api/v1/contracts/active e descarta pares inexistentes.
+    # BNBUSDT foi removido: a KuCoin não oferece futures de BNB.
     SYMBOLS: list = [
-        "BTCUSDT",  "ETHUSDT",  "SOLUSDT",  "BNBUSDT",
-        "XRPUSDT",  "ADAUSDT",  "DOGEUSDT", "LINKUSDT",
-        "AVAXUSDT", "POLUSDT",  "DOTUSDT",  "LTCUSDT",
+        "BTCUSDT",  "ETHUSDT",  "SOLUSDT",  "XRPUSDT",
+        "ADAUSDT",  "DOGEUSDT", "LINKUSDT", "AVAXUSDT",
+        "DOTUSDT",  "LTCUSDT",  "NEARUSDT", "ATOMUSDT",
     ]
 
     # ── Risco ─────────────────────────────────────────────────────
