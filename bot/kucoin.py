@@ -45,7 +45,10 @@ from bot.logger import log
 API_KEY        = os.environ.get("KUCOIN_API_KEY",        "")
 API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "")
 API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "")
-PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
+# PAPER_TRADE FORÇADO TEMPORARIAMENTE — protege capital durante correção de auth
+# Remover esta linha e descomentar a próxima quando autenticação estiver OK
+PAPER_TRADE    = True
+# PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
 
 # ── Endpoints ─────────────────────────────────────────────────────
 REST_BASE = "https://api-futures.kucoin.com"
