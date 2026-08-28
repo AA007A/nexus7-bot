@@ -22,7 +22,12 @@ class Config:
     ]
 
     # ── Risco ─────────────────────────────────────────────────────
-    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "10"))
+    # LEVERAGE 50x — solicitado pelo usuário.
+    # Com MAX_RISK_PCT=1.0 (100% do saldo como margem):
+    #   liquidação ocorre a ~2% de movimento adverso (100/50)
+    #   SL do bot fica em ~1.5% → folga de apenas 0.5% até a liquidação
+    # Em gaps ou spikes, a liquidação pode ocorrer antes do SL executar.
+    LEVERAGE:        int   = int(os.environ.get("LEVERAGE",        "50"))
     # MAX_RISK_PCT = 1.0 → usa 100% do saldo como margem por posição.
     # notional = balance × LEVERAGE × MAX_RISK_PCT
     # Com balance=$15, LEVERAGE=10, MAX_RISK_PCT=1.0 → notional $150, margem $15.
