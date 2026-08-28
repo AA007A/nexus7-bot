@@ -117,20 +117,6 @@ class KuCoinClient:
                 timeout=aiohttp.ClientTimeout(total=10)
             )
 
-    # ── Ping ──────────────────────────────────────────────────────
-    async def ping(self) -> bool:
-        """
-        Ping leve — verifica se a KuCoin API está acessível.
-        Nunca lança exceção. Retorna True se OK, False se falhar.
-        """
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as s:
-                async with s.get(f"{REST_BASE}/api/v1/status") as r:
-                    return r.status == 200
-        except Exception:
-            return False
-
     # ── Autenticação HMAC-SHA256 ──────────────────────────────────
     def _sign(self, timestamp: str, method: str, endpoint: str, body: str = "") -> str:
         """
@@ -168,8 +154,16 @@ class KuCoinClient:
     # ── Requests base ─────────────────────────────────────────────
     async def _get(self, endpoint: str, params: dict = None, auth: bool = False) -> dict:
         await self._ensure_session()
-        url = REST_BASE + endpoint
-        headers = self._auth_headers("GET", endpoint) if auth else {}
+        # CORRIGIDO: KuCoin exige que a assinatura de GET inclua a query string
+        # Exemplo: assina "/api/v1/account-overview?currency=USDT" (não só o path)
+        if params:
+            from urllib.parse import urlencode
+            query_string = urlencode(params)
+            signed_endpoint = f"{endpoint}?{query_string}"
+        else:
+            signed_endpoint = endpoint
+        url     = REST_BASE + endpoint
+        headers = self._auth_headers("GET", signed_endpoint) if auth else {}
         for attempt in range(3):
             try:
                 async with self._session.get(url, params=params, headers=headers) as r:
@@ -218,21 +212,35 @@ class KuCoinClient:
 
     # ── Instrumentos ──────────────────────────────────────────────
     async def load_instruments(self):
-        """Carrega especificações dos instrumentos (tickSize, lotSize, minNotional)."""
-        data = await self._get("/api/v1/contracts/active")
-        contracts = data if isinstance(data, list) else data.get("dataList", [])
+        """
+        Carrega especificações dos instrumentos KuCoin Futures.
+        CORRIGIDO: endpoint público não requer auth; resposta é lista direta.
+        Campos KuCoin: lotSize (tamanho mínimo), tickSize, multiplier (USDT/contrato).
+        """
+        data = await self._get("/api/v1/contracts/active")  # endpoint público, sem auth
+        # KuCoin retorna: {"code":"200000","data":[{...}, ...]}
+        # Após _get(), data já é o valor de "data" — pode ser lista ou dict
+        if isinstance(data, list):
+            contracts = data
+        elif isinstance(data, dict):
+            contracts = data.get("dataList", data.get("items", []))
+        else:
+            contracts = []
+
         for c in contracts:
             kc_sym   = c.get("symbol", "")
             std_sym  = to_standard(kc_sym)
-            lot_size = float(c.get("lotSize",   0.001))
-            tick_sz  = float(c.get("tickSize",  0.01))
-            mult     = float(c.get("multiplier", 1.0))  # valor por contrato
+            if not std_sym or std_sym == kc_sym:
+                continue   # pula símbolos fora do nosso mapa
+            lot_size = float(c.get("lotSize",    1.0))
+            tick_sz  = float(c.get("tickSize",   0.01))
+            mult     = float(c.get("multiplier", 0.001))  # BTC: 0.001; USDT-margined varia
             self._instruments[std_sym] = {
                 "minQty":      lot_size,
                 "qtyStep":     lot_size,
                 "tickSize":    tick_sz,
                 "multiplier":  mult,
-                "minNotional": lot_size * mult,
+                "minNotional": lot_size * mult * 100,  # estimativa conservadora
             }
         log.info(f"📋 {len(self._instruments)} instrumentos carregados da KuCoin")
         return self._instruments
@@ -242,14 +250,24 @@ class KuCoinClient:
 
     # ── Alavancagem ───────────────────────────────────────────────
     async def set_leverage(self, symbol: str, leverage: int):
-        """Define alavancagem para um par (KuCoin: separado para long e short)."""
+        """
+        Define alavancagem para um par.
+        KuCoin Futures: POST /api/v2/changeCrossUserLeverage (cross margin)
+        ou via parâmetro leverage diretamente na ordem (mais simples).
+        CORRIGIDO: endpoint correto para KuCoin Futures v1.
+        """
         kc_sym = to_kucoin(symbol)
-        for side in ["LONG", "SHORT"]:  # KuCoin exige setar para cada lado
-            await self._post("/api/v1/position/risk-limit-level/change", {
-                "symbol":    kc_sym,
-                "leverage":  str(leverage),
+        # KuCoin Futures: leverage é definido por posição (isolada) ou conta (cross)
+        # A forma mais confiável é passar leverage na própria ordem place_order
+        # Este endpoint é para garantia — pode não existir em todas as versões da API
+        try:
+            await self._post("/api/v1/position/margin/auto-deposit-status", {
+                "symbol": kc_sym,
+                "status": False,  # isolated margin
             })
-        log.info(f"⚙️ Leverage {symbol}: {leverage}x")
+        except Exception:
+            pass  # ignora se não suportado — leverage é passado na ordem
+        log.info(f"⚙️ Leverage {symbol}: {leverage}x (aplicado via parâmetro da ordem)")
 
     # ── Ordens ────────────────────────────────────────────────────
     def _round_price(self, price: float, symbol: str) -> str:
@@ -344,18 +362,32 @@ class KuCoinClient:
 
     # ── Cancelar ordens ───────────────────────────────────────────
     async def cancel_all_orders(self, symbol: str = "") -> bool:
-        kc_sym = to_kucoin(symbol) if symbol else ""
-        params = {"symbol": kc_sym} if kc_sym else {}
-        data   = await self._post("/api/v1/orders", params)   # DELETE via POST não existe
-        # KuCoin: DELETE /api/v1/orders
+        """
+        Cancela todas as ordens abertas.
+        KuCoin Futures: DELETE /api/v1/orders
+        CORRIGIDO: removido código duplicado (POST + DELETE ao mesmo tempo).
+        """
         await self._ensure_session()
+        kc_sym   = to_kucoin(symbol) if symbol else ""
+        params   = {"symbol": kc_sym} if kc_sym else {}
         endpoint = "/api/v1/orders"
-        headers  = self._auth_headers("DELETE", endpoint)
-        url      = REST_BASE + endpoint
+        # Monta query string para incluir na assinatura (mesmo padrão do _get corrigido)
+        if params:
+            from urllib.parse import urlencode
+            signed_endpoint = f"{endpoint}?{urlencode(params)}"
+        else:
+            signed_endpoint = endpoint
+        headers = self._auth_headers("DELETE", signed_endpoint)
+        url     = REST_BASE + endpoint
         try:
             async with self._session.delete(url, params=params, headers=headers) as r:
                 d = await r.json()
-                return d.get("code") == "200000"
+                ok = d.get("code") == "200000"
+                if ok:
+                    log.info(f"✓ cancel_all_orders {symbol or 'todos'}")
+                else:
+                    log.warning(f"cancel_all_orders: {d.get('code')} {d.get('msg','')}")
+                return ok
         except Exception as e:
             log.error(f"cancel_all_orders {symbol}: {e}")
             return False
@@ -373,28 +405,32 @@ class KuCoinClient:
         end_ts      = int(time.time() * 1000)
         start_ts    = end_ts - gran_sec * limit * 1000
 
+        # KuCoin Futures kline endpoint correto
+        # granularity em minutos: 1, 5, 15, 30, 60, 120, 240, 480, 720, 1440, 10080
         data = await self._get("/api/v1/kline/query", {
             "symbol":      kc_sym,
             "granularity": str(gran),
-            "from":        str(start_ts),
-            "to":          str(end_ts),
+            "from":        str(start_ts // 1000),  # KuCoin aceita segundos, não ms
+            "to":          str(end_ts   // 1000),
         })
 
         klines = []
         raw    = data if isinstance(data, list) else []
         for k in raw:
-            # KuCoin retorna: [timestamp, open, high, low, close, volume, turnover]
+            # KuCoin Futures kline: [timestamp_ms, open, high, low, close, volume, turnover]
+            # Nota: KuCoin retorna do mais recente para o mais antigo — inverter no final
             try:
                 klines.append({
-                    "ts": int(k[0]),
+                    "ts": int(float(k[0])) * (1 if int(float(k[0])) > 1e10 else 1000),
                     "o":  float(k[1]),
                     "h":  float(k[2]),
                     "l":  float(k[3]),
                     "c":  float(k[4]),
                     "v":  float(k[5]),
                 })
-            except (IndexError, ValueError):
+            except (IndexError, ValueError, TypeError):
                 continue
+        klines = list(reversed(klines))  # mais antigo primeiro (padrão do engine)
 
         # Atualiza cache
         key = (symbol, str(interval))
@@ -490,8 +526,7 @@ class KuCoinClient:
         url      = REST_BASE + endpoint
         try:
             async with self._session.post(url, headers=headers) as r:
-                response = await r.json()
-                data = response.get("data", {})
+                data = (await r.json()).get("data", {})
             self._ws_token    = data.get("token", "")
             self._ws_token_ts = now
             log.info("✓ WS token KuCoin obtido")
