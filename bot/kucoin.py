@@ -46,10 +46,11 @@ from bot.logger import log
 API_KEY        = os.environ.get("KUCOIN_API_KEY",        "").strip()
 API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "").strip()
 API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "").strip()
-# PAPER_TRADE FORÇADO TEMPORARIAMENTE — protege capital durante correção de auth
-# Remover esta linha e descomentar a próxima quando autenticação estiver OK
-PAPER_TRADE    = True
-# PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
+# OPERAÇÃO REAL ATIVADA — autenticação KuCoin confirmada (saldo real lido com sucesso).
+# Controlado pela env var PAPER_TRADE no Railway:
+#   PAPER_TRADE=true  → simula ordens (nada é executado na exchange)
+#   PAPER_TRADE=false → executa ordens REAIS com capital real (padrão)
+PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
 
 # ── Endpoints ─────────────────────────────────────────────────────
 REST_BASE = "https://api-futures.kucoin.com"
@@ -115,6 +116,12 @@ class KuCoinClient:
         self._sign_logged: bool = False   # loga a primeira assinatura para diagnóstico
 
         # Diagnóstico de credenciais no startup
+        # Aviso explícito do modo de operação
+        if PAPER_TRADE:
+            log.warning("🟡 PAPER TRADE — ordens simuladas, capital NÃO é usado")
+        else:
+            log.warning("🔴 OPERAÇÃO REAL ATIVA — ordens serão executadas com CAPITAL REAL")
+
         if API_KEY:
             log.info(f"🔑 KuCoin API Key: {API_KEY[:6]}...{API_KEY[-4:]} ({len(API_KEY)} chars)")
             log.info(
