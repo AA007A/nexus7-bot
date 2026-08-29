@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # ── ÚNICA LINHA ALTERADA em relação à versão Bybit ───────────────
-from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE
+from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON
 # ─────────────────────────────────────────────────────────────────
 
 from bot.engine import TradingEngine
@@ -139,6 +139,29 @@ async def lifespan(app: FastAPI):
         app.state.engine_task = asyncio.create_task(engine.run())
         log.info("✅ BGX Capital online (KuCoin Futures)")
 
+        # Avisa no Telegram em qual modo o bot subiu — evita a situação
+        # de esperar ordens que nunca virão por falta de configuração.
+        try:
+            from bot.notifier import notify as _n
+            if PAPER_TRADE:
+                await _n(
+                    f"🟡 *BOT ONLINE — MODO SIMULAÇÃO*\n"
+                    f"`{'━'*26}`\n"
+                    f"⚠️ *NENHUMA ordem será enviada à KuCoin*\n\n"
+                    f"Motivo: _{TRADING_MODE_REASON}_\n\n"
+                    f"Para operar de verdade, defina no Railway:\n"
+                    f"`PAPER_TRADE=false`\n"
+                    f"`LIVE_TRADING_CONFIRMED=I_UNDERSTAND_THE_RISK`"
+                )
+            else:
+                await _n(
+                    f"🔴 *BOT ONLINE — OPERAÇÃO REAL*\n"
+                    f"`{'━'*26}`\n"
+                    f"Ordens serão enviadas à KuCoin com capital real."
+                )
+        except Exception as _e:
+            log.debug(f"notify modo: {_e}")
+
     app.state.bootstrap_task = asyncio.create_task(_bootstrap())
 
     # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
@@ -190,6 +213,11 @@ async def health():
         "exchange": "kucoin",
         "ready":    bool(getattr(app.state, "ready", False)),
         "blocked":  bool(getattr(app.state, "blocked", False)),
+        # Modo de operação exposto aqui para responder rapidamente
+        # "por que o bot não abre ordens?"
+        "trading_mode": "PAPER" if PAPER_TRADE else "LIVE",
+        "mode_reason":  TRADING_MODE_REASON,
+        "orders_sent_to_exchange": not PAPER_TRADE,
     }
 
 @app.get("/")
