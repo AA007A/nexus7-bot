@@ -417,6 +417,12 @@ class TradingEngine:
         self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
         self._oi_hist:    Dict[str, float] = {}   # OI anterior por símbolo (delta)
+
+        # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
+        # position_manager.py mas NUNCA foi atribuído → AttributeError.
+        # A flag vive em bot.kucoin (lida da env var PAPER_TRADE).
+        from bot.kucoin import PAPER_TRADE as _PT
+        self.paper_trade: bool = bool(_PT)
         # PnL diário separado: só o REALIZADO conta para a meta.
         # O não realizado oscila muito com 50x e não é lucro de fato.
         self.daily_pnl_realized:   float = 0.0
