@@ -377,8 +377,8 @@ def test_parameter_robustness(k15: list, k1h: list, k4h: list,
                     "sharpe_deg": round(sharpe_deg, 1),
                     "pf_deg":     round(pf_deg, 1),
                 })
-            except Exception:
-                pass
+            except Exception as _e:
+                log.warning(f"persistência do resultado de otimização falhou: {_e}")
 
     if not results:
         return {"robust": True, "reason": "Sem parâmetros perturbáveis"}
