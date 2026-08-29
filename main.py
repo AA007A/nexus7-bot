@@ -54,20 +54,53 @@ def _rate_limit(request: Request):
 # ── Lifespan ──────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    BUG CORRIGIDO (deploy travado no Railway):
+    'await client.load_instruments()' era executado ANTES do yield. O FastAPI
+    só passa a responder requisições depois que o lifespan atinge o yield —
+    então o endpoint /health ficava indisponível enquanto o carregamento
+    rodava. Qualquer lentidão ou retry na API da KuCoin (o _get tem 3
+    tentativas com backoff exponencial) estourava o healthcheckTimeout do
+    Railway e o deploy ficava preso em "carregando" até falhar.
+
+    Agora: o servidor sobe imediatamente e /health responde de cara.
+    O carregamento de instrumentos vai para uma task de background com
+    timeout, e o engine só inicia depois que ela conclui.
+    """
     log.info("🚀 BGX Capital v12.1 (KuCoin) iniciando...")
     if PAPER_TRADE:
         log.warning("🟡 PAPER TRADE MODE ATIVO")
 
     client = ExchangeClient()
-    await client.load_instruments()          # carrega specs dos instrumentos KuCoin
     engine = TradingEngine(client)
-
     app.state.client = client
     app.state.engine = engine
-    app.state.engine_task = asyncio.create_task(engine.run())
-    log.info("✅ BGX Capital online (KuCoin Futures)")
+    app.state.ready  = False
+
+    async def _bootstrap():
+        """Carrega instrumentos e inicia o engine — fora do caminho do healthcheck."""
+        try:
+            await asyncio.wait_for(client.load_instruments(), timeout=45)
+            log.info("✅ Instrumentos carregados")
+        except asyncio.TimeoutError:
+            log.error("⏱️ load_instruments excedeu 45s — seguindo mesmo assim")
+        except Exception as e:
+            log.error(f"❌ load_instruments falhou: {e} — seguindo mesmo assim")
+
+        app.state.ready = True
+        app.state.engine_task = asyncio.create_task(engine.run())
+        log.info("✅ BGX Capital online (KuCoin Futures)")
+
+    app.state.bootstrap_task = asyncio.create_task(_bootstrap())
+
+    # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
     yield
+
     engine.stop()
+    for t in ("bootstrap_task", "engine_task"):
+        task = getattr(app.state, t, None)
+        if task and not task.done():
+            task.cancel()
     await asyncio.sleep(1.0)
     await client.close()
     log.info("👋 Encerrado")
@@ -87,7 +120,17 @@ app.add_middleware(
 # ── Health ────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "12.1.0", "exchange": "kucoin"}
+    """
+    Healthcheck do Railway. NUNCA faz I/O externo — responde sempre 200
+    assim que o processo está de pé. O campo 'ready' indica se o bootstrap
+    (carregamento de instrumentos + engine) já concluiu.
+    """
+    return {
+        "status":   "ok",
+        "version":  "12.1.0",
+        "exchange": "kucoin",
+        "ready":    bool(getattr(app.state, "ready", False)),
+    }
 
 @app.get("/")
 async def root():
