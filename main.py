@@ -68,6 +68,33 @@ async def lifespan(app: FastAPI):
     timeout, e o engine só inicia depois que ela conclui.
     """
     log.info("🚀 BGX Capital v12.1 (KuCoin) iniciando...")
+
+    # ══════════════════════════════════════════════════════════════
+    # SELF-CHECK DE INTEGRIDADE (previne bugs silenciosos)
+    #
+    # Vários bugs deste projeto só apareceram após horas em produção
+    # porque erros de programação eram engolidos por except genérico.
+    # Esta verificação roda em ~200ms e detecta, ANTES de operar:
+    #   • NameError latente (ex: aiohttp usado sem import)
+    #   • AttributeError latente (self.metodo() inexistente)
+    #   • métodos duplicados que se sobrescrevem
+    #   • combinações de config matematicamente impossíveis
+    #
+    # Bug crítico → bot inicia em modo BLOQUEADO. O /health continua
+    # respondendo (o deploy não falha), mas nenhuma ordem é enviada.
+    # ══════════════════════════════════════════════════════════════
+    _blocked_by_selfcheck = False
+    try:
+        from bot.selfcheck import run_selfcheck
+        _report = run_selfcheck()
+        if _report["critical"]:
+            _blocked_by_selfcheck = True
+            log.critical(
+                f"🚫 OPERAÇÃO BLOQUEADA: {len(_report['critical'])} bug(s) "
+                f"crítico(s) detectado(s) no código. Corrija antes de operar."
+            )
+    except Exception as _e:
+        log.error(f"self-check falhou (não bloqueia): {_e}")
     if PAPER_TRADE:
         log.warning("🟡 PAPER TRADE MODE ATIVO")
 
@@ -88,6 +115,27 @@ async def lifespan(app: FastAPI):
             log.error(f"❌ load_instruments falhou: {e} — seguindo mesmo assim")
 
         app.state.ready = True
+
+        if _blocked_by_selfcheck:
+            # Não inicia o engine: bug de código não vai a produção.
+            app.state.blocked = True
+            log.critical(
+                "🚫 Engine NÃO iniciado — self-check encontrou bugs críticos. "
+                "Veja os logs acima. Corrija e faça redeploy."
+            )
+            try:
+                from bot.notifier import notify as _n
+                await _n(
+                    "🚫 *BOT BLOQUEADO NO STARTUP*\n"
+                    "O self-check detectou bug(s) crítico(s) no código.\n"
+                    "Nenhuma ordem será enviada até a correção.\n"
+                    "_Verifique os logs do Railway._"
+                )
+            except Exception:
+                pass
+            return
+
+        app.state.blocked = False
         app.state.engine_task = asyncio.create_task(engine.run())
         log.info("✅ BGX Capital online (KuCoin Futures)")
 
@@ -130,6 +178,7 @@ async def health():
         "version":  "12.1.0",
         "exchange": "kucoin",
         "ready":    bool(getattr(app.state, "ready", False)),
+        "blocked":  bool(getattr(app.state, "blocked", False)),
     }
 
 @app.get("/")
@@ -185,6 +234,27 @@ async def close_all(request: Request):
 @app.get("/api/pnl", dependencies=[Depends(_require_auth)])
 async def pnl():
     return app.state.engine.stats.all_summaries()
+
+@app.get("/api/selfcheck", dependencies=[Depends(_require_auth)])
+async def selfcheck():
+    """
+    Verificação de integridade do código sob demanda.
+
+    Detecta NameError/AttributeError latentes, métodos duplicados e
+    combinações de configuração impossíveis — a classe de bug que
+    historicamente passou despercebida por horas em produção.
+    """
+    from bot.selfcheck import run_selfcheck
+    rep = run_selfcheck(verbose=False)
+    return {
+        "status":         "BLOCKED" if rep["critical"] else "OK",
+        "files_checked":  rep["files_checked"],
+        "critical_count": len(rep["critical"]),
+        "critical":       rep["critical"],
+        "warnings":       rep["warning"],
+        "engine_blocked": bool(getattr(app.state, "blocked", False)),
+    }
+
 
 @app.get("/api/nexus/{symbol}", dependencies=[Depends(_require_auth)])
 async def nexus_decision(symbol: str, direction: str = "LONG"):
