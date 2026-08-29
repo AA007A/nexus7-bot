@@ -76,7 +76,11 @@ class Config:
     MAX_CORRELATION: float = float(os.environ.get("MAX_CORRELATION", "0.70"))
 
     # ── Score / Entrada ───────────────────────────────────────────
-    MIN_ENTRY_SCORE:   int   = int(os.environ.get("MIN_ENTRY_SCORE",   "60"))
+    # MODO TESTE: 55 para validar o pipeline de execução ponta a ponta.
+    # Este filtro roda ANTES do NEXUS AI — se barrar aqui, o sinal nunca
+    # chega na IA. Por isso os dois thresholds precisam estar alinhados.
+    # Voltar para 60+ após confirmar que ordem, SL e TP funcionam.
+    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE",  "55"))
     POST_TARGET_SCORE: int   = int(os.environ.get("POST_TARGET_SCORE", "72"))
     POST_TARGET_RISK:  float = float(os.environ.get("POST_TARGET_RISK","0.005"))
     MIN_VOLUME_MULT:   float = float(os.environ.get("MIN_VOLUME_MULT",  "0.5"))
