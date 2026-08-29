@@ -459,6 +459,10 @@ def score_tf(closes, highs, lows, opens, volumes, direction,
         "momentum_s": momentum_s, "atr_s": atr_s, "struct_s": struct_s,
         "rsi_v": rsi_v, "rsi_s": rsi_s, "macd_s": macd_s,
         "adx_v": adx_v, "adx_trending": adx_trend, "adx_ranging": adx_v < 20,
+        # BUG CORRIGIDO: adx_aligned (ADX apontando na mesma direção do sinal)
+        # era calculado mas nunca exposto nem usado. Uma tendência forte na
+        # direção CONTRÁRIA ao sinal passava despercebida na confluência.
+        "adx_aligned": adx_aligned,
         "ci_chop": ci_chop, "ci_trend": ci_trend, "ci_v": ci_v,
         "bb_squeeze": bb_squeeze, "bb_width": bb_width,
         "vwap": vwap_v, "vwap_ok": vwap_ok,
