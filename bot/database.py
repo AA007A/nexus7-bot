@@ -321,8 +321,9 @@ async def _update_performance():
     rows = await _fetchall("SELECT pnl,fees FROM trades WHERE status='closed'")
     if not rows:
         return
+    # 'pnl' salvo já é LÍQUIDO (fees descontadas no engine) — a coluna
+    # fees é redundante aqui e era lida sem uso.
     pnls  = [r[0] for r in rows]
-    fees  = [r[1] for r in rows]
     arr   = np.array(pnls)
     wins  = arr[arr > 0]
     losses= arr[arr <= 0]
