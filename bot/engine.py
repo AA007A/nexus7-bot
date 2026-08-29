@@ -412,6 +412,14 @@ class TradingEngine:
         # Parâmetros otimizados pelo Optuna (carregados do JSON se disponível)
         self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
+
+        # ── Lock de posições (race condition) ─────────────────────
+        # self.positions é mutado por 7 pontos em corrotinas diferentes:
+        # _sync_positions, _manage_partial_tp, _check_rr_double,
+        # _apply_trailing_stops, _open e emergency_close_all.
+        # Sem lock, duas corrotinas podem ler o mesmo estado e emitir
+        # ordens duplicadas de fechamento para a mesma posição.
+        self._pos_lock = asyncio.Lock()
         self._consec_losses: Dict[str, int] = {}  # símbolo → perdas consecutivas
 
         # ── Meta diária ──────────────────────────────────────────
@@ -449,13 +457,17 @@ class TradingEngine:
 
                 if self.active:
                     self._check_daily_reset()
+                    self._gc_caches()
                     await self._update_balance()
                     await self._heartbeat_telegram()
-                    await self._sync_positions()
-                    await self._check_stagnation_and_invalidation()
-                    await self._manage_partial_tp()
-                    await self._apply_trailing_stops()
-                    await self._check_rr_double()
+                    # Serializa a gestão de posições sob um único lock,
+                    # impedindo ordens concorrentes na mesma posição.
+                    async with self._pos_lock:
+                        await self._sync_positions()
+                        await self._check_stagnation_and_invalidation()
+                        await self._manage_partial_tp()
+                        await self._apply_trailing_stops()
+                        await self._check_rr_double()
                     self._update_daily_pnl()
                     
                     if self.daily_stopped:
@@ -1719,11 +1731,45 @@ class TradingEngine:
                         f"qty_step={qty_step} tick={tick_size} "
                         f"notional={qty * sig.entry:.4f} balance={self.risk.balance:.4f}"
                     )
-                    await self.client.place_order(
+                    _order = await self.client.place_order(
                         symbol=sig.symbol, side=side, qty=qty,
                         sl=sig.sl, tp=sig.tp,
                         instruments=self.instruments,
                     )
+
+                    # ── PROTEÇÃO CRÍTICA: posição sem SL não pode existir ──
+                    # Com 50x, liquidação ocorre a ~2% de movimento adverso.
+                    # Se o trading-stop falhou, a posição está desprotegida:
+                    # fecha imediatamente em vez de deixá-la exposta.
+                    if _order and _order.get("sl_tp_failed"):
+                        log.error(
+                            f"🚨 {sig.symbol}: SL/TP não anexados — "
+                            f"FECHANDO posição imediatamente por segurança"
+                        )
+                        try:
+                            _retry_ok = await self.client.set_position_stops(
+                                sig.symbol, sl=sig.sl, tp=sig.tp
+                            )
+                            if not _retry_ok:
+                                await self.client.place_order(
+                                    symbol=sig.symbol,
+                                    side="Sell" if side == "Buy" else "Buy",
+                                    qty=qty, sl=0, tp=0,
+                                    instruments=self.instruments,
+                                    reduce_only=True,
+                                )
+                                await notify(
+                                    f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
+                                    f"`{sig.symbol}` foi aberta mas o SL não pôde\n"
+                                    f"ser anexado. Fechada para evitar exposição\n"
+                                    f"sem proteção com {cfg.LEVERAGE}x."
+                                )
+                                return
+                            log.info(f"✓ {sig.symbol}: SL/TP anexados na 2ª tentativa")
+                        except Exception as _e:
+                            log.error(f"🚨 {sig.symbol}: falha ao proteger/fechar: {_e}")
+                            return
+
                     last_exc = None
                     break   # sucesso — sai do loop de retry
                 except Exception as exc:
@@ -1732,7 +1778,7 @@ class TradingEngine:
 
                     # Extrai retCode e retMsg da mensagem de erro estruturada
                     import re as _re
-                    rc_match  = _re.search(r"Bybit\s+(\d+):\s*(.*)", err_str)
+                    rc_match  = _re.search(r"KuCoin\s+(\d+):\s*(.*)|code['\"]?\s*[:=]\s*['\"]?(\d+)", err_str)
                     ret_code  = rc_match.group(1) if rc_match else "?"
                     ret_msg   = rc_match.group(2).strip() if rc_match else err_str
 
@@ -1994,6 +2040,21 @@ class TradingEngine:
             )
         except Exception as e:
             log.debug(f"_heartbeat_telegram: {e}")
+
+    def _gc_caches(self):
+        """
+        Expurga entradas expiradas dos dicts auxiliares.
+
+        _cooldown e _trade_ids só recebiam escritas e nunca eram limpos.
+        Em operação 24/7 crescem indefinidamente — leak lento mas real.
+        """
+        now = time.time()
+        for sym in [s for s, t in list(self._cooldown.items()) if t < now]:
+            self._cooldown.pop(sym, None)
+        if len(getattr(self, "_trade_ids", {})) > 200:
+            for sym in list(self._trade_ids.keys()):
+                if sym not in self.positions:
+                    self._trade_ids.pop(sym, None)
 
     async def _update_balance(self):
         """
