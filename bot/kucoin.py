@@ -47,10 +47,40 @@ API_KEY        = os.environ.get("KUCOIN_API_KEY",        "").strip()
 API_SECRET     = os.environ.get("KUCOIN_API_SECRET",     "").strip()
 API_PASSPHRASE = os.environ.get("KUCOIN_API_PASSPHRASE", "").strip()
 # OPERAÇÃO REAL ATIVADA — autenticação KuCoin confirmada (saldo real lido com sucesso).
-# Controlado pela env var PAPER_TRADE no Railway:
-#   PAPER_TRADE=true  → simula ordens (nada é executado na exchange)
-#   PAPER_TRADE=false → executa ordens REAIS com capital real (padrão)
-PAPER_TRADE    = os.environ.get("PAPER_TRADE", "false").lower() == "true"
+# ══════════════════════════════════════════════════════════════════
+# BARREIRA EXPLÍCITA: PAPER TRADING ↔ DINHEIRO REAL (seção 24)
+#
+# P0 CORRIGIDO: o default era "false", ou seja, a AUSÊNCIA da variável
+# fazia o bot operar com CAPITAL REAL. Uma variável apagada por engano,
+# um ambiente novo ou um deploy sem config resultaria em ordens reais
+# sem ninguém ter pedido.
+#
+# Agora a operação real exige AFIRMAÇÃO EXPLÍCITA de duas variáveis:
+#     PAPER_TRADE=false
+#     LIVE_TRADING_CONFIRMED=I_UNDERSTAND_THE_RISK
+#
+# Qualquer configuração ambígua ou ausente → PAPER TRADE.
+# Falha para o lado seguro, sempre.
+# ══════════════════════════════════════════════════════════════════
+_paper_env = os.environ.get("PAPER_TRADE", "").strip().lower()
+_live_ack  = os.environ.get("LIVE_TRADING_CONFIRMED", "").strip()
+_LIVE_TOKEN = "I_UNDERSTAND_THE_RISK"
+
+if _paper_env == "false" and _live_ack == _LIVE_TOKEN:
+    PAPER_TRADE = False        # operação real explicitamente confirmada
+elif _paper_env == "false":
+    PAPER_TRADE = True         # pediu real mas não confirmou → simula
+    log.critical(
+        "🚫 PAPER_TRADE=false MAS LIVE_TRADING_CONFIRMED ausente ou inválido. "
+        f"Operando em PAPER TRADE por segurança. Para operar com capital "
+        f"real, defina LIVE_TRADING_CONFIRMED={_LIVE_TOKEN}"
+    )
+else:
+    PAPER_TRADE = True         # default seguro (variável ausente ou 'true')
+    if not _paper_env:
+        log.warning(
+            "🟡 PAPER_TRADE não definido — assumindo PAPER TRADE (default seguro)"
+        )
 
 # ── Endpoints ─────────────────────────────────────────────────────
 REST_BASE = "https://api-futures.kucoin.com"
@@ -537,7 +567,8 @@ class KuCoinClient:
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float = 0, tp: float = 0,
                           instruments: dict = None,
-                          reduce_only: bool = False) -> dict:
+                          reduce_only: bool = False,
+                          idem_key: str = None) -> dict:
         """
         Envia ordem a mercado com SL e TP opcionais.
         side: "Buy" ou "Sell" (mesmo padrão do BybitClient)
@@ -557,9 +588,23 @@ class KuCoinClient:
         # KuCoin: "buy" = long, "sell" = short (lowercase)
         kc_side   = side.lower()
 
-        # clientOid: idempotency key (máx 40 chars alfanumérico)
-        _ts      = str(int(time.time() * 1000))
-        _raw     = f"{symbol}_{side}_{contracts}_{_ts}"
+        # ══════════════════════════════════════════════════════════
+        # P0 CORRIGIDO — IDEMPOTÊNCIA DE ORDEM
+        #
+        # O clientOid usava time.time() em ms, mudando a cada tentativa.
+        # Se uma ordem executasse na exchange mas a resposta se perdesse
+        # (timeout de rede), o retry do engine geraria um OID NOVO e a
+        # KuCoin aceitaria como ordem distinta → POSIÇÃO DUPLICADA,
+        # com o dobro da exposição pretendida.
+        #
+        # Agora o OID é determinístico por (símbolo, lado, qty, janela
+        # de 60s). Retries dentro da mesma janela reusam o mesmo OID e a
+        # exchange rejeita a duplicata — comportamento correto.
+        #
+        # idem_key permite ao chamador forçar um OID específico.
+        # ══════════════════════════════════════════════════════════
+        _window  = int(time.time() // 60)      # janela de 1 minuto
+        _raw     = idem_key or f"{symbol}_{side}_{contracts}_{_window}"
         _oid     = hashlib.md5(_raw.encode()).hexdigest()[:40]
 
         # BUG CORRIGIDO: lia os.environ diretamente com default "10", ignorando
@@ -625,6 +670,15 @@ class KuCoinClient:
                     f"retentando com {fallback_lev}x"
                 )
                 body["leverage"] = str(fallback_lev)
+                # Antes de tentar outra alavancagem, CONFIRMA que a ordem
+                # anterior realmente não executou. Sem isso, um timeout
+                # após execução geraria uma segunda posição.
+                if await self._position_exists(symbol):
+                    log.warning(
+                        f"⚠️ {symbol}: posição JÁ EXISTE na exchange — "
+                        f"abortando fallback de leverage para não duplicar"
+                    )
+                    return {"orderId": "EXISTING_POSITION", "deduped": True}
                 body["clientOid"] = hashlib.md5(
                     f"{_raw}_{fallback_lev}".encode()
                 ).hexdigest()[:40]
@@ -659,6 +713,28 @@ class KuCoinClient:
         else:
             log.error(f"❌ Ordem {symbol} rejeitada em todas as tentativas")
         return data
+
+    async def _position_exists(self, symbol: str) -> bool:
+        """
+        Confirma na exchange se já existe posição aberta no símbolo.
+
+        Usado antes de qualquer RETRY de ordem de abertura: um timeout de
+        rede não significa que a ordem falhou — ela pode ter executado.
+        Reenviar sem verificar dobra a exposição.
+        """
+        try:
+            positions = await self.get_positions()
+            for p in positions:
+                if p.get("symbol") == symbol and abs(float(p.get("size", 0) or 0)) > 0:
+                    return True
+        except Exception as e:
+            # Na dúvida, assume que EXISTE — falhar para o lado seguro.
+            log.warning(
+                f"_position_exists {symbol}: {e} — assumindo que existe "
+                f"para evitar ordem duplicada"
+            )
+            return True
+        return False
 
     async def set_position_stops(self, symbol: str, sl: float = 0,
                                   tp: float = 0) -> bool:
