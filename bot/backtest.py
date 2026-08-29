@@ -7,7 +7,7 @@ Calcula: Win Rate, Profit Factor, Sharpe, Sortino, Max DD,
 Roda automaticamente toda semana.
 Persiste em tabela performance.
 """
-import asyncio, time
+import asyncio, os, time
 from datetime import datetime, timezone
 from typing import List, Dict
 import numpy as np
@@ -63,7 +63,8 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                   min_score: int = 75,
                   min_rr: float = 2.0,
                   sl_mult: float = None,
-                  tp_mult: float = None) -> List[dict]:
+                  tp_mult: float = None,
+                  symbol: str = "") -> List[dict]:
     """
     Simula a estratégia MTF sobre dados históricos.
     sl_mult e tp_mult substituem os defaults do cfg quando fornecidos
@@ -102,7 +103,11 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                 fee_mult=getattr(cfg, 'FEE_MULTIPLIER', 2.0),
                 vol_mult=getattr(cfg, 'MIN_VOLUME_MULT', 1.2),
             )
-        except Exception:
+        except Exception as _e:
+            # auditoria #10: falhas de análise no backtest agora são contadas
+            _skipped = locals().get("_analysis_errors", 0) + 1
+            if _skipped % 100 == 1:
+                log.debug(f"backtest: erro de análise no candle {i}: {_e}")
             continue
 
         if not sig:
@@ -126,7 +131,30 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
         hold      = 0
         tp1_hit   = False
         pnl_pct   = 0.0
-        fee_pct   = 0.0016   # 0.16% total (entrada + saída)
+
+        # ── CUSTOS REALISTAS (auditoria #5) ──────────────────────
+        # Antes: fee_pct fixo em 0.0016 sem slippage nem funding —
+        # o backtest era sistematicamente otimista vs. execução real.
+        #
+        # Taxa: KuCoin taker 0.06% × 2 (entrada + saída) = 0.12%
+        _TAKER = float(os.environ.get("TAKER_FEE", "0.0006"))
+        fee_pct = _TAKER * 2
+
+        # Slippage: ordens a mercado não preenchem no preço exato.
+        # Pares de menor liquidez (DOGE/LINK/AVAX/DOT) sofrem mais.
+        # Aplicado nas duas pontas (entrada e saída).
+        _SLIP_BASE = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))  # 0.05%
+        _MAJORS    = ("BTC", "ETH", "SOL")
+        _sym_up    = str(symbol).upper() if symbol else ""
+        _slip      = _SLIP_BASE if any(m in _sym_up for m in _MAJORS) else _SLIP_BASE * 2
+        slip_pct   = _slip * 2   # entrada + saída
+
+        # Funding: pago a cada 8h enquanto a posição está aberta.
+        # Taxa média histórica ~0.01% por período de 8h.
+        _FUNDING_8H = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
+
+        # Custo total aplicado ao PnL de cada trade
+        cost_pct = fee_pct + slip_pct
 
         for j in range(i+1, min(i+41, len(klines_15))):  # até 40 candles (~10h)
             future = klines_15[j]
@@ -139,10 +167,10 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                         # Metade já garantida — SL está em break-even
                         pnl_tp1  = abs(tp1 - entry) / entry * 0.5
                         pnl_sl   = 0.0   # SL = break-even, sem perda adicional
-                        pnl_pct  = pnl_tp1 + pnl_sl - fee_pct
+                        pnl_pct  = pnl_tp1 + pnl_sl - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                         result   = "PARTIAL_WIN"
                     else:
-                        pnl_pct = -(abs(sl - entry) / entry) - fee_pct
+                        pnl_pct = -(abs(sl - entry) / entry) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                         result  = "LOSS"
                     break
                 # TP1 atingido (50%)
@@ -153,21 +181,21 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                 if tp1_hit and future["h"] >= tp2:
                     pnl_tp1 = abs(tp1 - entry) / entry * 0.5
                     pnl_tp2 = abs(tp2 - entry) / entry * 0.5
-                    pnl_pct = pnl_tp1 + pnl_tp2 - fee_pct
+                    pnl_pct = pnl_tp1 + pnl_tp2 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                     result  = "WIN"; break
                 # TP único (sem parcial)
                 if not has_partial and future["h"] >= tp:
-                    pnl_pct = abs(tp - entry) / entry - fee_pct
+                    pnl_pct = abs(tp - entry) / entry - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                     result  = "WIN"; break
 
             else:  # SHORT
                 if future["h"] >= sl:
                     if tp1_hit:
                         pnl_tp1 = abs(tp1 - entry) / entry * 0.5
-                        pnl_pct = pnl_tp1 - fee_pct
+                        pnl_pct = pnl_tp1 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                         result  = "PARTIAL_WIN"
                     else:
-                        pnl_pct = -(abs(sl - entry) / entry) - fee_pct
+                        pnl_pct = -(abs(sl - entry) / entry) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                         result  = "LOSS"
                     break
                 if has_partial and not tp1_hit and future["l"] <= tp1:
@@ -176,17 +204,17 @@ def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
                 if tp1_hit and future["l"] <= tp2:
                     pnl_tp1 = abs(tp1 - entry) / entry * 0.5
                     pnl_tp2 = abs(tp2 - entry) / entry * 0.5
-                    pnl_pct = pnl_tp1 + pnl_tp2 - fee_pct
+                    pnl_pct = pnl_tp1 + pnl_tp2 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                     result  = "WIN"; break
                 if not has_partial and future["l"] <= tp:
-                    pnl_pct = abs(tp - entry) / entry - fee_pct
+                    pnl_pct = abs(tp - entry) / entry - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
                     result  = "WIN"; break
 
         if result is None:
             result = "TIMEOUT"
             last    = klines_15[min(i+40, len(klines_15)-1)]["c"]
             base    = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
-            pnl_pct = (base * (0.5 if tp1_hit else 1.0)) - fee_pct
+            pnl_pct = (base * (0.5 if tp1_hit else 1.0)) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
 
         # Timestamp do candle
         candle_idx = i
@@ -381,7 +409,8 @@ def monte_carlo_permutation(returns: list, n_simulations: int = 5000,
 
 # ── Walk-Forward Testing ─────────────────────────────────────────
 def _walk_forward(klines_15: list, klines_1h: list, klines_4h: list,
-                  n_windows: int = 3, train_ratio: float = 0.70) -> dict:
+                  n_windows: int = 5, train_ratio: float = 0.70,
+                  symbol: str = "", rolling: bool = True) -> dict:
     """
     Walk-Forward Testing: divide os dados em N janelas temporais.
     Em cada janela: treina nos primeiros 70% e testa nos 30% restantes.
@@ -398,12 +427,28 @@ def _walk_forward(klines_15: list, klines_1h: list, klines_4h: list,
         return {"error": "Dados insuficientes para walk-forward (min 200 candles 15M)"}
 
     n = len(klines_15)
-    window_size = n // n_windows
     results = []
 
+    # ── WALK-FORWARD ROLANTE (auditoria #9) ─────────────────────
+    # Antes: cortes fixos e disjuntos (n // n_windows), o que testava
+    # cada período uma única vez e ignorava a transição entre regimes.
+    #
+    # Agora: janelas DESLIZANTES com 50% de sobreposição — cada janela
+    # avança metade do seu tamanho, cobrindo mais combinações de regime
+    # e aproximando o teste de uma reotimização periódica real.
+    if rolling and n_windows > 1:
+        # window_size maior que n/n_windows porque as janelas se sobrepõem
+        window_size = int(n / ((n_windows + 1) / 2))
+        step        = window_size // 2          # avanço de 50%
+    else:
+        window_size = n // n_windows
+        step        = window_size
+
     for w in range(n_windows):
-        start_idx = w * window_size
-        end_idx   = start_idx + window_size if w < n_windows - 1 else n
+        start_idx = w * step
+        end_idx   = min(start_idx + window_size, n)
+        if end_idx - start_idx < 120 or start_idx >= n:
+            continue
         w_k15     = klines_15[start_idx:end_idx]
 
         # Índices proporcionais para 1H e 4H
@@ -429,8 +474,8 @@ def _walk_forward(klines_15: list, klines_1h: list, klines_4h: list,
         test_4h    = w_k4h[split_4h:] if split_4h < len(w_k4h) else []
 
         # Roda estratégia em treino e teste
-        train_trades = _run_strategy(train_15, train_1h, train_4h) if len(train_15) >= 60 else []
-        test_trades  = _run_strategy(test_15,  test_1h,  test_4h)  if len(test_15)  >= 30 else []
+        train_trades = _run_strategy(train_15, train_1h, train_4h, symbol=symbol) if len(train_15) >= 60 else []
+        test_trades  = _run_strategy(test_15,  test_1h,  test_4h, symbol=symbol)  if len(test_15)  >= 30 else []
 
         train_m = _calc_metrics(train_trades, "train") if train_trades else {}
         test_m  = _calc_metrics(test_trades,  "test")  if test_trades  else {}
@@ -526,12 +571,12 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
     )
 
     # ── Backtest completo (in-sample total) ──────────────────────
-    trades  = _run_strategy(k15, k1h, k4h)
+    trades  = _run_strategy(k15, k1h, k4h, symbol=symbol)
     metrics = _calc_metrics(trades, "MTF-4H-1H-15M")
 
     # ── Walk-Forward Testing (out-of-sample) ─────────────────────
     # FIX: 3 → 6 janelas walk-forward para melhor cobertura estatística
-    wf = _walk_forward(k15, k1h, k4h, n_windows=6, train_ratio=0.70)
+    wf = _walk_forward(k15, k1h, k4h, n_windows=6, train_ratio=0.70, symbol=symbol, rolling=True)
 
     elapsed = round(time.time() - start, 1)
     metrics["elapsed_seconds"]  = elapsed
