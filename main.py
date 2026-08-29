@@ -186,6 +186,65 @@ async def close_all(request: Request):
 async def pnl():
     return app.state.engine.stats.all_summaries()
 
+@app.get("/api/nexus/{symbol}", dependencies=[Depends(_require_auth)])
+async def nexus_decision(symbol: str, direction: str = "LONG"):
+    """
+    NEXUS AI — decisão completa para um símbolo (seções 18, 23).
+
+    Retorna a estrutura padronizada com score, regime, EV, R:R líquido,
+    reasoning, warnings e a saída de cada um dos 7 modelos do ensemble.
+    Útil para entender POR QUE a IA aprovou ou vetou um setup.
+    """
+    from bot import nexus_ai
+    eng = app.state.engine
+    sym = symbol.upper()
+    try:
+        k15 = eng.client.get_cached_klines(sym, "15",  200)
+        k1h = eng.client.get_cached_klines(sym, "60",  100)
+        k4h = eng.client.get_cached_klines(sym, "240",  60)
+        if len(k15) < 60:
+            k15 = await eng.client.get_klines(sym, "15", 200)
+        if len(k1h) < 40:
+            k1h = await eng.client.get_klines(sym, "60", 100)
+        if len(k4h) < 20:
+            k4h = await eng.client.get_klines(sym, "240", 60)
+
+        px = float(k15[-1]["c"]) if k15 else 0.0
+        # Níveis ilustrativos apenas para avaliação via endpoint
+        if direction.upper() == "LONG":
+            sl, tp = px * 0.985, px * 1.03
+        else:
+            sl, tp = px * 1.015, px * 0.97
+
+        funding = None
+        try:
+            funding = await eng.client.get_funding_rate(sym)
+        except Exception:
+            pass
+
+        d = nexus_ai.decide(
+            symbol=sym, k15=k15, k1h=k1h, k4h=k4h,
+            entry=px, sl=sl, tp=tp,
+            ticker=eng.client.get_cached_ticker(sym) or None,
+            funding=funding,
+        )
+        return d.to_dict()
+    except Exception as e:
+        return {"symbol": sym, "error": str(e),
+                "decision": "WAIT", "execution_allowed": False}
+
+
+@app.get("/api/nexus", dependencies=[Depends(_require_auth)])
+async def nexus_last():
+    """Últimas decisões do NEXUS AI por símbolo (seção 23)."""
+    eng = app.state.engine
+    return {
+        "enabled":   getattr(eng, "_last_nexus", None) is not None,
+        "min_score": float(os.environ.get("NEXUS_MIN_SCORE", "85")),
+        "decisions": getattr(eng, "_last_nexus", {}),
+    }
+
+
 @app.get("/api/expectancy", dependencies=[Depends(_require_auth)])
 async def expectancy(days: int = 0):
     """
