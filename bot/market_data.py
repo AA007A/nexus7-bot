@@ -943,7 +943,7 @@ _last_volume_update: float = 0
 
 async def update_volume_filter(client):
     """
-    Atualiza volume 24h de todos os pares via Bybit tickers.
+    Atualiza volume 24h de todos os pares via tickers da exchange.
     Atualiza a cada 30 minutos.
     """
     global _volume_cache, _last_volume_update
