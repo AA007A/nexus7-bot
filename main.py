@@ -144,13 +144,24 @@ async def lifespan(app: FastAPI):
     # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
     yield
 
+    # ── Shutdown ordenado ─────────────────────────────────────────
+    # P2 CORRIGIDO: a conexão com o banco nunca era fechada. Em restarts
+    # frequentes, conexões PostgreSQL ficavam penduradas até o timeout do
+    # servidor, consumindo slots do pool.
     engine.stop()
     for t in ("bootstrap_task", "engine_task"):
         task = getattr(app.state, t, None)
         if task and not task.done():
             task.cancel()
     await asyncio.sleep(1.0)
-    await client.close()
+    try:
+        await client.close()
+    except Exception as e:
+        log.warning(f"Erro ao fechar cliente: {e}")
+    try:
+        await db.close()
+    except Exception as e:
+        log.warning(f"Erro ao fechar banco: {e}")
     log.info("👋 Encerrado")
 
 
