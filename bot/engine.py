@@ -700,8 +700,14 @@ class TradingEngine:
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)
                     if tid:
+                        # BUG CRÍTICO CORRIGIDO: usava 'price', variável que não
+                        # existe neste escopo → NameError capturado pelo except.
+                        # Efeito: NENHUM trade fechado remotamente (SL/TP da
+                        # exchange) era persistido no banco. O histórico ficava
+                        # com trades eternamente "abertos", inviabilizando
+                        # métricas de performance e a calibração de pesos.
                         await db.save_trade_close(
-                            tid, price, pnl_net, total_fee,
+                            tid, exit_px, pnl_net, total_fee,
                             (datetime.utcnow() - pos.opened_at).total_seconds() / 60
                         )
                     del self.positions[sym]
@@ -825,7 +831,7 @@ class TradingEngine:
 
     async def _notify_session_info(self):
         """Envia info da sessão atual no Telegram uma vez por hora."""
-        sess = get_market_session()
+        sess = mdata.get_market_session()   # BUG: função vive em market_data
         if sess["quality"] < 50:
             await notify(
                 f"{sess['emoji']} *SESSÃO FRACA — Bot em modo cauteloso*\n"
@@ -1069,7 +1075,7 @@ class TradingEngine:
 
                 # Atualizar estado da posição
                 pnl_partial = risk_dist * partial_qty   # PnL gross do parcial
-                fee_p = partial_qty * cur * 0.00055 * 2
+                fee_p = partial_qty * cur * TAKER_FEE * 2   # taxa KuCoin
                 pnl_net = pnl_partial - fee_p
 
                 pos.tp1_hit     = True
@@ -1185,8 +1191,8 @@ class TradingEngine:
                     fee_close = pos.qty * price     * TAKER_FEE
                     total_fee = fee_open + fee_close
                     pnl_net   = pnl_gross - total_fee
-                    fee_open  = pos.qty * pos.entry * 0.00055
-                    fee_close = pos.qty * price     * 0.00055
+                    fee_open  = pos.qty * pos.entry * TAKER_FEE
+                    fee_close = pos.qty * price     * TAKER_FEE
                     trade = Trade(
                         sym, pos.direction, pos.entry, price,
                         pos.qty, pnl_gross, pos.opened_at,
@@ -1739,14 +1745,22 @@ class TradingEngine:
                     )
 
                     # Erros não-recuperáveis — não faz sentido tentar de novo
+                    # CORRIGIDO: os códigos anteriores (10001, 110007...) eram da
+                    # BYBIT. Na KuCoin nenhum deles existe, então erros permanentes
+                    # (saldo insuficiente, qty inválida) eram retentados 3x
+                    # inutilmente, com backoff — atrasando o scan.
                     NON_RETRYABLE = {
-                        "10001",  # parâmetro inválido
-                        "10004",  # assinatura inválida
-                        "110007", # saldo insuficiente
-                        "110013", # qty abaixo do mínimo
-                        "110017", # SL/TP inválido
-                        "110025", # posição não existe
-                        "110043", # alavancagem já configurada
+                        "400100",  # parâmetro inválido
+                        "400001",  # parâmetro obrigatório ausente
+                        "400002",  # KC-API-TIMESTAMP inválido
+                        "400003",  # KC-API-KEY inválida
+                        "400004",  # KC-API-PASSPHRASE inválida
+                        "400005",  # KC-API-SIGN inválida
+                        "400006",  # IP não autorizado
+                        "400007",  # sem permissão
+                        "300003",  # saldo insuficiente
+                        "300012",  # ordem rejeitada por risco
+                        "100001",  # ordem não existe
                     }
                     if ret_code in NON_RETRYABLE:
                         log.error(
@@ -1772,6 +1786,29 @@ class TradingEngine:
                     f"sl={sig.sl:.6f} tp={sig.tp:.6f} entry={sig.entry:.6f}"
                 )
                 return
+
+            # PREÇO REAL DE EXECUÇÃO (não o estimado no momento do sinal).
+            # sig.entry vem do último candle FECHADO do 15M; a ordem é MARKET
+            # e executa no preço corrente. Com 50x, uma divergência de 0.3%
+            # já representa 15% de diferença no PnL calculado — e o SL/TP
+            # ficavam medidos a partir de um preço que nunca existiu.
+            try:
+                _tk = self.client.get_cached_ticker(sig.symbol) or {}
+                _fill = float(_tk.get("lastPrice", 0) or 0)
+                if _fill > 0:
+                    _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
+                    if _slip_pct > 0.05:
+                        log.warning(
+                            f"📊 {sig.symbol}: slippage {_slip_pct:.3f}% "
+                            f"(sinal ${sig.entry:.4f} → fill ${_fill:.4f})"
+                        )
+                    # Desloca SL/TP na mesma proporção para preservar o R:R
+                    _delta = _fill - sig.entry
+                    sig.entry += _delta
+                    sig.sl    += _delta
+                    sig.tp    += _delta
+            except Exception as e:
+                log.debug(f"fill price {sig.symbol}: {e}")
 
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
