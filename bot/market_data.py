@@ -1,6 +1,3 @@
-import time
-
-_macro_cache: dict = {}
 """
 BGX Capital — Market Data Module
 - CVD (Cumulative Volume Delta) em tempo real
@@ -8,8 +5,20 @@ BGX Capital — Market Data Module
 - Correlações Macro (BTC x DXY, S&P500, BTC.D)
 Fault-tolerant: falhas não afetam o bot.
 """
-import asyncio, time
+import asyncio
+import time
+
+# BUG CRÍTICO CORRIGIDO: aiohttp era usado em 16 pontos deste módulo
+# (macro, notícias, sentimento, calendário econômico, volume) mas NUNCA
+# foi importado. Todas essas funções lançavam NameError, capturado pelos
+# except — o bot operava com dados macro/notícias permanentemente vazios,
+# sem qualquer sinal do problema.
+import aiohttp
+
 from bot.logger import log
+
+# Cache de dados macro (declarado aqui para ficar visível ao módulo todo)
+_macro_cache: dict = {}
 
 # ── CVD State — Persistente com janela de 4h ─────────────────────
 # Problema resolvido: CVD não reseta mais no reinício do bot.
