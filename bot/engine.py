@@ -473,6 +473,7 @@ class TradingEngine:
                     # Serializa a gestão de posições sob um único lock,
                     # impedindo ordens concorrentes na mesma posição.
                     async with self._pos_lock:
+                        await self._guard_naked_positions()
                         await self._sync_positions()
                         await self._check_stagnation_and_invalidation()
                         await self._manage_partial_tp()
@@ -1156,8 +1157,16 @@ class TradingEngine:
                     )
                     continue
 
-                # Mover SL para breakeven
-                await self.client.set_sl(sym, pos.entry)
+                # Mover SL para breakeven — verificado.
+                # Sem confirmação, a posição restante ficaria com o stop
+                # original enquanto o bot a trataria como protegida.
+                _be = await self.client.set_sl(sym, pos.entry)
+                if not _be:
+                    log.error(
+                        f"🚨 {sym}: TP parcial executado mas SL NÃO moveu "
+                        f"para break-even (${pos.entry:.4f}) — restante "
+                        f"ainda com stop original"
+                    )
 
                 # Atualizar estado da posição
                 pnl_partial = risk_dist * partial_qty   # PnL gross do parcial
@@ -1216,8 +1225,22 @@ class TradingEngine:
 
                 old_sl = pos.trailing_sl
 
-                # Move SL na exchange
-                await self.client.set_sl(sym, new_sl)
+                # RISCO CORRIGIDO: o estado interno era atualizado SEM
+                # verificar se a exchange aceitou o novo stop.
+                #
+                # Se set_sl falhasse, o bot passava a acreditar que o stop
+                # estava mais apertado do que realmente estava — calculando
+                # risco, break-even e trailing sobre um valor fictício.
+                # Numa reversão, a perda real seria maior que a esperada.
+                _ok = await self.client.set_sl(sym, new_sl)
+                if not _ok:
+                    log.error(
+                        f"🚨 [{sym}] Trailing FALHOU: exchange não aceitou "
+                        f"SL {new_sl:.6f} — mantendo estado em {old_sl:.6f}. "
+                        f"O stop real continua no valor anterior."
+                    )
+                    continue
+
                 pos.trailing_sl = new_sl
                 pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
 
@@ -2301,6 +2324,93 @@ class TradingEngine:
             )
         except Exception as e:
             log.debug(f"_heartbeat_telegram: {e}")
+
+    async def _guard_naked_positions(self):
+        """
+        GUARDIÃO DE POSIÇÕES DESPROTEGIDAS (proteção de capital).
+
+        Verifica a cada ciclo se TODA posição aberta na exchange tem stop
+        loss anexado. Uma posição sem SL com 50x liquida a ~2% de
+        movimento adverso — é o cenário de perda total.
+
+        Cenários que isto cobre e que a verificação da abertura não pega:
+          • stop removido manualmente na interface da KuCoin
+          • stop cancelado pela exchange após execução parcial
+          • posição aberta em deploy anterior, antes do fix do SL
+          • falha de rede no momento exato do trading-stop
+
+        Ação: tenta reaplicar o SL. Se falhar, FECHA a posição.
+        """
+        if self.paper_trade:
+            return
+        try:
+            positions = await self.client.get_positions()
+        except Exception as e:
+            log.debug(f"_guard_naked_positions: {e}")
+            return
+
+        for p in positions:
+            try:
+                sym  = p.get("symbol", "")
+                size = float(p.get("size", 0) or 0)
+                if size <= 0:
+                    continue
+                sl_ex = float(p.get("stopLoss", 0) or 0)
+                if sl_ex > 0:
+                    continue   # protegida
+
+                entry = float(p.get("entryPrice", 0) or 0)
+                side  = p.get("side", "Buy")
+                if entry <= 0:
+                    continue
+
+                log.critical(
+                    f"🚨 {sym}: POSIÇÃO SEM STOP LOSS na exchange "
+                    f"(size={size} entry=${entry:.4f}) — reaplicando"
+                )
+
+                # SL do estado interno, ou 1.5% como fallback de emergência
+                pos_local = self.positions.get(sym)
+                if pos_local and getattr(pos_local, "sl", 0) > 0:
+                    sl_target = pos_local.sl
+                else:
+                    sl_target = entry * (0.985 if side == "Buy" else 1.015)
+
+                ok = await self.client.set_position_stops(sym, sl=sl_target)
+                if ok:
+                    log.info(f"✓ {sym}: SL reaplicado @ ${sl_target:.4f}")
+                    await notify(
+                        f"🛡️ *SL REAPLICADO*\n"
+                        f"`{sym}` estava sem stop loss na exchange.\n"
+                        f"Stop reaplicado em `${sl_target:.4f}`."
+                    )
+                    continue
+
+                # Não conseguiu proteger → fecha para não ficar exposto
+                log.critical(f"🚨 {sym}: falha ao reaplicar SL — FECHANDO posição")
+                res = await self.client.place_order(
+                    symbol=sym,
+                    side="Sell" if side == "Buy" else "Buy",
+                    qty=size, sl=0, tp=0,
+                    instruments=self.instruments,
+                    reduce_only=True,
+                )
+                if res and res.get("orderId"):
+                    self.positions.pop(sym, None)
+                    await notify(
+                        f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
+                        f"`{sym}` estava SEM STOP LOSS e não foi possível\n"
+                        f"reaplicá-lo. Fechada para evitar exposição\n"
+                        f"sem proteção com {cfg.LEVERAGE}x."
+                    )
+                else:
+                    await notify(
+                        f"🆘 *AÇÃO MANUAL NECESSÁRIA*\n"
+                        f"`{sym}` está SEM STOP LOSS e o fechamento\n"
+                        f"automático FALHOU. Feche manualmente na KuCoin."
+                    )
+            except Exception as e:
+                log.error(f"_guard_naked_positions {p.get('symbol','?')}: {e}")
 
     def _gc_caches(self):
         """
