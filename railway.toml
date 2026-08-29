@@ -4,6 +4,8 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/health"
-healthcheckTimeout = 300
+# 120s é suficiente: /health responde em ~1s (o bootstrap roda em background).
+# 300s apenas prolongava a espera quando algo dava errado.
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
