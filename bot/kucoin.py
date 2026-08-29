@@ -228,6 +228,7 @@ class KuCoinClient:
         self._ticker_cache: dict = {}   # symbol → dict
         self._ob_cache:    dict = {}    # symbol → dict
         self._stale_logged: dict = {}   # controle de log de cache obsoleto
+        self._ping_task     = None             # task de ping do WS (cancelável)
         self._rate_lock     = asyncio.Lock()   # serializa o throttle
         self._rate_sem      = asyncio.Semaphore(self._RATE_MAX_CONCURRENT)
         self._last_req_ts   = 0.0
@@ -1201,7 +1202,13 @@ class KuCoinClient:
                             "response":       True,
                         }))
 
-                    # Ping manual a cada 20s (KuCoin exige)
+                    # Ping de aplicação a cada 20s (exigência da KuCoin).
+                    #
+                    # P1 CORRIGIDO — VAZAMENTO DE TASK:
+                    # a task era criada a cada reconexão sem cancelar a
+                    # anterior. Após N reconexões, N tasks de ping ativas
+                    # tentando usar websockets já fechados — consumo de
+                    # memória e ruído crescentes em operação 24/7.
                     async def _ping():
                         while True:
                             await asyncio.sleep(20)
@@ -1213,14 +1220,26 @@ class KuCoinClient:
                             except Exception:
                                 break
 
-                    asyncio.create_task(_ping())
+                    # Cancela ping órfão de uma conexão anterior
+                    _old_ping = getattr(self, "_ping_task", None)
+                    if _old_ping and not _old_ping.done():
+                        _old_ping.cancel()
+                    self._ping_task = asyncio.create_task(_ping())
 
-                    async for raw in ws:
-                        try:
-                            msg = json.loads(raw)
-                            await self._handle_ws_message(msg)
-                        except Exception as e:
-                            log.debug(f"WS parse: {e}")
+                    try:
+                        async for raw in ws:
+                            try:
+                                msg = json.loads(raw)
+                                await self._handle_ws_message(msg)
+                            except json.JSONDecodeError as e:
+                                # Mensagem malformada não deve derrubar o loop
+                                log.debug(f"WS JSON inválido: {e}")
+                            except Exception as e:
+                                log.debug(f"WS parse: {e}")
+                    finally:
+                        # Garante que o ping morre junto com a conexão
+                        if self._ping_task and not self._ping_task.done():
+                            self._ping_task.cancel()
 
             except Exception as e:
                 self._ws_retry += 1
