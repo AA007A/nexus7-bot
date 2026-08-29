@@ -1236,40 +1236,65 @@ class KuCoinClient:
                     log.info(f"✅ WebSocket KuCoin conectado")
 
                     # Subscrever klines por símbolo e intervalo (batches de 10)
+                    # ══════════════════════════════════════════════════
+                    # BUG CORRIGIDO — FORMATO DA SUBSCRIÇÃO (code=400)
+                    #
+                    # O código juntava TÓPICOS DIFERENTES com vírgula:
+                    #   "/contractMarket/limitCandle:X_15min,/contractMarket/tickerV2:Y"
+                    #
+                    # Na KuCoin a vírgula separa SÍMBOLOS dentro do MESMO
+                    # canal, não tópicos distintos:
+                    #   ✓ /contractMarket/tickerV2:XBTUSDTM,ETHUSDTM
+                    #   ✗ /contractMarket/limitCandle:A,/contractMarket/tickerV2:B
+                    #
+                    # Resultado: TODAS as subscrições eram rejeitadas com
+                    # code=400 e o cache de klines ficava permanentemente
+                    # vazio ("WS cache miss 15m=0 1h=0 4h=0").
+                    #
+                    # Agora: limitCandle é enviado UM POR MENSAGEM (o
+                    # intervalo faz parte do sufixo do símbolo) e o ticker
+                    # agrupa os símbolos num único tópico.
+                    # ══════════════════════════════════════════════════
                     subs = []
                     for sym in symbols:
                         kc_sym = to_kucoin(sym)
                         for interval in intervals:
-                            # CORRIGIDO: tópico é "limitCandle" (não "candle") e o
-                            # intervalo usa o formato nomeado (15min, 1hour, 4hour).
-                            # Com o formato antigo a KuCoin rejeitava a subscrição
-                            # em silêncio e o cache de klines nunca era atualizado.
                             ws_iv = WS_INTERVAL_MAP.get(str(interval))
                             if not ws_iv:
                                 log.warning(f"intervalo {interval} sem mapeamento WS — pulando")
                                 continue
                             subs.append(f"/contractMarket/limitCandle:{kc_sym}_{ws_iv}")
-                        subs.append(f"/contractMarket/tickerV2:{kc_sym}")
 
-                    # KuCoin suporta múltiplos tópicos por mensagem
-                    for i in range(0, len(subs), 10):
-                        batch = subs[i:i+10]
+                    # Ticker: um único tópico com todos os símbolos
+                    _tick_syms = ",".join(to_kucoin(s) for s in symbols)
+                    if _tick_syms:
+                        subs.append(f"/contractMarket/tickerV2:{_tick_syms}")
+
+                    # BUG: os contadores eram zerados APÓS o envio, apagando
+                    # os acks que já haviam chegado durante a subscrição.
+                    # Precisam ser inicializados ANTES.
+                    self._ws_acks   = 0
+                    self._ws_errors = 0
+                    _n_subs = len(subs)
+                    log.info(f"📡 Subscrevendo {_n_subs} tópicos no WS...")
+
+                    # Uma mensagem por tópico — a KuCoin não aceita
+                    # canais diferentes na mesma subscrição.
+                    for _t in subs:
                         await ws.send(json.dumps({
-                            "id":             str(int(time.time() * 1000)),
+                            "id":             str(int(time.time() * 1000000)),
                             "type":           "subscribe",
-                            "topic":          ",".join(batch),
+                            "topic":          _t,
                             "privateChannel": False,
                             "response":       True,
                         }))
-
-                    # Aguarda os acks e reporta o resultado das subscrições.
-                    # Sem isso, uma rejeição em massa passava despercebida.
-                    self._ws_acks = 0
-                    self._ws_errors = 0
-                    _n_subs = len(subs)
+                        # Espaçamento leve: a KuCoin limita ~100 msgs/10s
+                        await asyncio.sleep(0.12)
 
                     async def _report_subs():
-                        await asyncio.sleep(6)
+                        # Espera o suficiente para todas as subscrições
+                        # (0.12s cada) + margem para os acks chegarem.
+                        await asyncio.sleep(_n_subs * 0.12 + 5)
                         a = getattr(self, "_ws_acks", 0)
                         e = getattr(self, "_ws_errors", 0)
                         if e:
