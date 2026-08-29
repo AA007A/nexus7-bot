@@ -41,6 +41,18 @@ class Config:
     MAX_RISK_PCT:    float = float(os.environ.get("MAX_RISK_PCT",  "1.0"))
     # Cap de margem: 0.98 = usa 98% do saldo, deixando 2% para taxas.
     # Sem essa folga a exchange rejeita a ordem por saldo insuficiente para fees.
+    # MAX_MARGIN_PCT é o teto de margem POR POSIÇÃO, aplicado sobre a
+    # margem LIVRE (risk.py desconta o que já está em uso).
+    #
+    # ⚠️ INTERAÇÃO COM MAX_POSITIONS:
+    # Com 0.98 e MAX_POSITIONS=2, a 1ª posição consome 98% do saldo e a
+    # 2ª fica com 2% do que sobrou — ou seja, na prática o bot opera
+    # apenas 1 posição relevante.
+    #
+    # Para de fato usar 2 posições equilibradas, o valor coerente seria
+    # ~0.49 (duas de metade cada). Mantido em 0.98 conforme configurado:
+    # a 1ª posição usa quase todo o capital, e a 2ª só entra se a 1ª for
+    # fechada ou parcialmente realizada.
     MAX_MARGIN_PCT:  float = float(os.environ.get("MAX_MARGIN_PCT", "0.98"))
     # Drawdown 40%: com sizing de 100% o bot precisa de espaço para operar.
     # Abaixo disso o bot pausaria após 2-3 trades perdedores.
