@@ -302,8 +302,6 @@ async def update_coinglass():
     try:
         async with aiohttp.ClientSession() as s:
             # Open Interest + Long/Short ratio via Coinglass public
-            url = "https://open-api.coinglass.com/public/v2/indicator/open_interest"
-            headers = {"coinglassSecret": ""}  # público
             async with s.get(
                 "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
                 "?symbol=BTCUSDT&period=1h&limit=1",
@@ -710,9 +708,7 @@ async def update_twitter_sentiment():
                     data = await r.json()
                     tw   = data.get("Data", {}).get("Twitter", {})
                     if tw:
-                        followers   = tw.get("followers", 0)
-                        statuses    = tw.get("statuses",  0)
-                        favourites  = tw.get("favourites", 0)
+                        statuses = tw.get("statuses", 0)
                         # Engagement alto = sentimento ativo
                         if statuses > 1000:
                             bull_score += 5
