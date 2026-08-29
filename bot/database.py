@@ -50,8 +50,26 @@ _DDL = [
         symbol TEXT, entry_price REAL, exit_price REAL,
         size REAL, leverage INTEGER, pnl REAL, fees REAL,
         duration_minutes REAL, score_entrada INTEGER,
-        status TEXT DEFAULT 'open'
+        status TEXT DEFAULT 'open',
+        -- ITEM 2: componentes do score no momento da entrada (JSON).
+        -- Sem isso, score_weights.calibrate_from_history() nunca teria
+        -- dados e os pesos (+10/+5/+3) seguiriam sendo palpites manuais.
+        score_features TEXT,
+        -- ITEM 4: métricas de expectancy (o que realmente mede edge).
+        -- risk_amount = |entry - sl| × qty  → 1R do trade
+        -- r_multiple  = pnl / risk_amount   → resultado em múltiplos de R
+        risk_amount REAL,
+        r_multiple REAL,
+        direction TEXT,
+        exit_reason TEXT
     )""",
+    # Migrações idempotentes para bancos criados antes destas colunas.
+    # SQLite/Postgres ignoram o erro se a coluna já existir (tratado em _exec).
+    """ALTER TABLE trades ADD COLUMN score_features TEXT""",
+    """ALTER TABLE trades ADD COLUMN risk_amount REAL""",
+    """ALTER TABLE trades ADD COLUMN r_multiple REAL""",
+    """ALTER TABLE trades ADD COLUMN direction TEXT""",
+    """ALTER TABLE trades ADD COLUMN exit_reason TEXT""",
     """CREATE TABLE IF NOT EXISTS signals (
         id SERIAL PRIMARY KEY,
         timestamp TEXT, strategy TEXT, direction TEXT,
@@ -188,20 +206,56 @@ async def _fetchall(sql: str, params: tuple = ()):
 
 
 # ── API pública ──────────────────────────────────────────────────
-async def save_trade_open(symbol, side, entry, size, leverage, score, strategy="MTF") -> int:
+async def save_trade_open(symbol, side, entry, size, leverage, score,
+                          strategy="MTF", score_features: dict = None,
+                          sl: float = 0, direction: str = "") -> int:
+    """
+    ITEM 2: grava os COMPONENTES do score, não só o total.
+
+    Sem os componentes é impossível responder "qual sinal previu o quê?".
+    Os pesos (+10/+5/+3) eram valores manuais que nunca puderam ser
+    validados porque os dados para validá-los nunca foram gravados.
+
+    ITEM 4: grava risk_amount (1R do trade) para permitir o cálculo de
+    expectancy em múltiplos de R — a métrica que realmente mede edge,
+    diferente do win rate.
+    """
+    import json as _json
+    feats = _json.dumps(score_features or {})
+    # 1R = distância até o stop × tamanho da posição
+    risk_amount = abs(entry - sl) * size if sl and entry else 0.0
+
     sql = """INSERT INTO trades
-        (timestamp,strategy,side,symbol,entry_price,size,leverage,score_entrada,status)
-        VALUES (?,?,?,?,?,?,?,?,'open')"""
-    await _exec(sql, (_now(), strategy, side, symbol, entry, size, leverage, score))
+        (timestamp,strategy,side,symbol,entry_price,size,leverage,
+         score_entrada,status,score_features,risk_amount,direction)
+        VALUES (?,?,?,?,?,?,?,?,'open',?,?,?)"""
+    await _exec(sql, (_now(), strategy, side, symbol, entry, size, leverage,
+                      score, feats, risk_amount, direction or side))
     row = await _fetchone("SELECT MAX(id) FROM trades")
     return row[0] if row else 0
 
 
 async def save_trade_close(trade_id: int, exit_price: float, pnl: float,
-                           fees: float, duration_min: float):
+                           fees: float, duration_min: float,
+                           exit_reason: str = ""):
+    """
+    ITEM 4: calcula r_multiple = pnl / risk_amount.
+
+    Win rate isolado não mede lucratividade. O que mede é a EXPECTANCY:
+        E = média(r_multiple)
+    Uma estratégia com 40% de acerto e R:R 2:1 tem E = +0.20R (lucrativa).
+    Uma com 90% de acerto e R:R 0.3:1 tem E = +0.17R (pior).
+    Gravar r_multiple por trade é o que permite essa comparação.
+    """
+    row = await _fetchone("SELECT risk_amount FROM trades WHERE id=?", (trade_id,))
+    risk_amount = float(row[0]) if row and row[0] else 0.0
+    r_multiple  = (pnl / risk_amount) if risk_amount > 0 else 0.0
+
     sql = """UPDATE trades SET exit_price=?,pnl=?,fees=?,
-             duration_minutes=?,status='closed' WHERE id=?"""
-    await _exec(sql, (exit_price, pnl, fees, duration_min, trade_id))
+             duration_minutes=?,status='closed',r_multiple=?,exit_reason=?
+             WHERE id=?"""
+    await _exec(sql, (exit_price, pnl, fees, duration_min,
+                      round(r_multiple, 4), exit_reason, trade_id))
     await _update_performance()
 
 
@@ -440,3 +494,95 @@ async def get_trades_with_features(limit: int = 1000) -> list:
         from bot.logger import log
         log.debug(f"get_trades_with_features: {e} (coluna score_features ausente?)")
         return []
+
+
+
+async def get_expectancy_stats(days: int = None) -> dict:
+    """
+    ITEM 4: métricas de EXPECTANCY — o que realmente determina lucratividade.
+
+    Win rate isolado é enganoso. As métricas que importam:
+
+      expectancy_R  = média dos r_multiple  → lucro esperado por trade, em R
+      profit_factor = soma(ganhos) / |soma(perdas)|
+      breakeven_wr  = 1 / (1 + payoff)  → win rate mínimo para não perder
+
+    Um sistema com 40% de acerto e payoff 2.0 tem breakeven_wr de 33% —
+    ou seja, é lucrativo. Um com 90% e payoff 0.3 tem breakeven de 77%:
+    lucrativo também, mas com expectancy MENOR e cauda muito pior.
+
+    Retorna também 'verdict' comparando o win rate real com o de breakeven.
+    """
+    where = "WHERE status='closed'"
+    params = ()
+    if days:
+        where += " AND timestamp >= ?"
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        params = (cutoff,)
+
+    rows = await _fetchall(
+        f"SELECT pnl, r_multiple, risk_amount FROM trades {where}", params
+    )
+    if not rows:
+        return {"status": "no_data", "n_trades": 0,
+                "reason": "nenhum trade fechado registrado ainda"}
+
+    pnls = [float(r[0] or 0) for r in rows]
+    rs   = [float(r[1] or 0) for r in rows if r[1] is not None]
+
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    n      = len(pnls)
+
+    win_rate = len(wins) / n * 100 if n else 0.0
+    avg_win  = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
+    payoff   = (avg_win / avg_loss) if avg_loss > 0 else 0.0
+    pf       = (sum(wins) / abs(sum(losses))) if losses else float("inf")
+
+    # Expectancy em R (preferido) ou em USDT (fallback)
+    if rs:
+        expectancy_r = sum(rs) / len(rs)
+    else:
+        expectancy_r = 0.0
+    expectancy_usd = sum(pnls) / n if n else 0.0
+
+    # Win rate de breakeven para o payoff observado
+    breakeven_wr = (1 / (1 + payoff) * 100) if payoff > 0 else 100.0
+    margem       = win_rate - breakeven_wr
+
+    # Sequências
+    max_wins = max_losses = cur_w = cur_l = 0
+    for p in pnls:
+        if p > 0:
+            cur_w += 1; cur_l = 0; max_wins = max(max_wins, cur_w)
+        elif p < 0:
+            cur_l += 1; cur_w = 0; max_losses = max(max_losses, cur_l)
+
+    if n < 30:
+        verdict = f"amostra pequena ({n} trades) — sem significância estatística"
+    elif expectancy_r > 0.1 and margem > 5:
+        verdict = f"edge positivo: {margem:+.1f}pp acima do breakeven"
+    elif expectancy_r > 0:
+        verdict = f"marginal: apenas {margem:+.1f}pp acima do breakeven"
+    else:
+        verdict = f"SEM EDGE: expectancy {expectancy_r:.3f}R — estratégia perde no longo prazo"
+
+    return {
+        "status":          "ok",
+        "n_trades":        n,
+        "win_rate":        round(win_rate, 1),
+        "breakeven_wr":    round(breakeven_wr, 1),
+        "margem_pp":       round(margem, 1),
+        "expectancy_R":    round(expectancy_r, 4),
+        "expectancy_usd":  round(expectancy_usd, 4),
+        "payoff_ratio":    round(payoff, 2),
+        "profit_factor":   round(pf, 2) if pf != float("inf") else None,
+        "avg_win":         round(avg_win, 4),
+        "avg_loss":        round(avg_loss, 4),
+        "max_win_streak":  max_wins,
+        "max_loss_streak": max_losses,
+        "total_pnl":       round(sum(pnls), 4),
+        "verdict":         verdict,
+    }
