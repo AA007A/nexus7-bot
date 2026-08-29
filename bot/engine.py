@@ -603,28 +603,65 @@ class TradingEngine:
             self.connected = False
 
     async def _filter_viable_symbols(self):
+        """
+        BUG CORRIGIDO: o custo mínimo era calculado como minQty × price,
+        tratando lotSize como quantidade na moeda base. Na KuCoin Futures
+        lotSize é o número mínimo de CONTRATOS, e cada contrato vale
+        multiplier × price.
+
+        Efeito do bug: BTCUSDT aparecia custando 1 × $108.000 = $108.000
+        (em vez de 1 × 0.001 × $108.000 = $108) e era eliminado do scan,
+        junto com todos os pares de preço alto. Só sobravam pares baratos
+        — por isso o bot analisava basicamente SOLUSDT.
+
+        Fórmula correta: min_cost = lotSize × multiplier × price
+        """
         try:
-            tickers    = await self.client.get_all_tickers()
-            price_map  = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
+            tickers   = await self.client.get_all_tickers()
+            price_map = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
             buying_power = self.risk.balance * cfg.LEVERAGE
-            viable = []
+            viable, rejected = [], []
+
             for sym in cfg.SYMBOLS:
                 info  = self.instruments.get(sym)
                 price = price_map.get(sym, 0)
-                if not info or price <= 0:
+
+                # Fallback: se o ticker não trouxe preço, tenta o cache do WS
+                if price <= 0:
+                    tk = self.client.get_cached_ticker(sym) or {}
+                    price = float(tk.get("lastPrice", 0) or 0)
+
+                if not info:
+                    rejected.append(f"{sym}(sem instrumento)")
                     continue
-                min_cost = max(info.get("minNotional", 1.0), info.get("minQty", 0.001) * price)
+                if price <= 0:
+                    rejected.append(f"{sym}(sem preço)")
+                    continue
+
+                lot_size   = float(info.get("minQty",     1))
+                multiplier = float(info.get("multiplier", 1))
+                # Custo de 1 lote mínimo, em USDT
+                min_cost   = lot_size * multiplier * price
+
                 if buying_power >= min_cost * 1.1:
                     viable.append(sym)
+                else:
+                    rejected.append(f"{sym}(min ${min_cost:.2f})")
+
             self.viable_symbols = viable
-            log.info(f"✅ {len(viable)} pares viáveis")
+            log.info(
+                f"✅ {len(viable)}/{len(cfg.SYMBOLS)} pares viáveis "
+                f"(poder=${buying_power:.2f}): {', '.join(viable)}"
+            )
+            if rejected:
+                log.info(f"⛔ Rejeitados: {', '.join(rejected)}")
         except Exception as e:
             log.error(f"_filter_viable: {e}")
-            self.viable_symbols = cfg.SYMBOLS[:5]
+            self.viable_symbols = list(cfg.SYMBOLS)
 
-    # ── Sincronização em tempo real com Bybit ──────────────────
+    # ── Sincronização em tempo real com a exchange ─────────────
     async def _sync_positions(self):
-        """Puxa posições abertas do Bybit e reconcilia estado local."""
+        """Puxa posições abertas da exchange e reconcilia estado local."""
         try:
             all_pos   = await self.client.get_positions()
             open_syms = {}
