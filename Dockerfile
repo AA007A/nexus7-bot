@@ -1,35 +1,36 @@
-# ── BGX Capital Trading Bot — Dockerfile v11.1 ───────────────────
-# Otimizado para Railway Hobby Plan:
-#   - Sem gcc/g++/make — todas as deps têm wheels pré-compilados
-#   - python:3.11-slim base mínima
-#   - Build cache otimizado (requirements antes do código)
+# ── BGX Capital Trading Bot — Dockerfile v12.2 ───────────────────
+# CORREÇÕES PARA O DEPLOY TRAVADO:
+#
+# 1. sgmllib3k (dependência do feedparser) NÃO tem wheel publicado —
+#    só existe como sdist e precisa de setuptools para instalar.
+#    A imagem slim sem build-essential fazia o pip ficar preso nessa
+#    etapa, travando o build indefinidamente.
+#    Fix: instala sgmllib3k explicitamente antes, com --no-build-isolation.
+#
+# 2. HEALTHCHECK do Docker removido — era redundante com o
+#    healthcheckPath do railway.toml. Ter os dois pode manter o
+#    container em estado "starting" mesmo com o app respondendo.
 FROM python:3.11-slim
-
-# Apenas curl para o healthcheck — sem compiladores desnecessários
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Instala dependências (camada cacheada — só rebuilda se requirements.txt mudar)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
+
+# setuptools/wheel primeiro: necessários para o único pacote sem wheel
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir sgmllib3k \
     && pip install --no-cache-dir -r requirements.txt
 
-# Copia o código
 COPY . .
 
-# Variáveis de ambiente padrão (sobrescritas no Railway)
-# IMPORTANTE: LOG_LEVEL deve ser minúsculo — uvicorn exige
-# 'critical'|'error'|'warning'|'info'|'debug'|'trace'
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LOG_LEVEL=info \
     PORT=8000
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+EXPOSE 8000
+
+# Sem HEALTHCHECK — o Railway monitora via railway.toml (/health)
 
 # Workers=1 obrigatório — estado compartilhado em memória
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level ${LOG_LEVEL:-info}"]
