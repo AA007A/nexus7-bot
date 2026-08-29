@@ -1151,6 +1151,56 @@ class KuCoinClient:
         return positions
 
     # ── WebSocket ─────────────────────────────────────────────────
+    async def _seed_kline_cache(self, symbols: list, intervals: list):
+        """
+        Popula o cache de klines via REST no startup.
+
+        O WS (limitCandle) só entrega candles FECHADOS — do zero, levaria
+        horas ou dias para o cache ficar utilizável. Este seed carrega o
+        histórico uma vez; o WS mantém atualizado depois.
+
+        Executa com concorrência limitada para respeitar o rate limit.
+        """
+        _LIMITS = {"15": 200, "60": 150, "240": 120}
+        sem = asyncio.Semaphore(3)
+        ok = fail = 0
+
+        async def _one(sym: str, iv: str):
+            nonlocal ok, fail
+            async with sem:
+                try:
+                    lim  = _LIMITS.get(str(iv), 120)
+                    data = await self.get_klines(sym, str(iv), lim)
+                    if data and len(data) >= 20:
+                        self._kline_cache[(sym, str(iv))] = list(data)
+                        ok += 1
+                    else:
+                        fail += 1
+                        log.debug(f"seed {sym} {iv}m: apenas {len(data or [])} velas")
+                except Exception as e:
+                    fail += 1
+                    log.debug(f"seed {sym} {iv}m: {e}")
+
+        t0 = time.time()
+        log.info(
+            f"🌱 Populando cache via REST: {len(symbols)} pares × "
+            f"{len(intervals)} intervalos..."
+        )
+        await asyncio.gather(
+            *[_one(s, iv) for s in symbols for iv in intervals],
+            return_exceptions=True,
+        )
+        total = sum(len(v) for v in self._kline_cache.values())
+        log.info(
+            f"🌱 Cache populado em {time.time()-t0:.1f}s: {ok} séries OK, "
+            f"{fail} falhas, {total} candles no total"
+        )
+        if fail > ok:
+            log.warning(
+                f"⚠️ Mais falhas que sucessos no seed — o bot dependerá "
+                f"de REST a cada scan"
+            )
+
     async def _get_ws_token(self) -> str:
         """
         KuCoin WS requer token obtido via REST (válido 18h).
@@ -1292,27 +1342,70 @@ class KuCoinClient:
                         await asyncio.sleep(0.12)
 
                     async def _report_subs():
-                        # Espera o suficiente para todas as subscrições
-                        # (0.12s cada) + margem para os acks chegarem.
-                        await asyncio.sleep(_n_subs * 0.12 + 5)
+                        # Margem generosa: os acks podem chegar depois do
+                        # envio da última subscrição.
+                        await asyncio.sleep(_n_subs * 0.12 + 12)
                         a = getattr(self, "_ws_acks", 0)
                         e = getattr(self, "_ws_errors", 0)
+
                         if e:
                             log.error(
                                 f"❌ WS: {e} subscrições REJEITADAS de {_n_subs} "
-                                f"({a} aceitas) — cache de klines ficará vazio "
-                                f"nesses tópicos"
+                                f"({a} aceitas) — cache ficará vazio nesses tópicos"
                             )
                         elif a == 0:
                             log.error(
-                                f"❌ WS: NENHUM ack recebido para {_n_subs} "
-                                f"subscrições — a KuCoin não confirmou nada. "
-                                f"Klines virão só por REST."
+                                f"❌ WS: NENHUM ack para {_n_subs} subscrições — "
+                                f"klines virão só por REST"
+                            )
+                        elif a < _n_subs:
+                            log.warning(
+                                f"⚠️ WS: {a}/{_n_subs} subscrições confirmadas "
+                                f"({_n_subs - a} sem ack) — esses pares/intervalos "
+                                f"dependerão de REST"
                             )
                         else:
-                            log.info(f"✅ WS: {a} subscrições confirmadas")
+                            log.info(f"✅ WS: {a}/{_n_subs} subscrições confirmadas")
+
+                        # Diagnóstico do cache: os acks confirmam a subscrição,
+                        # mas só a chegada de candles prova que os dados fluem.
+                        await asyncio.sleep(30)
+                        _keys = list(self._kline_cache.keys())
+                        _vazios = [k for k in _keys if not self._kline_cache.get(k)]
+                        _total_candles = sum(len(v) for v in self._kline_cache.values())
+                        if _total_candles == 0:
+                            log.error(
+                                f"❌ WS: 30s após subscrever, cache VAZIO "
+                                f"({len(_keys)} chaves). Subscrição aceita mas "
+                                f"nenhum candle chegou."
+                            )
+                        else:
+                            log.info(
+                                f"📊 WS cache: {_total_candles} candles em "
+                                f"{len(_keys) - len(_vazios)}/{len(_keys)} séries"
+                            )
 
                     asyncio.create_task(_report_subs())
+
+                    # ══════════════════════════════════════════════════
+                    # SEED DO CACHE VIA REST (essencial)
+                    #
+                    # /contractMarket/limitCandle só envia um candle quando
+                    # ele FECHA. Partindo do zero, o cache levaria:
+                    #     15M → 15 horas para 60 velas
+                    #     1H  → 50 horas para 50 velas
+                    #     4H  → 8 dias   para 50 velas
+                    #
+                    # Ou seja, o WS sozinho nunca encheria o cache em tempo
+                    # útil — e cada scan caía em "WS cache miss" + REST.
+                    #
+                    # O seed carrega o histórico uma vez via REST; o WS
+                    # mantém atualizado a partir dali. Roda em background
+                    # para não atrasar a conexão.
+                    # ══════════════════════════════════════════════════
+                    if not getattr(self, "_cache_seeded", False):
+                        self._cache_seeded = True
+                        asyncio.create_task(self._seed_kline_cache(symbols, intervals))
 
                     # Ping de aplicação a cada 20s (exigência da KuCoin).
                     #
