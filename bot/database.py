@@ -70,6 +70,14 @@ _DDL = [
     """ALTER TABLE trades ADD COLUMN r_multiple REAL""",
     """ALTER TABLE trades ADD COLUMN direction TEXT""",
     """ALTER TABLE trades ADD COLUMN exit_reason TEXT""",
+    # P2: ÍNDICES — sem eles, get_expectancy_stats(), _update_performance()
+    # e get_trades_with_features() fazem full table scan. Com milhares de
+    # trades isso degrada o ciclo do bot, que roda a cada 20s.
+    """CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)""",
+    """CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)""",
+    """CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp)""",
+    """CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(timestamp)""",
+    """CREATE INDEX IF NOT EXISTS idx_decisions_id ON decisions(id)""",
     """CREATE TABLE IF NOT EXISTS signals (
         id SERIAL PRIMARY KEY,
         timestamp TEXT, strategy TEXT, direction TEXT,
@@ -594,3 +602,28 @@ async def get_expectancy_stats(days: int = None) -> dict:
         "total_pnl":       round(sum(pnls), 4),
         "verdict":         verdict,
     }
+
+
+async def close():
+    """
+    Fecha a conexão com o banco.
+
+    P2 CORRIGIDO: a conexão nunca era encerrada no shutdown. Em restarts
+    frequentes do Railway, conexões PostgreSQL ficavam penduradas até o
+    timeout do servidor, consumindo slots do pool.
+    """
+    global _conn
+    if not _conn:
+        return
+    try:
+        if _is_pg:
+            await _conn.close()
+        else:
+            await _conn.close()
+        from bot.logger import log
+        log.info("🗄️ Conexão com o banco encerrada")
+    except Exception as e:
+        from bot.logger import log
+        log.warning(f"Erro ao fechar banco: {e}")
+    finally:
+        _conn = None
