@@ -723,6 +723,39 @@ class KuCoinClient:
         return self._ticker_cache.get(symbol, {})
 
     # ── Open Interest ─────────────────────────────────────────────
+    async def get_all_tickers(self) -> list:
+        """
+        Retorna ticker de todos os contratos ativos (volume 24h em USDT).
+
+        BUG CORRIGIDO: market_data.update_volume_filter() chamava este método
+        que NÃO EXISTIA no KuCoinClient — a exceção era engolida pelo except
+        e o filtro de volume mínimo NUNCA funcionava. O bot podia operar
+        pares ilíquidos sem qualquer bloqueio.
+
+        Formato de saída compatível com o consumidor (chave turnover24h).
+        """
+        data = await self._get("/api/v1/contracts/active")
+        contracts = data if isinstance(data, list) else data.get("dataList", [])
+        out = []
+        for c in contracts:
+            kc_sym = c.get("symbol", "")
+            if not kc_sym.endswith("USDTM"):
+                continue
+            try:
+                out.append({
+                    "symbol":       to_standard(kc_sym),
+                    # KuCoin expõe volume em USDT como turnoverOf24h
+                    "turnover24h":  float(c.get("turnoverOf24h", 0) or 0),
+                    "volume24h":    float(c.get("volumeOf24h",   0) or 0),
+                    "lastPrice":    float(c.get("lastTradePrice", 0) or 0),
+                    "priceChgPct":  float(c.get("priceChgPct",   0) or 0),
+                })
+            except (ValueError, TypeError) as e:
+                log.debug(f"get_all_tickers: contrato {kc_sym} ignorado: {e}")
+                continue
+        log.debug(f"get_all_tickers: {len(out)} contratos com volume")
+        return out
+
     async def get_open_interest(self, symbol: str) -> dict:
         kc_sym = to_kucoin(symbol)
         data   = await self._get("/api/v1/contracts/" + kc_sym)
