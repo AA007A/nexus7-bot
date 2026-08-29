@@ -585,20 +585,30 @@ class KuCoinClient:
             body["reduceOnly"] = True
             body["closeOrder"] = True   # KuCoin: fecha a posição do símbolo
 
-        # SL server-side
-        if sl > 0:
-            body["stop"]          = "down" if side == "Buy" else "up"
-            body["stopPrice"]     = self._round_price(sl, symbol)
-            # CORRIGIDO (auditoria #6): "TP" = Trade/Last Price, não mark price.
-            # Usar last price deixa o SL vulnerável a stop hunt em pares de
-            # baixa liquidez. "MP" = Mark Price (preço justo, resistente a
-            # manipulação por poucos negócios).
-            body["stopPriceType"] = os.environ.get("KUCOIN_STOP_PRICE_TYPE", "MP")
-
-        # TP server-side
-        if tp > 0:
-            # KuCoin Futures v2: takeProfit separado
-            body["takeProfit"] = self._round_price(tp, symbol)
+        # ══════════════════════════════════════════════════════════════
+        # 🔴 BUG CRÍTICO CORRIGIDO — SL/TP NÃO VÃO NA ORDEM DE ENTRADA
+        #
+        # O código anterior fazia:
+        #     body["stop"]      = "down" if side=="Buy" else "up"
+        #     body["stopPrice"] = SL
+        #     body["takeProfit"]= TP
+        #
+        # Na KuCoin, os campos stop/stopPrice em /api/v1/orders NÃO anexam
+        # um stop loss à posição — eles CONVERTEM a ordem inteira numa
+        # STOP ORDER CONDICIONAL, que só é ativada quando o preço atinge
+        # stopPrice.
+        #
+        # Efeito para um LONG: criava uma ordem de COMPRA que só dispararia
+        # se o preço CAÍSSE até o nível do stop loss. Ou seja:
+        #   1. a ordem não executava na hora (ficava pendente);
+        #   2. se executasse, compraria no pior preço possível;
+        #   3. e a posição ficaria SEM stop loss.
+        # O campo "takeProfit" sequer existe nesse endpoint — era ignorado.
+        #
+        # CORREÇÃO: a entrada é uma ordem MARKET pura. SL e TP são anexados
+        # logo depois via POST /api/v1/position/trading-stop, que é o
+        # endpoint correto para stop de posição na KuCoin Futures.
+        # ══════════════════════════════════════════════════════════════
 
         data     = await self._post("/api/v1/orders", body)
         order_id = data.get("orderId", "")
@@ -629,9 +639,57 @@ class KuCoinClient:
                 f"📤 Ordem {side} {contracts} contratos {symbol} "
                 f"@ {body['leverage']}x → orderId={order_id}"
             )
+
+            # ── Anexa SL/TP à POSIÇÃO (endpoint correto da KuCoin) ────
+            # Só faz sentido em ordem de abertura (reduce_only=False).
+            if not reduce_only and (sl > 0 or tp > 0):
+                # Pequena espera para a posição existir antes do trading-stop
+                await asyncio.sleep(0.4)
+                ok = await self.set_position_stops(symbol, sl=sl, tp=tp)
+                if not ok:
+                    log.error(
+                        f"🚨 {symbol}: posição ABERTA mas SL/TP NÃO foram "
+                        f"anexados — posição desprotegida! Verifique manualmente."
+                    )
+                    data["sl_tp_failed"] = True
+                else:
+                    log.info(
+                        f"🛡️ {symbol}: SL=${sl:.4f} TP=${tp:.4f} anexados à posição"
+                    )
         else:
             log.error(f"❌ Ordem {symbol} rejeitada em todas as tentativas")
         return data
+
+    async def set_position_stops(self, symbol: str, sl: float = 0,
+                                  tp: float = 0) -> bool:
+        """
+        Anexa stop loss e/ou take profit a uma posição JÁ ABERTA.
+
+        Endpoint correto da KuCoin Futures para stops de posição:
+          POST /api/v1/position/trading-stop
+
+        Diferente de /api/v1/orders, aqui os stops ficam ligados à posição
+        e não criam ordens condicionais de entrada.
+
+        Preços arredondados ao tickSize — a KuCoin rejeita silenciosamente
+        valores fora do múltiplo correto.
+        """
+        if not API_KEY:
+            return False
+        kc_sym = to_kucoin(symbol)
+        body   = {"symbol": kc_sym}
+        if sl and sl > 0:
+            body["stopLoss"] = self._round_price(sl, symbol)
+        if tp and tp > 0:
+            body["takeProfit"] = self._round_price(tp, symbol)
+        if len(body) == 1:
+            return False
+        try:
+            res = await self._post("/api/v1/position/trading-stop", body)
+            return bool(res is not None and res != {})
+        except Exception as e:
+            log.error(f"set_position_stops {symbol}: {e}")
+            return False
 
     # ── Trailing Stop / Set SL ────────────────────────────────────
     async def set_sl(self, symbol: str, sl: float, instruments: dict = None) -> bool:
