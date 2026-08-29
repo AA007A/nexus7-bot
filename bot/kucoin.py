@@ -258,6 +258,8 @@ class KuCoinClient:
         self._ob_cache:    dict = {}    # symbol → dict
         self._stale_logged: dict = {}   # controle de log de cache obsoleto
         self._ping_task     = None             # task de ping do WS (cancelável)
+        self._ws_endpoint   = None             # endpoint WS vindo da KuCoin
+        self._ws_ping_ms    = 18000            # pingInterval exigido pela KuCoin
         self._rate_lock     = asyncio.Lock()   # serializa o throttle
         self._rate_sem      = asyncio.Semaphore(self._RATE_MAX_CONCURRENT)
         self._last_req_ts   = 0.0
@@ -1167,10 +1169,36 @@ class KuCoinClient:
                 data = (await r.json()).get("data", {})
             self._ws_token    = data.get("token", "")
             self._ws_token_ts = now
-            # BUG CORRIGIDO: antes logava sucesso mesmo com token vazio,
-            # mascarando falha de autenticação no WS.
+
+            # ══════════════════════════════════════════════════════
+            # BUG CRÍTICO CORRIGIDO — ENDPOINT WS ERRADO
+            #
+            # A URL estava hardcoded como wss://ws-api.kucoin.com/endpoint,
+            # que é o host do KuCoin SPOT. O Futures usa outro host.
+            #
+            # A resposta de bullet-private já traz o endereço correto em
+            # instanceServers[0].endpoint — o código descartava esse campo.
+            #
+            # Efeito: o WS conectava (ou falhava em silêncio) no host
+            # errado e NENHUM kline chegava. Daí o
+            # "WS cache miss (15m=0 1h=0 4h=0)" em todos os pares, com o
+            # bot dependendo 100% de REST a cada scan.
+            # ══════════════════════════════════════════════════════
+            servers = data.get("instanceServers") or []
+            if servers:
+                self._ws_endpoint = servers[0].get("endpoint", WS_BASE)
+                # pingInterval vem em ms e define o ritmo exigido pela KuCoin
+                self._ws_ping_ms  = int(servers[0].get("pingInterval", 18000))
+            else:
+                self._ws_endpoint = WS_BASE
+                self._ws_ping_ms  = 18000
+
             if self._ws_token:
-                log.info(f"✓ WS token KuCoin obtido ({len(self._ws_token)} chars)")
+                log.info(
+                    f"✓ WS token KuCoin obtido ({len(self._ws_token)} chars) "
+                    f"| endpoint={self._ws_endpoint} "
+                    f"| ping={self._ws_ping_ms}ms"
+                )
             else:
                 log.error("❌ WS token VAZIO — autenticação KuCoin falhou (verifique credenciais)")
             return self._ws_token
@@ -1197,7 +1225,10 @@ class KuCoinClient:
                     await asyncio.sleep(10)
                     continue
 
-                ws_url = f"wss://ws-api.kucoin.com/endpoint?token={token}&connectId=bgx"
+                # Usa o endpoint retornado pela própria KuCoin (Futures),
+                # não o host do Spot que estava hardcoded.
+                _ep = getattr(self, "_ws_endpoint", None) or WS_BASE
+                ws_url = f"{_ep}?token={token}&connectId=bgx-{int(time.time())}"
 
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
                     self._ws_retry = 0
@@ -1231,6 +1262,33 @@ class KuCoinClient:
                             "response":       True,
                         }))
 
+                    # Aguarda os acks e reporta o resultado das subscrições.
+                    # Sem isso, uma rejeição em massa passava despercebida.
+                    self._ws_acks = 0
+                    self._ws_errors = 0
+                    _n_subs = len(subs)
+
+                    async def _report_subs():
+                        await asyncio.sleep(6)
+                        a = getattr(self, "_ws_acks", 0)
+                        e = getattr(self, "_ws_errors", 0)
+                        if e:
+                            log.error(
+                                f"❌ WS: {e} subscrições REJEITADAS de {_n_subs} "
+                                f"({a} aceitas) — cache de klines ficará vazio "
+                                f"nesses tópicos"
+                            )
+                        elif a == 0:
+                            log.error(
+                                f"❌ WS: NENHUM ack recebido para {_n_subs} "
+                                f"subscrições — a KuCoin não confirmou nada. "
+                                f"Klines virão só por REST."
+                            )
+                        else:
+                            log.info(f"✅ WS: {a} subscrições confirmadas")
+
+                    asyncio.create_task(_report_subs())
+
                     # Ping de aplicação a cada 20s (exigência da KuCoin).
                     #
                     # P1 CORRIGIDO — VAZAMENTO DE TASK:
@@ -1240,7 +1298,11 @@ class KuCoinClient:
                     # memória e ruído crescentes em operação 24/7.
                     async def _ping():
                         while True:
-                            await asyncio.sleep(20)
+                            # Intervalo vindo da própria KuCoin (pingInterval),
+                            # com margem de segurança de 20%.
+                            await asyncio.sleep(
+                                max(5, getattr(self, "_ws_ping_ms", 18000) / 1000 * 0.8)
+                            )
                             try:
                                 await ws.send(json.dumps({
                                     "id":   str(int(time.time() * 1000)),
@@ -1286,7 +1348,32 @@ class KuCoinClient:
         data   = msg.get("data", {})
         m_type = msg.get("type", "")
 
-        if m_type in ("welcome", "ack", "pong"):
+        # ══════════════════════════════════════════════════════════
+        # BUG CORRIGIDO — ERRO DE SUBSCRIÇÃO IGNORADO
+        #
+        # Se a KuCoin rejeita um tópico (nome inválido, símbolo
+        # inexistente, formato de intervalo errado), ela responde
+        # {"type":"error","code":...,"data":"..."}. O código descartava
+        # essa mensagem, então uma subscrição rejeitada ficava INVISÍVEL
+        # — o cache seguia vazio ("WS cache miss 15m=0 1h=0 4h=0") sem
+        # que ninguém soubesse o motivo.
+        # ══════════════════════════════════════════════════════════
+        if m_type == "error":
+            log.error(
+                f"❌ WS KuCoin REJEITOU subscrição: "
+                f"code={msg.get('code')} data={str(msg.get('data'))[:200]} "
+                f"| id={msg.get('id')}"
+            )
+            self._ws_errors = getattr(self, "_ws_errors", 0) + 1
+            return
+
+        if m_type == "ack":
+            # Confirmação de subscrição aceita — conta para diagnóstico
+            self._ws_acks = getattr(self, "_ws_acks", 0) + 1
+            log.debug(f"✓ WS ack #{self._ws_acks} (id={msg.get('id')})")
+            return
+
+        if m_type in ("welcome", "pong"):
             return
 
         # ── Candles / Klines ──────────────────────────────────────
