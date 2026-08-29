@@ -826,7 +826,6 @@ class TradingEngine:
                             f"{consecutive} perdas consecutivas",
                             pnl_net,
                         )
-                    icon = "✅" if pnl_net >= 0 else "❌"
                     log.info(
                         f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
                         f"Taxas=-${total_fee:.4f} | Líquido=${pnl_net:+.4f}"
@@ -1646,7 +1645,15 @@ class TradingEngine:
                             f"1H={'↑' if bull_1h else '↓' if bear_1h else '→'} → HOLD"
                         )
                     except Exception as ex:
-                        log.debug(f"[{sym}] ✗ Sem sinal")
+                        # BUG CORRIGIDO: a exceção era descartada e logada como
+                        # "Sem sinal". Um erro real na análise (indicador, dados
+                        # malformados) ficava indistinguível de ausência
+                        # legítima de setup — mascarando falhas por tempo
+                        # indeterminado.
+                        log.warning(
+                            f"[{sym}] ✗ Falha ao montar log de diagnóstico: "
+                            f"{type(ex).__name__}: {ex}"
+                        )
                         combined = 0
                         regime = "UNKNOWN"
                         rsi_v = 0
@@ -1855,7 +1862,6 @@ class TradingEngine:
             )
             if not pre_score["aprovado"]:
                 # Log detalhado mostrando o que bloqueou
-                det = pre_score.get("detalhes", {})
                 tec = pre_score.get("tecnico", 0)
                 of  = pre_score.get("orderflow", 0)
                 mac = pre_score.get("macro", 0)
