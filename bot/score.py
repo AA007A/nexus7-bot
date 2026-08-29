@@ -84,7 +84,6 @@ def score_tecnico(
     if len(closes) >= 5 and len(highs) >= 5 and len(lows) >= 5:
         prev_high = max(highs[-6:-1])
         prev_low  = min(lows[-6:-1])
-        body = abs(closes[-1] - closes[-2]) if len(closes) >= 2 else 0
         if direction == "LONG":
             sweep = lows[-1] < prev_low and closes[-1] > prev_low
         else:
