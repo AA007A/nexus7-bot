@@ -191,8 +191,8 @@ async def update_macro_correlations():
                             "market_cap_percentage", {}
                         ).get("btc", 57.0)
                         _macro_corr["btc_dominance"] = round(dom, 1)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.warning(f"BTC dominance indisponível — mantendo valor anterior: {_e}")
 
                 # DXY via Yahoo Finance (sem auth)
                 try:
@@ -210,8 +210,8 @@ async def update_macro_correlations():
                             _macro_corr["dxy_trend"] = "up" if chg > 0.001 else (
                                 "down" if chg < -0.001 else "neutral"
                             )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.warning(f"DXY indisponível — mantendo valor anterior: {_e}")
 
                 # S&P500 via Yahoo Finance
                 try:
@@ -229,8 +229,8 @@ async def update_macro_correlations():
                             _macro_corr["sp500_trend"] = "up" if chg > 0.001 else (
                                 "down" if chg < -0.001 else "neutral"
                             )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.warning(f"S&P indisponível — mantendo valor anterior: {_e}")
 
                 _macro_corr["last_update"] = time.time()
                 log.info(
@@ -752,8 +752,8 @@ async def update_twitter_sentiment():
                                 "followers": tw2.get("followers", 0),
                                 "posts":     tw2.get("statuses",  0),
                             }
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.debug(f"twitter sentiment indisponível: {_e}")
 
     except Exception as e:
         log.warning(f"Twitter sentiment: {e}")
@@ -959,8 +959,8 @@ async def update_volume_filter(client):
                 # turnover24h = volume em USDT
                 vol_usd = float(t.get("turnover24h", 0))
                 _volume_cache[sym] = vol_usd
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"volume filter: ticker inválido descartado: {_e}")
         _last_volume_update = time.time()
         # Log pares filtrados
         low_vol = [s for s, v in _volume_cache.items()
