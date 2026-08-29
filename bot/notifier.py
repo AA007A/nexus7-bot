@@ -1,3 +1,4 @@
+import os
 import aiohttp
 import asyncio
 import time
@@ -347,3 +348,155 @@ async def news_summary_msg(total: int, bull: int, bear: int,
             for n in top_news[:3]
         ])
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# NEXUS AI — Notificações no Telegram (seção 23: observabilidade)
+# ══════════════════════════════════════════════════════════════════
+#
+# O bot escaneia ~12 pares a cada 20s. Notificar cada avaliação daria
+# ~2.160 mensagens/hora e o Telegram bloquearia o bot em minutos
+# (limite prático: ~20 msg/min por chat).
+#
+# Por isso há deduplicação: o mesmo veto, para o mesmo par, com o
+# mesmo motivo, só é reenviado após NEXUS_VETO_COOLDOWN segundos.
+# Se o MOTIVO mudar, a mensagem sai na hora — mudança de motivo é
+# informação nova.
+_nexus_veto_cache: dict = {}     # (symbol, motivo_curto) → timestamp
+_nexus_msg_count:  dict = {}     # minuto → contagem (guarda de rate limit)
+
+NEXUS_VETO_COOLDOWN = int(os.environ.get("NEXUS_VETO_COOLDOWN", "900"))   # 15min
+NEXUS_MAX_MSG_MIN   = int(os.environ.get("NEXUS_MAX_MSG_MIN", "12"))      # msgs/min
+
+
+def _nexus_rate_ok() -> bool:
+    """Guarda de rate limit: no máximo NEXUS_MAX_MSG_MIN mensagens/minuto."""
+    import time as _t
+    minute = int(_t.time() // 60)
+    # limpa minutos antigos
+    for k in [k for k in _nexus_msg_count if k < minute - 2]:
+        _nexus_msg_count.pop(k, None)
+    cur = _nexus_msg_count.get(minute, 0)
+    if cur >= NEXUS_MAX_MSG_MIN:
+        return False
+    _nexus_msg_count[minute] = cur + 1
+    return True
+
+
+def _grade_icon(grade: str) -> str:
+    return {"A+": "🏆", "A": "🥇", "B": "🥈", "C": "🥉"}.get(grade, "⚪")
+
+
+async def nexus_approved_msg(d: dict) -> str:
+    """Mensagem de APROVAÇÃO do NEXUS AI — setup autorizado."""
+    icon = "🟢" if d.get("decision") == "LONG" else "🔴"
+    models = d.get("models", [])
+    used   = [m for m in models if m.get("available")]
+
+    lines = []
+    for m in used:
+        if m.get("name") == "RISK_REGIME":
+            continue
+        dir_ic = {"LONG": "🟩", "SHORT": "🟥"}.get(m.get("direction"), "⬜")
+        lines.append(f"  {dir_ic} `{m['name'][:12]:<12}` {m.get('confidence',0):>5.1f}")
+
+    return (
+        f"🧠 *NEXUS AI — SETUP APROVADO* {icon}\n"
+        f"`{'━'*28}`\n"
+        f"📍 Par:        `{d.get('symbol')}`\n"
+        f"🧭 Direção:    `{d.get('decision')}`\n"
+        f"{_grade_icon(d.get('setup_grade',''))} Grade:      "
+        f"`{d.get('setup_grade')}` (score `{d.get('setup_quality',0):.1f}`)\n"
+        f"🎯 Confiança:  `{d.get('confidence',0):.0f}%`\n"
+        f"🌐 Regime:     `{d.get('market_regime')}`\n"
+        f"🔗 Compat:     `{d.get('regime_compat',0):.0f}%`\n"
+        f"`{'─'*28}`\n"
+        f"💰 Entrada:    `${d.get('entry',0):,.4f}`\n"
+        f"🛑 Stop:       `${d.get('stop_loss',0):,.4f}`\n"
+        f"🎯 Alvo:       `${d.get('take_profit',0):,.4f}`\n"
+        f"⚖️ R:R líq:    `{d.get('risk_reward',0):.2f}`\n"
+        f"📈 EV:         `{d.get('expected_value',0):+.3f}%`\n"
+        f"📡 Dados:      `{d.get('data_quality',0):.0f}/100`\n"
+        f"`{'─'*28}`\n"
+        f"*Modelos ({len(used)} ativos):*\n" + "\n".join(lines) + "\n"
+        f"`{'━'*28}`\n"
+        f"_{'; '.join(d.get('reasoning', [])[-2:])}_"
+    )
+
+
+async def nexus_veto_msg(d: dict) -> str:
+    """Mensagem de VETO — compacta, pois é o caso mais frequente."""
+    reason = (d.get("reasoning") or ["sem motivo"])[-1]
+    warns  = d.get("warnings") or []
+    grade  = d.get("setup_grade", "—")
+
+    extra = ""
+    if d.get("risk_reward"):
+        extra += f"⚖️ R:R líq: `{d['risk_reward']:.2f}`  "
+    if d.get("expected_value"):
+        extra += f"📈 EV: `{d['expected_value']:+.3f}%`"
+    if extra:
+        extra = f"{extra}\n"
+
+    warn_line = ""
+    if warns:
+        warn_line = f"⚠️ _{warns[0][:70]}_\n"
+
+    return (
+        f"🚫 *NEXUS AI — VETO*\n"
+        f"📍 `{d.get('symbol')}`  "
+        f"{_grade_icon(grade)} `{grade}` "
+        f"score `{d.get('setup_quality',0):.1f}`\n"
+        f"🌐 `{d.get('market_regime')}`  "
+        f"📡 dados `{d.get('data_quality',0):.0f}`\n"
+        f"{extra}{warn_line}"
+        f"❌ _{reason[:150]}_"
+    )
+
+
+async def notify_nexus(d: dict, approved: bool) -> bool:
+    """
+    Envia a decisão do NEXUS AI ao Telegram com deduplicação.
+
+    Aprovações passam sempre (são raras e importantes).
+    Vetos são deduplicados por (símbolo + motivo) para não inundar o chat.
+
+    Retorna True se a mensagem foi enviada.
+    """
+    import time as _t
+    if os.environ.get("NEXUS_TELEGRAM", "true").lower() != "true":
+        return False
+
+    try:
+        if approved:
+            if not _nexus_rate_ok():
+                log.warning("Telegram: rate limit atingido — aprovação não enviada")
+                return False
+            await notify(await nexus_approved_msg(d))
+            return True
+
+        # ── Veto: deduplicação por símbolo + motivo ──────────────
+        sym    = d.get("symbol", "?")
+        reason = (d.get("reasoning") or ["?"])[-1]
+        key    = (sym, reason[:60])
+        now    = _t.time()
+        last   = _nexus_veto_cache.get(key, 0)
+
+        if now - last < NEXUS_VETO_COOLDOWN:
+            return False   # mesmo veto, mesmo motivo, ainda em cooldown
+
+        if not _nexus_rate_ok():
+            return False   # guarda de rate limit
+
+        _nexus_veto_cache[key] = now
+        # Expurgo do cache para não crescer indefinidamente
+        if len(_nexus_veto_cache) > 500:
+            for k in [k for k, t in list(_nexus_veto_cache.items())
+                      if now - t > NEXUS_VETO_COOLDOWN * 2]:
+                _nexus_veto_cache.pop(k, None)
+
+        await notify(await nexus_veto_msg(d))
+        return True
+    except Exception as e:
+        log.debug(f"notify_nexus: {e}")
+        return False
