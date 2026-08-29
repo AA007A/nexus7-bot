@@ -27,7 +27,9 @@ import os
 from typing import Dict, Optional, List
 import numpy as np
 
-from bot.bybit import BybitClient
+# Migrado para KuCoin. O type hint usa o cliente ativo; o import do
+# BybitClient foi removido para não depender de bot/bybit.py.
+from bot.kucoin import KuCoinClient
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
@@ -394,7 +396,7 @@ class RiskManager:
 
 # ─── Trading Engine ───────────────────────────────────────────────────────────
 class TradingEngine:
-    def __init__(self, client: BybitClient):
+    def __init__(self, client: KuCoinClient):
         self.client       = client
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
@@ -1888,7 +1890,16 @@ class TradingEngine:
                 return
 
             self.risk.update(bal)
-            self._recalc_daily_limits()
+
+            # BUG CORRIGIDO: self._recalc_daily_limits() era chamado aqui mas
+            # o método NÃO EXISTE na classe — lançava AttributeError a cada
+            # ciclo, capturado pelo except abaixo. Efeito: o bloco inteiro
+            # abortava, então o alerta de drawdown NUNCA era avaliado.
+            # A lógica de recálculo já existe em _check_daily_reset(); aqui
+            # apenas mantemos meta/stop coerentes com o saldo atual.
+            if bal > 0:
+                self.daily_target    = round(bal * cfg.DAILY_TARGET_PCT, 2)
+                self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
 
             if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                 if not getattr(self, "_dd_alerted", False):
