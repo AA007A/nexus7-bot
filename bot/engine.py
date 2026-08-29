@@ -645,6 +645,18 @@ class TradingEngine:
             self.risk.init(bal)
             self.risk.update(bal)
 
+            # BUG CORRIGIDO: meta e stop diários só eram recalculados no
+            # reset das 00:00 UTC. No startup, ficavam com o valor de
+            # config — que era $100/$50 fixos. Com saldo de $19, a meta
+            # era inatingível e o stop nunca dispararia.
+            if bal > 0:
+                if cfg.DAILY_TARGET <= 0:
+                    self.daily_target = round(bal * cfg.DAILY_TARGET_PCT, 2)
+                if cfg.DAILY_STOP_LOSS <= 0:
+                    self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_tracker.daily_target    = self.daily_target
+                self.daily_tracker.daily_stop_loss = self.daily_stop_loss
+
             # Sanidade de configuração: MAX_POSITIONS × MAX_MARGIN_PCT > 100%
             # significa que as posições extras nunca terão margem suficiente.
             _mc = getattr(cfg, "MAX_MARGIN_PCT", 0.80)
