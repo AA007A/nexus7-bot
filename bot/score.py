@@ -349,17 +349,17 @@ async def calculate(
     if client:
         try:
             orderbook = await client.get_orderbook(symbol)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"score: orderbook indisponível para {symbol}: {_e}")
         try:
             oi_data    = await client.get_open_interest(symbol)
             oi_current = float(oi_data.get("openInterest", 0))
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"score: open interest indisponível para {symbol}: {_e}")
         try:
             funding = await client.get_funding_rate(symbol)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"score: funding indisponível para {symbol}: {_e}")
 
     # Calcula CVD simples (soma de body * volume com sinal)
     if len(closes) >= 2:
@@ -412,8 +412,8 @@ async def calculate(
             entrou=result["aprovado"],
             motivo="" if result["aprovado"] else f"score {total} < {MIN_SCORE}",
         )
-    except Exception:
-        pass
+    except Exception as _e:
+        log.warning(f"score: falha ao persistir sinal: {_e}")
 
     return result
 
@@ -430,8 +430,8 @@ async def update_macro_cache():
                     _macro_cache["fear_greed"] = int(
                         data["data"][0]["value"]
                     )
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"fear & greed indisponível: {_e}")
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get("https://api.coingecko.com/api/v3/global",
@@ -441,8 +441,8 @@ async def update_macro_cache():
                         "market_cap_percentage", {}
                     ).get("btc", 57.0)
                     _macro_cache["btc_dominance"] = round(btc_dom, 1)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"btc dominance indisponível: {_e}")
         _macro_cache["last_update"] = time.time()
         await asyncio.sleep(300)   # atualiza a cada 5 min
 
@@ -506,12 +506,12 @@ async def news_reader_loop():
                             try:
                                 await db.save_news(title, "CryptoPanic",
                                                    classif, conf, impacto)
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                log.debug(f"falha ao persistir notícia: {_e}")
                             log.info(f"📰 News: {classif} conf={conf:.2f} — {title[:60]}")
                             break
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.debug(f"falha ao processar item de notícia: {_e}")
 
                 # RSS feeds
                 try:
@@ -532,10 +532,10 @@ async def news_reader_loop():
                                         "fomc_window":    is_fomc,
                                     })
                                     break
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as _e:
+                            log.warning(f"falha no pipeline de notícias: {_e}")
+                except Exception as _e:
+                    log.debug(f"falha ao processar feed de notícias: {_e}")
         except Exception as e:
             log.debug(f"news_reader: {e}")
 
