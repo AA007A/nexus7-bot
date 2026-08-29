@@ -232,6 +232,87 @@ def check_missing_self_methods(paths: List[str]) -> List[str]:
     return issues
 
 
+
+def check_missing_self_attrs(paths: List[str]) -> List[str]:
+    """
+    Detecta self.atributo LIDO mas nunca atribuído em lugar nenhum.
+
+    Complementa check_missing_self_methods, que só cobria self.metodo().
+    Foi esta a lacuna que deixou passar o bug do self.paper_trade —
+    lido em engine.py e position_manager.py, nunca atribuído,
+    lançando AttributeError a cada ciclo.
+
+    Só reporta atributos lidos SEM getattr() e sem default, para evitar
+    falso positivo em acesso defensivo.
+    """
+    issues = []
+    assigned = set()     # tudo que recebe self.x = ...
+    trees = {}
+
+    for p in paths:
+        try:
+            t = ast.parse(open(p, encoding="utf-8").read())
+            trees[p] = t
+        except Exception:
+            continue
+        for node in ast.walk(t):
+            # self.x = ...
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and isinstance(node.ctx, ast.Store)):
+                assigned.add(node.attr)
+            # x: tipo = ... dentro de classe (atributo de classe)
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        assigned.add(item.name)
+                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        assigned.add(item.target.id)
+                    elif isinstance(item, ast.Assign):
+                        for tg in item.targets:
+                            if isinstance(tg, ast.Name):
+                                assigned.add(tg.id)
+            # setattr(self, "x", ...)
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "setattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)):
+                assigned.add(str(node.args[1].value))
+
+    for p, t in trees.items():
+        # Atributos acessados via getattr(self, "x", default) são seguros
+        safe = set()
+        for node in ast.walk(t):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)):
+                safe.add(str(node.args[1].value))
+
+        for node in ast.walk(t):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and isinstance(node.ctx, ast.Load)):
+                if node.attr not in assigned and node.attr not in safe:
+                    issues.append(
+                        f"{os.path.basename(p)}:{node.lineno} "
+                        f"AttributeError latente: self.{node.attr} "
+                        f"lido mas nunca atribuído"
+                    )
+    # Deduplica mantendo a primeira ocorrência de cada atributo
+    seen, out = set(), []
+    for i in issues:
+        key = i.split("self.")[-1]
+        if key not in seen:
+            seen.add(key)
+            out.append(i)
+    return out
+
+
 def check_config_sanity() -> List[str]:
     """
     Combinações de parâmetros matematicamente impossíveis, que só
@@ -297,6 +378,7 @@ def run_selfcheck(verbose: bool = True) -> Dict[str, list]:
     critical += check_undefined_names(files)
     critical += check_duplicate_methods(files)
     critical += check_missing_self_methods(files)
+    critical += check_missing_self_attrs(files)
 
     warning  = []
     warning += check_bare_except(files)
