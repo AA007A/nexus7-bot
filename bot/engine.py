@@ -41,6 +41,10 @@ from bot import market_data as mdata
 from bot import backtest as bt
 from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
+# ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
+from bot import nexus_ai
+from bot.nexus_types import NexusDecision
+_NEXUS_ENABLED = os.environ.get("NEXUS_AI_ENABLED", "true").lower() == "true"
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -412,6 +416,8 @@ class TradingEngine:
         # Parâmetros otimizados pelo Optuna (carregados do JSON se disponível)
         self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
+        self._oi_hist:    Dict[str, float] = {}   # OI anterior por símbolo (delta)
+        self._last_nexus: Dict[str, dict]  = {}   # última decisão da IA (observabilidade)
 
         # ── Lock de posições (race condition) ─────────────────────
         # self.positions é mutado por 7 pontos em corrotinas diferentes:
@@ -1603,6 +1609,78 @@ class TradingEngine:
             if len(self.positions) >= cfg.MAX_POSITIONS:
                 break
             await self._open(sig)
+
+    async def _nexus_validate(self, sig: Signal):
+        """
+        Consulta o NEXUS AI Decision Engine para o sinal proposto.
+
+        Reúne os dados disponíveis (nunca inventa — seção 14) e delega a
+        decisão. Retorna NexusDecision ou None se a própria consulta
+        falhar (nesse caso o fluxo antigo segue, para não travar o bot
+        por um erro da camada de IA).
+        """
+        try:
+            k15 = self.client.get_cached_klines(sig.symbol, "15",  200)
+            k1h = self.client.get_cached_klines(sig.symbol, "60",  100)
+            k4h = self.client.get_cached_klines(sig.symbol, "240",  60)
+
+            # Cache insuficiente → busca via REST (sem inventar dados)
+            missing = []
+            if len(k15) < 60: missing.append(("15", 200))
+            if len(k1h) < 40: missing.append(("60", 100))
+            if len(k4h) < 20: missing.append(("240", 60))
+            if missing:
+                try:
+                    fetched = await asyncio.gather(
+                        *[self.client.get_klines(sig.symbol, iv, lim)
+                          for iv, lim in missing],
+                        return_exceptions=True,
+                    )
+                    for (iv, _), data in zip(missing, fetched):
+                        if isinstance(data, Exception) or not data:
+                            continue
+                        if iv == "15":  k15 = data
+                        elif iv == "60": k1h = data
+                        elif iv == "240": k4h = data
+                except Exception as e:
+                    log.debug(f"nexus fetch {sig.symbol}: {e}")
+
+            # Dados opcionais — ausência é registrada, não estimada
+            ticker = self.client.get_cached_ticker(sig.symbol) or None
+            funding = oi = oi_delta = None
+            try:
+                funding = await self.client.get_funding_rate(sig.symbol)
+            except Exception:
+                pass
+            try:
+                oi = await self.client.get_open_interest(sig.symbol)
+                prev = self._oi_hist.get(sig.symbol)
+                cur  = float(oi.get("openInterest", 0)) if oi else 0.0
+                if prev and prev > 0 and cur > 0:
+                    oi_delta = (cur - prev) / prev
+                if cur > 0:
+                    self._oi_hist[sig.symbol] = cur
+            except Exception:
+                pass
+
+            news_score = None
+            try:
+                ns = mdata.get_market_sentiment()
+                if isinstance(ns, dict) and ns.get("score") is not None:
+                    news_score = float(ns["score"])
+            except Exception:
+                pass
+
+            return nexus_ai.decide(
+                symbol=sig.symbol,
+                k15=k15, k1h=k1h, k4h=k4h,
+                entry=sig.entry, sl=sig.sl, tp=sig.tp,
+                ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
+                news_score=news_score,
+            )
+        except Exception as e:
+            log.error(f"_nexus_validate {sig.symbol}: {e}")
+            return None
 
     async def _open(self, sig: Signal):
         try:
