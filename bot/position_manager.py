@@ -49,15 +49,23 @@ class PositionManagerMixin:
                     else new_sl < pos.trailing_sl
                 )
                 if better:
-                    old_sl         = pos.trailing_sl
-                    pos.trailing_sl = new_sl
-                    await self.client.set_sl(
+                    old_sl = pos.trailing_sl
+                    # Só atualiza o estado após a exchange confirmar —
+                    # senão o bot acredita num stop que não existe.
+                    _ok = await self.client.set_sl(
                         sym, new_sl, instruments=self.instruments
                     )
-                    log.info(
-                        f"🔄 Trailing SL {sym} {pos.direction}: "
-                        f"{old_sl:.4f} → {new_sl:.4f}"
-                    )
+                    if _ok:
+                        pos.trailing_sl = new_sl
+                        log.info(
+                            f"🔄 Trailing SL {sym} {pos.direction}: "
+                            f"{old_sl:.4f} → {new_sl:.4f}"
+                        )
+                    else:
+                        log.error(
+                            f"🚨 Trailing {sym}: exchange recusou {new_sl:.4f} "
+                            f"— stop real continua em {old_sl:.4f}"
+                        )
             except Exception as e:
                 log.error(f"trailing_stops {sym}: {e}")
 
