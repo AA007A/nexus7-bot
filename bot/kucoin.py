@@ -686,7 +686,55 @@ class KuCoinClient:
             return False
         try:
             res = await self._post("/api/v1/position/trading-stop", body)
-            return bool(res is not None and res != {})
+            if not res and res != {}:
+                return False
+            if res == {}:
+                log.error(f"set_position_stops {symbol}: exchange recusou o pedido")
+                return False
+
+            # ══════════════════════════════════════════════════════
+            # VERIFICAÇÃO REAL NA EXCHANGE (dinheiro em risco)
+            #
+            # Confiar apenas no retorno da API é insuficiente: a KuCoin
+            # pode responder 200 e não aplicar o stop (preço fora do
+            # tickSize, posição ainda não consolidada, etc).
+            #
+            # Com 50x, uma posição sem SL liquida a ~2% de movimento.
+            # Aqui consultamos a posição e confirmamos que o stop existe.
+            # ══════════════════════════════════════════════════════
+            await asyncio.sleep(0.5)
+            try:
+                positions = await self.get_positions()
+                pos = next((p for p in positions
+                            if p.get("symbol") == symbol), None)
+                if not pos:
+                    log.warning(
+                        f"set_position_stops {symbol}: posição não encontrada "
+                        f"na verificação — pode ter fechado"
+                    )
+                    return False
+
+                confirmed = float(pos.get("stopLoss", 0) or 0)
+                if sl > 0 and confirmed <= 0:
+                    log.error(
+                        f"🚨 {symbol}: API aceitou o stop mas a posição está "
+                        f"SEM STOP LOSS na exchange — posição DESPROTEGIDA"
+                    )
+                    return False
+                if sl > 0 and confirmed > 0:
+                    # Tolerância de 1% (arredondamento de tickSize)
+                    if abs(confirmed - sl) / sl > 0.01:
+                        log.warning(
+                            f"⚠️ {symbol}: SL aplicado (${confirmed:.4f}) difere "
+                            f"do solicitado (${sl:.4f}) em "
+                            f"{abs(confirmed-sl)/sl*100:.2f}%"
+                        )
+                    log.info(f"✓ {symbol}: SL confirmado na exchange @ ${confirmed:.4f}")
+            except Exception as ve:
+                # Falha na verificação não invalida o stop — mas registra
+                log.warning(f"{symbol}: não foi possível verificar o SL: {ve}")
+
+            return True
         except Exception as e:
             log.error(f"set_position_stops {symbol}: {e}")
             return False
@@ -979,6 +1027,10 @@ class KuCoinClient:
                     # exposto, fazendo o engine calcular SL com liq=0.
                     "liquidationPrice": float(p.get("liquidationPrice", 0)),
                     "liqPrice":         float(p.get("liquidationPrice", 0)),
+                    # Stops efetivamente aplicados na exchange — permitem
+                    # auditar se a posição está protegida de fato.
+                    "stopLoss":         float(p.get("stopLoss",   0) or 0),
+                    "takeProfit":       float(p.get("takeProfit", 0) or 0),
                     "posMargin":        float(p.get("posMargin", 0)),
                 })
             except (ValueError, TypeError) as _e:
