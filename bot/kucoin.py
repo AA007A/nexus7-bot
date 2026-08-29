@@ -57,7 +57,10 @@ REST_BASE = "https://api-futures.kucoin.com"
 WS_BASE   = "wss://ws-api.kucoin.com/endpoint"
 
 # ── Constantes ────────────────────────────────────────────────────
-TAKER_FEE = 0.0006   # 0.06% taker (KuCoin Futures padrão)
+# Taxa taker KuCoin Futures: 0.06% (auditoria #8 — Bybit era 0.055%)
+# Configurável caso sua conta tenha tier de taxa diferente.
+TAKER_FEE = float(os.environ.get("TAKER_FEE", "0.0006"))
+MAKER_FEE = float(os.environ.get("MAKER_FEE", "0.0002"))
 
 # ── Mapa de símbolos Bybit → KuCoin ──────────────────────────────
 # KuCoin Futures USDT-margined usa sufixo "M" (ex: XBTUSDTM, ETHUSDTM)
@@ -480,7 +483,8 @@ class KuCoinClient:
 
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float = 0, tp: float = 0,
-                          instruments: dict = None) -> dict:
+                          instruments: dict = None,
+                          reduce_only: bool = False) -> dict:
         """
         Envia ordem a mercado com SL e TP opcionais.
         side: "Buy" ou "Sell" (mesmo padrão do BybitClient)
@@ -520,11 +524,23 @@ class KuCoinClient:
             "leverage":  str(_lev),
         }
 
+        # reduceOnly (auditoria #3): garante que a ordem SÓ pode reduzir uma
+        # posição existente. Sem essa flag, se a qty do bot divergir da qty
+        # real na exchange, a ordem de "fechamento" abriria posição na direção
+        # oposta, dobrando a exposição em vez de zerá-la.
+        if reduce_only:
+            body["reduceOnly"] = True
+            body["closeOrder"] = True   # KuCoin: fecha a posição do símbolo
+
         # SL server-side
         if sl > 0:
             body["stop"]          = "down" if side == "Buy" else "up"
             body["stopPrice"]     = self._round_price(sl, symbol)
-            body["stopPriceType"] = "TP"   # mark price
+            # CORRIGIDO (auditoria #6): "TP" = Trade/Last Price, não mark price.
+            # Usar last price deixa o SL vulnerável a stop hunt em pares de
+            # baixa liquidez. "MP" = Mark Price (preço justo, resistente a
+            # manipulação por poucos negócios).
+            body["stopPriceType"] = os.environ.get("KUCOIN_STOP_PRICE_TYPE", "MP")
 
         # TP server-side
         if tp > 0:
@@ -664,7 +680,15 @@ class KuCoinClient:
                     "c":  float(k[4]),
                     "v":  float(k[5]),
                 })
-            except (IndexError, ValueError, TypeError):
+            except (IndexError, ValueError, TypeError) as _e:
+                # auditoria #10: descarte de candle malformado agora é contado.
+                # Log em nível debug para não poluir, mas rastreável.
+                self._malformed_klines = getattr(self, "_malformed_klines", 0) + 1
+                if self._malformed_klines % 50 == 1:
+                    log.debug(
+                        f"kline malformada descartada ({self._malformed_klines} "
+                        f"no total): {_e}"
+                    )
                 continue
         klines = list(reversed(klines))  # mais antigo primeiro (padrão do engine)
 
@@ -751,16 +775,30 @@ class KuCoinClient:
                 if qty == 0:
                     continue
                 kc_sym = p.get("symbol", "")
+                _entry = float(p.get("avgEntryPrice", 0))
                 positions.append({
-                    "symbol":        to_standard(kc_sym),
-                    "side":          "Buy" if qty > 0 else "Sell",
-                    "size":          abs(qty),
-                    "entryPrice":    float(p.get("avgEntryPrice",  0)),
-                    "markPrice":     float(p.get("markPrice",      0)),
-                    "unrealisedPnl": float(p.get("unrealisedPnl", 0)),
-                    "leverage":      float(p.get("realLeverage",   1)),
+                    "symbol":           to_standard(kc_sym),
+                    "side":             "Buy" if qty > 0 else "Sell",
+                    "size":             abs(qty),
+                    "entryPrice":       _entry,
+                    # Alias para compatibilidade com código que esperava o
+                    # formato Bybit (auditoria #2)
+                    "avgPrice":         _entry,
+                    "markPrice":        float(p.get("markPrice", 0)),
+                    "unrealisedPnl":    float(p.get("unrealisedPnl", 0)),
+                    "leverage":         float(p.get("realLeverage", 1)),
+                    # ADICIONADO (auditoria #2): liquidationPrice não era
+                    # exposto, fazendo o engine calcular SL com liq=0.
+                    "liquidationPrice": float(p.get("liquidationPrice", 0)),
+                    "liqPrice":         float(p.get("liquidationPrice", 0)),
+                    "posMargin":        float(p.get("posMargin", 0)),
                 })
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _e:
+                # auditoria #10: posição com campos inválidos agora é logada
+                log.warning(
+                    f"posição descartada por campo inválido: {_e} | "
+                    f"dados: {str(p)[:150]}"
+                )
                 continue
         return positions
 
