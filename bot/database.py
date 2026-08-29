@@ -408,3 +408,35 @@ async def load_key_value(key: str) -> str:
         return row[0] if row else None
     except Exception:
         return None
+
+
+
+async def get_trades_with_features(limit: int = 1000) -> list:
+    """
+    Retorna trades com as features do score para calibração estatística
+    dos pesos (auditoria #7 — bot/score_weights.py).
+
+    Espera uma coluna score_features (JSON) na tabela trades. Se a coluna
+    não existir, retorna lista vazia — a calibração então recusa rodar,
+    em vez de gerar pesos a partir de dados inexistentes.
+    """
+    if not _conn:
+        return []
+    try:
+        query = (
+            "SELECT symbol, direction, pnl, score, score_features, closed_at "
+            "FROM trades ORDER BY closed_at ASC LIMIT "
+            + str(int(limit))
+        )
+        if _is_pg:
+            rows = await _conn.fetch(query)
+            return [dict(r) for r in rows]
+        else:
+            cur  = await _conn.execute(query)
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        from bot.logger import log
+        log.debug(f"get_trades_with_features: {e} (coluna score_features ausente?)")
+        return []
