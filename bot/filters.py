@@ -5,6 +5,7 @@ CORRIGIDO: tasks de atualização do cache agora iniciadas pelo engine.
 NOVO: update_fear_greed e update_macro_events agora exportados para o engine.
 run_all_filters() conectado ao fluxo real de _open() no engine.py
 """
+import os
 import asyncio, time, aiohttp
 from datetime import datetime, timezone
 from bot.logger import log
@@ -377,7 +378,7 @@ def calc_trade_cost(entry: float, qty: float,
     Inclui: taxa de abertura + taxa de fechamento + funding estimado + slippage
     Retorna break-even mínimo e custo total em USD e %.
     """
-    TAKER_FEE  = 0.00055  # Bybit taker 0.055%
+    TAKER_FEE  = float(os.environ.get('TAKER_FEE', '0.0006'))  # KuCoin taker 0.06%
     SLIPPAGE   = 0.0002   # 0.02% estimado
     notional   = entry * qty
 
