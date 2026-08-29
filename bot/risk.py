@@ -118,9 +118,24 @@ async def check_partial_tps(pos: PositionRisk, cur: float, client) -> dict:
                     return {"actions": actions, "qty_remain": pos.qty_remain}
                 pos.qty_remain  -= q
                 pos.tp1_hit      = True
-                pos.trailing_sl  = pos.entry   # move SL para break-even
-                pos.be_set       = True
-                await client.set_sl(pos.symbol, pos.entry)
+
+                # RISCO CORRIGIDO: set_sl era chamado sem verificar o retorno.
+                # Se falhasse, a posição restante ficava com o SL ANTIGO
+                # (abaixo do break-even) enquanto o bot registrava be_set=True
+                # e agia como se estivesse protegido — risco de perder no que
+                # já era lucro garantido.
+                _be_ok = await client.set_sl(pos.symbol, pos.entry)
+                if _be_ok:
+                    pos.trailing_sl = pos.entry
+                    pos.be_set      = True
+                else:
+                    # Não marca be_set: o trailing continuará tentando e o
+                    # guardião de posições vai detectar se ficou sem stop.
+                    log.error(
+                        f"🚨 TP1 {pos.symbol}: falha ao mover SL para "
+                        f"break-even (${pos.entry:.4f}) — posição restante "
+                        f"ainda com stop original"
+                    )
                 log.info(
                     f"✅ TP1 {pos.symbol}: {q:.6f} @ {cur:.4f} "
                     f"| BE={pos.entry:.4f} | remain={pos.qty_remain:.6f}"
@@ -166,11 +181,22 @@ async def check_partial_tps(pos: PositionRisk, cur: float, client) -> dict:
             (pos.direction == "SHORT" and new_sl < pos.trailing_sl)
         )
         if better:
-            pos.trailing_sl = new_sl
+            # RISCO CORRIGIDO: pos.trailing_sl era atualizado ANTES de
+            # chamar a exchange. Se a chamada falhasse, o bot registrava
+            # um stop mais apertado do que o real — subestimando a perda
+            # máxima da posição.
             try:
-                await client.set_sl(pos.symbol, new_sl)
-                log.info(f"🔄 Trailing SL {pos.symbol} → {new_sl:.4f}")
-                actions.append("TRAIL_SL")
+                _ok = await client.set_sl(pos.symbol, new_sl)
+                if _ok:
+                    pos.trailing_sl = new_sl
+                    log.info(f"🔄 Trailing SL {pos.symbol} → {new_sl:.4f}")
+                    actions.append("TRAIL_SL")
+                else:
+                    log.error(
+                        f"🚨 TrailSL {pos.symbol}: exchange recusou "
+                        f"{new_sl:.4f} — stop real permanece em "
+                        f"{pos.trailing_sl:.4f}"
+                    )
             except Exception as e:
                 log.error(f"TrailSL {pos.symbol}: {e}")
 
