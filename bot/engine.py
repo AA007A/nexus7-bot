@@ -490,6 +490,27 @@ class TradingEngine:
 
             except asyncio.CancelledError:
                 break
+            except (NameError, AttributeError, TypeError, ImportError) as e:
+                # Erro de programação no ciclo principal: log CRITICAL com
+                # traceback e alerta único (evita spam a cada 5s).
+                import traceback
+                _sig = f"{type(e).__name__}:{e}"
+                if getattr(self, "_last_bug_sig", None) != _sig:
+                    self._last_bug_sig = _sig
+                    log.critical(
+                        f"🐛 BUG DE CÓDIGO no engine loop: {type(e).__name__}: {e}\n"
+                        f"Traceback:\n{traceback.format_exc()}"
+                    )
+                    try:
+                        asyncio.create_task(notify(
+                            f"🐛 *BUG NO CICLO PRINCIPAL*\n"
+                            f"❌ `{type(e).__name__}`\n"
+                            f"💬 `{str(e)[:140]}`\n"
+                            f"_O bot continua rodando, mas este ciclo falhou._"
+                        ))
+                    except Exception:
+                        pass
+                await asyncio.sleep(5)
             except Exception as e:
                 log.error(f"Engine loop: {e}")
                 await asyncio.sleep(5)
@@ -1712,8 +1733,8 @@ class TradingEngine:
             funding = oi = oi_delta = None
             try:
                 funding = await self.client.get_funding_rate(sig.symbol)
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"nexus: funding indisponível para {sig.symbol}: {_e}")
             try:
                 oi = await self.client.get_open_interest(sig.symbol)
                 prev = self._oi_hist.get(sig.symbol)
@@ -1722,16 +1743,16 @@ class TradingEngine:
                     oi_delta = (cur - prev) / prev
                 if cur > 0:
                     self._oi_hist[sig.symbol] = cur
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"nexus: open interest indisponível para {sig.symbol}: {_e}")
 
             news_score = None
             try:
                 ns = mdata.get_market_sentiment()
                 if isinstance(ns, dict) and ns.get("score") is not None:
                     news_score = float(ns["score"])
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"nexus: news sentiment indisponível: {_e}")
 
             return nexus_ai.decide(
                 symbol=sig.symbol,
@@ -1811,7 +1832,11 @@ class TradingEngine:
             if len(kl) < 20:
                 try:
                     kl = await self.client.get_klines(sig.symbol, "15", 50)
-                except Exception:
+                except Exception as _e:
+                    log.warning(
+                        f"score pré-trade {sig.symbol}: klines indisponíveis "
+                        f"via REST ({_e}) — usando fallback"
+                    )
                     kl = []
 
             if len(kl) >= 10:
@@ -2101,6 +2126,44 @@ class TradingEngine:
             else:
                 await notify(await signal_msg(sig))
             await notify(await order_opened_msg(sig, qty, _obal, _obal*cfg.LEVERAGE))
+        except (NameError, AttributeError, TypeError, ImportError) as e:
+            # ══════════════════════════════════════════════════════
+            # ERRO DE PROGRAMAÇÃO — não é falha operacional.
+            #
+            # Três bugs críticos deste projeto ficaram escondidos aqui:
+            #   • notify_nexus sem import      → NameError
+            #   • self._recalc_daily_limits()  → AttributeError
+            #   • price indefinida             → NameError
+            #
+            # Todos eram engolidos como "exceção inesperada" e o bot
+            # seguia sem abrir posição, sem sinal claro do que houve.
+            #
+            # Agora: log CRITICAL + alerta no Telegram, para que um bug
+            # de código nunca mais passe despercebido.
+            # ══════════════════════════════════════════════════════
+            import traceback
+            _tb = traceback.format_exc()
+            log.critical(
+                f"🐛 BUG DE CÓDIGO em _open {sig.symbol}: "
+                f"{type(e).__name__}: {e}\n"
+                f"Isto NÃO é falha de mercado ou de API — é erro de "
+                f"programação e precisa ser corrigido.\n"
+                f"Traceback:\n{_tb}"
+            )
+            try:
+                asyncio.create_task(notify(
+                    f"🐛 *BUG DE CÓDIGO DETECTADO*\n"
+                    f"`{'━'*26}`\n"
+                    f"📍 Par:  `{sig.symbol}`\n"
+                    f"❌ Erro: `{type(e).__name__}`\n"
+                    f"💬 `{str(e)[:120]}`\n"
+                    f"`{'━'*26}`\n"
+                    f"_O bot não conseguiu abrir esta posição por erro de "
+                    f"programação, não por condição de mercado._"
+                ))
+            except Exception:
+                pass   # notificação é best-effort; o log CRITICAL basta
+
         except Exception as e:
             import traceback
             log.error(
