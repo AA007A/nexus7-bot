@@ -724,6 +724,21 @@ def check_strategy_validity(metrics: dict, wf: dict, mc: dict) -> dict:
     elif p_value >= 0.05:
         warnings.append(f"p-value={p_value:.4f} — edge fraco, monitorar")
 
+    # Sharpe out-of-sample
+    # BUG CORRIGIDO: sharpe_oos era calculado e nunca verificado. Uma
+    # estratégia com PF aceitável mas Sharpe negativo (retorno instável,
+    # dependente de poucos trades) passava na validação sem ressalva.
+    if sharpe_oos < 0:
+        critical.append(
+            f"CRÍTICO: Sharpe OOS={sharpe_oos:.2f} < 0 — retorno ajustado "
+            f"ao risco negativo fora da amostra"
+        )
+    elif sharpe_oos < 0.5:
+        warnings.append(
+            f"Sharpe OOS={sharpe_oos:.2f} baixo — retorno instável "
+            f"em relação à volatilidade"
+        )
+
     # Overfitting
     if overfit == "HIGH":
         critical.append("CRÍTICO: Overfit risk=HIGH — parâmetros não generalizam")
