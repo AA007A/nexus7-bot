@@ -33,7 +33,7 @@ from bot.kucoin import KuCoinClient
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
-from bot.notifier import (notify, signal_msg, order_opened_msg, close_msg,
+from bot.notifier import (notify, notify_nexus, signal_msg, order_opened_msg, close_msg,
     daily_report_msg, daily_target_msg, daily_stop_msg, drawdown_msg, consecutive_losses_msg, online_msg)
 from bot import database as db
 from bot import score as scoring
@@ -606,7 +606,7 @@ class TradingEngine:
             # O bot tenta operar mesmo sem ping (REST pode funcionar)
             ping_ok = await self.client.ping()
             if not ping_ok:
-                log.warning("⚠️ Bybit ping falhou — continuando mesmo assim (REST pode funcionar)")
+                log.warning("⚠️ Ping da exchange falhou — continuando mesmo assim (REST pode funcionar)")
 
             bal = await self.client.get_balance()
             if bal < 0:
@@ -616,6 +616,18 @@ class TradingEngine:
 
             self.risk.init(bal)
             self.risk.update(bal)
+
+            # Sanidade de configuração: MAX_POSITIONS × MAX_MARGIN_PCT > 100%
+            # significa que as posições extras nunca terão margem suficiente.
+            _mc = getattr(cfg, "MAX_MARGIN_PCT", 0.80)
+            if cfg.MAX_POSITIONS * _mc > 1.0:
+                log.warning(
+                    f"⚠️ CONFIG: MAX_POSITIONS={cfg.MAX_POSITIONS} × "
+                    f"MAX_MARGIN_PCT={_mc:.0%} = {cfg.MAX_POSITIONS*_mc:.0%} > 100%. "
+                    f"A 1ª posição consome quase toda a margem — as demais "
+                    f"ficarão residuais. Para {cfg.MAX_POSITIONS} posições "
+                    f"equilibradas use MAX_MARGIN_PCT≈{1/cfg.MAX_POSITIONS:.2f}"
+                )
             self.instruments = self.client.get_instruments()
             await self._filter_viable_symbols()
 
@@ -1641,9 +1653,24 @@ class TradingEngine:
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
         for sig in candidates:
-            if len(self.positions) >= cfg.MAX_POSITIONS:
-                break
-            await self._open(sig)
+            # RACE CONDITION CORRIGIDA: _open() escreve em self.positions,
+            # mas rodava FORA do _pos_lock que protege o ciclo de gestão
+            # (_sync_positions, _check_rr_double, trailing...).
+            #
+            # Sem o lock, uma posição podia ser inserida enquanto outro
+            # caminho iterava sobre o dict — gerando estado inconsistente
+            # ou ordens duplicadas para o mesmo símbolo.
+            #
+            # A checagem de MAX_POSITIONS também precisa estar sob o lock,
+            # senão duas iterações podem ler o mesmo valor e abrir posições
+            # além do limite.
+            async with self._pos_lock:
+                if len(self.positions) >= cfg.MAX_POSITIONS:
+                    break
+                if sig.symbol in self.positions:
+                    log.debug(f"[{sig.symbol}] já tem posição aberta — pulando")
+                    continue
+                await self._open(sig)
 
     async def _nexus_validate(self, sig: Signal):
         """
@@ -2216,6 +2243,15 @@ class TradingEngine:
         now = time.time()
         for sym in [s for s, t in list(self._cooldown.items()) if t < now]:
             self._cooldown.pop(sym, None)
+
+        # Dicts sem expurgo até então — leak lento em operação 24/7.
+        # Mantém apenas símbolos que ainda estão na lista operável.
+        _viaveis = set(self.viable_symbols or []) | set(self.positions.keys())
+        for d_name in ("_oi_hist", "_last_nexus"):
+            d = getattr(self, d_name, None)
+            if isinstance(d, dict) and len(d) > 60:
+                for k in [k for k in list(d.keys()) if k not in _viaveis]:
+                    d.pop(k, None)
         if len(getattr(self, "_trade_ids", {})) > 200:
             for sym in list(self._trade_ids.keys()):
                 if sym not in self.positions:
