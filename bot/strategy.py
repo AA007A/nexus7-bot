@@ -212,8 +212,8 @@ def detect_regime(closes, highs, lows, atr_v) -> str:
             e50 = float(ema(closes, min(50, len(closes)-1))[-1])
             if e20 > e50 and price > e20: return "TRENDING_UP"
             if e20 < e50 and price < e20: return "TRENDING_DOWN"
-        except Exception:
-            pass
+        except Exception as _e:
+            log.warning(f"detecção de regime falhou — usando NEUTRAL: {_e}")
         return "RANGING"
 
 
