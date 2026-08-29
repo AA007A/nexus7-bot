@@ -708,7 +708,8 @@ class TradingEngine:
                         # métricas de performance e a calibração de pesos.
                         await db.save_trade_close(
                             tid, exit_px, pnl_net, total_fee,
-                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60,
+                            exit_reason="EXCHANGE_SL_TP",   # fechado pela exchange
                         )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
@@ -1204,7 +1205,8 @@ class TradingEngine:
                     if tid:
                         await db.save_trade_close(
                             tid, price, pnl_net, total_fee,
-                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60
+                            (datetime.utcnow() - pos.opened_at).total_seconds() / 60,
+                            exit_reason="RR_DOUBLE",   # fechado pelo R:R dobrado
                         )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
@@ -1814,9 +1816,27 @@ class TradingEngine:
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
             # Persiste no banco
+            # ITEM 2: grava os COMPONENTES do score, não só o total.
+            # Permite que score_weights.calibrate_from_history() descubra
+            # estatisticamente quais sinais realmente preveem trades
+            # vencedores — em vez de manter os pesos manuais (+10/+5/+3).
+            _feats = {}
+            try:
+                for _k, _v in (pre_score or {}).items():
+                    if isinstance(_v, (int, float)) and _k != "total":
+                        _feats[_k] = float(_v)
+                _feats["mtf_score"] = float(sig.score)
+                _feats["rr"]        = float(sig.rr)
+                _feats["regime"]    = 1.0 if "TRENDING" in str(sig.reason) else 0.0
+            except Exception as _e:
+                log.debug(f"score_features {sig.symbol}: {_e}")
+
             trade_id = await db.save_trade_open(
                 sig.symbol, side, sig.entry, qty,
                 cfg.LEVERAGE, pre_score["total"],
+                score_features=_feats,
+                sl=sig.sl,                 # ITEM 4: define 1R do trade
+                direction=sig.direction,
             )
             self._trade_ids[sig.symbol] = trade_id
             entry_type = "BOS_BREAK" if "ENTRY:BOS_BREAK" in sig.reason else \
@@ -1933,6 +1953,31 @@ class TradingEngine:
                 "🧠 Melhor score: `nenhum sinal no último scan`\n"
             )
 
+            # ITEM 4: expectancy em vez de win rate isolado.
+            # Win rate sozinho não diz se a estratégia é lucrativa — o que
+            # diz é a expectancy e a margem sobre o win rate de breakeven.
+            exp_line = ""
+            try:
+                _ex = await db.get_expectancy_stats()
+                if _ex.get("status") == "ok" and _ex.get("n_trades", 0) > 0:
+                    _m = _ex["margem_pp"]
+                    _icon = "✅" if _m > 5 else "⚠️" if _m > 0 else "🔴"
+                    exp_line = (
+                        f"`━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                        f"📊 Trades:     `{_ex['n_trades']}`\n"
+                        f"🎲 Win rate:   `{_ex['win_rate']}%` "
+                        f"(breakeven `{_ex['breakeven_wr']}%`)\n"
+                        f"{_icon} Margem:     `{_m:+.1f}pp`\n"
+                        f"💡 Expectancy: `{_ex['expectancy_R']:+.3f}R` "
+                        f"(`${_ex['expectancy_usd']:+.3f}`/trade)\n"
+                        f"⚖️ Payoff:     `{_ex['payoff_ratio']:.2f}` | "
+                        f"PF `{_ex.get('profit_factor') or '—'}`\n"
+                        f"📉 Maior seq. perdas: `{_ex['max_loss_streak']}`\n"
+                        f"_{_ex['verdict']}_\n"
+                    )
+            except Exception as _e:
+                log.debug(f"heartbeat expectancy: {_e}")
+
             await notify(
                 f"💓 *BGX — STATUS*\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━`\n"
@@ -1943,6 +1988,7 @@ class TradingEngine:
                 f"🎯 Meta:     `${self.daily_target:,.2f}`\n"
                 f"🔍 Pares:    `{len(self.viable_symbols)}`\n"
                 f"{best_line}"
+                f"{exp_line}"
                 f"⚙️ Score mín: `{cfg.MIN_ENTRY_SCORE}` | R:R mín: `{cfg.MIN_RR_RATIO}`\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━`"
             )
