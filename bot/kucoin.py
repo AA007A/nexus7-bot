@@ -423,7 +423,11 @@ class KuCoinClient:
                 "tickSize":    tick_sz,
                 "multiplier":  mult,
                 "maxLeverage": max_lev,
-                "minNotional": lot_size * mult,
+                # minNotional aqui é a QUANTIDADE base mínima (lote × multiplicador),
+                # não valor em USDT — o valor depende do preço e é calculado em
+                # _filter_viable_symbols como lot_size × multiplier × price.
+                "minBaseQty":  lot_size * mult,
+                "minNotional": lot_size * mult,   # mantido por compatibilidade
                 "kucoinSymbol": kc_sym,
             }
             matched.append(f"{std_sym}→{kc_sym}")
