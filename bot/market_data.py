@@ -1,4 +1,6 @@
 import time
+
+_macro_cache: dict = {}
 """
 BGX Capital — Market Data Module
 - CVD (Cumulative Volume Delta) em tempo real
@@ -681,7 +683,7 @@ async def update_twitter_sentiment():
     global _twitter_cache
 
     # Throttle: atualiza no máx a cada 10 minutos
-    if _t.time() - _twitter_cache.get("last_update", 0) < 600:
+    if time.time() - _twitter_cache.get("last_update", 0) < 600:
         return
 
     bull_score = 0
@@ -777,7 +779,7 @@ async def update_twitter_sentiment():
         "bear_score":  bear_score,
         "mentions":    mentions,
         "trending":    trending,
-        "last_update": _t.time(),
+        "last_update": time.time(),
     }
 
     log.info(f"🐦 Twitter: {sentiment} (bull={bull_score} bear={bear_score})")
@@ -862,7 +864,7 @@ async def update_economic_calendar():
     Atualiza 1x por hora.
     """
     global _economic_events_cache, _last_calendar_update
-    if _t.time() - _last_calendar_update < 3600:
+    if time.time() - _last_calendar_update < 3600:
         return
 
     events = []
@@ -889,7 +891,7 @@ async def update_economic_calendar():
         log.debug(f"economic_calendar: {e}")
 
     _economic_events_cache = events
-    _last_calendar_update  = _t.time()
+    _last_calendar_update  = time.time()
     if events:
         log.info(f"📅 Calendário: {len(events)} eventos HIGH IMPACT nos próximos 3 dias")
 
@@ -947,7 +949,7 @@ async def update_volume_filter(client):
     Atualiza a cada 30 minutos.
     """
     global _volume_cache, _last_volume_update
-    if _t.time() - _last_volume_update < 1800:
+    if time.time() - _last_volume_update < 1800:
         return
     try:
         tickers = await client.get_all_tickers()
@@ -959,7 +961,7 @@ async def update_volume_filter(client):
                 _volume_cache[sym] = vol_usd
             except Exception:
                 pass
-        _last_volume_update = _t.time()
+        _last_volume_update = time.time()
         # Log pares filtrados
         low_vol = [s for s, v in _volume_cache.items()
                    if v < 50_000_000 and s.endswith("USDT")]
