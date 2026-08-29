@@ -1,0 +1,73 @@
+# BGX Capital — Verificação de qualidade em cada push
+#
+# Roda ANTES do deploy no Railway. Se falhar, o bug nunca chega em produção.
+# Detecta a classe de erro que historicamente passou despercebida:
+# NameError/AttributeError latentes engolidos por except genérico.
+
+name: Quality Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyflakes
+          pip install -r requirements.txt
+
+      - name: Compilação (erros de sintaxe)
+        run: python -m compileall -q bot/ main.py
+
+      - name: Pyflakes — nomes indefinidos
+        run: |
+          # Falha SOMENTE em undefined name (bug real).
+          # Imports não usados são ruído e não bloqueiam.
+          OUT=$(python -m pyflakes bot/ main.py 2>&1 || true)
+          echo "$OUT"
+          UNDEF=$(echo "$OUT" | grep -c "undefined name" || true)
+          if [ "$UNDEF" -gt 0 ]; then
+            echo "::error::$UNDEF nome(s) indefinido(s) — NameError garantido em runtime"
+            echo "$OUT" | grep "undefined name"
+            exit 1
+          fi
+
+      - name: Self-check de integridade
+        run: python -m bot.selfcheck
+
+      - name: Imports em runtime
+        run: |
+          python - <<'EOF'
+          import os, sys, importlib
+          sys.path.insert(0, ".")
+          falhas = []
+          for f in sorted(os.listdir("bot")):
+              if f.endswith(".py") and f != "__init__.py":
+                  m = "bot." + f[:-3]
+                  try:
+                      importlib.import_module(m)
+                  except Exception as e:
+                      falhas.append(f"{m}: {type(e).__name__}: {e}")
+          try:
+              importlib.import_module("main")
+          except Exception as e:
+              falhas.append(f"main: {type(e).__name__}: {e}")
+          if falhas:
+              for x in falhas:
+                  print(f"::error::{x}")
+              sys.exit(1)
+          print("Todos os módulos importam corretamente")
+          EOF
