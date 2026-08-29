@@ -43,7 +43,10 @@ from bot import optimizer as opt
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
 # Taxa Bybit: 0.055% por lado (maker) ou 0.055% taker — usamos 0.055% x2 = 0.11% total
-TAKER_FEE = 0.00055   # 0.055% por execução
+# CORRIGIDO (auditoria #8): 0.00055 era a taxa da Bybit. A exchange agora
+# é a KuCoin (taker 0.06%). Importado do módulo do cliente para manter uma
+# única fonte de verdade — antes o PnL líquido reportado era subestimado.
+from bot.kucoin import TAKER_FEE
 
 class Trade:
     def __init__(self, symbol, direction, entry, exit_price, qty, pnl_gross, opened_at,
@@ -709,7 +712,10 @@ class TradingEngine:
             # Posições abertas externamente (ex: manual)
             for sym, bp in open_syms.items():
                 if sym not in self.positions:
-                    ep  = float(bp.get("avgPrice", 0))
+                    # CORRIGIDO: KuCoinClient.get_positions() normaliza como
+                    # "entryPrice"; "avgPrice" era o formato da Bybit e retornava
+                    # 0, zerando entry/SL/TP da posição carregada.
+                    ep  = float(bp.get("entryPrice", bp.get("avgPrice", 0)))
                     sz  = float(bp.get("size", 0))
                     side = bp.get("side", "Buy")
                     if ep > 0 and sz > 0:
@@ -721,7 +727,7 @@ class TradingEngine:
                         else:
                             sl = ep + atr_est * 1.5
                             tp = ep - atr_est * 3.0
-                        sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync Bybit", 75)
+                        sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync exchange", 75)
                         pos = Position(sig, sz)
                         pos.pnl = float(bp.get("unrealisedPnl", 0))
                         cur = float(bp.get("markPrice", ep))
@@ -878,7 +884,8 @@ class TradingEngine:
                     await self.client.place_order(
                         symbol=sym, side=close_side,
                         qty=pos.qty, sl=0, tp=0,
-                        instruments=self.instruments
+                        instruments=self.instruments,
+                        reduce_only=True,   # auditoria #3
                     )
                     continue
 
@@ -915,7 +922,8 @@ class TradingEngine:
                         await self.client.place_order(
                             symbol=sym, side=close_side,
                             qty=pos.qty, sl=0, tp=0,
-                            instruments=self.instruments
+                            instruments=self.instruments,
+                            reduce_only=True,   # auditoria #3
                         )
                         continue
 
@@ -938,7 +946,8 @@ class TradingEngine:
                         await self.client.place_order(
                             symbol=sym, side=close_side,
                             qty=pos.qty, sl=0, tp=0,
-                            instruments=self.instruments
+                            instruments=self.instruments,
+                            reduce_only=True,   # auditoria #3
                         )
 
             except Exception as e:
@@ -1006,7 +1015,15 @@ class TradingEngine:
                     symbol=sym, side=close_side,
                     qty=partial_qty, sl=0, tp=0,
                     instruments=self.instruments,
+                    reduce_only=True,   # auditoria #3
                 )
+                # auditoria #4: só atualiza estado se a ordem foi aceita
+                if not result or not result.get("orderId"):
+                    log.error(
+                        f"❌ TP parcial {sym} REJEITADO pela exchange — "
+                        f"estado da posição mantido inalterado"
+                    )
+                    continue
 
                 # Mover SL para breakeven
                 await self.client.set_sl(sym, pos.entry)
@@ -1110,10 +1127,19 @@ class TradingEngine:
                         f"(R:R={rr_atual:.2f}) → fechando 100%"
                     )
                     close_side = "Sell" if pos.direction == "LONG" else "Buy"
-                    await self.client.place_order(
+                    _res = await self.client.place_order(
                         symbol=sym, side=close_side,
                         qty=pos.qty, sl=0, tp=0,
+                        instruments=self.instruments,
+                        reduce_only=True,   # auditoria #3
                     )
+                    # auditoria #4: não marca como fechada se foi rejeitada
+                    if not _res or not _res.get("orderId"):
+                        log.error(
+                            f"❌ Fechamento R:R {sym} REJEITADO — "
+                            f"posição permanece monitorada"
+                        )
+                        continue
                     # Registra como trade fechado
                     pnl_gross = lucro_dist * pos.qty
                     fee_open  = pos.qty * pos.entry * TAKER_FEE
@@ -1763,9 +1789,22 @@ class TradingEngine:
                     continue
                 sym   = p["symbol"]
                 side  = p.get("side", "Buy")
-                ep    = float(p.get("avgPrice", 0))
+                # CORRIGIDO (auditoria #2): KuCoinClient.get_positions() usa
+                # "entryPrice" e "liquidationPrice". As chaves "avgPrice"/"liqPrice"
+                # eram do formato Bybit e retornavam 0 na KuCoin, zerando
+                # entry/SL/TP de posições carregadas após restart.
+                ep    = float(p.get("entryPrice", p.get("avgPrice", 0)))
                 upnl  = float(p.get("unrealisedPnl", 0))
-                liq   = float(p.get("liqPrice", 0))
+                liq   = float(p.get("liquidationPrice", p.get("liqPrice", 0)))
+
+                if ep <= 0:
+                    log.error(
+                        f"⚠️ {sym}: entryPrice inválido ({ep}) no retorno da "
+                        f"exchange — posição NÃO carregada para evitar SL/TP "
+                        f"zerados. Campos recebidos: {list(p.keys())}"
+                    )
+                    continue
+
                 direction = "LONG" if side == "Buy" else "SHORT"
                 atr_est = ep * 0.007
 
@@ -1786,7 +1825,7 @@ class TradingEngine:
                 log.info(f"📂 Carregada: {direction} {size} {sym} @ ${ep:.4f} PnL=${upnl:.4f}")
 
             if count:
-                log.info(f"✅ {count} posição(ões) sincronizadas do Bybit")
+                log.info(f"✅ {count} posição(ões) sincronizadas da exchange")
         except Exception as e:
             log.error(f"_load_existing: {e}")
 
