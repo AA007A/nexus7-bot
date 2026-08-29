@@ -33,4 +33,4 @@ EXPOSE 8000
 # Sem HEALTHCHECK — o Railway monitora via railway.toml (/health)
 
 # Workers=1 obrigatório — estado compartilhado em memória
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level ${LOG_LEVEL:-info}"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level $(echo ${LOG_LEVEL:-info} | tr '[:upper:]' '[:lower:]')"]
