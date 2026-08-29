@@ -4,6 +4,7 @@ Multi-Timeframe: 4H → 1H → 15M
 Entrada antecipada: BOS_BREAK > MOMENTUM > PULLBACK
 Indicadores: ADX, BB Width, Choppiness, VWAP, SMC, Delta, OB Imbalance
 """
+import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
@@ -118,7 +119,7 @@ def calc_sl_tp(direction: str, entry: float, levels: dict, atr_v: float) -> dict
     }
 
 
-TAKER_FEE   = 0.00055
+TAKER_FEE   = float(os.environ.get('TAKER_FEE', '0.0006'))   # KuCoin (era 0.00055 Bybit)
 SLIPPAGE    = 0.00020
 FUNDING_FEE = 0.00010
 TOTAL_COST  = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_FEE
