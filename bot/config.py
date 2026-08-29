@@ -126,8 +126,22 @@ class Config:
     # (Revertido a pedido do usuário em 28/08/2026 junto com LEVERAGE/MAX_RISK_PCT.)
     DAILY_TARGET_PCT:    float = _pct(os.environ.get("DAILY_TARGET_PCT",    "0.20"), 0.20)
     DAILY_STOP_LOSS_PCT: float = _pct(os.environ.get("DAILY_STOP_LOSS_PCT", "0.20"), 0.20)
-    DAILY_TARGET:        float = float(os.environ.get("DAILY_TARGET",        "100.0"))
-    DAILY_STOP_LOSS:     float = float(os.environ.get("DAILY_STOP_LOSS",     "50.0"))
+    # ══════════════════════════════════════════════════════════════
+    # BUG CORRIGIDO — META DIÁRIA FIXA INCOMPATÍVEL COM O SALDO
+    #
+    # O default era $100/$50 em valor ABSOLUTO. Com saldo de $19, a meta
+    # de $100 é inatingível e o stop de $50 nunca dispararia (o saldo
+    # todo é menor que isso).
+    #
+    # Havia dois sistemas paralelos: DAILY_TARGET (absoluto) e
+    # DAILY_TARGET_PCT (percentual). O absoluto tinha prioridade,
+    # anulando o percentual.
+    #
+    # Agora o default é 0 = usar o percentual sobre o saldo real.
+    # Definir um valor > 0 continua funcionando como override manual.
+    # ══════════════════════════════════════════════════════════════
+    DAILY_TARGET:        float = float(os.environ.get("DAILY_TARGET",        "0"))
+    DAILY_STOP_LOSS:     float = float(os.environ.get("DAILY_STOP_LOSS",     "0"))
 
     # ── Relatório ─────────────────────────────────────────────────
     REPORT_INTERVAL_H: int = int(os.environ.get("REPORT_INTERVAL_H", "24"))
