@@ -49,7 +49,7 @@ WEIGHTS = {
 # apenas A+/A (85+), então este valor é uma escolha deliberada de
 # priorizar frequência de operação sobre seletividade máxima.
 # Ajustável a qualquer momento via NEXUS_MIN_SCORE.
-MIN_SCORE = float(__import__("os").environ.get("NEXUS_MIN_SCORE", "60"))
+MIN_SCORE = float(__import__("os").environ.get("NEXUS_MIN_SCORE", "55"))
 
 # Idade máxima dos dados antes de considerá-los stale (seção 22)
 MAX_DATA_AGE_S = float(__import__("os").environ.get("NEXUS_MAX_DATA_AGE", "300"))
