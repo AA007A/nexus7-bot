@@ -409,7 +409,14 @@ async def get_recent_decisions(limit: int = 60) -> list:
     if not _conn:
         return []
     try:
-        query = f"SELECT timestamp, symbol, type, score, reason FROM decisions ORDER BY id DESC LIMIT {limit}"
+        # P1 CORRIGIDO: f-string em SQL. 'limit' vem de query param do
+        # dashboard — se um caminho futuro passar string, vira injeção.
+        # int() garante que só um inteiro chega ao SQL.
+        _lim = max(1, min(1000, int(limit)))
+        query = (
+            "SELECT timestamp, symbol, type, score, reason "
+            "FROM decisions ORDER BY id DESC LIMIT " + str(_lim)
+        )
         if _is_pg:
             rows = await _conn.fetch(query)
             return [{"timestamp": str(r["timestamp"]), "symbol": r["symbol"],
