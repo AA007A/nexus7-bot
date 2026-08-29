@@ -128,7 +128,7 @@ async def signal_msg(sig) -> str:
         f"🧠 Score:        `{sig.score}/100`\n"
         f"💡 _{sig.reason}_\n"
         f"`{'━'*28}`\n"
-        f"⚡ _Ordem enviada para a Bybit_"
+        f"⚡ _Ordem enviada para a KuCoin_"
     )
 
 
