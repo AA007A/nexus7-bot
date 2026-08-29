@@ -198,11 +198,31 @@ class KuCoinClient:
         self._ticker_cache: dict = {}   # symbol → dict
         self._ob_cache:    dict = {}    # symbol → dict
         self._stale_logged: dict = {}   # controle de log de cache obsoleto
+        self._rate_lock     = asyncio.Lock()   # serializa o throttle
+        self._rate_sem      = asyncio.Semaphore(self._RATE_MAX_CONCURRENT)
+        self._last_req_ts   = 0.0
         self._last_ws_update: float = 0.0   # timestamp do último kline via WS
         self._instruments: dict = {}    # symbol → {minQty, qtyStep, tickSize, minNotional}
 
         self._connected = False
         self._running   = False
+
+    # ── Rate Limiter ──────────────────────────────────────────────
+    # A KuCoin limita requisições por peso (~30/10s no público).
+    # Com 12 pares × 3 filtros REST a cada scan de 20s, o bot fazia
+    # ~1.8 req/s de forma não-controlada, arriscando HTTP 429 e ban
+    # temporário de IP. O semáforo + intervalo mínimo evitam isso.
+    _RATE_MAX_CONCURRENT = int(os.environ.get("KUCOIN_MAX_CONCURRENT", "5"))
+    _RATE_MIN_INTERVAL   = float(os.environ.get("KUCOIN_MIN_INTERVAL", "0.06"))
+
+    async def _throttle(self):
+        """Espaça as requisições para respeitar o rate limit da KuCoin."""
+        async with self._rate_lock:
+            now  = time.monotonic()
+            wait = self._last_req_ts + self._RATE_MIN_INTERVAL - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_req_ts = time.monotonic()
 
     # ── Sessão HTTP ───────────────────────────────────────────────
     async def _ensure_session(self):
@@ -291,13 +311,21 @@ class KuCoinClient:
 
         for attempt in range(3):
             try:
-                # params=None — URL já contém os params embutidos (sem risco de reordenação)
-                async with self._session.get(full_url, headers=headers) as r:
+                await self._throttle()
+                async with self._rate_sem, self._session.get(full_url, headers=headers) as r:
                     data = await r.json()
                     if data.get("code") == "200000":
                         return data.get("data", {})
 
                     code = data.get("code", "")
+
+                    # HTTP 429 / código 429000: rate limit atingido.
+                    # Backoff progressivo maior que o normal para não piorar.
+                    if code in ("429000", "429") or r.status == 429:
+                        _w = 5 * (attempt + 1)
+                        log.warning(f"🚦 Rate limit KuCoin — aguardando {_w}s")
+                        await asyncio.sleep(_w)
+                        continue
 
                     # Erros de autenticação: 400004 (passphrase) / 400005 (sign)
                     # Estratégia: alterna v2↔v1 e re-sincroniza o relógio.
@@ -333,7 +361,8 @@ class KuCoinClient:
         headers  = self._auth_headers("POST", endpoint, body_str)
         for attempt in range(3):
             try:
-                async with self._session.post(url, data=body_str, headers=headers) as r:
+                await self._throttle()
+                async with self._rate_sem, self._session.post(url, data=body_str, headers=headers) as r:
                     data = await r.json()
                     if data.get("code") == "200000":
                         return data.get("data", {})
