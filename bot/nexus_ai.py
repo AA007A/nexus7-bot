@@ -41,8 +41,15 @@ WEIGHTS = {
     "RISK_REWARD":     0.10,
 }
 
-# Threshold configurável (seção 6). Default A+ e A apenas.
-MIN_SCORE = float(__import__("os").environ.get("NEXUS_MIN_SCORE", "85"))
+# Threshold configurável (seção 6).
+#
+# Escala de grades: 90+ = A+ | 85-89 = A | 75-84 = B | 65-74 = C | <65 = NO_TRADE
+#
+# Default 60: aceita setups abaixo da faixa C. A spec sugere operar
+# apenas A+/A (85+), então este valor é uma escolha deliberada de
+# priorizar frequência de operação sobre seletividade máxima.
+# Ajustável a qualquer momento via NEXUS_MIN_SCORE.
+MIN_SCORE = float(__import__("os").environ.get("NEXUS_MIN_SCORE", "60"))
 
 # Idade máxima dos dados antes de considerá-los stale (seção 22)
 MAX_DATA_AGE_S = float(__import__("os").environ.get("NEXUS_MAX_DATA_AGE", "300"))
@@ -492,8 +499,11 @@ def decide(symbol: str, k15: list, k1h: list, k4h: list,
             dq.score, warnings + ["Aguardando normalização do mercado"])
 
     if regime == Regime.CHOPPY:
-        threshold = max(threshold, 92.0)
-        warnings.append("CHOPPY: threshold elevado para 92")
+        # Em mercado errático o threshold sobe 15 pontos sobre a base.
+        # Antes era fixo em 92, o que com base 60 significaria nunca
+        # operar em CHOPPY. Agora é proporcional ao threshold escolhido.
+        threshold = threshold + 15.0
+        warnings.append(f"CHOPPY: threshold elevado para {threshold:.0f}")
 
     # ── PASSO 4: multi-timeframe (seção 3) ───────────────────────
     mtf = analyze_mtf(k15, k1h, k4h)
