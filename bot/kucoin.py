@@ -66,21 +66,50 @@ _paper_env = os.environ.get("PAPER_TRADE", "").strip().lower()
 _live_ack  = os.environ.get("LIVE_TRADING_CONFIRMED", "").strip()
 _LIVE_TOKEN = "I_UNDERSTAND_THE_RISK"
 
+# Motivo legível do modo escolhido — exposto em /health e /api/status
+# para que "por que não abre ordens?" seja respondível em 5 segundos.
 if _paper_env == "false" and _live_ack == _LIVE_TOKEN:
-    PAPER_TRADE = False        # operação real explicitamente confirmada
+    PAPER_TRADE = False
+    TRADING_MODE_REASON = "OPERAÇÃO REAL — confirmada por PAPER_TRADE=false + LIVE_TRADING_CONFIRMED"
+    log.critical("=" * 62)
+    log.critical("🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin")
+    log.critical("=" * 62)
+
 elif _paper_env == "false":
-    PAPER_TRADE = True         # pediu real mas não confirmou → simula
-    log.critical(
-        "🚫 PAPER_TRADE=false MAS LIVE_TRADING_CONFIRMED ausente ou inválido. "
-        f"Operando em PAPER TRADE por segurança. Para operar com capital "
-        f"real, defina LIVE_TRADING_CONFIRMED={_LIVE_TOKEN}"
+    PAPER_TRADE = True
+    TRADING_MODE_REASON = (
+        "PAPER — PAPER_TRADE=false mas falta LIVE_TRADING_CONFIRMED"
     )
+    log.critical("=" * 62)
+    log.critical("🚫 NENHUMA ORDEM SERÁ ENVIADA À EXCHANGE")
+    log.critical("")
+    log.critical("   Você definiu PAPER_TRADE=false, mas falta a segunda")
+    log.critical("   confirmação. O bot vai analisar e simular, sem operar.")
+    log.critical("")
+    log.critical("   PARA OPERAR DE VERDADE, adicione no Railway:")
+    log.critical(f"      LIVE_TRADING_CONFIRMED={_LIVE_TOKEN}")
+    log.critical("=" * 62)
+
+elif _paper_env == "true":
+    PAPER_TRADE = True
+    TRADING_MODE_REASON = "PAPER — PAPER_TRADE=true (simulação pedida)"
+    log.warning("🟡 PAPER TRADE ativo por configuração — ordens simuladas")
+
 else:
-    PAPER_TRADE = True         # default seguro (variável ausente ou 'true')
-    if not _paper_env:
-        log.warning(
-            "🟡 PAPER_TRADE não definido — assumindo PAPER TRADE (default seguro)"
-        )
+    PAPER_TRADE = True
+    TRADING_MODE_REASON = (
+        f"PAPER — PAPER_TRADE ausente ou inválido ('{_paper_env}')"
+    )
+    log.critical("=" * 62)
+    log.critical("🚫 NENHUMA ORDEM SERÁ ENVIADA À EXCHANGE")
+    log.critical("")
+    log.critical(f"   PAPER_TRADE não está definido (valor lido: '{_paper_env}')")
+    log.critical("   Por segurança, o bot assume simulação.")
+    log.critical("")
+    log.critical("   PARA OPERAR DE VERDADE, adicione no Railway:")
+    log.critical("      PAPER_TRADE=false")
+    log.critical(f"      LIVE_TRADING_CONFIRMED={_LIVE_TOKEN}")
+    log.critical("=" * 62)
 
 # ── Endpoints ─────────────────────────────────────────────────────
 REST_BASE = "https://api-futures.kucoin.com"
