@@ -447,8 +447,8 @@ class BybitClient:
                     vol    = float(data.get("volume24h", 0))
                     if cur_p > 0 and prev_p > 0:
                         update_cvd(sym, cur_p, prev_p, vol)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log.debug(f"CVD update falhou: {_e}")
 
         # Kline
         elif topic.startswith("kline."):
