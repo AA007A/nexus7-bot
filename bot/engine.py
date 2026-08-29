@@ -1067,7 +1067,8 @@ class TradingEngine:
 
                 # ── Saída por MUDANÇA DE REGIME ────────────────────
                 # Se o regime mudou para RANGING/COMPRESSED/CHOPPY após a entrada
-                k4h = self.client.get_cached_klines(sym, "240", limit=50) or []
+                # EMA50 precisa de 50+ velas; 50 é o limite exato e gera NaN.
+                k4h = self.client.get_cached_klines(sym, "240", limit=120) or []
                 if len(k4h) >= 20:
                     c4h   = [float(k["c"]) for k in k4h[:-1]]
                     h4h   = [float(k["h"]) for k in k4h[:-1]]
@@ -1653,10 +1654,44 @@ class TradingEngine:
                         e50_4h=__import__('bot.indicators',fromlist=['ema']).ema(c4h,50)[-1]
                         e20_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,20)[-1]
                         e50_1h=__import__('bot.indicators',fromlist=['ema']).ema(c1h,50)[-1]
-                        bull_4h = not __import__('numpy').isnan(e20_4h) and e20_4h>e50_4h and c4h[-1]>e20_4h
-                        bear_4h = not __import__('numpy').isnan(e20_4h) and e20_4h<e50_4h and c4h[-1]<e20_4h
-                        bull_1h = not __import__('numpy').isnan(e20_1h) and e20_1h>e50_1h and c1h[-1]>e20_1h
-                        bear_1h = not __import__('numpy').isnan(e20_1h) and e20_1h<e50_1h and c1h[-1]<e20_1h
+                        # ══════════════════════════════════════════════
+                        # BUG CORRIGIDO — NaN NA EMA50 ZERAVA A DIREÇÃO
+                        #
+                        # A validação testava apenas isnan(e20). Se a EMA50
+                        # fosse NaN (candles insuficientes — comum no 4H, que
+                        # busca só 50-60 velas), TODAS as comparações com NaN
+                        # retornam False:
+                        #     e20 > NaN → False
+                        #     e20 < NaN → False
+                        # Resultado: bull=False E bear=False ao mesmo tempo,
+                        # exatamente o que apareceu nos logs
+                        # ("bull4h=False bear4h=False bull1h=False bear1h=False").
+                        #
+                        # Efeito: o par era descartado como "4H/1H não
+                        # alinhados" mesmo em tendência clara — sem que o
+                        # motivo real (dados insuficientes) fosse registrado.
+                        # ══════════════════════════════════════════════
+                        _np = __import__('numpy')
+
+                        def _valid(*vals):
+                            return all(v is not None and not _np.isnan(v) for v in vals)
+
+                        _ok_4h = _valid(e20_4h, e50_4h)
+                        _ok_1h = _valid(e20_1h, e50_1h)
+
+                        if not _ok_4h or not _ok_1h:
+                            log.warning(
+                                f"[{sym}] EMAs indisponíveis "
+                                f"(4H ok={_ok_4h} com {len(c4h)} velas, "
+                                f"1H ok={_ok_1h} com {len(c1h)} velas) — "
+                                f"EMA50 precisa de 50+ candles. Direção não "
+                                f"pode ser determinada."
+                            )
+
+                        bull_4h = _ok_4h and e20_4h > e50_4h and c4h[-1] > e20_4h
+                        bear_4h = _ok_4h and e20_4h < e50_4h and c4h[-1] < e20_4h
+                        bull_1h = _ok_1h and e20_1h > e50_1h and c1h[-1] > e20_1h
+                        bear_1h = _ok_1h and e20_1h < e50_1h and c1h[-1] < e20_1h
                         direction = "LONG" if (bull_4h or bull_1h) else "SHORT"
                         s4=score_tf(c4h,h4h,l4h,o4h,v4h,direction,av4h,ag4h)
                         s1=score_tf(c1h,h1h,l1h,o1h,v1h,direction,av1h,ag1h)
@@ -1741,13 +1776,13 @@ class TradingEngine:
         try:
             k15 = self.client.get_cached_klines(sig.symbol, "15",  200)
             k1h = self.client.get_cached_klines(sig.symbol, "60",  100)
-            k4h = self.client.get_cached_klines(sig.symbol, "240",  60)
+            k4h = self.client.get_cached_klines(sig.symbol, "240",  120)
 
             # Cache insuficiente → busca via REST (sem inventar dados)
             missing = []
             if len(k15) < 60: missing.append(("15", 200))
             if len(k1h) < 40: missing.append(("60", 100))
-            if len(k4h) < 20: missing.append(("240", 60))
+            if len(k4h) < 20: missing.append(("240", 120))
             if missing:
                 try:
                     fetched = await asyncio.gather(
