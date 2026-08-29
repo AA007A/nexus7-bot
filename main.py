@@ -219,8 +219,8 @@ async def nexus_decision(symbol: str, direction: str = "LONG"):
         funding = None
         try:
             funding = await eng.client.get_funding_rate(sym)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"endpoint /api/nexus: funding indisponível: {_e}")
 
         d = nexus_ai.decide(
             symbol=sym, k15=k15, k1h=k1h, k4h=k4h,
