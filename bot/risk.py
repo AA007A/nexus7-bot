@@ -106,11 +106,16 @@ async def check_partial_tps(pos: PositionRisk, cur: float, client) -> dict:
         if hit:
             q = round(pos.qty_total * TP1_PCT, 8)
             try:
-                await client.place_order(
+                _res = await client.place_order(
                     pos.symbol,
                     "Sell" if pos.direction == "LONG" else "Buy",
                     q,
+                    reduce_only=True,   # auditoria #3
                 )
+                # auditoria #4: só atualiza estado após confirmação da ordem
+                if not _res or not _res.get("orderId"):
+                    log.error(f"❌ TP1 {pos.symbol} rejeitado — estado inalterado")
+                    return {"actions": actions, "qty_remain": pos.qty_remain}
                 pos.qty_remain  -= q
                 pos.tp1_hit      = True
                 pos.trailing_sl  = pos.entry   # move SL para break-even
@@ -133,11 +138,16 @@ async def check_partial_tps(pos: PositionRisk, cur: float, client) -> dict:
         if hit:
             q = round(pos.qty_remain, 8)
             try:
-                await client.place_order(
+                _res = await client.place_order(
                     pos.symbol,
                     "Sell" if pos.direction == "LONG" else "Buy",
                     q,
+                    reduce_only=True,   # auditoria #3
                 )
+                # auditoria #4: só atualiza estado após confirmação da ordem
+                if not _res or not _res.get("orderId"):
+                    log.error(f"❌ TP2 {pos.symbol} rejeitado — estado inalterado")
+                    return {"actions": actions, "qty_remain": pos.qty_remain}
                 pos.qty_remain -= q
                 pos.tp2_hit     = True
                 log.info(f"✅ TP2 {pos.symbol}: {q:.6f} @ {cur:.4f} | POSIÇÃO FECHADA")
