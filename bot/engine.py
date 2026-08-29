@@ -1972,8 +1972,72 @@ class TradingEngine:
             RETRY_DELAYS  = [1.0, 2.0, 4.0]   # segundos entre tentativas
             last_exc: Exception | None = None
 
+            # ══════════════════════════════════════════════════════════
+            # P0 — SL ALÉM DA LIQUIDAÇÃO
+            #
+            # Com LEVERAGE=50, a liquidação ocorre a ~2% de movimento
+            # adverso. Se o ATR estiver alto, o SL calculado pode cair
+            # ALÉM desse ponto — a posição seria liquidada ANTES do stop
+            # disparar, transformando uma perda planejada de 1R em perda
+            # TOTAL da margem.
+            #
+            # Não havia validação disso na abertura (só existia ao adotar
+            # posições órfãs). Aqui recusamos o trade em vez de aceitar
+            # um stop que nunca será executado.
+            # ══════════════════════════════════════════════════════════
+            _liq_pct   = 100.0 / max(1, cfg.LEVERAGE)      # % até liquidar
+            _sl_pct    = abs(sig.entry - sig.sl) / sig.entry * 100
+            _SAFETY    = float(os.environ.get("SL_LIQ_SAFETY", "0.75"))
+
+            if _sl_pct >= _liq_pct * _SAFETY:
+                log.warning(
+                    f"⛔ [{sig.symbol}] REJEITADO: SL a {_sl_pct:.2f}% do entry, "
+                    f"mas liquidação ocorre a ~{_liq_pct:.2f}% "
+                    f"(limite seguro: {_liq_pct*_SAFETY:.2f}%). "
+                    f"A posição seria liquidada antes do stop disparar."
+                )
+                try:
+                    await db.save_signal(
+                        sig.symbol, sig.direction, {"total": int(sig.score)},
+                        entrou=False,
+                        motivo=f"SL {_sl_pct:.2f}% >= liquidação {_liq_pct:.2f}%",
+                    )
+                except Exception as _e:
+                    log.debug(f"save_signal sl_liq: {_e}")
+                asyncio.create_task(notify(
+                    f"⛔ *TRADE REJEITADO — RISCO DE LIQUIDAÇÃO*\n"
+                    f"`{sig.symbol}`\n"
+                    f"SL a `{_sl_pct:.2f}%` do entry\n"
+                    f"Liquidação a `~{_liq_pct:.2f}%`\n"
+                    f"_A posição seria liquidada antes do stop._"
+                ))
+                return
+
+            # P0: chave de idempotência FIXA para todas as tentativas deste
+            # sinal. Garante que retries reusem o mesmo clientOid e a
+            # exchange rejeite duplicatas.
+            _idem = f"{sig.symbol}_{side}_{qty}_{int(time.time()//60)}"
+
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
+                    # ══════════════════════════════════════════════════
+                    # P0 — NUNCA RETENTAR ORDEM SEM VERIFICAR EXECUÇÃO
+                    #
+                    # Um timeout de rede não significa que a ordem falhou.
+                    # A partir da 2ª tentativa, confirma na exchange se a
+                    # posição já existe antes de reenviar.
+                    # ══════════════════════════════════════════════════
+                    if attempt > 1:
+                        if await self.client._position_exists(sig.symbol):
+                            log.warning(
+                                f"⚠️ {sig.symbol}: posição JÁ EXISTE na exchange "
+                                f"(tentativa {attempt}) — a ordem anterior "
+                                f"executou apesar do erro. Abortando retry para "
+                                f"não duplicar exposição."
+                            )
+                            last_exc = None
+                            break
+
                     log.info(
                         f"📡 _open {sig.symbol} tentativa {attempt}/{MAX_RETRIES} | "
                         f"side={side} qty={qty} entry={sig.entry:.6f} "
@@ -1985,6 +2049,7 @@ class TradingEngine:
                         symbol=sig.symbol, side=side, qty=qty,
                         sl=sig.sl, tp=sig.tp,
                         instruments=self.instruments,
+                        idem_key=_idem,   # P0: mesmo OID em todas as tentativas
                     )
 
                     # ── PROTEÇÃO CRÍTICA: posição sem SL não pode existir ──
