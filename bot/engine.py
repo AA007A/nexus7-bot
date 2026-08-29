@@ -1684,6 +1684,56 @@ class TradingEngine:
 
     async def _open(self, sig: Signal):
         try:
+            # ══════════════════════════════════════════════════════
+            # NEXUS AI DECISION ENGINE (seções 1, 9, 12, 22)
+            #
+            # Camada independente de validação ANTES do Risk Engine.
+            # A IA apenas autoriza ou veta — não executa nada. O sizing
+            # e os limites continuam sob responsabilidade do Risk Engine.
+            #
+            # Desativável via NEXUS_AI_ENABLED=false.
+            # ══════════════════════════════════════════════════════
+            if _NEXUS_ENABLED:
+                nx_dec = await self._nexus_validate(sig)
+
+                if nx_dec is not None and not nx_dec.execution_allowed:
+                    _motivo = (nx_dec.reasoning[-1] if nx_dec.reasoning
+                               else "sem motivo registrado")
+                    log.info(
+                        f"[{sig.symbol}] 🧠 NEXUS AI VETOU | "
+                        f"score={nx_dec.setup_quality:.1f} ({nx_dec.setup_grade}) "
+                        f"regime={nx_dec.market_regime} "
+                        f"dq={nx_dec.data_quality:.0f} | {_motivo}"
+                    )
+                    try:
+                        await db.save_signal(
+                            sig.symbol, sig.direction,
+                            {"total": int(nx_dec.setup_quality)},
+                            entrou=False,
+                            motivo=f"NEXUS_AI: {_motivo[:180]}",
+                        )
+                    except Exception as _e:
+                        log.debug(f"save_signal veto: {_e}")
+
+                    # Telegram — deduplicado por símbolo+motivo no notifier
+                    asyncio.create_task(
+                        notify_nexus(nx_dec.to_dict(), approved=False)
+                    )
+                    return
+
+                if nx_dec is not None:
+                    log.info(
+                        f"[{sig.symbol}] 🧠 NEXUS AI APROVOU | "
+                        f"score={nx_dec.setup_quality:.1f} ({nx_dec.setup_grade}) "
+                        f"conf={nx_dec.confidence:.0f} EV={nx_dec.expected_value:+.3f}% "
+                        f"RR_net={nx_dec.risk_reward:.2f} regime={nx_dec.market_regime}"
+                    )
+                    self._last_nexus[sig.symbol] = nx_dec.to_dict()
+                    # Aprovações passam sempre — são raras e relevantes
+                    asyncio.create_task(
+                        notify_nexus(nx_dec.to_dict(), approved=True)
+                    )
+
             # Atualizar saldo real antes de calcular qty
             fresh_bal = await self.client.get_balance()
             if fresh_bal > 0:
