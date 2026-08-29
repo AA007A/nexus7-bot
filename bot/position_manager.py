@@ -14,7 +14,8 @@ from bot.logger import log
 from bot.config import cfg
 
 # Constante de taxa taker Bybit
-TAKER_FEE = 0.00055
+# CORRIGIDO (auditoria #8): taxa da Bybit (0.055%) → KuCoin (0.06%)
+from bot.kucoin import TAKER_FEE
 
 
 class PositionManagerMixin:
@@ -104,10 +105,21 @@ class PositionManagerMixin:
                 pnl_net   = pnl_gross - fee_open - fee_close
 
                 if not self.paper_trade:
-                    await self.client.place_order(
+                    _res = await self.client.place_order(
                         symbol=sym, side=side, qty=pos.qty,
                         sl=0, tp=0, instruments=self.instruments,
+                        reduce_only=True,   # auditoria #3
                     )
+                    # auditoria #4: NÃO remove do dicionário se a ordem falhou.
+                    # Antes o estado era apagado de forma otimista — o bot
+                    # perdia o monitoramento de uma posição ainda aberta.
+                    if not _res or not _res.get("orderId"):
+                        errors += 1
+                        log.error(
+                            f"❌ Emergency close {sym} REJEITADO — posição "
+                            f"permanece aberta e monitorada"
+                        )
+                        continue
 
                 del self.positions[sym]
                 self.risk.close_position_risk(sym)
