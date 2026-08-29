@@ -186,6 +186,23 @@ async def close_all(request: Request):
 async def pnl():
     return app.state.engine.stats.all_summaries()
 
+@app.get("/api/expectancy", dependencies=[Depends(_require_auth)])
+async def expectancy(days: int = 0):
+    """
+    ITEM 4: métricas que realmente medem edge — não o win rate isolado.
+
+    Retorna expectancy em R, payoff ratio, profit factor e o win rate de
+    BREAKEVEN para o payoff observado. A comparação win_rate vs
+    breakeven_wr é o que diz se a estratégia é lucrativa.
+
+    Exemplos:
+      40% acerto, payoff 2.0 → breakeven 33% → lucrativo (+7pp)
+      90% acerto, payoff 0.3 → breakeven 77% → lucrativo (+13pp) mas com
+      expectancy MENOR e cauda de perdas muito pior.
+    """
+    return await db.get_expectancy_stats(days or None)
+
+
 @app.get("/api/db-stats", dependencies=[Depends(_require_auth)])
 async def db_stats():
     return await db.get_stats()
