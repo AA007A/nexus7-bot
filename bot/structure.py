@@ -135,6 +135,14 @@ def mtf_entry_signal(k_1h, k_15m, k_5m=None) -> dict:
     if not (ob_ok or fvg_ok or bos_ok):
         return {"aligned": False, "direction": None, "reason": "15M sem setup (OB/FVG/BOS)"}
 
+    # BUG CORRIGIDO: hunt15 (stop hunt no 15M) era calculado e DESCARTADO.
+    # Só o hunt da micro-entrada era verificado. Um caça-stops em formação
+    # no próprio timeframe de entrada passava despercebido — exatamente o
+    # cenário em que o preço varre liquidez antes de reverter.
+    if hunt15.get("wait_confirmation"):
+        return {"aligned": False, "direction": None,
+                "reason": "Stop hunt em formação no 15M — aguardando confirmação"}
+
     # ── Confirmação de micro-entrada ──────────────────────────────
     # Usa 5M se disponível, caso contrário usa últimos 10 candles do 15M como proxy
     if k_5m and len(k_5m) >= 5:
@@ -162,6 +170,7 @@ def mtf_entry_signal(k_1h, k_15m, k_5m=None) -> dict:
         "aligned":    True,
         "direction":  bias,
         "setup_type": setup,
+        "stop_hunt_15m": hunt15,
         "ob":         ob15,
         "fvg":        fvg15,
         "bos":        bos15,
