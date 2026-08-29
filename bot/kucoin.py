@@ -842,6 +842,12 @@ class KuCoinClient:
                 last = self._stale_logged.get(k, 0)
                 if time.time() - last > 60:
                     self._stale_logged[k] = time.time()
+                    # Expurgo: sem isso o dict só cresceria (leak lento)
+                    if len(self._stale_logged) > 100:
+                        _cut = time.time() - 3600
+                        for _k in [x for x, t in list(self._stale_logged.items())
+                                   if t < _cut]:
+                            self._stale_logged.pop(_k, None)
                     log.warning(
                         f"⏳ Cache OBSOLETO {symbol} {interval}m: último candle "
                         f"há {age/60:.1f}min (máx {max_age/60:.0f}min) — "
