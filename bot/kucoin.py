@@ -116,6 +116,24 @@ def to_standard(symbol: str) -> str:
     return symbol
 
 # ── Intervalo: Bybit → KuCoin ────────────────────────────────────
+# Formato do intervalo nos tópicos WS da KuCoin: _1min, _15min, _1hour, _4hour
+# CORRIGIDO: o código usava números crus (_15, _60), que a KuCoin rejeita.
+WS_INTERVAL_MAP = {
+    "1":   "1min",
+    "3":   "3min",
+    "5":   "5min",
+    "15":  "15min",
+    "30":  "30min",
+    "60":  "1hour",
+    "120": "2hour",
+    "240": "4hour",
+    "480": "8hour",
+    "720": "12hour",
+    "D":   "1day",
+    "W":   "1week",
+}
+WS_INTERVAL_MAP_REV = {v: k for k, v in WS_INTERVAL_MAP.items()}
+
 INTERVAL_MAP = {
     "1": 1, "3": 3, "5": 5, "15": 15, "30": 30,
     "60": 60, "120": 120, "240": 240, "D": 1440, "W": 10080,
@@ -179,6 +197,8 @@ class KuCoinClient:
         self._kline_cache: dict = {}    # (symbol, interval) → deque[dict]
         self._ticker_cache: dict = {}   # symbol → dict
         self._ob_cache:    dict = {}    # symbol → dict
+        self._stale_logged: dict = {}   # controle de log de cache obsoleto
+        self._last_ws_update: float = 0.0   # timestamp do último kline via WS
         self._instruments: dict = {}    # symbol → {minQty, qtyStep, tickSize, minNotional}
 
         self._connected = False
@@ -703,10 +723,48 @@ class KuCoinClient:
         self._kline_cache[key].extend(klines[-limit:])
         return klines[-limit:]
 
+    # Idade máxima aceitável do último candle antes de considerar o cache obsoleto.
+    # Múltiplo do próprio intervalo: 15m → 45min, 1h → 3h, 4h → 12h.
+    STALE_MULTIPLIER = 3
+
     def get_cached_klines(self, symbol: str, interval: str, limit: int = 200) -> list:
-        key = (symbol, str(interval))
+        """
+        Retorna klines do cache WS.
+
+        CORRIGIDO: antes devolvia o cache independentemente da idade. Se o
+        WebSocket caísse (ou a subscrição falhasse, como acontecia com o
+        tópico errado), o bot seguia calculando entry/SL/TP sobre preços
+        congelados sem qualquer aviso.
+
+        Agora: se o último candle for mais antigo que STALE_MULTIPLIER ×
+        intervalo, retorna lista vazia — forçando o chamador a buscar via
+        REST — e loga o problema.
+        """
+        key    = (symbol, str(interval))
         cached = list(self._kline_cache.get(key, []))
-        return cached[-limit:] if cached else []
+        if not cached:
+            return []
+
+        try:
+            iv_min  = int(INTERVAL_MAP.get(str(interval), int(interval)))
+            max_age = iv_min * 60 * self.STALE_MULTIPLIER
+            age     = time.time() - (cached[-1]["ts"] / 1000)
+            if age > max_age:
+                # Loga no máximo 1x por minuto por par para não poluir
+                k = f"{symbol}_{interval}"
+                last = self._stale_logged.get(k, 0)
+                if time.time() - last > 60:
+                    self._stale_logged[k] = time.time()
+                    log.warning(
+                        f"⏳ Cache OBSOLETO {symbol} {interval}m: último candle "
+                        f"há {age/60:.1f}min (máx {max_age/60:.0f}min) — "
+                        f"buscando via REST"
+                    )
+                return []
+        except Exception as e:
+            log.debug(f"get_cached_klines staleness {symbol}: {e}")
+
+        return cached[-limit:]
 
     # ── Ticker ────────────────────────────────────────────────────
     async def get_ticker(self, symbol: str) -> dict:
@@ -900,9 +958,16 @@ class KuCoinClient:
                     for sym in symbols:
                         kc_sym = to_kucoin(sym)
                         for interval in intervals:
-                            gran = INTERVAL_MAP.get(str(interval), int(interval))
-                            subs.append(f"/contractMarket/candle:{kc_sym}_{gran}")
-                        subs.append(f"/contractMarket/ticker:{kc_sym}")
+                            # CORRIGIDO: tópico é "limitCandle" (não "candle") e o
+                            # intervalo usa o formato nomeado (15min, 1hour, 4hour).
+                            # Com o formato antigo a KuCoin rejeitava a subscrição
+                            # em silêncio e o cache de klines nunca era atualizado.
+                            ws_iv = WS_INTERVAL_MAP.get(str(interval))
+                            if not ws_iv:
+                                log.warning(f"intervalo {interval} sem mapeamento WS — pulando")
+                                continue
+                            subs.append(f"/contractMarket/limitCandle:{kc_sym}_{ws_iv}")
+                        subs.append(f"/contractMarket/tickerV2:{kc_sym}")
 
                     # KuCoin suporta múltiplos tópicos por mensagem
                     for i in range(0, len(subs), 10):
@@ -956,27 +1021,35 @@ class KuCoinClient:
             return
 
         # ── Candles / Klines ──────────────────────────────────────
-        if "candle" in topic and "candles" in data:
-            # topic: /contractMarket/candle:XBTUSDTM_15
+        if "andle" in topic and "candles" in data:
+            # topic: /contractMarket/limitCandle:XBTUSDTM_15min
             parts     = topic.split(":")[-1].split("_")
             kc_sym    = "_".join(parts[:-1])
-            gran_str  = parts[-1]
+            ws_iv     = parts[-1]                    # ex: "15min"
             std_sym   = to_standard(kc_sym)
 
-            # Mapear granularidade → interval string (Bybit style)
-            rev_map = {str(v): k for k, v in INTERVAL_MAP.items()}
-            interval = rev_map.get(gran_str, gran_str)
+            # Converte o intervalo do formato WS (15min) para o interno (15)
+            interval = WS_INTERVAL_MAP_REV.get(ws_iv, ws_iv)
 
             candles = data["candles"]
-            # KuCoin retorna: [timestamp, open, close, high, low, volume, turnover]
+            # KuCoin WS: [start_time(SEGUNDOS), open, close, high, low, volume, amount]
+            # Atenção: a ordem difere do REST, que é [ts, open, high, low, close, vol]
+            _ts = int(float(candles[0]))
+            # CORRIGIDO: WS envia em SEGUNDOS (10 dígitos) e o REST em ms (13).
+            # Sem normalizar, a comparação do candle atual nunca batia e o cache
+            # acumulava duplicatas em vez de atualizar o candle em formação.
+            if _ts < 1e11:
+                _ts *= 1000
+
             kline = {
-                "ts": int(candles[0]),
+                "ts": _ts,
                 "o":  float(candles[1]),
-                "c":  float(candles[2]),
+                "c":  float(candles[2]),   # close vem ANTES de high/low no WS
                 "h":  float(candles[3]),
                 "l":  float(candles[4]),
                 "v":  float(candles[5]),
             }
+            self._last_ws_update = time.time()
             key = (std_sym, str(interval))
             if key not in self._kline_cache:
                 self._kline_cache[key] = deque(maxlen=500)
@@ -987,7 +1060,7 @@ class KuCoinClient:
                 cache.append(kline)
 
         # ── Ticker ────────────────────────────────────────────────
-        elif "ticker" in topic:
+        elif "icker" in topic:
             kc_sym  = topic.split(":")[-1]
             std_sym = to_standard(kc_sym)
             self._ticker_cache[std_sym] = {
@@ -1000,7 +1073,10 @@ class KuCoinClient:
 
     # ── Cache stats ───────────────────────────────────────────────
     def get_cache_stats(self) -> dict:
+        _age = (time.time() - self._last_ws_update) if self._last_ws_update else -1
         return {
+            "ws_last_update_s": round(_age, 1) if _age >= 0 else None,
+            "ws_healthy":       bool(self._last_ws_update and _age < 180),
             "kline_pairs": len(self._kline_cache),
             "tickers":     len(self._ticker_cache),
             "instruments": len(self._instruments),
