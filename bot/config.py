@@ -46,9 +46,12 @@ class Config:
     # Abaixo disso o bot pausaria após 2-3 trades perdedores.
     MAX_DRAWDOWN:    float = float(os.environ.get("MAX_DRAWDOWN",  "0.40"))
     INITIAL_CAP:     float = float(os.environ.get("INITIAL_CAP",  "0"))
-    # MAX_POSITIONS = 1: com 100% do saldo em uma posição não sobra margem
-    # para outras. Manter 3 faria as posições 2 e 3 serem rejeitadas.
-    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "1"))
+    # MAX_POSITIONS = 2 — a pedido do usuário (28/08/2026). ATENÇÃO: com
+    # MAX_RISK_PCT=1.0 (100% do saldo como margem), a 1ª posição já deve
+    # consumir quase todo o saldo disponível — a 2ª tende a ser rejeitada
+    # pela exchange por margem insuficiente até a 1ª fechar ou até
+    # MAX_RISK_PCT ser reduzido para deixar espaço real para 2 posições.
+    MAX_POSITIONS:   int   = int(os.environ.get("MAX_POSITIONS",   "2"))
     MIN_CONFIDENCE:  float = float(os.environ.get("MIN_CONFIDENCE","0.75"))
     MIN_RR_RATIO:    float = float(os.environ.get("MIN_RR_RATIO",  "2.0"))
 
