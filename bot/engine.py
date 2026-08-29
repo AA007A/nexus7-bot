@@ -417,6 +417,10 @@ class TradingEngine:
         self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
         self._oi_hist:    Dict[str, float] = {}   # OI anterior por símbolo (delta)
+        # PnL diário separado: só o REALIZADO conta para a meta.
+        # O não realizado oscila muito com 50x e não é lucro de fato.
+        self.daily_pnl_realized:   float = 0.0
+        self.daily_pnl_unrealized: float = 0.0
         self._last_nexus: Dict[str, dict]  = {}   # última decisão da IA (observabilidade)
 
         # ── Lock de posições (race condition) ─────────────────────
@@ -519,37 +523,68 @@ class TradingEngine:
             log.info(f"🎯 Meta diária: ${self.daily_target:.2f} | Stop-loss dia: -${self.daily_stop_loss:.2f} | Saldo: ${bal:.2f}")
 
     def _update_daily_pnl(self):
-        """Soma PnL realizado + não-realizado do dia e verifica meta/stop."""
-        realized    = self.stats.daily_pnl()
-        unrealized  = sum(p.pnl for p in self.positions.values())
-        self.daily_pnl = realized + unrealized
+        """
+        Atualiza o PnL do dia e verifica meta/stop.
 
-        # ── Stop/meta via DailyTracker (diário + semanal + mensal) ───
+        ══════════════════════════════════════════════════════════
+        BUG CRÍTICO CORRIGIDO — meta batida com lucro inexistente
+        ══════════════════════════════════════════════════════════
+        Antes: daily_pnl = realizado + NÃO REALIZADO.
+
+        Com 50x e notional de ~$766, uma oscilação de 1.5% no preço
+        produzia "+$11.60 de lucro" com a posição ainda ABERTA. O bot
+        anunciava META BATIDA e entrava em modo conservador sobre um
+        lucro que podia evaporar no minuto seguinte — e a flag
+        daily_target_hit não voltava atrás.
+
+        Agora: a META considera apenas PnL REALIZADO (trades fechados).
+        O não realizado continua sendo exibido, mas separadamente.
+
+        Também corrigido: havia DOIS caminhos marcando a meta como
+        batida, usando contadores diferentes de PnL. Eles divergiam e
+        disparavam notificações duplicadas com valores distintos.
+        Agora existe um único ponto de decisão.
+        """
+        realized   = self.stats.daily_pnl()
+        unrealized = sum(p.pnl for p in self.positions.values())
+
+        # Exposto para dashboard/heartbeat (informativo)
+        self.daily_pnl_realized   = realized
+        self.daily_pnl_unrealized = unrealized
+        self.daily_pnl            = realized + unrealized   # exibição
+
+        # ── STOP: considera realizado + não realizado ─────────────
+        # Aqui o não realizado DEVE contar: uma posição perdendo muito
+        # é risco presente, não hipotético.
         result = self.daily_tracker.check_limits()
-        if result == 'TARGET' and not self.daily_target_hit:
-            self.daily_target_hit = True
-        elif result in ('STOP', 'WEEKLY_STOP', 'MONTHLY_STOP'):
-            if not self.daily_stopped:
-                self.daily_stopped = True
-                label = {'STOP':'DIÁRIO','WEEKLY_STOP':'SEMANAL','MONTHLY_STOP':'MENSAL'}[result]
-                log.warning(f"🛑 STOP-LOSS {label} ATINGIDO: ${self.daily_pnl:.2f}")
-                asyncio.create_task(notify(
-                    f"🛑 *Stop-Loss {label}*\n"
-                    f"PnL: `${self.daily_pnl:.2f}` → bot pausado"
-                ))
+        if result in ('STOP', 'WEEKLY_STOP', 'MONTHLY_STOP') and not self.daily_stopped:
+            self.daily_stopped = True
+            label = {'STOP': 'DIÁRIO', 'WEEKLY_STOP': 'SEMANAL',
+                     'MONTHLY_STOP': 'MENSAL'}[result]
+            log.warning(f"🛑 STOP-LOSS {label} ATINGIDO: ${self.daily_pnl:.2f}")
+            asyncio.create_task(notify(
+                f"🛑 *Stop-Loss {label}*\n"
+                f"PnL: `${self.daily_pnl:.2f}` → bot pausado"
+            ))
 
-        # ── Meta batida ───────────────────────────────────────────
-        if not self.daily_target_hit and self.daily_pnl >= self.daily_target:
+        # ── META: SOMENTE PnL REALIZADO ───────────────────────────
+        # Ponto ÚNICO de decisão — elimina a duplicação de notificação.
+        if not self.daily_target_hit and realized >= self.daily_target:
             self.daily_target_hit = True
             log.info(
-                f"🎯 META DIÁRIA BATIDA! PnL=${self.daily_pnl:.4f} ≥ ${self.daily_target:.0f}"
-                f" — Entrando em modo CONSERVADOR (score ≥ {cfg.POST_TARGET_SCORE})"
+                f"🎯 META DIÁRIA BATIDA! Realizado=${realized:.4f} "
+                f"≥ ${self.daily_target:.2f} — modo CONSERVADOR "
+                f"(score ≥ {cfg.POST_TARGET_SCORE})"
             )
             asyncio.create_task(notify(
                 f"🎯 *META DIÁRIA BATIDA!*\n"
-                f"Lucro: `+${self.daily_pnl:.2f} USDT`\n"
-                f"Próximas entradas: score >= `{cfg.POST_TARGET_SCORE}/100`\n"
-                f"Modo conservador ativado"
+                f"`{'━'*26}`\n"
+                f"💵 Lucro realizado: `+${realized:.2f} USDT`\n"
+                f"📊 Em aberto:       `${unrealized:+.2f} USDT`\n"
+                f"🎯 Meta era:        `${self.daily_target:.2f}`\n"
+                f"`{'━'*26}`\n"
+                f"Próximas entradas: score ≥ `{cfg.POST_TARGET_SCORE}/100`\n"
+                f"_Modo conservador ativado_"
             ))
 
     def _effective_score(self) -> int:
@@ -2158,7 +2193,9 @@ class TradingEngine:
                 f"💰 Saldo:    `${bal:,.2f}` USDT\n"
                 f"⚡ Poder:    `${bal * cfg.LEVERAGE:,.2f}` ({cfg.LEVERAGE}x)\n"
                 f"📊 Posições: `{n_open}/{cfg.MAX_POSITIONS}`\n"
-                f"📈 PnL dia:  `${self.daily_pnl:+,.2f}`\n"
+                f"💵 PnL real: `${getattr(self, 'daily_pnl_realized', 0.0):+,.2f}` "
+                f"_(conta p/ meta)_\n"
+                f"📊 Em aberto:`${getattr(self, 'daily_pnl_unrealized', 0.0):+,.2f}`\n"
                 f"🎯 Meta:     `${self.daily_target:,.2f}`\n"
                 f"🔍 Pares:    `{len(self.viable_symbols)}`\n"
                 f"{best_line}"
