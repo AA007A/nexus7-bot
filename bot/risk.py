@@ -237,7 +237,13 @@ class RiskManager:
         )
 
     def can_open(self, n: int) -> bool:
+        # Este era o ÚNICO caminho de bloqueio sem log — se _ready ficasse
+        # False, o scan era pulado silenciosamente e nada aparecia nos logs.
         if not self._ready:
+            log.warning(
+                f"⛔ RiskManager não inicializado (saldo lido: "
+                f"${self.balance:.2f}) — scan bloqueado"
+            )
             return False
         if self.drawdown >= cfg.MAX_DRAWDOWN:
             log.warning(
