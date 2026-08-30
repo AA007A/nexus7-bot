@@ -331,17 +331,32 @@ def model_structure(closes: List[float], highs: List[float],
         choch = bool(s.get("choch"))
         bdir  = s.get("bos_dir", "NONE")
 
-        if st == "BULLISH":
+        # ══════════════════════════════════════════════════════════
+        # BUG CORRIGIDO — VOCABULÁRIO INCOMPATÍVEL
+        #
+        # smc_analysis() retorna "UPTREND"/"DOWNTREND"/"RANGING", mas
+        # este modelo comparava com "BULLISH"/"BEARISH" — valores que a
+        # função NUNCA produz. Nenhuma comparação casava, e o modelo de
+        # estrutura (15% do score, o maior peso junto com tendência)
+        # retornava WAIT/confiança 0 em TODAS as situações.
+        #
+        # Visível nos logs: "STRUCTURE WAIT conf=0.0  UPTREND +BOS" —
+        # a estrutura era de alta E tinha rompimento confirmado, mas o
+        # modelo não contribuía nada.
+        # ══════════════════════════════════════════════════════════
+        if st in ("UPTREND", "BULLISH"):
             m.direction, m.confidence = Decision.LONG, 70.0
-        elif st == "BEARISH":
+        elif st in ("DOWNTREND", "BEARISH"):
             m.direction, m.confidence = Decision.SHORT, 70.0
-        elif st == "REVERSAL":
-            m.direction, m.confidence = Decision.WAIT, 0.0
-        else:
+        else:   # RANGING, REVERSAL, UNKNOWN
             m.direction, m.confidence = Decision.WAIT, 0.0
 
-        if bos and bdir in ("LONG", "SHORT"):
-            bos_dec = Decision.LONG if bdir == "LONG" else Decision.SHORT
+        # bos_dir vem como "BULLISH"/"BEARISH" do smc_analysis, não
+        # "LONG"/"SHORT" — a condição nunca era satisfeita e o reforço
+        # por rompimento confirmado nunca se aplicava.
+        if bos and bdir in ("LONG", "SHORT", "BULLISH", "BEARISH"):
+            bos_dec = (Decision.LONG if bdir in ("LONG", "BULLISH")
+                       else Decision.SHORT)
             if bos_dec == m.direction:
                 m.confidence = min(100, m.confidence + 20)
             else:
