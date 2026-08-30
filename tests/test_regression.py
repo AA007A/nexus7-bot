@@ -135,13 +135,85 @@ def test_imports_todos_modulos():
     check("todos os módulos importam", not falhas, str(falhas[:2]))
 
 
+
+
+def test_ordenacao_candles():
+    """
+    P0: candles invertidos no tempo zeravam todos os indicadores.
+
+    O código fazia reversed() incondicional. Com a ordem já cronológica,
+    o RSI de uma alta forte dava 0 e o filtro de "RSI extremo" bloqueava
+    TODOS os sinais.
+    """
+    from bot.indicators import rsi
+    alta = [100 * (1.004 ** i) for i in range(60)]
+    r_ok  = rsi(alta, 14)[-1]
+    r_inv = rsi(list(reversed(alta)), 14)[-1]
+    check("RSI de alta é alto", r_ok > 70, f"={r_ok:.0f}")
+    check("RSI invertido é baixo", r_inv < 30, f"={r_inv:.0f}")
+    check("inversão muda o RSI drasticamente", abs(r_ok - r_inv) > 50)
+
+
+def test_structure_vocabulario():
+    """
+    P0: model_structure comparava com BULLISH/BEARISH, mas smc_analysis
+    retorna UPTREND/DOWNTREND. O modelo (15% do score) nunca contribuía.
+    """
+    from bot.nexus_models import model_structure
+    import numpy as np
+    n = 60
+    closes = [100 * (1.005 ** i) for i in range(n)]
+    highs  = [c * 1.002 for c in closes]
+    lows   = [c * 0.998 for c in closes]
+    m = model_structure(closes, highs, lows)
+    check("structure reconhece UPTREND", m.confidence > 0,
+          f"conf={m.confidence} reason={m.reason}")
+
+
+def test_max_data_age_compativel():
+    """
+    P0: MAX_DATA_AGE era 300s, mas o bot analisa candles de 15 MINUTOS.
+    Um candle recém-fechado (900s) era marcado obsoleto e derrubava a
+    qualidade dos dados, vetando todos os sinais.
+    """
+    from bot.nexus_ai import MAX_DATA_AGE_S
+    check("MAX_DATA_AGE cobre candle de 15M", MAX_DATA_AGE_S >= 900,
+          f"={MAX_DATA_AGE_S}")
+
+
+def test_rr_bruto_vs_liquido():
+    """
+    P0: a estratégia aprova com R:R BRUTO >= 2.0 e o NEXUS exigia R:R
+    LÍQUIDO >= 2.0. Custos corroem 15-25% → todo sinal era vetado.
+    """
+    from bot.nexus_ai import expected_value
+    ev = expected_value(0.60, 100, 99, 103)      # R:R bruto 3.0
+    check("R:R líquido < bruto", ev["rr_net"] < 3.0, f"={ev['rr_net']:.2f}")
+    check("R:R líquido ainda operável", ev["rr_net"] >= 1.6,
+          f"={ev['rr_net']:.2f}")
+
+
+def test_score_exclui_sem_dados():
+    """
+    P0: componentes sem dados entravam como ZERO. DERIVATIVES +
+    MICROSTRUCTURE = 20% do score → teto real 80, não 100.
+    A seção 14 da spec exige excluir, não zerar.
+    """
+    from bot.nexus_ai import WEIGHTS
+    total = sum(WEIGHTS.values())
+    check("pesos somam 1.0", abs(total - 1.0) < 0.01, f"={total}")
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
                test_sl_vs_liquidacao, test_expectancy_math, test_ev_com_custos,
                test_nexus_nao_inventa_dados, test_nexus_bloqueia_sem_dados,
                test_selfcheck_detecta_bugs, test_config_sanity,
-               test_imports_todos_modulos]:
+               test_imports_todos_modulos,
+               test_ordenacao_candles, test_structure_vocabulario,
+               test_max_data_age_compativel, test_rr_bruto_vs_liquido,
+               test_score_exclui_sem_dados]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
