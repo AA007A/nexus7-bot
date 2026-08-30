@@ -260,6 +260,36 @@ def test_minqty_unidade_correta():
           q == 0 or abs((q / 0.001) - round(q / 0.001)) < 1e-6, f"q={q}")
 
 
+
+
+def test_arredondamento_lote_decimal():
+    """
+    P1: math.floor(qty/step) com float perdia um lote inteiro.
+        0.7 / 0.1 == 6.999999999999999 → floor 6 (correto: 7)
+    Detectado em 22 de 770 combinações da matriz de validação.
+    """
+    from bot.risk import RiskManager
+    from bot.config import cfg
+    inst = {"S": {"minQty": 1, "qtyStep": 1, "multiplier": 0.1,
+                  "tickSize": 0.0001, "minNotional": 0.1}}
+    r = RiskManager()
+    # saldo/preço escolhidos para cair exatamente num múltiplo problemático
+    r.balance = 100.0; r.peak_balance = 100.0
+    r._ready = True; r.positions = {}
+    q = r.size("S", 140, inst)
+    step = 0.1
+    n = q / step if step else 0
+    check("qty é múltiplo exato do lote",
+          q == 0 or abs(n - round(n)) < 1e-6, f"q={q} n={n}")
+
+    import math
+    from decimal import Decimal, ROUND_FLOOR
+    for v, s in [(0.7, 0.1), (1.4, 0.1), (2.8, 0.1)]:
+        f = math.floor(v / s)
+        d = int((Decimal(str(v)) / Decimal(str(s))).to_integral_value(ROUND_FLOOR))
+        check(f"float perde lote em {v}/{s} (Decimal={d}, float={f})", d > f)
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -271,7 +301,8 @@ if __name__ == "__main__":
                test_max_data_age_compativel, test_rr_bruto_vs_liquido,
                test_score_exclui_sem_dados,
                test_riskmanager_unico, test_sizing_nunca_excede_saldo,
-               test_minqty_unidade_correta]:
+               test_minqty_unidade_correta,
+               test_arredondamento_lote_decimal]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
