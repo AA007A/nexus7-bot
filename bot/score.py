@@ -1,3 +1,4 @@
+import os
 import aiohttp
 from bot import database as db
 import time
@@ -475,9 +476,31 @@ def _classify_news(text: str) -> tuple:
     return classif, conf, is_fomc
 
 
+class _SkipSource(Exception):
+    """Sinaliza fonte de notícias desativada — não é erro, é configuração."""
+    pass
+
+
 async def news_reader_loop():
     """Monitora CryptoPanic + RSS 24/7. Fault-tolerant."""
-    CRYPTOPANIC = "https://cryptopanic.com/api/v1/posts/?auth_token=&filter=important&currencies=BTC"
+    # BUG CORRIGIDO: a URL tinha auth_token= VAZIO hardcoded. Sem token,
+    # o CryptoPanic responde HTML (página de erro) e não JSON, gerando
+    # "Attempt to decode JSON with unexpected mimetype: text/html" a cada
+    # ciclo — poluindo os logs e desperdiçando requisições.
+    #
+    # Agora o token vem da env var. Sem ele, a fonte é simplesmente
+    # PULADA (os feeds RSS continuam funcionando normalmente).
+    _CP_TOKEN   = os.environ.get("CRYPTOPANIC_TOKEN", "").strip()
+    CRYPTOPANIC = (
+        f"https://cryptopanic.com/api/v1/posts/"
+        f"?auth_token={_CP_TOKEN}&filter=important&currencies=BTC"
+    ) if _CP_TOKEN else None
+
+    if not _CP_TOKEN:
+        log.info(
+            "ℹ️ CRYPTOPANIC_TOKEN não configurado — fonte desativada. "
+            "Os feeds RSS seguem ativos. Token gratuito em cryptopanic.com."
+        )
     RSS_FEEDS   = [
         "https://cointelegraph.com/rss",
         "https://theblock.co/rss.xml",
@@ -485,9 +508,19 @@ async def news_reader_loop():
     while True:
         try:
             async with aiohttp.ClientSession() as s:
-                # CryptoPanic
+                # CryptoPanic — só consulta se houver token configurado
                 try:
+                    if not CRYPTOPANIC:
+                        raise _SkipSource()
                     async with s.get(CRYPTOPANIC, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        # Valida o content-type antes de tentar parsear:
+                        # token inválido/ausente devolve HTML, não JSON.
+                        _ct = (r.headers.get("Content-Type") or "").lower()
+                        if "json" not in _ct:
+                            raise ValueError(
+                                f"CryptoPanic retornou {_ct or 'sem content-type'} "
+                                f"(status {r.status}) — token inválido?"
+                            )
                         data = await r.json()
                         for item in (data.get("results") or [])[:5]:
                             title = item.get("title", "")
@@ -509,6 +542,9 @@ async def news_reader_loop():
                                 log.debug(f"falha ao persistir notícia: {_e}")
                             log.info(f"📰 News: {classif} conf={conf:.2f} — {title[:60]}")
                             break
+                except _SkipSource:
+                    pass   # fonte desativada por configuração
+
                 except Exception as _e:
                     log.debug(f"falha ao processar item de notícia: {_e}")
 
