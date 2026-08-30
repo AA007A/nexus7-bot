@@ -284,8 +284,16 @@ async def why_no_trade():
     "algo está bloqueando" (configuração ou bug).
     """
     eng = app.state.engine
-    scores = list(getattr(eng, "_score_hist", []))
-    mn = cfg.MIN_ENTRY_SCORE
+    mn  = cfg.MIN_ENTRY_SCORE
+
+    # Buffer do strategy: registra TODO score avaliado, não só os aprovados
+    try:
+        from bot.strategy import get_score_log
+        _log   = get_score_log(300)
+        scores = [x["score"] for x in _log]
+    except Exception:
+        _log   = []
+        scores = list(getattr(eng, "_score_hist", []))
 
     if scores:
         dist = {
@@ -306,6 +314,12 @@ async def why_no_trade():
         veredito = "Nenhum sinal avaliado ainda — bot pode ter acabado de subir"
 
     return {
+        # Os 10 pares mais recentes avaliados, com o detalhe por timeframe
+        "ultimos_avaliados": [
+            {"par": x["symbol"], "score": x["score"],
+             "4H": x["s4h"], "1H": x["s1h"], "15M": x["s15"]}
+            for x in _log[:10]
+        ],
         "modo":            "PAPER" if PAPER_TRADE else "LIVE",
         "ordens_reais":    not PAPER_TRADE,
         "thresholds": {
