@@ -298,6 +298,39 @@ async def test_telegram_endpoint():
     return res
 
 
+@app.get("/api/integrity", dependencies=[Depends(_require_auth)])
+async def integrity_status():
+    """
+    Estado do kill switch de integridade (Fase 3, P0).
+
+    Responde: o bot PODE abrir novas posições agora? Se não, por quê?
+    """
+    eng = app.state.engine
+    g = getattr(eng, "integrity", None)
+    if g is None:
+        return {"error": "IntegrityGuard não inicializado"}
+    d = g.to_dict()
+    d["orders_tracked"] = len(getattr(eng, "orders", []) or [])
+    return d
+
+
+@app.get("/api/liquidation-check", dependencies=[Depends(_require_auth)])
+async def liquidation_check(entry: float, stop: float, leverage: int = 0,
+                            side: str = "LONG"):
+    """
+    Calcula se um stop é efetivo para dado leverage, incluindo margem de
+    manutenção, taxas e slippage. Útil para dimensionar o leverage antes
+    de configurá-lo.
+    """
+    from bot import liquidation as liq
+    lev = leverage or cfg.LEVERAGE
+    a = liq.analyze(entry, stop, lev, side.upper() == "LONG")
+    out = a.to_dict()
+    out["leverage"] = lev
+    out["max_leverage_para_este_stop"] = liq.max_leverage_for_stop(a.stop_move_pct)
+    return out
+
+
 @app.get("/api/why-no-trade", dependencies=[Depends(_require_auth)])
 async def why_no_trade():
     """
