@@ -278,18 +278,37 @@ class RiskManager:
             return 0.0
 
         info     = instruments.get(symbol, {})
-        min_qty  = float(info.get("minQty",      0.001))
-        qty_step = float(info.get("qtyStep",     0.001))
+        # ══════════════════════════════════════════════════════════
+        # 🔴 P0 — UNIDADES MISTURADAS (contratos vs quantidade base)
+        #
+        # `qty` neste método é QUANTIDADE BASE (ex: 0.001 BTC), mas
+        # info["minQty"] é o lotSize em CONTRATOS (ex: 1 contrato).
+        # Comparar os dois diretamente é erro de unidade.
+        #
+        # Na KuCoin: 1 contrato = multiplier unidades da moeda base.
+        #   XBTUSDTM: lotSize=1, multiplier=0.001 → mínimo 0.001 BTC
+        #
+        # Converte o lote mínimo para a mesma unidade de qty.
+        # ══════════════════════════════════════════════════════════
+        _lot_contratos = float(info.get("minQty",  1.0))
+        _multiplier    = float(info.get("multiplier", 1.0))
+        min_qty  = _lot_contratos * _multiplier          # em unidade base
+        qty_step = min_qty                                # passo = 1 lote
         min_not  = float(info.get("minNotional", 1.0))
 
         # Margem livre = saldo - margem já em uso por posições abertas
         margin_used = self._margin_in_use()
         free_margin = max(0.0, self.balance - margin_used)
 
-        if free_margin < min_not / cfg.LEVERAGE:
+        # Custo REAL do lote mínimo em margem (min_qty já está em unidade
+        # base). min_not é quantidade base, não USDT — usá-lo aqui era
+        # comparação de unidades incompatíveis.
+        _margem_lote_min = (min_qty * entry) / cfg.LEVERAGE
+        if free_margin < _margem_lote_min:
             log.warning(
-                f"📐 {symbol}: margem livre insuficiente "
-                f"(${free_margin:.2f} | em uso: ${margin_used:.2f})"
+                f"📐 {symbol}: margem livre ${free_margin:.2f} < "
+                f"${_margem_lote_min:.2f} exigidos pelo lote mínimo "
+                f"({min_qty} @ ${entry:.4f}) | em uso: ${margin_used:.2f}"
             )
             return 0.0
 
@@ -302,25 +321,74 @@ class RiskManager:
         margin_cap   = getattr(cfg, "MAX_MARGIN_PCT", 0.80)
         max_notional = free_margin * margin_cap * cfg.LEVERAGE
         target_not   = min(target_not, max_notional)
-        target_not   = max(target_not, min_not)
 
+        # NÃO forçar target_not para min_not: são unidades diferentes
+        # (USDT vs quantidade base) e isso inflava o notional.
         qty   = target_not / entry
-        steps = max(1, math.floor(qty / qty_step))
+        steps = math.floor(qty / qty_step) if qty_step > 0 else 0
         qty   = round(steps * qty_step, 8)
-        qty   = max(qty, min_qty)
 
-        # Verificação hard: margem final respeita MAX_MARGIN_PCT
-        final_margin = (qty * entry) / cfg.LEVERAGE
-        if final_margin > self.balance * margin_cap:
-            qty   = (self.balance * margin_cap * cfg.LEVERAGE) / entry
-            steps = max(1, math.floor(qty / qty_step))
-            qty   = round(steps * qty_step, 8)
-            qty   = max(qty, min_qty)
-
-        if qty * entry < min_not:
+        # Se nem 1 lote cabe, recusa aqui — sem forçar o mínimo, que era
+        # justamente o que estourava a margem.
+        if qty < min_qty:
+            _falta = (min_qty * entry) / cfg.LEVERAGE
             log.warning(
-                f"📐 {symbol}: saldo ${self.balance:.2f} insuficiente "
-                f"(notional mínimo ${min_not})"
+                f"📐 {symbol}: RECUSADO — cabe apenas {qty} mas o lote "
+                f"mínimo é {min_qty} (exige ${_falta:.2f} de margem, "
+                f"disponível ${free_margin * margin_cap:.2f})"
+            )
+            return 0.0
+
+        # ══════════════════════════════════════════════════════════
+        # 🔴 P0 CORRIGIDO — SIZING EXCEDIA O SALDO EM ORDENS DE MAGNITUDE
+        #
+        # O clamp de margem era aplicado e LOGO DESFEITO por
+        # `qty = max(qty, min_qty)`. Quando o lote mínimo custa mais que
+        # o saldo permite, o código forçava o mínimo mesmo assim.
+        #
+        # MEDIDO (saldo $0.50, BTCUSDT a $108k, 10x):
+        #   qty=1 → notional $108.000 → margem $10.800 = 2.160.000% do saldo
+        #
+        # A verificação seguinte também estava errada: comparava
+        # `qty * entry` (notional em USDT) com `min_not`, que é a
+        # QUANTIDADE BASE mínima (lotSize × multiplier). Unidades
+        # diferentes — a checagem nunca protegia.
+        #
+        # Agora: se o lote mínimo não cabe na margem disponível, o trade
+        # é RECUSADO. Melhor não operar que abrir posição impossível.
+        # ══════════════════════════════════════════════════════════
+        margem_max = self.balance * margin_cap
+
+        # Custo real do lote mínimo, em margem
+        margem_min_lote = (min_qty * entry) / cfg.LEVERAGE
+        if margem_min_lote > margem_max:
+            log.warning(
+                f"📐 {symbol}: RECUSADO — lote mínimo ({min_qty}) exige "
+                f"${margem_min_lote:.2f} de margem, mas só há "
+                f"${margem_max:.2f} disponível "
+                f"(saldo ${self.balance:.2f} × {margin_cap:.0%})"
+            )
+            return 0.0
+
+        # Clamp de margem — SEM forçar o mínimo depois
+        final_margin = (qty * entry) / cfg.LEVERAGE
+        if final_margin > margem_max:
+            qty   = (margem_max * cfg.LEVERAGE) / entry
+            steps = math.floor(qty / qty_step)
+            qty   = round(steps * qty_step, 8)
+            if qty < min_qty:
+                log.warning(
+                    f"📐 {symbol}: RECUSADO — após ajuste de margem, "
+                    f"qty={qty} < lote mínimo {min_qty}"
+                )
+                return 0.0
+
+        # Verificação final em MARGEM (não em notional vs qty base)
+        _margem_final = (qty * entry) / cfg.LEVERAGE
+        if _margem_final > margem_max * 1.001:      # 0.1% de tolerância
+            log.error(
+                f"📐 {symbol}: RECUSADO — margem final ${_margem_final:.2f} "
+                f"excede o teto ${margem_max:.2f}"
             )
             return 0.0
 
