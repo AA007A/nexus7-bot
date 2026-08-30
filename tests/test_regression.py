@@ -204,6 +204,62 @@ def test_score_exclui_sem_dados():
     check("pesos somam 1.0", abs(total - 1.0) < 0.01, f"={total}")
 
 
+
+
+def test_riskmanager_unico():
+    """
+    P0: engine.py definia sua PRÓPRIA classe RiskManager, sombreando a de
+    bot/risk.py. Todas as correções de sizing foram aplicadas na classe
+    canônica — que o bot nunca usava.
+    """
+    import bot.engine, bot.risk
+    check("engine usa RiskManager de bot.risk",
+          bot.engine.RiskManager is bot.risk.RiskManager)
+    import ast
+    src = open(bot.engine.__file__).read()
+    classes = [n.name for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.ClassDef)]
+    check("engine.py não redefine RiskManager",
+          classes.count("RiskManager") == 0, f"encontrado {classes.count('RiskManager')}x")
+
+
+def test_sizing_nunca_excede_saldo():
+    """
+    P0: max(qty, min_qty) desfazia o clamp de margem. Saldo $0.50 gerava
+    margem de $10.800 (2.160.000% do saldo).
+    """
+    from bot.risk import RiskManager
+    from bot.config import cfg
+    inst = {"BTCUSDT": {"minQty": 1.0, "qtyStep": 1.0, "tickSize": 0.1,
+                        "multiplier": 0.001, "minNotional": 0.001}}
+    r = RiskManager()
+    for bal in (0.5, 19.07, 100.0, 100000.0):
+        r.balance = bal; r.peak_balance = bal
+        r._ready = True; r.positions = {}
+        q = r.size("BTCUSDT", 108000, inst)
+        margem = (q * 108000) / cfg.LEVERAGE if q > 0 else 0
+        pct = (margem / bal * 100) if (bal and q > 0) else 0
+        check(f"sizing saldo ${bal}: margem {pct:.0f}% <= 100%",
+              pct <= 100.5, f"={pct:.1f}%")
+
+
+def test_minqty_unidade_correta():
+    """
+    P0: minQty é lotSize em CONTRATOS, mas qty é quantidade BASE.
+    Comparar os dois direto é erro de unidade.
+    """
+    from bot.risk import RiskManager
+    inst = {"X": {"minQty": 1.0, "qtyStep": 1.0, "multiplier": 0.001,
+                  "tickSize": 0.1, "minNotional": 0.001}}
+    r = RiskManager()
+    r.balance = 100.0; r.peak_balance = 100.0
+    r._ready = True; r.positions = {}
+    q = r.size("X", 108000, inst)
+    # 1 contrato × 0.001 = 0.001 BTC. qty deve ser múltiplo disso.
+    check("qty é múltiplo do lote em unidade base",
+          q == 0 or abs((q / 0.001) - round(q / 0.001)) < 1e-6, f"q={q}")
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -213,7 +269,9 @@ if __name__ == "__main__":
                test_imports_todos_modulos,
                test_ordenacao_candles, test_structure_vocabulario,
                test_max_data_age_compativel, test_rr_bruto_vs_liquido,
-               test_score_exclui_sem_dados]:
+               test_score_exclui_sem_dados,
+               test_riskmanager_unico, test_sizing_nunca_excede_saldo,
+               test_minqty_unidade_correta]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
