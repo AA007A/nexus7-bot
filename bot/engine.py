@@ -417,6 +417,7 @@ class TradingEngine:
         self._opt_params  = opt.load_optimized_params()
         self._cooldown:   Dict[str, float] = {}   # símbolo → timestamp até quando não operar
         self._oi_hist:    Dict[str, float] = {}   # OI anterior por símbolo (delta)
+        self._liq_alert:  Dict[str, float] = {}   # dedup do alerta de liquidação
 
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
@@ -1875,8 +1876,19 @@ class TradingEngine:
                         f"1H={'↑' if locals().get('bull_1h') else '↓' if locals().get('bear_1h') else '→'}"
                     )
                     await db.log_decision(sym, "HOLD", combined, hold_reason)
-                    # Alerta "quase entrando" — score entre 55 e cfg.MIN_ENTRY_SCORE-1
-                    if cfg.MIN_ENTRY_SCORE - 5 <= combined < cfg.MIN_ENTRY_SCORE:
+                    # Alerta "quase entrando" — DESATIVADO por padrão.
+                    #
+                    # Com 12 pares em tendência, esses alertas disparavam
+                    # em bloco a cada scan. Como o notifier impõe 3s entre
+                    # mensagens, eles formavam fila e ATRASAVAM os avisos
+                    # que realmente importam (sinal aprovado, ordem aberta,
+                    # ordem rejeitada por liquidação).
+                    #
+                    # Reativável com ALERT_QUASE_ENTRANDO=true.
+                    _quase_on = os.environ.get(
+                        "ALERT_QUASE_ENTRANDO", "false"
+                    ).lower() == "true"
+                    if _quase_on and cfg.MIN_ENTRY_SCORE - 5 <= combined < cfg.MIN_ENTRY_SCORE:
                         asyncio.create_task(notify(
                             f"🔔 *QUASE ENTRANDO — {sym}*\n"
                             f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
@@ -2225,13 +2237,26 @@ class TradingEngine:
                     )
                 except Exception as _e:
                     log.debug(f"save_signal sl_liq: {_e}")
-                asyncio.create_task(notify(
-                    f"⛔ *TRADE REJEITADO — RISCO DE LIQUIDAÇÃO*\n"
-                    f"`{sig.symbol}`\n"
-                    f"SL a `{_sl_pct:.2f}%` do entry\n"
-                    f"Liquidação a `~{_liq_pct:.2f}%`\n"
-                    f"_A posição seria liquidada antes do stop._"
-                ))
+                # Este alerta explica POR QUE o sinal não virou ordem —
+                # é a informação mais importante do fluxo. Deduplicado
+                # por par para não repetir a cada scan (a mesma condição
+                # persiste enquanto o ATR não mudar).
+                _k = f"liq_{sig.symbol}"
+                _now = time.time()
+                if _now - self._liq_alert.get(_k, 0) > 1800:   # 30 min
+                    self._liq_alert[_k] = _now
+                    asyncio.create_task(notify(
+                        f"⛔ *ORDEM NÃO ABERTA — RISCO DE LIQUIDAÇÃO*\n"
+                        f"`{'━'*26}`\n"
+                        f"📍 Par:        `{sig.symbol}`\n"
+                        f"🛑 SL a:       `{_sl_pct:.2f}%` do entry\n"
+                        f"💀 Liquidação: `~{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
+                        f"⚠️ Limite:     `{_liq_pct*_SAFETY:.2f}%`\n"
+                        f"`{'━'*26}`\n"
+                        f"_A posição seria liquidada ANTES do stop disparar._\n"
+                        f"_Com {cfg.LEVERAGE}x, só passam SLs abaixo de "
+                        f"{_liq_pct*_SAFETY:.2f}%. Considere LEVERAGE=20._"
+                    ))
                 return
 
             # P0: chave de idempotência FIXA para todas as tentativas deste
