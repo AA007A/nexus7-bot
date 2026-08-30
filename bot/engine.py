@@ -492,6 +492,18 @@ class TradingEngine:
                         pass   # já logado em _update_daily_pnl, não repetir aqui
                     elif self.risk.can_open(len(self.positions)):
                         await self._scan_all_and_enter()
+                    else:
+                        # Sem este else, um can_open()=False fazia o ciclo
+                        # passar direto sem nenhum registro — parecia que o
+                        # bot tinha parado de analisar.
+                        _n = len(self.positions)
+                        log.info(
+                            f"⏸️ Scan pulado: posições={_n}/{cfg.MAX_POSITIONS} "
+                            f"drawdown={self.risk.drawdown:.1%}/"
+                            f"{cfg.MAX_DRAWDOWN:.0%} "
+                            f"ready={self.risk._ready} "
+                            f"stop_diário={self.daily_stopped}"
+                        )
 
                 await asyncio.sleep(5)
 
@@ -1523,10 +1535,21 @@ class TradingEngine:
         Multi-Timeframe scan: busca 15m, 1h e 4h para cada símbolo.
         Fast-track: usa WebSocket cache quando disponível (sem latência REST).
         Fallback: busca os três timeframes em paralelo via asyncio.gather().
-        Só entra quando AMBOS os timeframes apontam na mesma direção.
+        Só entra quando os timeframes apontam na mesma direção.
         """
         candidates = []
         min_score = self._effective_score()
+
+        # Prova de vida do scan. Sem isso, viable_symbols vazio fazia o
+        # método rodar e retornar sem analisar nada — indistinguível de
+        # "o bot parou de funcionar".
+        _alvos = self.viable_symbols or []
+        if not _alvos:
+            log.warning(
+                "⛔ viable_symbols VAZIO — nenhum par para analisar. "
+                "O filtro de viabilidade rejeitou todos ou ainda não rodou."
+            )
+            return
 
         # Thresholds mínimos para considerar o cache WS "suficiente"
         WS_MIN_15  = 20
