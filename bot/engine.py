@@ -680,13 +680,38 @@ class TradingEngine:
             self.active    = True
 
             # Inicia WebSocket para dados em tempo real
-            # Garante que viable_symbols foi populado antes de iniciar o WS
-            ws_symbols = self.viable_symbols[:10]
+            # ══════════════════════════════════════════════════════════
+            # LIMITE DE SÍMBOLOS NO WEBSOCKET
+            #
+            # O corte fixo em 10 deixava 2 dos 12 pares configurados SEM
+            # cache — eles caíam em "WS cache miss" e dependiam de REST a
+            # cada scan, com dados mais defasados que os demais.
+            #
+            # A KuCoin permite até 100 tópicos por conexão. Com 3
+            # intervalos por par, 12 pares = 36 tópicos + 1 ticker = 37,
+            # bem dentro do limite.
+            #
+            # Configurável via WS_MAX_SYMBOLS caso a lista cresça muito.
+            # ══════════════════════════════════════════════════════════
+            _ws_max = int(os.environ.get("WS_MAX_SYMBOLS", "30"))
+            _n_iv   = 3
+            # Margem de segurança: 100 tópicos é o teto da KuCoin
+            _cap_por_topicos = max(1, (100 - 1) // _n_iv)
+            _ws_max = min(_ws_max, _cap_por_topicos)
+
+            ws_symbols = self.viable_symbols[:_ws_max]
             if not ws_symbols:
                 log.warning(
-                    "⚠️ viable_symbols vazio — usando fallback cfg.SYMBOLS[:10] para WebSocket"
+                    "⚠️ viable_symbols vazio — usando fallback cfg.SYMBOLS para WebSocket"
                 )
-                ws_symbols = cfg.SYMBOLS[:10]
+                ws_symbols = cfg.SYMBOLS[:_ws_max]
+
+            _fora = [s for s in self.viable_symbols if s not in ws_symbols]
+            if _fora:
+                log.warning(
+                    f"⚠️ {len(_fora)} pares fora do WebSocket (limite {_ws_max}): "
+                    f"{', '.join(_fora)} — dependerão de REST a cada scan"
+                )
 
             log.info(
                 f"🔌 Iniciando WebSocket com {len(ws_symbols)} símbolos: "
