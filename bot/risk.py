@@ -324,9 +324,30 @@ class RiskManager:
 
         # NÃO forçar target_not para min_not: são unidades diferentes
         # (USDT vs quantidade base) e isso inflava o notional.
-        qty   = target_not / entry
-        steps = math.floor(qty / qty_step) if qty_step > 0 else 0
-        qty   = round(steps * qty_step, 8)
+        # ══════════════════════════════════════════════════════════
+        # P1 CORRIGIDO — math.floor COM FLOAT PERDIA UM LOTE
+        #
+        # 0.1 não tem representação binária exata:
+        #     0.7 / 0.1 == 6.999999999999999  → floor = 6 (deveria ser 7)
+        #     1.4 / 0.1 == 13.999999999999998 → floor = 13 (deveria ser 14)
+        #     2.8 / 0.1 == 27.999999999999996 → floor = 27 (deveria ser 28)
+        #
+        # O bot descartava um lote inteiro nesses casos, operando abaixo
+        # do tamanho correto. Medido em 22 de 770 combinações da matriz
+        # de validação (saldos × instrumentos × leverages).
+        #
+        # Decimal faz a divisão em base 10, sem erro de representação.
+        # ══════════════════════════════════════════════════════════
+        qty = target_not / entry
+        if qty_step > 0:
+            from decimal import Decimal, ROUND_FLOOR
+            _d_qty  = Decimal(str(qty))
+            _d_step = Decimal(str(qty_step))
+            steps   = int((_d_qty / _d_step).to_integral_value(rounding=ROUND_FLOOR))
+            qty     = float(Decimal(steps) * _d_step)
+        else:
+            steps = 0
+            qty   = 0.0
 
         # Se nem 1 lote cabe, recusa aqui — sem forçar o mínimo, que era
         # justamente o que estourava a margem.
@@ -373,9 +394,11 @@ class RiskManager:
         # Clamp de margem — SEM forçar o mínimo depois
         final_margin = (qty * entry) / cfg.LEVERAGE
         if final_margin > margem_max:
-            qty   = (margem_max * cfg.LEVERAGE) / entry
-            steps = math.floor(qty / qty_step)
-            qty   = round(steps * qty_step, 8)
+            qty = (margem_max * cfg.LEVERAGE) / entry
+            from decimal import Decimal, ROUND_FLOOR
+            _d = Decimal(str(qty)) / Decimal(str(qty_step))
+            steps = int(_d.to_integral_value(rounding=ROUND_FLOOR))
+            qty   = float(Decimal(steps) * Decimal(str(qty_step)))
             if qty < min_qty:
                 log.warning(
                     f"📐 {symbol}: RECUSADO — após ajuste de margem, "
