@@ -135,6 +135,15 @@ async def lifespan(app: FastAPI):
                 pass
             return
 
+        # Verifica o canal do Telegram ANTES de iniciar o engine.
+        # Falha aqui não impede a operação — apenas registra o motivo.
+        try:
+            from bot.notifier import test_telegram
+            app.state.telegram = await asyncio.wait_for(test_telegram(), timeout=10)
+        except Exception as _e:
+            log.warning(f"test_telegram: {_e}")
+            app.state.telegram = {"ok": False, "reason": str(_e)}
+
         app.state.blocked = False
         app.state.engine_task = asyncio.create_task(engine.run())
         log.info("✅ BGX Capital online (KuCoin Futures)")
@@ -215,6 +224,7 @@ async def health():
         "blocked":  bool(getattr(app.state, "blocked", False)),
         # Modo de operação exposto aqui para responder rapidamente
         # "por que o bot não abre ordens?"
+        "telegram":     getattr(app.state, "telegram", {"ok": None}),
         "trading_mode": "PAPER" if PAPER_TRADE else "LIVE",
         "mode_reason":  TRADING_MODE_REASON,
         "orders_sent_to_exchange": not PAPER_TRADE,
@@ -273,6 +283,20 @@ async def close_all(request: Request):
 @app.get("/api/pnl", dependencies=[Depends(_require_auth)])
 async def pnl():
     return app.state.engine.stats.all_summaries()
+
+@app.post("/api/test-telegram", dependencies=[Depends(_require_auth)])
+async def test_telegram_endpoint():
+    """Envia uma mensagem de teste ao Telegram e reporta o resultado."""
+    from bot.notifier import test_telegram, notify
+    res = await test_telegram()
+    if res.get("ok"):
+        await notify(
+            "🧪 *TESTE DE CONEXÃO*\n"
+            "Se você está lendo isto, o canal está funcionando."
+        )
+        res["mensagem_enviada"] = True
+    return res
+
 
 @app.get("/api/why-no-trade", dependencies=[Depends(_require_auth)])
 async def why_no_trade():
