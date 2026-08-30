@@ -41,6 +41,10 @@ from bot import market_data as mdata
 from bot import backtest as bt
 from bot.daily_tracker import DailyTracker
 from bot import optimizer as opt
+# ── Fase 3: hardening ─────────────────────────────────────────────
+from bot.integrity import IntegrityGuard, Severity
+from bot.order_state import OrderRegistry, OrderState, InvalidTransition
+from bot import liquidation as liq
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
 from bot.nexus_types import NexusDecision
@@ -349,6 +353,14 @@ class TradingEngine:
         self._oi_hist:    Dict[str, float] = {}   # OI anterior por símbolo (delta)
         self._liq_alert:  Dict[str, float] = {}   # dedup do alerta de liquidação
 
+        # ── Fase 3 — P0 ───────────────────────────────────────────
+        # Kill switch de integridade: única autoridade sobre permissão
+        # de NOVAS entradas. Fail-closed por construção.
+        self.integrity = IntegrityGuard()
+        # Registro de ordens com máquina de estados (idempotência que
+        # sobrevive a retry, timeout, restart e múltiplos workers).
+        self.orders = OrderRegistry()
+
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
         # A flag vive em bot.kucoin (lida da env var PAPER_TRADE).
@@ -433,7 +445,26 @@ class TradingEngine:
                         # FIX: logar apenas 1x — não a cada 5s em loop infinito
                         pass   # já logado em _update_daily_pnl, não repetir aqui
                     elif self.risk.can_open(len(self.positions)):
-                        await self._scan_all_and_enter()
+                        # ══════════════════════════════════════════
+                        # P0 — KILL SWITCH DE INTEGRIDADE
+                        #
+                        # Avalia o estado ANTES de qualquer entrada.
+                        # Bloqueia se a exchange não puder ser
+                        # confirmada, se houver divergência local ↔
+                        # exchange, ou se alguma posição estiver sem
+                        # stop confirmado.
+                        #
+                        # NÃO interrompe a gestão de posições abertas —
+                        # essa roda antes, sob o _pos_lock.
+                        # ══════════════════════════════════════════
+                        await self.integrity.assess(self.client, self)
+                        if not self.integrity.can_open_new():
+                            log.warning(
+                                f"🚫 ENTRADAS BLOQUEADAS: "
+                                f"{self.integrity.block_reason()}"
+                            )
+                        else:
+                            await self._scan_all_and_enter()
                     else:
                         # Sem este else, um can_open()=False fazia o ciclo
                         # passar direto sem nenhum registro — parecia que o
@@ -2166,9 +2197,23 @@ class TradingEngine:
             # posições órfãs). Aqui recusamos o trade em vez de aceitar
             # um stop que nunca será executado.
             # ══════════════════════════════════════════════════════════
-            _liq_pct   = 100.0 / max(1, cfg.LEVERAGE)      # % até liquidar
-            _sl_pct    = abs(sig.entry - sig.sl) / sig.entry * 100
-            _SAFETY    = float(os.environ.get("SL_LIQ_SAFETY", "0.75"))
+            # ══════════════════════════════════════════════════════
+            # P0 — MATEMÁTICA REAL DE LIQUIDAÇÃO (Fase 3)
+            #
+            # A aproximação 100/leverage era OTIMISTA em ~33%: ignorava
+            # margem de manutenção (0.5%), taxas (0.12%) e slippage.
+            #
+            # Com 50x:  aproximação 2.00%  |  real 1.33%
+            #
+            # O stop precisa ficar numa região que NÃO dependa da
+            # liquidação para encerrar a posição.
+            # ══════════════════════════════════════════════════════
+            _liq = liq.analyze(
+                entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
+                is_long=(sig.direction == "LONG"),
+            )
+            _liq_pct = _liq.liq_move_pct
+            _sl_pct  = _liq.stop_move_pct
 
             # ══════════════════════════════════════════════════════════
             # OVERRIDE EXPLÍCITO — ALLOW_SL_BEYOND_LIQUIDATION
@@ -2188,7 +2233,8 @@ class TradingEngine:
                 "ALLOW_SL_BEYOND_LIQUIDATION", "false"
             ).lower() == "true"
 
-            _sl_inseguro = _sl_pct >= _liq_pct * _SAFETY
+            # stop_effective já considera a folga mínima exigida
+            _sl_inseguro = not _liq.stop_effective
 
             if _sl_inseguro and _allow_beyond:
                 # Não bloqueia, mas registra e avisa — o operador precisa
@@ -2218,39 +2264,36 @@ class TradingEngine:
                         ))
 
             elif _sl_inseguro:
+                _lev_ok = liq.max_leverage_for_stop(_sl_pct)
                 log.warning(
-                    f"⛔ [{sig.symbol}] REJEITADO: SL a {_sl_pct:.2f}% do entry, "
-                    f"mas liquidação ocorre a ~{_liq_pct:.2f}% "
-                    f"(limite seguro: {_liq_pct*_SAFETY:.2f}%). "
-                    f"A posição seria liquidada antes do stop disparar."
+                    f"⛔ [{sig.symbol}] REJEITADO: {_liq.reason} | "
+                    f"leverage máximo seguro para este SL: {_lev_ok}x"
                 )
                 try:
                     await db.save_signal(
                         sig.symbol, sig.direction, {"total": int(sig.score)},
                         entrou=False,
-                        motivo=f"SL {_sl_pct:.2f}% >= liquidação {_liq_pct:.2f}%",
+                        motivo=f"stop inefetivo: SL {_sl_pct:.2f}% vs liq {_liq_pct:.2f}%",
                     )
                 except Exception as _e:
                     log.debug(f"save_signal sl_liq: {_e}")
-                # Este alerta explica POR QUE o sinal não virou ordem —
-                # é a informação mais importante do fluxo. Deduplicado
-                # por par para não repetir a cada scan (a mesma condição
-                # persiste enquanto o ATR não mudar).
+
                 _k = f"liq_{sig.symbol}"
                 _now = time.time()
                 if _now - self._liq_alert.get(_k, 0) > 1800:   # 30 min
                     self._liq_alert[_k] = _now
                     asyncio.create_task(notify(
-                        f"⛔ *ORDEM NÃO ABERTA — RISCO DE LIQUIDAÇÃO*\n"
+                        f"⛔ *ORDEM NÃO ABERTA — STOP INEFETIVO*\n"
                         f"`{'━'*26}`\n"
                         f"📍 Par:        `{sig.symbol}`\n"
                         f"🛑 SL a:       `{_sl_pct:.2f}%` do entry\n"
-                        f"💀 Liquidação: `~{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
-                        f"⚠️ Limite:     `{_liq_pct*_SAFETY:.2f}%`\n"
+                        f"💀 Liquidação: `{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
+                        f"📏 Folga:      `{_liq.gap_pct:+.2f}%`\n"
+                        f"✅ SL máximo:  `{_liq.max_safe_stop_pct:.2f}%`\n"
                         f"`{'━'*26}`\n"
-                        f"_A posição seria liquidada ANTES do stop disparar._\n"
-                        f"_Com {cfg.LEVERAGE}x, só passam SLs abaixo de "
-                        f"{_liq_pct*_SAFETY:.2f}%. Considere LEVERAGE=20._"
+                        f"_Liquidação calculada com margem de manutenção, "
+                        f"taxas e slippage._\n"
+                        f"_Leverage máximo seguro para este SL: `{_lev_ok}x`_"
                     ))
                 return
 
