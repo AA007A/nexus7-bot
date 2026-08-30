@@ -511,6 +511,10 @@ class Analyzer:
     def analyze_mtf(self, symbol, k15, k1h, k4h,
                     min_score=60, fee_mult=2.0, vol_mult=1.0) -> Optional[Signal]:
         if len(k4h) < 10 or len(k1h) < 15 or len(k15) < 20:
+            log.info(
+                f"⛔ [{symbol}] CANDLES INSUFICIENTES: "
+                f"4h={len(k4h)}/10 1h={len(k1h)}/15 15m={len(k15)}/20"
+            )
             return None
 
         def ga(kl):
@@ -540,8 +544,14 @@ class Analyzer:
         regime = detect_regime(c4h, h4h, l4h, atr_4h)
         # FIX-1: Bloquear RANGING, COMPRESSED e CHOPPY — sistema é trend-follow
         # Em lateralização (60-70% do tempo) o edge desaparece sistematicamente
+        # Saídas antecipadas do analyze_mtf: eram todas log.debug ou
+        # sem log. Um par podia ser descartado aqui e o operador via
+        # apenas "nenhum sinal", sem saber o motivo.
         if regime in ("COMPRESSED", "RANGING", "CHOPPY"):
-            log.debug(f"[{symbol}] 4H {regime} → HOLD (trend-follow só opera TRENDING)")
+            log.info(
+                f"⛔ [{symbol}] REGIME {regime} no 4H — estratégia é "
+                f"trend-follow, só opera TRENDING_UP/DOWN"
+            )
             return None
 
         # ── PASSO 2: Direção (4H + 1H) ─────────────────────────
@@ -564,8 +574,8 @@ class Analyzer:
             direction = "SHORT"
         else:
             # Qualquer ambiguidade: não entra
-            log.debug(
-                f"[{symbol}] 4H/1H não alinhados "
+            log.info(
+                f"⛔ [{symbol}] 4H/1H NÃO ALINHADOS "
                 f"(bull4h={bull_4h} bear4h={bear_4h} bull1h={bull_1h} bear1h={bear_1h}) → HOLD"
             )
             return None
@@ -576,6 +586,10 @@ class Analyzer:
         s15 = score_tf(c15, h15, l15, o15, v15, direction, atr_15, avg_15)
 
         if not s4h["ok"] or not s1h["ok"] or not s15["ok"]:
+            log.info(
+                f"⛔ [{symbol}] SCORE INVÁLIDO: "
+                f"4H_ok={s4h['ok']} 1H_ok={s1h['ok']} 15M_ok={s15['ok']}"
+            )
             return None
 
         # Peso: 4H=25%, 1H=30%, 15M=45% (15M tem mais peso no timing)
@@ -599,16 +613,28 @@ class Analyzer:
 
         # ── PASSO 4: Bloqueios críticos ─────────────────────────
         # RSI extremo no 15M
+        # Bloqueios pós-score: eram todos log.debug, invisíveis com
+        # LOG_LEVEL=INFO. Um sinal com score 79 era descartado aqui sem
+        # deixar rastro, dando a impressão de que o score era o problema.
         if s15["rsi_v"] > 92 or s15["rsi_v"] < 8:
-            log.debug(f"[{symbol}] RSI extremo {s15['rsi_v']:.0f} → HOLD")
+            log.info(
+                f"⛔ [{symbol}] BLOQUEIO RSI extremo: {s15['rsi_v']:.0f} "
+                f"(fora de 8-92) — score era {combined}"
+            )
             return None
         # Volume mínimo: 0.40x da média (equilibrio entre liquidez e frequência)
         if s15["vol_r"] < 0.40:
-            log.debug(f"[{symbol}] Volume insuficiente {s15['vol_r']:.2f}x < 0.40x → HOLD")
+            log.info(
+                f"⛔ [{symbol}] BLOQUEIO volume: {s15['vol_r']:.2f}x < 0.40x "
+                f"— score era {combined}"
+            )
             return None
         # 15M não alinhado — só bloqueia se regime não for TRENDING
         if not s15["aligned"] and regime not in ("TRENDING_UP","TRENDING_DOWN"):
-            log.debug(f"[{symbol}] 15M não alinhado e regime={regime} → HOLD")
+            log.info(
+                f"⛔ [{symbol}] BLOQUEIO alinhamento: 15M desalinhado e "
+                f"regime={regime} — score era {combined}"
+            )
             return None
 
         # ── PASSO 5: Tipo de entrada ────────────────────────────
@@ -618,7 +644,10 @@ class Analyzer:
         if not entry_ok:
             combined = max(0, combined - 5)
             if combined < min_score:
-                log.debug(f"[{symbol}] Sem setup de entrada → HOLD")
+                log.info(
+                    f"⛔ [{symbol}] BLOQUEIO setup: nenhum gatilho de entrada "
+                    f"(pullback/breakout/reversão) — score {combined}"
+                )
                 return None
 
         # ── PASSO 6: SL/TP adaptativo por tipo de entrada ───────
