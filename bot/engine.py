@@ -1676,9 +1676,13 @@ class TradingEngine:
                             k4h = r
 
                 if len(k15) < ANAL_MIN_15 or len(k1h) < ANAL_MIN_1H or len(k4h) < ANAL_MIN_4H:
-                    log.debug(
-                        f"[{sym}] dados insuficientes após fetch "
-                        f"(15m={len(k15)} 1h={len(k1h)} 4h={len(k4h)}) → skip"
+                    # Era log.debug — invisível. Se o cache e o REST
+                    # falharem, TODOS os pares saem aqui e o scan termina
+                    # sem analisar nada, sem deixar rastro.
+                    log.warning(
+                        f"⛔ [{sym}] SEM DADOS: 15m={len(k15)}/{ANAL_MIN_15} "
+                        f"1h={len(k1h)}/{ANAL_MIN_1H} 4h={len(k4h)}/{ANAL_MIN_4H} "
+                        f"— cache e REST falharam"
                     )
                     continue
 
@@ -1689,26 +1693,49 @@ class TradingEngine:
                     vol_mult=cfg.MIN_VOLUME_MULT,
                 )
                 if sig:
-                    # ── Ajuste de sessão de mercado ──────────────
+                    # ══════════════════════════════════════════════
+                    # FUNIL PÓS-SINAL — agora com log VISÍVEL.
+                    #
+                    # Estes três filtros usavam log.debug (invisível com
+                    # LOG_LEVEL=INFO) ou nenhum log. Um sinal com score 79
+                    # podia ser descartado aqui sem deixar rastro, dando a
+                    # impressão de que o problema era o score.
+                    # ══════════════════════════════════════════════
+
+                    # 1. Ajuste por sessão de mercado
                     adjusted = self._session_score_adjustment(sym, sig.score)
                     if adjusted < min_score:
-                        log.debug(
-                            f"[{sym}] Score {sig.score}→{adjusted} após "
-                            f"ajuste sessão {self._get_market_session()} → HOLD"
+                        log.info(
+                            f"⛔ [{sym}] REJEITADO no ajuste de sessão: "
+                            f"{sig.score}→{adjusted} < {min_score} "
+                            f"(sessão {self._get_market_session()})"
                         )
                         continue
                     sig.score = adjusted
 
-                    # ── Regime Switching: filtro de direção ───────
-                    # O regime é detectado no 4H pelo analyze_mtf.
-                    # Aqui bloqueamos direções proibidas pelo regime atual.
+                    # 2. Regime permite a direção?
                     regime_from_sig = getattr(sig, "regime", "RANGING")
                     if not self._regime_allows_direction(regime_from_sig, sig.direction):
+                        log.info(
+                            f"⛔ [{sym}] REJEITADO pelo regime: "
+                            f"{sig.direction} não permitido em "
+                            f"{regime_from_sig} (score era {sig.score})"
+                        )
                         continue
-                if sig:
+
+                    # 3. PnL esperado positivo após taxas?
                     if sig.expected_pnl <= 0:
-                        log.debug(f"[{sym}] PnL negativo após taxas → HOLD")
+                        log.info(
+                            f"⛔ [{sym}] REJEITADO por PnL: "
+                            f"{sig.expected_pnl:.3f}% ≤ 0 após taxas "
+                            f"(score {sig.score}, R:R {sig.rr:.2f})"
+                        )
                         continue
+
+                    log.info(
+                        f"✅ [{sym}] CANDIDATO: {sig.direction} score={sig.score} "
+                        f"R:R={sig.rr:.2f} PnL_est={sig.expected_pnl:+.2f}%"
+                    )
                     candidates.append(sig)
 
                     # Histórico de scores para diagnóstico no heartbeat:
