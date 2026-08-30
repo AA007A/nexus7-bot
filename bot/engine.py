@@ -308,97 +308,27 @@ class Stats:
 
 
 # ─── Risk Manager ─────────────────────────────────────────────────────────────
-class RiskManager:
-    def __init__(self):
-        self.peak     = 0.0
-        self.balance  = 0.0
-        self.drawdown = 0.0
-        self._ready   = False
+# ══════════════════════════════════════════════════════════════════
+# 🔴 P0 CORRIGIDO — CLASSE RiskManager DUPLICADA
+#
+# engine.py definia sua PRÓPRIA classe RiskManager, sombreando a de
+# bot/risk.py. Como este arquivo não importava a versão canônica, o bot
+# sempre usou a cópia local — mais simples e com bugs já corrigidos no
+# outro arquivo:
+#
+#   • max(qty, min_qty) DESFAZIA o clamp de margem
+#     → saldo $0.50 gerava margem de $10.800 (2.160.000% do saldo)
+#   • cap fixo em 80%, ignorando cfg.MAX_MARGIN_PCT
+#   • não descontava margem já em uso por posições abertas
+#   • confundia unidades: minQty (contratos) vs qty (base)
+#
+# Toda a lógica robusta de bot/risk.py (TPs parciais, trailing
+# verificado, expectancy, margem em uso) estava MORTA.
+#
+# Agora engine.py usa a implementação canônica.
+# ══════════════════════════════════════════════════════════════════
+from bot.risk import RiskManager
 
-    def init(self, balance: float):
-        if not self._ready and balance > 0:
-            self.peak    = balance
-            self.balance = balance
-            self._ready  = True
-            log.debug(f"📊 RiskManager: ${balance:.4f} | poder=${balance*cfg.LEVERAGE:.2f}")  # debug: evita spam
-
-    def update(self, balance: float):
-        if balance <= 0:
-            return
-        self.balance  = balance
-        self.peak     = max(self.peak, balance)
-        self.drawdown = (self.peak - balance) / self.peak if self.peak > 0 else 0.0
-
-    def can_open(self, n_open: int) -> bool:
-        if not self._ready:
-            return False
-        if self.drawdown >= cfg.MAX_DRAWDOWN:
-            log.warning(f"🚨 Drawdown {self.drawdown:.1%} >= limite {cfg.MAX_DRAWDOWN:.0%} → bloqueado")
-            return False
-        if n_open >= cfg.MAX_POSITIONS:
-            log.debug(f"⛔ {n_open}/{cfg.MAX_POSITIONS} posições abertas → aguardando")  # debug
-            return False
-        return True
-
-    def size(self, symbol: str, entry: float, instruments: dict) -> float:
-        """
-        Calcula quantidade segura para a ordem.
-        REGRA ABSOLUTA: margem usada nunca excede 95% do saldo real.
-        """
-        if entry <= 0 or not self._ready or self.balance <= 0:
-            return 0.0
-
-        info     = instruments.get(symbol, {})
-        min_qty  = float(info.get("minQty",  0.001))
-        qty_step = float(info.get("qtyStep", 0.001))
-        min_not  = float(info.get("minNotional", 1.0))
-
-        balance  = self.balance           # saldo real atual em USDT
-        leverage = cfg.LEVERAGE
-
-        # CAP ABSOLUTO: nunca usar mais de 80% do saldo como margem
-        max_margin   = balance * 0.80
-        max_notional = max_margin * leverage
-
-        # Target: MAX_RISK_PCT do buying power
-        target_not = balance * leverage * cfg.MAX_RISK_PCT
-        
-        # Aplicar cap absoluto
-        target_not = min(target_not, max_notional)
-        target_not = max(target_not, min_not)
-
-        # Calcular quantidade — usar math.floor para evitar ruído de ponto flutuante
-        import math
-        qty   = target_not / entry
-        steps = max(1, math.floor(qty / qty_step))
-        qty   = round(steps * qty_step, 8)
-        qty   = max(qty, min_qty)
-
-        # Verificação HARD: margem da ordem nunca > saldo
-        final_notional = qty * entry
-        final_margin   = final_notional / leverage
-        if final_margin > balance * 0.90:
-            qty   = (balance * 0.80 * leverage) / entry
-            steps = max(1, math.floor(qty / qty_step))
-            qty   = round(steps * qty_step, 8)
-            qty   = max(qty, min_qty)
-
-        # Rejeitar se ainda insuficiente
-        if qty <= 0 or qty * entry < min_not:
-            log.warning(
-                f"📐 {symbol}: saldo ${balance:.2f} insuficiente para "
-                f"notional mínimo ${min_not} (entry=${entry})"
-            )
-            return 0.0
-
-        log.info(
-            f"📐 {symbol}: qty={qty} notional=${qty*entry:.2f} "
-            f"margem=${qty*entry/leverage:.2f} / saldo=${balance:.2f}"
-        )
-        return qty
-
-
-# ─── Trading Engine ───────────────────────────────────────────────────────────
 class TradingEngine:
     def __init__(self, client: KuCoinClient):
         self.client       = client
