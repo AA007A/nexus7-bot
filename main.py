@@ -274,6 +274,54 @@ async def close_all(request: Request):
 async def pnl():
     return app.state.engine.stats.all_summaries()
 
+@app.get("/api/why-no-trade", dependencies=[Depends(_require_auth)])
+async def why_no_trade():
+    """
+    Responde diretamente: por que o bot não está operando?
+
+    Mostra o modo de operação, os thresholds ativos e a distribuição
+    dos scores recentes — separando "não há setup bom" (mercado) de
+    "algo está bloqueando" (configuração ou bug).
+    """
+    eng = app.state.engine
+    scores = list(getattr(eng, "_score_hist", []))
+    mn = cfg.MIN_ENTRY_SCORE
+
+    if scores:
+        dist = {
+            "avaliados":       len(scores),
+            "maximo":          max(scores),
+            "media":           round(sum(scores) / len(scores), 1),
+            "acima_do_minimo": len([s for s in scores if s >= mn]),
+            "a_5pts_ou_menos": len([s for s in scores if mn - 5 <= s < mn]),
+        }
+        if dist["acima_do_minimo"] > 0:
+            veredito = "Sinais passaram o score — verifique vetos do NEXUS AI e do Risk Engine"
+        elif dist["maximo"] >= mn - 5:
+            veredito = f"Chegou perto (máx {dist['maximo']}), mas nenhum atingiu {mn}"
+        else:
+            veredito = f"Nenhum setup próximo do mínimo (máx {dist['maximo']} vs {mn})"
+    else:
+        dist = {"avaliados": 0}
+        veredito = "Nenhum sinal avaliado ainda — bot pode ter acabado de subir"
+
+    return {
+        "modo":            "PAPER" if PAPER_TRADE else "LIVE",
+        "ordens_reais":    not PAPER_TRADE,
+        "thresholds": {
+            "score_minimo":  mn,
+            "nexus_minimo":  float(os.environ.get("NEXUS_MIN_SCORE", "55")),
+            "rr_minimo":     cfg.MIN_RR_RATIO,
+            "sl_max_pct":    round(100 / max(1, cfg.LEVERAGE) * 0.75, 2),
+        },
+        "scores_recentes": dist,
+        "posicoes_abertas": len(getattr(eng, "positions", {})),
+        "max_posicoes":     cfg.MAX_POSITIONS,
+        "pares_monitorados": len(getattr(eng, "viable_symbols", [])),
+        "veredito":         veredito,
+    }
+
+
 @app.get("/api/selfcheck", dependencies=[Depends(_require_auth)])
 async def selfcheck():
     """
