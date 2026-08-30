@@ -351,6 +351,9 @@ async def why_no_trade():
             "nexus_minimo":  float(os.environ.get("NEXUS_MIN_SCORE", "55")),
             "rr_minimo":     cfg.MIN_RR_RATIO,
             "sl_max_pct":    round(100 / max(1, cfg.LEVERAGE) * 0.75, 2),
+            "filtro_liquidacao_ativo": os.environ.get(
+                "ALLOW_SL_BEYOND_LIQUIDATION", "false").lower() != "true",
+            "liquidacao_pct": round(100 / max(1, cfg.LEVERAGE), 2),
         },
         "scores_recentes": dist,
         "posicoes_abertas": len(getattr(eng, "positions", {})),
