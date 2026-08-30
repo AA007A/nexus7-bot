@@ -1,3 +1,4 @@
+import time
 """
 BGX Capital Strategy v11.0
 Multi-Timeframe: 4H → 1H → 15M
@@ -270,6 +271,31 @@ def detect_entry(closes, highs, lows, opens, volumes, direction, atr_v) -> Tuple
 
 
 # ─── Score de Confluência ─────────────────────────────────────────
+# ── Buffer de scores avaliados (diagnóstico) ─────────────────────
+# Guarda os últimos scores de TODOS os pares analisados, mesmo os que
+# não viram sinal. Sem isso é impossível responder "quão perto o bot
+# está de operar?" quando nada passa no filtro.
+_SCORE_LOG: list = []
+_SCORE_LOG_MAX = 300
+
+
+def record_score(symbol: str, combined: int, s4h: int, s1h: int, s15: int):
+    """Registra um score avaliado no buffer de diagnóstico."""
+    global _SCORE_LOG
+    _SCORE_LOG.append({
+        "symbol": symbol, "score": combined,
+        "s4h": s4h, "s1h": s1h, "s15": s15,
+        "ts": time.time(),
+    })
+    if len(_SCORE_LOG) > _SCORE_LOG_MAX:
+        _SCORE_LOG = _SCORE_LOG[-_SCORE_LOG_MAX:]
+
+
+def get_score_log(limit: int = 300) -> list:
+    """Últimos scores avaliados, do mais recente para o mais antigo."""
+    return list(reversed(_SCORE_LOG[-limit:]))
+
+
 def score_tf(closes, highs, lows, opens, volumes, direction,
              atr_v, atr_avg, orderbook=None) -> dict:
     """
@@ -554,6 +580,12 @@ class Analyzer:
 
         # Peso: 4H=25%, 1H=30%, 15M=45% (15M tem mais peso no timing)
         combined = round(s4h["total"]*0.25 + s1h["total"]*0.30 + s15["total"]*0.45)
+
+        # Registra TODO score avaliado, inclusive os que darão HOLD.
+        # Antes, o histórico só recebia sinais aprovados — então ficava
+        # sempre vazio quando nenhum passava, que é justamente o caso em
+        # que a informação é mais necessária.
+        record_score(symbol, combined, s4h["total"], s1h["total"], s15["total"])
 
         if combined < min_score:
             log.info(
