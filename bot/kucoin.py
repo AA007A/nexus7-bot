@@ -112,8 +112,10 @@ else:
     log.critical("=" * 62)
 
 # ── Endpoints ─────────────────────────────────────────────────────
-REST_BASE = "https://api-futures.kucoin.com"
-WS_BASE   = "wss://ws-api.kucoin.com/endpoint"
+# Configuráveis para permitir testes de integração contra um mock
+# ou apontar para a testnet sem alterar código.
+REST_BASE = os.environ.get("KUCOIN_REST_BASE", "https://api-futures.kucoin.com")
+WS_BASE   = os.environ.get("KUCOIN_WS_BASE",   "wss://ws-api.kucoin.com/endpoint")
 
 # ── Constantes ────────────────────────────────────────────────────
 # Taxa taker KuCoin Futures: 0.06% (auditoria #8 — Bybit era 0.055%)
@@ -978,7 +980,42 @@ class KuCoinClient:
                         f"no total): {_e}"
                     )
                 continue
-        klines = list(reversed(klines))  # mais antigo primeiro (padrão do engine)
+        # ══════════════════════════════════════════════════════════
+        # 🔴 BUG CRÍTICO CORRIGIDO — ORDENAÇÃO DOS CANDLES
+        #
+        # O código fazia reversed() INCONDICIONALMENTE, assumindo que a
+        # KuCoin sempre retorna do mais recente para o mais antigo.
+        #
+        # Se a API retorna em ordem cronológica (ou muda de ordem entre
+        # endpoints/versões), a inversão QUEBRA todos os indicadores:
+        # o RSI de uma alta forte vira 0, as EMAs se invertem, o ADX
+        # aponta a direção errada.
+        #
+        # EVIDÊNCIA (teste E2E contra mock com tendência de alta):
+        #   RSI=0 em TODOS os 12 pares → bloqueio "RSI extremo"
+        #   → nenhum sinal passava → NENHUMA ORDEM DESDE A MIGRAÇÃO
+        #
+        # Agora a ordem é DETERMINADA pelos timestamps, não assumida.
+        # ══════════════════════════════════════════════════════════
+        if len(klines) >= 2:
+            if klines[0]["ts"] > klines[-1]["ts"]:
+                klines = list(reversed(klines))   # veio do mais recente
+            # Garantia final: ordenação cronológica estrita
+            klines.sort(key=lambda k: k["ts"])
+
+            # Sanidade: timestamps duplicados indicam dados corrompidos
+            _ts = [k["ts"] for k in klines]
+            if len(set(_ts)) != len(_ts):
+                _vistos, _limpo = set(), []
+                for k in klines:
+                    if k["ts"] not in _vistos:
+                        _vistos.add(k["ts"])
+                        _limpo.append(k)
+                log.warning(
+                    f"{symbol} {interval}m: {len(klines)-len(_limpo)} candles "
+                    f"duplicados removidos"
+                )
+                klines = _limpo
 
         # Atualiza cache
         key = (symbol, str(interval))
