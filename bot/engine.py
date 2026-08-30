@@ -2426,7 +2426,15 @@ class TradingEngine:
             # Diagnóstico: distribuição dos scores recentes.
             # Se todos ficam muito abaixo do mínimo, o problema é de
             # mercado ou de threshold — não de bug.
-            _sc = getattr(self, "_score_hist", [])
+            # Usa o buffer do strategy, que registra TODO score avaliado
+            # (inclusive os que deram HOLD). O buffer local só recebia
+            # sinais aprovados e ficava vazio justamente quando nada passa.
+            try:
+                from bot.strategy import get_score_log
+                _sc = [x["score"] for x in get_score_log(200)]
+            except Exception:
+                _sc = getattr(self, "_score_hist", [])
+
             if _sc:
                 _mx  = max(_sc)
                 _avg = sum(_sc) / len(_sc)
