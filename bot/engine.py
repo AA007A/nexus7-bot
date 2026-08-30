@@ -1785,6 +1785,46 @@ class TradingEngine:
             except Exception as e:
                 log.error(f"scan {sym}: {e}")
 
+        # ══════════════════════════════════════════════════════════
+        # RESUMO DO CICLO DE SCAN
+        #
+        # As linhas de score por par são individuais e se perdem no meio
+        # do log (ainda mais com DEBUG do WS ativo). Este resumo único
+        # mostra o estado de TODOS os pares de uma vez, em INFO.
+        # ══════════════════════════════════════════════════════════
+        try:
+            from bot.strategy import get_score_log
+            _recentes = get_score_log(len(self.viable_symbols) or 12)
+            if _recentes:
+                _mn    = cfg.MIN_ENTRY_SCORE
+                _linha = " | ".join(
+                    f"{x['symbol'].replace('USDT',''):<5}{x['score']:>3}"
+                    for x in _recentes
+                )
+                _mx     = max(x["score"] for x in _recentes)
+                _perto  = len([x for x in _recentes if x["score"] >= _mn - 5])
+                log.info(
+                    f"🔎 SCAN: {len(_recentes)} pares | máx={_mx} "
+                    f"(mín={_mn}) | {_perto} a ≤5pts | "
+                    f"{len(candidates)} aprovados"
+                )
+                log.info(f"   {_linha}")
+
+                # Quando algum par chega perto, mostra qual TF está fraco.
+                if _perto and not candidates:
+                    _top = max(_recentes, key=lambda x: x["score"])
+                    _fraco = min(
+                        [("4H", _top["s4h"]), ("1H", _top["s1h"]), ("15M", _top["s15"])],
+                        key=lambda t: t[1],
+                    )
+                    log.info(
+                        f"   ↳ melhor: {_top['symbol']} {_top['score']} "
+                        f"(4H:{_top['s4h']} 1H:{_top['s1h']} 15M:{_top['s15']}) "
+                        f"— {_fraco[0]} é o mais fraco ({_fraco[1]})"
+                    )
+        except Exception as _e:
+            log.debug(f"resumo do scan: {_e}")
+
         # Ordena por score decrescente e entra nos melhores
         candidates = self.analyzer.rank_signals(candidates)
         for sig in candidates:
