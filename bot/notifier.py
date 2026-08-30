@@ -13,6 +13,7 @@ from bot.logger import log
 
 _notify_queue: asyncio.Queue = None
 _last_sent_time: float = 0.0
+_warned_no_creds: bool = False
 _last_sent_hash: str   = ""
 _MIN_INTERVAL: float   = 3.0   # mínimo 3s entre mensagens
 _DEDUP_WINDOW: float   = 30.0  # ignorar msg idêntica nos últimos 30s
@@ -35,6 +36,16 @@ async def notify(text: str):
       - Fila com maxsize=50: descarta se cheia (bot operacional > Telegram)
     """
     if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
+        # Avisa uma única vez: sem isso, a ausência de mensagens era
+        # indistinguível de "o bot não tem nada para reportar".
+        global _warned_no_creds
+        if not _warned_no_creds:
+            _warned_no_creds = True
+            log.warning(
+                f"⚠️ Telegram DESATIVADO — "
+                f"TELEGRAM_TOKEN={'ok' if cfg.TELEGRAM_TOKEN else 'AUSENTE'} "
+                f"TELEGRAM_CHAT={'ok' if cfg.TELEGRAM_CHAT else 'AUSENTE'}"
+            )
         return
 
     global _last_sent_time, _last_sent_hash
@@ -80,8 +91,16 @@ async def notify(text: str):
                     # Não logar como warning — é esperado ocasionalmente
 
                 elif resp.status in (400, 401, 403):
-                    # Erros permanentes — não tentar novamente
-                    log.warning(f"Telegram: HTTP {resp.status} (erro permanente)")
+                    # Erro permanente: inclui o corpo da resposta, que diz
+                    # exatamente o problema (token inválido, chat_id errado,
+                    # Markdown malformado...).
+                    try:
+                        _body = (await resp.text())[:200]
+                    except Exception:
+                        _body = ""
+                    log.error(
+                        f"❌ Telegram HTTP {resp.status} (permanente): {_body}"
+                    )
                     return
 
                 else:
@@ -93,7 +112,12 @@ async def notify(text: str):
             if attempt < max_retries:
                 await asyncio.sleep(2 ** attempt)
             else:
-                log.debug(f"Telegram: conexão falhou ({type(e).__name__})")
+                # Era debug: falhas de envio ficavam invisíveis e o usuário
+                # só percebia pela ausência de mensagens, sem saber o motivo.
+                log.warning(
+                    f"⚠️ Telegram: falha de conexão após {max_retries+1} "
+                    f"tentativas ({type(e).__name__}: {e})"
+                )
         except Exception:
             return  # silencioso — Telegram não pode derrubar o bot
 
@@ -500,3 +524,37 @@ async def notify_nexus(d: dict, approved: bool) -> bool:
     except Exception as e:
         log.debug(f"notify_nexus: {e}")
         return False
+
+
+async def test_telegram() -> dict:
+    """
+    Verifica a conexão com o Telegram no startup via getMe.
+
+    Sem isso, a ausência de mensagens tinha várias causas possíveis
+    (token errado, chat_id errado, bot bloqueado, rede) e nenhuma
+    aparecia nos logs.
+    """
+    if not cfg.TELEGRAM_TOKEN:
+        log.warning("⚠️ Telegram: TELEGRAM_TOKEN ausente — notificações OFF")
+        return {"ok": False, "reason": "TELEGRAM_TOKEN ausente"}
+    if not cfg.TELEGRAM_CHAT:
+        log.warning("⚠️ Telegram: TELEGRAM_CHAT ausente — notificações OFF")
+        return {"ok": False, "reason": "TELEGRAM_CHAT ausente"}
+
+    url = f"https://api.telegram.org/bot{cfg.TELEGRAM_TOKEN}/getMe"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                data = await r.json()
+                if r.status == 200 and data.get("ok"):
+                    nome = data.get("result", {}).get("username", "?")
+                    log.info(f"✅ Telegram OK — bot @{nome}, chat {cfg.TELEGRAM_CHAT}")
+                    return {"ok": True, "bot": nome, "chat": cfg.TELEGRAM_CHAT}
+                log.error(
+                    f"❌ Telegram: token REJEITADO (HTTP {r.status}) — "
+                    f"{str(data)[:150]}"
+                )
+                return {"ok": False, "reason": f"token inválido (HTTP {r.status})"}
+    except Exception as e:
+        log.error(f"❌ Telegram: falha ao verificar ({type(e).__name__}: {e})")
+        return {"ok": False, "reason": str(e)}
