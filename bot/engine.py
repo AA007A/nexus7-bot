@@ -464,8 +464,19 @@ class TradingEngine:
         asyncio.create_task(self._monitor_news_pipeline())               # pipeline de notícias
         await self._connect()
 
+        _ciclos = 0
         while self._running:
             try:
+                _ciclos += 1
+                # Prova de vida: sem isso, um loop travado era
+                # indistinguível de "mercado sem setup".
+                if _ciclos == 1 or _ciclos % 60 == 0:
+                    log.info(
+                        f"💓 Loop #{_ciclos} | connected={self.connected} "
+                        f"active={self.active} pares={len(self.viable_symbols)} "
+                        f"posições={len(self.positions)}"
+                    )
+
                 if not self.connected:
                     await asyncio.sleep(20)   # scan a cada 20s
                     await self._connect()
@@ -683,13 +694,36 @@ class TradingEngine:
             self.instruments = self.client.get_instruments()
             await self._filter_viable_symbols()
 
-            for sym in self.viable_symbols[:15]:
-                await self.client.set_leverage(sym, cfg.LEVERAGE)
-                await asyncio.sleep(0.3)
+            # set_leverage é no-op (a alavancagem vai como parâmetro em
+            # cada ordem). O loop com sleep de 0.3s × 12 pares somava 3.6s
+            # de atraso no startup sem nenhum efeito prático.
+            log.info(
+                f"⚙️ Leverage {cfg.LEVERAGE}x será aplicado em cada ordem "
+                f"({len(self.viable_symbols)} pares)"
+            )
 
-            await self._load_existing_positions()
+            # ══════════════════════════════════════════════════════
+            # connected=True ANTES das etapas opcionais.
+            #
+            # Tudo que roda aqui bloqueia o LOOP PRINCIPAL, porque
+            # _connect() é aguardado antes do while. Uma etapa lenta
+            # (ou travada) impedia qualquer scan de acontecer — e isso
+            # ficava invisível nos logs, já que o WebSocket roda em task
+            # separada e seguia publicando normalmente.
+            #
+            # O essencial (saldo, instrumentos, pares viáveis) já foi
+            # feito. O resto tem timeout e não pode travar o engine.
+            # ══════════════════════════════════════════════════════
             self.connected = True
             self.active    = True
+            log.info("✅ Engine PRONTO — loop de scan liberado")
+
+            try:
+                await asyncio.wait_for(self._load_existing_positions(), timeout=20)
+            except asyncio.TimeoutError:
+                log.warning("⏱️ _load_existing_positions excedeu 20s — seguindo")
+            except Exception as e:
+                log.warning(f"_load_existing_positions: {e}")
 
             # Inicia WebSocket para dados em tempo real
             # ══════════════════════════════════════════════════════════
@@ -729,17 +763,36 @@ class TradingEngine:
                 f"🔌 Iniciando WebSocket com {len(ws_symbols)} símbolos: "
                 f"{', '.join(ws_symbols)}"
             )
-            await self.client.start_websocket(
-                ws_symbols,
-                intervals=["15", "60", "240"],
-            )
+            # start_websocket já usa create_task internamente, mas o
+            # timeout garante que uma mudança futura não volte a travar.
+            try:
+                await asyncio.wait_for(
+                    self.client.start_websocket(
+                        ws_symbols, intervals=["15", "60", "240"]
+                    ),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                log.warning("⏱️ start_websocket excedeu 10s — seguindo")
+            except Exception as e:
+                log.error(f"start_websocket: {e}")
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
 
-            await notify(await online_msg(bal, bal*cfg.LEVERAGE, len(self.viable_symbols), cfg.MAX_POSITIONS))
-            await notify(
-                f"Score mínimo: `{cfg.MIN_ENTRY_SCORE}/100`\n"
-                f"Pares ativos: `{len(self.viable_symbols)}`"
-            )
+            # Telegram em background: uma API lenta não pode atrasar o scan.
+            async def _notify_online():
+                try:
+                    await notify(await online_msg(
+                        bal, bal * cfg.LEVERAGE,
+                        len(self.viable_symbols), cfg.MAX_POSITIONS
+                    ))
+                    await notify(
+                        f"Score mínimo: `{cfg.MIN_ENTRY_SCORE}/100`\n"
+                        f"Pares ativos: `{len(self.viable_symbols)}`"
+                    )
+                except Exception as e:
+                    log.debug(f"notify online: {e}")
+
+            asyncio.create_task(_notify_online())
         except Exception as e:
             log.error(f"_connect: {e}")
             self.connected = False
