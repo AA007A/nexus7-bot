@@ -683,6 +683,24 @@ class TradingEngine:
 
             # Sanidade de configuração: MAX_POSITIONS × MAX_MARGIN_PCT > 100%
             # significa que as posições extras nunca terão margem suficiente.
+            # Aviso destacado quando o filtro de liquidação está desligado
+            if os.environ.get("ALLOW_SL_BEYOND_LIQUIDATION", "false").lower() == "true":
+                _liq = 100.0 / max(1, cfg.LEVERAGE)
+                log.warning("=" * 62)
+                log.warning(
+                    f"⚠️ FILTRO DE LIQUIDAÇÃO DESATIVADO "
+                    f"(ALLOW_SL_BEYOND_LIQUIDATION=true)"
+                )
+                log.warning(
+                    f"   Com {cfg.LEVERAGE}x, a liquidação ocorre a "
+                    f"~{_liq:.2f}% de movimento adverso."
+                )
+                log.warning(
+                    f"   Trades com SL acima disso serão abertos e a perda "
+                    f"será de 100% da margem, não 1R."
+                )
+                log.warning("=" * 62)
+
             _mc = getattr(cfg, "MAX_MARGIN_PCT", 0.80)
             if cfg.MAX_POSITIONS * _mc > 1.0:
                 log.warning(
@@ -2222,7 +2240,54 @@ class TradingEngine:
             _sl_pct    = abs(sig.entry - sig.sl) / sig.entry * 100
             _SAFETY    = float(os.environ.get("SL_LIQ_SAFETY", "0.75"))
 
-            if _sl_pct >= _liq_pct * _SAFETY:
+            # ══════════════════════════════════════════════════════════
+            # OVERRIDE EXPLÍCITO — ALLOW_SL_BEYOND_LIQUIDATION
+            #
+            # Quando o SL fica além do preço de liquidação, a posição é
+            # liquidada ANTES do stop disparar. A perda deixa de ser 1R
+            # e passa a ser 100% da margem.
+            #
+            # Exemplo real (SOLUSDT, 50x):
+            #   liquidação a 2.00% | SL a 2.27%
+            #   → o preço atinge a liquidação primeiro; o SL nunca executa
+            #
+            # Ativado por escolha do usuário, ciente de que o stop loss
+            # se torna decorativo nesses trades.
+            # ══════════════════════════════════════════════════════════
+            _allow_beyond = os.environ.get(
+                "ALLOW_SL_BEYOND_LIQUIDATION", "false"
+            ).lower() == "true"
+
+            _sl_inseguro = _sl_pct >= _liq_pct * _SAFETY
+
+            if _sl_inseguro and _allow_beyond:
+                # Não bloqueia, mas registra e avisa — o operador precisa
+                # saber quais trades entraram sem proteção efetiva.
+                _sera_liquidado = _sl_pct >= _liq_pct
+                log.warning(
+                    f"⚠️ [{sig.symbol}] SL a {_sl_pct:.2f}% vs liquidação "
+                    f"{_liq_pct:.2f}% — "
+                    f"{'LIQUIDA ANTES DO STOP' if _sera_liquidado else 'margem apertada'}. "
+                    f"Prosseguindo por ALLOW_SL_BEYOND_LIQUIDATION=true"
+                )
+                if _sera_liquidado:
+                    _k = f"beyond_{sig.symbol}"
+                    _now = time.time()
+                    if _now - self._liq_alert.get(_k, 0) > 1800:
+                        self._liq_alert[_k] = _now
+                        asyncio.create_task(notify(
+                            f"⚠️ *ORDEM SEM PROTEÇÃO EFETIVA*\n"
+                            f"`{'━'*26}`\n"
+                            f"📍 Par:        `{sig.symbol}`\n"
+                            f"🛑 SL a:       `{_sl_pct:.2f}%`\n"
+                            f"💀 Liquidação: `{_liq_pct:.2f}%` ({cfg.LEVERAGE}x)\n"
+                            f"`{'━'*26}`\n"
+                            f"_A liquidação ocorre ANTES do stop. Se este "
+                            f"trade perder, a perda é de 100% da margem, "
+                            f"não 1R._"
+                        ))
+
+            elif _sl_inseguro:
                 log.warning(
                     f"⛔ [{sig.symbol}] REJEITADO: SL a {_sl_pct:.2f}% do entry, "
                     f"mas liquidação ocorre a ~{_liq_pct:.2f}% "
