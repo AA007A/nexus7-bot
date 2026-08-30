@@ -1635,6 +1635,12 @@ class TradingEngine:
                         continue
                     candidates.append(sig)
 
+                    # Histórico de scores para diagnóstico no heartbeat:
+                    # responde "quão perto o bot está de operar?"
+                    _hist = getattr(self, "_score_hist", [])
+                    _hist.append(sig.score)
+                    self._score_hist = _hist[-200:]
+
                     # Guarda o melhor score visto (usado pelo heartbeat)
                     _prev = getattr(self, "_last_best_score", None)
                     if not _prev or sig.score > _prev.get("score", 0):
@@ -2417,6 +2423,21 @@ class TradingEngine:
             best   = getattr(self, "_last_best_score", None)
             n_open = len(self.positions)
 
+            # Diagnóstico: distribuição dos scores recentes.
+            # Se todos ficam muito abaixo do mínimo, o problema é de
+            # mercado ou de threshold — não de bug.
+            _sc = getattr(self, "_score_hist", [])
+            if _sc:
+                _mx  = max(_sc)
+                _avg = sum(_sc) / len(_sc)
+                _perto = len([s for s in _sc if s >= cfg.MIN_ENTRY_SCORE - 5])
+                score_line = (
+                    f"📊 Scores ({len(_sc)}): máx `{_mx}` méd `{_avg:.0f}` | "
+                    f"`{_perto}` a ≤5pts do mínimo\n"
+                )
+            else:
+                score_line = "📊 Scores: `nenhum sinal avaliado ainda`\n"
+
             best_line = (
                 f"🧠 Melhor score: `{best['score']}/100` em `{best['symbol']}` "
                 f"({best['direction']})\n"
@@ -2461,6 +2482,7 @@ class TradingEngine:
                 f"🎯 Meta:     `${self.daily_target:,.2f}`\n"
                 f"🔍 Pares:    `{len(self.viable_symbols)}`\n"
                 f"{best_line}"
+                f"{score_line}"
                 f"{exp_line}"
                 f"⚙️ Score mín: `{cfg.MIN_ENTRY_SCORE}` | R:R mín: `{cfg.MIN_RR_RATIO}`\n"
                 f"`━━━━━━━━━━━━━━━━━━━━━━━━`"
