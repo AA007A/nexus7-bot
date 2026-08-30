@@ -158,6 +158,21 @@ async def funding_rate(req):
     return web.json_response({"code": "200000", "data": {"value": 0.0001}})
 
 
+async def stats(req):
+    """Endpoint de introspecção para os testes lerem o estado do servidor."""
+    return web.json_response({
+        "orders": ORDERS, "stops": STOPS,
+        "positions": list(POSITIONS.values()),
+        "n_orders": len(ORDERS),
+        "client_oids": sorted({o.get("clientOid") for o in ORDERS if o.get("clientOid")}),
+    })
+
+
+async def reset(req):
+    ORDERS.clear(); STOPS.clear(); POSITIONS.clear()
+    return web.json_response({"ok": True})
+
+
 async def catch_all(req):
     return web.json_response({"code": "200000", "data": {}})
 
@@ -191,6 +206,8 @@ def make_app():
     app.router.add_post("/api/v1/position/trading-stop", trading_stop)
     app.router.add_post("/api/v1/bullet-private", bullet_private)
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/_stats", stats)
+    app.router.add_post("/_reset", reset)
     app.router.add_route("*", "/{tail:.*}", catch_all)
     return app
 
