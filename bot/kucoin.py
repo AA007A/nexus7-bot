@@ -562,18 +562,39 @@ class KuCoinClient:
         ou via parâmetro leverage diretamente na ordem (mais simples).
         CORRIGIDO: endpoint correto para KuCoin Futures v1.
         """
-        kc_sym = to_kucoin(symbol)
-        # KuCoin Futures: leverage é definido por posição (isolada) ou conta (cross)
-        # A forma mais confiável é passar leverage na própria ordem place_order
-        # Este endpoint é para garantia — pode não existir em todas as versões da API
-        try:
-            await self._post("/api/v1/position/margin/auto-deposit-status", {
-                "symbol": kc_sym,
-                "status": False,  # isolated margin
-            })
-        except Exception:
-            pass  # ignora se não suportado — leverage é passado na ordem
-        log.info(f"⚙️ Leverage {symbol}: {leverage}x (aplicado via parâmetro da ordem)")
+        # ══════════════════════════════════════════════════════════
+        # BUG CRÍTICO CORRIGIDO — set_leverage TRAVAVA O STARTUP
+        #
+        # Este POST era feito para CADA par no _connect(). O endpoint
+        # frequentemente falha (não existe em todas as versões da API), e
+        # o _post tem 3 tentativas com backoff exponencial (1+2+4s).
+        #
+        # Com 12 pares: até 12 × 7s = 84 segundos de bloqueio, mais 0.3s
+        # de sleep entre cada um. Como isso roda ANTES de connected=True,
+        # o LOOP PRINCIPAL não começava — nenhum scan acontecia.
+        #
+        # Nos logs isso era invisível: o WebSocket roda em task separada
+        # e continuava publicando normalmente, dando a impressão de que
+        # o bot estava vivo enquanto o engine seguia bloqueado.
+        #
+        # A alavancagem já é enviada como parâmetro em cada ordem
+        # (place_order → body["leverage"]), então esta chamada é
+        # redundante. Vira no-op por padrão.
+        # ══════════════════════════════════════════════════════════
+        if os.environ.get("KUCOIN_SET_LEVERAGE_ENDPOINT", "false").lower() == "true":
+            kc_sym = to_kucoin(symbol)
+            try:
+                await asyncio.wait_for(
+                    self._post("/api/v1/position/margin/auto-deposit-status", {
+                        "symbol": kc_sym,
+                        "status": False,
+                    }),
+                    timeout=3,
+                )
+            except Exception as e:
+                log.debug(f"set_leverage {symbol}: {e}")
+
+        log.debug(f"⚙️ Leverage {symbol}: {leverage}x (via parâmetro da ordem)")
 
     # ── Ordens ────────────────────────────────────────────────────
     def _round_price(self, price: float, symbol: str) -> str:
