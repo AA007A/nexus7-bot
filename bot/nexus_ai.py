@@ -1,3 +1,4 @@
+import os
 """
 NEXUS-7 — AI DECISION ENGINE
 Implementa as seções 1-24 da especificação.
@@ -51,8 +52,18 @@ WEIGHTS = {
 # Ajustável a qualquer momento via NEXUS_MIN_SCORE.
 MIN_SCORE = float(__import__("os").environ.get("NEXUS_MIN_SCORE", "55"))
 
-# Idade máxima dos dados antes de considerá-los stale (seção 22)
-MAX_DATA_AGE_S = float(__import__("os").environ.get("NEXUS_MAX_DATA_AGE", "300"))
+# ══════════════════════════════════════════════════════════════════
+# IDADE MÁXIMA DOS DADOS (seção 22)
+#
+# CALIBRAÇÃO CORRIGIDA: o valor era 300s (5 min), mas o bot analisa
+# candles de 15 MINUTOS. Um candle recém-fechado tem naturalmente até
+# 900s de idade — e era marcado como obsoleto, derrubando a qualidade
+# dos dados e fazendo o NEXUS vetar TODOS os sinais.
+#
+# O valor correto tem que ser proporcional ao timeframe: 2 candles de
+# 15M = 1800s. Acima disso, os dados estão de fato defasados.
+# ══════════════════════════════════════════════════════════════════
+MAX_DATA_AGE_S = float(__import__("os").environ.get("NEXUS_MAX_DATA_AGE", "1800"))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -83,8 +94,14 @@ def validate_data(symbol: str, k15: list, k1h: list, k4h: list,
             ts = k15[-1].get("ts", 0)
             if ts:
                 age = time.time() - (ts / 1000 if ts > 1e11 else ts)
+                # Penalidade proporcional ao atraso, não fixa em 40.
+                # Um candle 15M recém-fechado tem naturalmente até 900s;
+                # penalizar 40 pontos por isso derrubava a qualidade
+                # abaixo do mínimo e vetava sinais válidos.
                 if age > MAX_DATA_AGE_S:
-                    dq.mark_stale("k15", age, 40)
+                    _excesso = age / MAX_DATA_AGE_S
+                    _pen = min(40.0, 10.0 * _excesso)
+                    dq.mark_stale("k15", age, _pen)
         except Exception as e:
             dq.mark_error(f"timestamp k15 ilegível: {e}", 15)
 
@@ -101,15 +118,25 @@ def validate_data(symbol: str, k15: list, k1h: list, k4h: list,
         except Exception as e:
             dq.mark_error(f"OHLC ilegível: {e}", 15)
 
-    # ── Dados opcionais: ausência é registrada, não penalizada forte
+    # ── Dados OPCIONAIS ──────────────────────────────────────────
+    # CALIBRAÇÃO CORRIGIDA: a soma das penalidades de dados opcionais
+    # era 25 pontos. Com qualquer falha adicional (ex: candle levemente
+    # antigo, -40), a qualidade caía abaixo de 60 e o NEXUS vetava TODOS
+    # os sinais — mesmo com os candles perfeitos.
+    #
+    # Estes dados enriquecem a análise mas NÃO são essenciais: a decisão
+    # principal vem dos candles. Penalidades reduzidas e o total de
+    # opcionais limitado a 12 pontos.
+    _opcionais = 0.0
     if ticker is None or not ticker.get("lastPrice"):
-        dq.mark_unavailable("ticker", 10)
+        dq.unavailable.append("ticker");        _opcionais += 4
     if funding is None:
-        dq.mark_unavailable("funding", 5)
+        dq.unavailable.append("funding");       _opcionais += 3
     if oi is None:
-        dq.mark_unavailable("open_interest", 5)
+        dq.unavailable.append("open_interest"); _opcionais += 3
     if orderbook is None or not orderbook.get("b"):
-        dq.mark_unavailable("orderbook", 5)
+        dq.unavailable.append("orderbook");     _opcionais += 2
+    dq.score = max(0.0, dq.score - min(12.0, _opcionais))
 
     return dq
 
@@ -435,9 +462,40 @@ def _score_components(models: List[ModelOutput], mtf: dict,
         "MULTI_TIMEFRAME":  mtf_s,
         "RISK_REWARD":      rr_s,
     }
-    total = sum(comps[k] * WEIGHTS[k] for k in comps)
-    return {"components": {k: round(v, 1) for k, v in comps.items()},
-            "total": round(total, 2)}
+
+    # ══════════════════════════════════════════════════════════════
+    # BUG DE DESIGN CORRIGIDO — COMPONENTE SEM DADOS PUXAVA O SCORE
+    #
+    # DERIVATIVES (funding/OI) e MICROSTRUCTURE (order book) entravam
+    # como ZERO quando os dados não estavam disponíveis. Juntos valem
+    # 20% do score — o teto real virava 80, não 100, e nenhum setup
+    # alcançava o threshold.
+    #
+    # Isso contraria a seção 14 da spec: dado ausente não deve ser
+    # tratado como sinal negativo. O correto é EXCLUIR o componente e
+    # renormalizar os pesos dos que restaram, exatamente como já é
+    # feito com os modelos do ensemble.
+    #
+    # Componentes indisponíveis são listados para auditoria.
+    # ══════════════════════════════════════════════════════════════
+    _sem_dados = set()
+    if not (by.get("DERIVATIVES") and by["DERIVATIVES"].available):
+        _sem_dados.add("DERIVATIVES")
+    if micro_s <= 0:
+        _sem_dados.add("MICROSTRUCTURE")   # não alimentado nesta versão
+
+    _ativos = {k: v for k, v in comps.items() if k not in _sem_dados}
+    _peso_total = sum(WEIGHTS[k] for k in _ativos) or 1.0
+
+    # Renormaliza: os pesos dos componentes ativos somam 1.0
+    total = sum(_ativos[k] * (WEIGHTS[k] / _peso_total) for k in _ativos)
+
+    return {
+        "components":  {k: round(v, 1) for k, v in comps.items()},
+        "unavailable": sorted(_sem_dados),
+        "weight_used": round(_peso_total, 3),
+        "total":       round(total, 2),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -575,8 +633,29 @@ def decide(symbol: str, k15: list, k1h: list, k4h: list,
         return _wait(f"EV negativo após custos: {ev['ev_pct']:.3f}% "
                      f"(R:R líquido {ev['rr_net']:.2f})")
 
-    if ev["rr_net"] < cfg.MIN_RR_RATIO:
-        return _wait(f"R:R líquido {ev['rr_net']:.2f} < mínimo {cfg.MIN_RR_RATIO}")
+    # ══════════════════════════════════════════════════════════════
+    # INCONSISTÊNCIA DE DESIGN CORRIGIDA
+    #
+    # A estratégia aprova com R:R BRUTO >= MIN_RR_RATIO (2.0), mas o
+    # NEXUS exigia R:R LÍQUIDO >= o MESMO valor. Como taxas e slippage
+    # corroem 15-25% do R:R, TODO sinal aprovado pela estratégia era
+    # vetado aqui — nenhuma ordem passava.
+    #
+    # Comparar bruto com líquido usando o mesmo limiar é um erro de
+    # unidade. O R:R líquido tem seu próprio piso, derivado do bruto
+    # descontando o custo típico (configurável).
+    #
+    # O que realmente protege é o EV positivo, já validado acima.
+    # ══════════════════════════════════════════════════════════════
+    _rr_liq_min = float(os.environ.get(
+        "NEXUS_MIN_RR_NET",
+        str(round(cfg.MIN_RR_RATIO * 0.80, 2))     # 2.0 → 1.60
+    ))
+    if ev["rr_net"] < _rr_liq_min:
+        return _wait(
+            f"R:R líquido {ev['rr_net']:.2f} < mínimo líquido {_rr_liq_min:.2f} "
+            f"(bruto exigido: {cfg.MIN_RR_RATIO})"
+        )
 
     # ── PASSO 8: score final (seção 6) ───────────────────────────
     sc     = _score_components(models, mtf, ev["rr_net"], direction, regime)
