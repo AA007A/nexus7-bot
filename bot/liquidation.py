@@ -12,6 +12,37 @@ VALIDADO contra o exemplo numérico da própria documentação:
     1 BTC @ 30.000, 50x, MMR 0.4%, liq fee 0.06%
     doc: 29.535,9   |   esta implementação: 29.535,9   (Δ $0,04)
 
+CONFIRMADO EM PRODUÇÃO (print de tela do usuário, ETHUSDT 50x):
+    entry 2.480,84 | liq real da KuCoin: 2.440,09
+    fórmula prevê: ~1,55% até liquidar | real: 1,64%
+    Δ = 0,10 ponto percentual — a fórmula bate com a exchange real.
+
+⚠️ GAP CRÍTICO — MODO DE MARGEM NÃO VERIFICADO (encontrado após a
+   confirmação acima, ao notar que a conta real do usuário opera em
+   CROSS MARGIN, não Isolated):
+
+   A fórmula documentada e o exemplo numérico da KuCoin referem-se
+   EXPLICITAMENTE a Isolated Margin. A própria documentação da KuCoin
+   afirma que em Cross Margin:
+     "In Cross Margin Mode, the max open position size is no longer
+      restricted by risk limit tiers... depends on total margin
+      available in the futures account, leverage, and price."
+     "Margin for the same futures position = max(...) — posições
+      long/short podem compartilhar/hedgear margem."
+
+   Ou seja: em Cross, a margem de manutenção considera TODA A CONTA,
+   não a posição isolada. Com UMA posição aberta (como no print), os
+   dois modos tendem a convergir — e foi isso que a validação acima
+   mostrou. Mas com DUAS OU MAIS posições simultâneas em Cross, este
+   módulo NÃO FOI VALIDADO e pode subestimar ou superestimar a real
+   distância até a liquidação, porque ele calcula cada posição de
+   forma isolada.
+
+   Esta limitação não foi identificada nas Fases 2-5 porque nenhuma
+   delas verificou o modo de margem da conta configurada. Client trata
+   /api/v2/changeCrossUserLeverage no comentário, mas o código nunca
+   define nem lê explicitamente marginMode.
+
 HISTÓRICO DAS APROXIMAÇÕES (ambas ERRADAS):
     Fase 2: 100/leverage        → 2.000%  (otimista)
     Fase 3: estimativa c/ custos → 1.330%  (pessimista)
@@ -158,10 +189,22 @@ def liquidation_price(entry: float, leverage: int, is_long: bool,
 
 
 def analyze(entry: float, stop: float, leverage: int, is_long: bool,
-            symbol: str = "", funding_pct: float = 0.0) -> LiquidationAnalysis:
-    """Análise completa de stop vs liquidação usando a fórmula oficial."""
+            symbol: str = "", funding_pct: float = 0.0,
+            n_open_positions: int = 1) -> LiquidationAnalysis:
+    """
+    Análise completa de stop vs liquidação usando a fórmula oficial.
+
+    n_open_positions: quantas posições estão abertas SIMULTANEAMENTE na
+    conta. Confirmado em produção (print de tela real) que a conta
+    opera em CROSS MARGIN. A fórmula foi validada apenas para o caso de
+    posição isolada / única posição em cross (que convergem quando há
+    apenas uma posição). Com 2+ posições em cross, a margem de
+    manutenção real depende da conta inteira — este módulo NÃO calcula
+    isso, e o resultado é marcado como não confiável.
+    """
     mmr, oficial = get_mmr(symbol)
     model = "OFFICIAL_FORMULA" if oficial else "APPROXIMATION"
+    _cross_multi_risk = n_open_positions > 1
 
     if entry <= 0 or leverage <= 0:
         return LiquidationAnalysis(symbol, entry, stop, leverage, is_long,
@@ -191,6 +234,15 @@ def analyze(entry: float, stop: float, leverage: int, is_long: bool,
 
     if not oficial:
         motivo += f" [MMR estimado {mmr:.4f} — não confirmado pela API]"
+
+    if _cross_multi_risk:
+        efetivo = False   # não confia no gap calculado — força cautela
+        motivo += (
+            f" [CROSS MARGIN com {n_open_positions} posições simultâneas — "
+            f"cálculo de liquidação NÃO CONSIDERA margem compartilhada da "
+            f"conta e não é confiável neste cenário]"
+        )
+        model = "UNRELIABLE_CROSS_MULTI_POSITION"
 
     return LiquidationAnalysis(
         symbol=symbol, entry=entry, stop=stop, leverage=leverage,
