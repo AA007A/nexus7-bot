@@ -263,6 +263,19 @@ class KuCoinClient:
         self._ws_endpoint   = None             # endpoint WS vindo da KuCoin
         self._ws_ping_ms    = 18000            # pingInterval exigido pela KuCoin
         self._rate_lock     = asyncio.Lock()   # serializa o throttle
+        # ══════════════════════════════════════════════════════════
+        # P0 (Fase 4F) — CONTADOR REAL DE RATE LIMIT
+        #
+        # O IntegrityGuard lia client._rate_limit_hits, mas NADA
+        # incrementava esse atributo: era um contador fictício e a
+        # condição RATE_LIMITED nunca disparava.
+        #
+        # Agora é incrementado a cada 429 e decai com o tempo, para que
+        # um pico isolado não bloqueie o bot indefinidamente.
+        # ══════════════════════════════════════════════════════════
+        self._rate_limit_hits: int   = 0
+        self._rate_limit_last: float = 0.0
+        self._rate_limit_backoff_until: float = 0.0
         self._rate_sem      = asyncio.Semaphore(self._RATE_MAX_CONCURRENT)
         self._last_req_ts   = 0.0
         self._last_ws_update: float = 0.0   # timestamp do último kline via WS
@@ -279,8 +292,46 @@ class KuCoinClient:
     _RATE_MAX_CONCURRENT = int(os.environ.get("KUCOIN_MAX_CONCURRENT", "5"))
     _RATE_MIN_INTERVAL   = float(os.environ.get("KUCOIN_MIN_INTERVAL", "0.06"))
 
+    def _register_429(self):
+        """Registra um 429 e agenda backoff global."""
+        import random
+        now = time.time()
+        # Decaimento: hits antigos (>5min) não contam mais
+        if now - self._rate_limit_last > 300:
+            self._rate_limit_hits = 0
+        self._rate_limit_hits += 1
+        self._rate_limit_last  = now
+        # Backoff GLOBAL: todas as requisições esperam, não só esta.
+        # Sem isso, N corrotinas em paralelo geram retry storm.
+        espera = min(60.0, 2 ** min(self._rate_limit_hits, 6))
+        espera *= (1 + random.random() * 0.3)     # jitter até +30%
+        self._rate_limit_backoff_until = now + espera
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        """Backoff exponencial com jitter (evita sincronização de retries)."""
+        import random
+        base = min(30.0, 2 ** (attempt + 1))
+        return base * (1 + random.random() * 0.5)
+
+    def rate_limit_status(self) -> dict:
+        now = time.time()
+        return {
+            "hits_recentes":   self._rate_limit_hits,
+            "ultimo_429_s":    round(now - self._rate_limit_last, 1)
+                               if self._rate_limit_last else None,
+            "em_backoff":      now < self._rate_limit_backoff_until,
+            "backoff_restante": max(0.0, round(
+                self._rate_limit_backoff_until - now, 1)),
+        }
+
     async def _throttle(self):
         """Espaça as requisições para respeitar o rate limit da KuCoin."""
+        # Backoff GLOBAL após 429: bloqueia TODAS as requisições, não só
+        # a que falhou. É isto que impede o retry storm.
+        _bo = self._rate_limit_backoff_until - time.time()
+        if _bo > 0:
+            await asyncio.sleep(min(_bo, 60.0))
+
         async with self._rate_lock:
             now  = time.monotonic()
             wait = self._last_req_ts + self._RATE_MIN_INTERVAL - now
@@ -377,17 +428,55 @@ class KuCoinClient:
             try:
                 await self._throttle()
                 async with self._rate_sem, self._session.get(full_url, headers=headers) as r:
-                    data = await r.json()
+                    # ══════════════════════════════════════════════════
+                    # BUG CORRIGIDO (Fase 4F) — 429 ERA PERDIDO
+                    #
+                    # r.json() levanta ContentTypeError quando o status é
+                    # de erro, ANTES de chegar ao tratamento de 429. A
+                    # exceção caía no except genérico, que fazia retry
+                    # cego — o contador nunca incrementava e o backoff
+                    # global nunca era acionado.
+                    #
+                    # Agora o status HTTP é verificado ANTES de parsear.
+                    # ══════════════════════════════════════════════════
+                    if r.status == 429:
+                        self._register_429()
+                        _w = self._backoff_seconds(attempt)
+                        log.warning(
+                            f"🚦 Rate limit KuCoin HTTP 429 "
+                            f"({self._rate_limit_hits} recentes) — "
+                            f"aguardando {_w:.1f}s"
+                        )
+                        await asyncio.sleep(_w)
+                        continue
+
+                    try:
+                        data = await r.json(content_type=None)
+                    except Exception as _je:
+                        log.warning(
+                            f"KuCoin GET {endpoint}: resposta não-JSON "
+                            f"(HTTP {r.status}): {_je}"
+                        )
+                        await asyncio.sleep(self._backoff_seconds(attempt))
+                        continue
+
+                    if not isinstance(data, dict):
+                        log.warning(f"KuCoin GET {endpoint}: payload inesperado")
+                        return {}
+
                     if data.get("code") == "200000":
                         return data.get("data", {})
 
                     code = data.get("code", "")
 
-                    # HTTP 429 / código 429000: rate limit atingido.
-                    # Backoff progressivo maior que o normal para não piorar.
-                    if code in ("429000", "429") or r.status == 429:
-                        _w = 5 * (attempt + 1)
-                        log.warning(f"🚦 Rate limit KuCoin — aguardando {_w}s")
+                    # Código de rate limit no corpo (alguns endpoints)
+                    if code in ("429000", "429"):
+                        self._register_429()
+                        _w = self._backoff_seconds(attempt)
+                        log.warning(
+                            f"🚦 Rate limit KuCoin ({self._rate_limit_hits} "
+                            f"recentes) — aguardando {_w:.1f}s"
+                        )
                         await asyncio.sleep(_w)
                         continue
 
@@ -1586,10 +1675,54 @@ class KuCoinClient:
             if key not in self._kline_cache:
                 self._kline_cache[key] = deque(maxlen=500)
             cache = self._kline_cache[key]
-            if cache and cache[-1]["ts"] == kline["ts"]:
-                cache[-1] = kline   # atualiza candle atual
-            else:
+
+            # ══════════════════════════════════════════════════════
+            # BUG CORRIGIDO (Fase 4G, cenário E) — EVENTOS FORA DE ORDEM
+            #
+            # O código só comparava com o ÚLTIMO candle do cache. Um
+            # evento atrasado (comum após reconexão ou congestionamento)
+            # era ANEXADO NO FIM, quebrando a cronologia da série.
+            #
+            # Consequência: EMAs, RSI, ADX e ATR calculados sobre uma
+            # série desordenada produzem valores incorretos — a mesma
+            # classe de falha do bug de candles invertidos.
+            #
+            # Agora: candle existente é atualizado onde está; candle
+            # atrasado é inserido na posição cronológica correta.
+            # ══════════════════════════════════════════════════════
+            _ts_novo = kline["ts"]
+
+            if cache and cache[-1]["ts"] == _ts_novo:
+                cache[-1] = kline                    # caso comum: candle atual
+            elif cache and _ts_novo > cache[-1]["ts"]:
+                cache.append(kline)                  # caso comum: candle novo
+            elif not cache:
                 cache.append(kline)
+            else:
+                # Evento ATRASADO ou duplicado de um candle anterior.
+                _idx = None
+                for _i in range(len(cache) - 1, -1, -1):
+                    if cache[_i]["ts"] == _ts_novo:
+                        _idx = _i
+                        break
+                    if cache[_i]["ts"] < _ts_novo:
+                        break
+
+                if _idx is not None:
+                    cache[_idx] = kline              # atualiza no lugar
+                else:
+                    # Reinsere mantendo a ordem cronológica. deque não
+                    # tem insert eficiente em posição arbitrária, então
+                    # reconstruímos ordenado.
+                    _itens = list(cache)
+                    _itens.append(kline)
+                    _itens.sort(key=lambda k: k["ts"])
+                    cache.clear()
+                    cache.extend(_itens)
+                    log.debug(
+                        f"WS {std_sym} {interval}m: candle atrasado "
+                        f"reinserido em ordem (ts={_ts_novo})"
+                    )
 
         # ── Ticker ────────────────────────────────────────────────
         elif "icker" in topic:
