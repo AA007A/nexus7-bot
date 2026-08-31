@@ -67,7 +67,37 @@ STOPS  = {}          # SL/TP aplicados por símbolo
 POSITIONS = {}       # posições abertas
 
 
+
+# ── FAULT INJECTOR (Fase 4G) ──────────────────────────────────────
+# Permite ao teste forçar falhas específicas sem alterar o bot.
+FAULTS = {
+    "rate_limit_next": 0,    # próximas N respostas retornam 429
+    "ws_drop_after":   0,    # derruba o WS após N mensagens
+    "ws_duplicate":    False,# reenvia cada evento duas vezes
+    "ws_out_of_order": False,# inverte a ordem dos candles
+    "ws_no_pong":      False,# ignora pings (heartbeat failure)
+    "order_no_reply":  False,# executa a ordem mas não responde
+}
+
+
+async def set_faults(req):
+    body = await req.json()
+    FAULTS.update(body)
+    return web.json_response({"ok": True, "faults": FAULTS})
+
+
+def _maybe_429():
+    """Consome uma falha de rate limit, se agendada."""
+    if FAULTS["rate_limit_next"] > 0:
+        FAULTS["rate_limit_next"] -= 1
+        return web.json_response(
+            {"code": "429000", "msg": "Too Many Requests"}, status=429)
+    return None
+
+
 async def contracts_active(req):
+    _f = _maybe_429()
+    if _f is not None: return _f
     data = []
     for s in SYMBOLS:
         data.append({
@@ -83,6 +113,8 @@ async def contracts_active(req):
 
 
 async def account_overview(req):
+    _f = _maybe_429()
+    if _f is not None: return _f
     return web.json_response({"code": "200000", "data": {
         "accountEquity": 100.0, "availableBalance": 100.0,
         "currency": "USDT",
@@ -90,6 +122,8 @@ async def account_overview(req):
 
 
 async def kline_query(req):
+    _f = _maybe_429()
+    if _f is not None: return _f
     sym = req.query.get("symbol", "XBTUSDTM")
     gran = int(req.query.get("granularity", 15))
     n = 200 if gran == 15 else (150 if gran == 60 else 120)
@@ -102,10 +136,14 @@ async def kline_query(req):
 
 
 async def positions(req):
+    _f = _maybe_429()
+    if _f is not None: return _f
     return web.json_response({"code": "200000", "data": list(POSITIONS.values())})
 
 
 async def orders(req):
+    _f = _maybe_429()
+    if _f is not None: return _f
     body = await req.json()
     oid  = f"mock_{len(ORDERS)}_{int(time.time()*1000)}"
     ORDERS.append({**body, "orderId": oid, "ts": time.time()})
@@ -126,6 +164,9 @@ async def orders(req):
         }
     else:
         POSITIONS.pop(sym, None)
+    if FAULTS["order_no_reply"]:
+        # Cenário C: exchange EXECUTA mas a resposta não chega ao bot
+        raise web.HTTPGatewayTimeout(text="simulated: no reply")
     return web.json_response({"code": "200000", "data": {"orderId": oid}})
 
 
@@ -208,6 +249,7 @@ def make_app():
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/_stats", stats)
     app.router.add_post("/_reset", reset)
+    app.router.add_post("/_faults", set_faults)
     app.router.add_route("*", "/{tail:.*}", catch_all)
     return app
 
