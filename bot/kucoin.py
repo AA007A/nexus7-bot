@@ -747,9 +747,25 @@ class KuCoinClient:
         #
         # idem_key permite ao chamador forçar um OID específico.
         # ══════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════
+        # OBSERVABILIDADE (Fase 7) — GAP ENCONTRADO
+        #
+        # O clientOid era um hash MD5 puro, sem qualquer marca de
+        # origem. Consequência prática, descoberta ao analisar um
+        # print de tela do usuário: é IMPOSSÍVEL, olhando o histórico
+        # de ordens na interface da KuCoin, distinguir uma ordem aberta
+        # pelo bot de uma aberta manualmente pelo usuário. A única
+        # fonte de verdade era o banco de dados interno do bot — que
+        # não é o que aparece na exchange.
+        #
+        # Prefixo fixo torna toda ordem do bot auto-identificável
+        # diretamente na tela "Ordens" da KuCoin (campo clientOid é
+        # visível lá), sem precisar cruzar com logs internos.
+        # ══════════════════════════════════════════════════════════
         _window  = int(time.time() // 60)      # janela de 1 minuto
         _raw     = idem_key or f"{symbol}_{side}_{contracts}_{_window}"
-        _oid     = hashlib.md5(_raw.encode()).hexdigest()[:40]
+        _hash    = hashlib.md5(_raw.encode()).hexdigest()
+        _oid     = f"bgx7-{_hash}"[:40]
 
         # BUG CORRIGIDO: lia os.environ diretamente com default "10", ignorando
         # o valor de config.py. Se LEVERAGE não estivesse setado no Railway,
@@ -823,9 +839,11 @@ class KuCoinClient:
                         f"abortando fallback de leverage para não duplicar"
                     )
                     return {"orderId": "EXISTING_POSITION", "deduped": True}
-                body["clientOid"] = hashlib.md5(
-                    f"{_raw}_{fallback_lev}".encode()
-                ).hexdigest()[:40]
+                body["clientOid"] = (
+                    "bgx7-" + hashlib.md5(
+                        f"{_raw}_{fallback_lev}".encode()
+                    ).hexdigest()
+                )[:40]
                 data     = await self._post("/api/v1/orders", body)
                 order_id = data.get("orderId", "")
                 if order_id:
