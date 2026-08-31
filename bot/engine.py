@@ -2210,8 +2210,20 @@ class TradingEngine:
             # ══════════════════════════════════════════════════════
             _liq = liq.analyze(
                 entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
-                is_long=(sig.direction == "LONG"),
+                is_long=(sig.direction == "LONG"), symbol=sig.symbol,
             )
+            # Fase 5C: se o notional puder ter saído do Tier 1 (MMR
+            # maior que o assumido), a liquidação real fica MAIS PERTO
+            # do que calculamos. Log de auditoria, não bloqueio — não
+            # temos a tabela exata de tiers.
+            _notional_est = qty * sig.entry
+            if _notional_est and liq.notional_exceeds_tier1(_notional_est):
+                log.warning(
+                    f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
+                    f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
+                    f"MMR real pode ser maior, liquidação mais próxima "
+                    f"do que calculado"
+                )
             _liq_pct = _liq.liq_move_pct
             _sl_pct  = _liq.stop_move_pct
 
