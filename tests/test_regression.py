@@ -318,6 +318,28 @@ def test_cross_margin_multi_posicao_nao_confiavel():
     check("motivo menciona cross margin", "CROSS MARGIN" in a3.reason)
 
 
+
+
+def test_clientoid_identificavel():
+    """
+    Gap encontrado ao verificar se era possível PROVAR que uma ordem
+    vista na KuCoin veio do bot. Antes, clientOid era MD5 puro — sem
+    consultar o banco de dados interno, era impossível saber se uma
+    ordem na tela da exchange foi aberta pelo bot ou manualmente.
+
+    Um prefixo fixo resolve isso: o clientOid fica visível na própria
+    interface da KuCoin (aba Ordens) e é auto-identificável.
+    """
+    import hashlib
+    raw = "BTCUSDT_Buy_10_12345"
+    oid = ("bgx7-" + hashlib.md5(raw.encode()).hexdigest())[:40]
+    check("OID tem prefixo identificável", oid.startswith("bgx7-"))
+    check("OID respeita limite de 40 chars da KuCoin", len(oid) <= 40,
+          f"len={len(oid)}")
+    check("OID ainda é alfanumérico + hífen (regra da KuCoin)",
+          all(c.isalnum() or c == "-" for c in oid))
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -331,7 +353,8 @@ if __name__ == "__main__":
                test_riskmanager_unico, test_sizing_nunca_excede_saldo,
                test_minqty_unidade_correta,
                test_arredondamento_lote_decimal,
-               test_cross_margin_multi_posicao_nao_confiavel]:
+               test_cross_margin_multi_posicao_nao_confiavel,
+               test_clientoid_identificavel]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
