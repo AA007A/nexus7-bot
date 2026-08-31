@@ -27,8 +27,31 @@ from typing import Optional, Dict
 
 from bot.logger import log
 
-# ── Parâmetros oficiais (fallback quando a API não informa) ───────
-# XBTUSDTM: Maintenance Margin 0.40% (ficha do contrato na KuCoin)
+# ══════════════════════════════════════════════════════════════════
+# TIERS DE MMR (Fase 5C) — CONFIRMADO na documentação oficial
+#
+# FONTE: kucoin.com/support/26685810193433 (Risk Limit Levels)
+#        + fichas de contrato (kucoin.com/futures/contract/detail/*)
+#
+# "with the BTC perpetual contract (USDT)... Position Size = 300,000
+#  USDT... this would fall under Level 1, where the MMR is 0.4%"
+#
+# CONFIRMADO: Tier 1 do XBTUSDTM tem MMR = 0.40%. Isso bate com o
+# DEFAULT_MMR usado desde a Fase 4 — não era um chute, mas eu não tinha
+# a fonte direta até agora.
+#
+# NÃO CONFIRMADO: o MMR SOBE por tier conforme o valor da posição
+# aumenta ("the maintenance margin rate is 0.5%" em outro exemplo da
+# doc, para posição maior). Os limiares exatos de cada tier e a tabela
+# completa por símbolo exigem o endpoint /api/v1/contracts/risk-limit,
+# que está bloqueado neste ambiente (Fase 5A).
+#
+# Por isso o Tier 1 (0.4%) é usado como fallback SEMPRE que a API não
+# responder — é o cenário mais comum (posições pequenas) e o valor tem
+# fonte primária confirmada. Posições GRANDES terão MMR real maior que
+# este fallback, subestimando o risco de liquidação nesse caso
+# específico. set_mmr_from_api() deve sobrepor assim que disponível.
+# ══════════════════════════════════════════════════════════════════
 DEFAULT_MMR      = float(os.environ.get("DEFAULT_MMR", "0.004"))
 # Taxa de liquidação usada no exemplo oficial da documentação
 LIQUIDATION_FEE  = float(os.environ.get("LIQUIDATION_FEE", "0.0006"))
@@ -59,6 +82,25 @@ def get_mmr(symbol: str) -> tuple:
     if symbol in _MMR_BY_SYMBOL:
         return _MMR_BY_SYMBOL[symbol], True
     return DEFAULT_MMR, False
+
+
+# Acima deste notional, o Tier 1 (0.4%) pode não ser mais válido — a
+# doc cita 300.000 USDT como exemplo do limite do Tier 1 do BTC.
+# Fallback conservador: alerta, não bloqueia (não temos a tabela exata).
+TIER1_NOTIONAL_CEILING = float(
+    os.environ.get("TIER1_NOTIONAL_CEILING_USDT", "300000")
+)
+
+
+def notional_exceeds_tier1(notional_usdt: float) -> bool:
+    """
+    True se o notional pode ter saído do Tier 1 assumido pelo fallback.
+
+    Isso NÃO é uma tabela de tiers real — é um teto conservador citado
+    no exemplo oficial da KuCoin para o BTC. Serve para avisar, não
+    para decidir com precisão.
+    """
+    return notional_usdt > TIER1_NOTIONAL_CEILING
 
 
 @dataclass
