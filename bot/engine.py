@@ -2208,9 +2208,15 @@ class TradingEngine:
             # O stop precisa ficar numa região que NÃO dependa da
             # liquidação para encerrar a posição.
             # ══════════════════════════════════════════════════════
+            # Fase 6: conta real opera em CROSS MARGIN (confirmado por
+            # print de tela do usuário). Com 2+ posições simultâneas, a
+            # margem de manutenção depende da conta inteira — informa
+            # isso ao módulo para que ele se declare não-confiável
+            # nesse cenário, em vez de dar um número falsamente preciso.
             _liq = liq.analyze(
                 entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
                 is_long=(sig.direction == "LONG"), symbol=sig.symbol,
+                n_open_positions=len(self.positions) + 1,   # +1 = esta que abriria
             )
             # Fase 5C: se o notional puder ter saído do Tier 1 (MMR
             # maior que o assumido), a liquidação real fica MAIS PERTO
