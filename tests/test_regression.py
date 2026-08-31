@@ -290,6 +290,34 @@ def test_arredondamento_lote_decimal():
         check(f"float perde lote em {v}/{s} (Decimal={d}, float={f})", d > f)
 
 
+
+
+def test_cross_margin_multi_posicao_nao_confiavel():
+    """
+    Gap encontrado via evidência real (print de tela do usuário):
+    a conta opera em CROSS MARGIN, não Isolated. A fórmula de
+    liquidação foi validada só para o caso de 1 posição — com 2+
+    posições simultâneas em cross, a margem de manutenção depende da
+    conta inteira, o que este módulo não calcula.
+
+    Com 1 posição, cross e isolated convergem (confirmado: fórmula
+    previu 1.55%, KuCoin real mostrou 1.64%, Δ 0.10pp). Com 2+, o
+    resultado deve se declarar não confiável em vez de dar um número
+    falsamente preciso.
+    """
+    from bot.liquidation import analyze
+
+    a1 = analyze(2480.84, 2440.0, 50, True, "ETHUSDT", n_open_positions=1)
+    check("1 posição usa modelo normal", a1.model != "UNRELIABLE_CROSS_MULTI_POSITION")
+
+    a3 = analyze(2480.84, 2440.0, 50, True, "ETHUSDT", n_open_positions=3)
+    check("2+ posições marca resultado como não confiável",
+          a3.model == "UNRELIABLE_CROSS_MULTI_POSITION")
+    check("2+ posições força stop_effective=False (bloqueia)",
+          a3.stop_effective is False)
+    check("motivo menciona cross margin", "CROSS MARGIN" in a3.reason)
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -302,7 +330,8 @@ if __name__ == "__main__":
                test_score_exclui_sem_dados,
                test_riskmanager_unico, test_sizing_nunca_excede_saldo,
                test_minqty_unidade_correta,
-               test_arredondamento_lote_decimal]:
+               test_arredondamento_lote_decimal,
+               test_cross_margin_multi_posicao_nao_confiavel]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
