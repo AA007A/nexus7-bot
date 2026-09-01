@@ -2387,6 +2387,30 @@ class TradingEngine:
                             log.error(f"🚨 {sig.symbol}: falha ao proteger/fechar: {_e}")
                             return
 
+                            # ══════════════════════════════════════════════════
+                    # P0 — CONFIRMAÇÃO DE FILLED (não apenas HTTP 200)
+                    #
+                    # Antes, "orderId recebido" era tratado como sucesso
+                    # definitivo. Agora consulta o status real da ordem
+                    # antes de aceitar o resultado como FILLED.
+                    # ══════════════════════════════════════════════════
+                    _oid_real = _order.get("orderId", "") if _order else ""
+                    _fill_check = await self.client.wait_for_fill(_oid_real)
+                    if not _fill_check["filled"]:
+                        log.error(
+                            f"🚨 {sig.symbol}: orderId={_oid_real} aceito pela "
+                            f"API mas NÃO confirmado como FILLED "
+                            f"(status={_fill_check['status']}, "
+                            f"timeout={_fill_check['timed_out']})"
+                        )
+                        # Não sabemos se há posição real — não assume nada.
+                        # Deixa o guardião de reconciliação (_load_existing_
+                        # positions / IntegrityGuard) resolver no próximo ciclo.
+                        last_exc = RuntimeError(
+                            f"ordem {_oid_real} não confirmada como FILLED"
+                        )
+                        break
+
                     last_exc = None
                     break   # sucesso — sai do loop de retry
                 except Exception as exc:
