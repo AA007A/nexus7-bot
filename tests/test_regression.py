@@ -340,6 +340,52 @@ def test_clientoid_identificavel():
           all(c.isalnum() or c == "-" for c in oid))
 
 
+
+
+def test_confirmacao_filled_nao_apenas_http200():
+    """
+    P0 (Auditoria cirúrgica): _open() tratava HTTP 200 + orderId como
+    sucesso definitivo, sem consultar o status real da ordem. Nenhuma
+    ocorrência de FILLED/filledSize/dealSize existia em bot/kucoin.py.
+
+    bot/order_state.py já definia a máquina de estados correta, mas
+    OrderRegistry nunca era alimentado dentro de _open() — código
+    morto parcial, mesmo padrão de outros achados desta auditoria.
+    """
+    from bot.kucoin import KuCoinClient
+    import inspect
+
+    src = inspect.getsource(KuCoinClient)
+    check("get_order_status existe", "def get_order_status" in src)
+    check("wait_for_fill existe", "def wait_for_fill" in src)
+
+    from bot import engine as E
+    eng_src = inspect.getsource(E)
+    check("_open() chama wait_for_fill antes de aceitar a ordem",
+          "wait_for_fill" in eng_src)
+
+
+def test_paper_trade_nao_afetado_por_confirmacao_filled():
+    """
+    A confirmação de FILLED não pode quebrar o modo PAPER_TRADE nem
+    exigir uma chamada HTTP real quando o orderId é sintético.
+    """
+    import asyncio
+    from bot.kucoin import KuCoinClient
+    import bot.kucoin as K
+
+    async def run():
+        c = KuCoinClient()
+        r1 = await c.get_order_status("paper_12345")
+        check("orderId sintético 'paper_' não faz chamada real",
+              r1.get("_synthetic") is True)
+        r2 = await c.wait_for_fill("paper_12345")
+        check("wait_for_fill resolve instantâneo para paper",
+              r2["filled"] is True and r2["timed_out"] is False)
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -354,7 +400,9 @@ if __name__ == "__main__":
                test_minqty_unidade_correta,
                test_arredondamento_lote_decimal,
                test_cross_margin_multi_posicao_nao_confiavel,
-               test_clientoid_identificavel]:
+               test_clientoid_identificavel,
+               test_confirmacao_filled_nao_apenas_http200,
+               test_paper_trade_nao_afetado_por_confirmacao_filled]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
