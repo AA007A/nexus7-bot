@@ -70,7 +70,10 @@ class ManagedOrder:
     state:      OrderState = OrderState.CREATED
     order_id:   Optional[str] = None
     filled_qty: float = 0.0
+    avg_price:  float = 0.0      # preço médio real de execução (dealValue/dealSize)
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)   # última transição
+    last_source: str  = ""       # "REST" ou "WS" — de onde veio a última atualização
     history:    List[tuple] = field(default_factory=list)
 
     def transition(self, novo: OrderState, **info):
@@ -90,12 +93,16 @@ class ManagedOrder:
 
         anterior = self.state
         self.state = novo
+        self.updated_at = time.time()
+        self.last_source = info.get("source", self.last_source)
         self.history.append((time.time(), anterior.value, novo.value, info))
 
         if "order_id" in info and info["order_id"]:
             self.order_id = info["order_id"]
         if "filled_qty" in info:
             self.filled_qty = float(info["filled_qty"])
+        if "avg_price" in info and info["avg_price"]:
+            self.avg_price = float(info["avg_price"])
 
         log.debug(
             f"📋 {self.symbol} [{self.client_oid[:8]}]: "
@@ -125,10 +132,15 @@ class OrderRegistry:
     """
     Registro de ordens por client_oid — garante idempotência mesmo com
     múltiplos workers ou após restart.
+
+    Também indexado por order_id (Fase 2: correlação primária quando
+    ambos orderId e clientOid estão disponíveis, ex: eventos do WS
+    privado que trazem só orderId).
     """
 
     def __init__(self):
         self._orders: dict = {}
+        self._by_order_id: dict = {}   # order_id -> client_oid
 
     def get_or_create(self, client_oid: str, symbol: str,
                       side: str, qty: float) -> tuple:
@@ -147,6 +159,18 @@ class OrderRegistry:
 
     def get(self, client_oid: str) -> Optional[ManagedOrder]:
         return self._orders.get(client_oid)
+
+    def get_by_order_id(self, order_id: str) -> Optional[ManagedOrder]:
+        """Correlação primária por orderId (Fase 2) — usado pelo WS
+        privado, que identifica eventos por orderId, não client_oid."""
+        coid = self._by_order_id.get(order_id)
+        return self._orders.get(coid) if coid else None
+
+    def index_order_id(self, order_id: str, client_oid: str):
+        """Registra o vínculo order_id -> client_oid assim que a
+        exchange retorna o orderId (dentro de place_order)."""
+        if order_id and client_oid:
+            self._by_order_id[order_id] = client_oid
 
     def open_orders(self, symbol: str = None) -> List[ManagedOrder]:
         return [o for o in self._orders.values()
