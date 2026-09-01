@@ -2439,19 +2439,42 @@ class TradingEngine:
 
                     if _fill_check["filled"]:
                         _st = _fill_check.get("status", {}) or {}
+                        _fsz = float(_st.get("filledSize", 0) or 0)
+                        _dsz = float(_st.get("dealSize", 0) or 0)
+                        _dval = float(_st.get("dealValue", 0) or 0)
+                        _avg_px = (_dval / _dsz) if _dsz > 0 else 0.0
                         try:
                             _managed.transition(
-                                OrderState.FILLED,
-                                filled_qty=float(_st.get("filledSize", 0) or 0),
-                                avg_price=(
-                                    float(_st["dealValue"]) / float(_st["dealSize"])
-                                    if float(_st.get("dealSize", 0) or 0) > 0
-                                    else 0.0
-                                ),
-                                source="REST",
+                                OrderState.FILLED, filled_qty=_fsz,
+                                avg_price=_avg_px, source="REST",
                             )
                         except InvalidTransition as _ie:
                             log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+
+                        # GAP DE OBSERVABILIDADE CORRIGIDO — não existia
+                        # log de sucesso do FILLED via REST. A Fase 8 do
+                        # protocolo de prova E2E exige demonstrar
+                        # explicitamente "FILLED source = REST" com os
+                        # valores de origem (filledSize/dealSize/
+                        # dealValue) para correlação com o WS depois.
+                        #
+                        # BUG CORRIGIDO NESTA MESMA SESSÃO: usava _idem
+                        # (chave interna pré-hash) em vez do clientOid
+                        # REAL enviado à exchange (_order["clientOid"],
+                        # com o prefixo bgx7-). Capturado em teste E2E:
+                        # os logs [ORDER] e [FILLED] mostravam valores
+                        # DIFERENTES para a mesma ordem, quebrando a
+                        # correlação exigida pelo protocolo.
+                        _oid_correlacao = (
+                            _order.get("clientOid", _idem) if _order else _idem
+                        )
+                        log.info(
+                            f"✅ [FILLED] source=REST "
+                            f"clientOid={_oid_correlacao} "
+                            f"orderId={_oid_real} symbol={sig.symbol} "
+                            f"filledSize={_fsz} dealSize={_dsz} "
+                            f"dealValue={_dval} avgPrice={_avg_px:.8f}"
+                        )
 
                     if not _fill_check["filled"]:
                         log.error(
