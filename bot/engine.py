@@ -343,6 +343,29 @@ class TradingEngine:
         self._trade_ids:  Dict[str, int] = {}   # symbol → DB trade id
         self.instruments: dict = {}
         self.viable_symbols: List[str] = []
+        # ══════════════════════════════════════════════════════════
+        # P0 — connected=True não pode significar "operacional" quando
+        # viable_symbols está vazio.
+        #
+        # CAUSA RAIZ (auditoria): _filter_viable_symbols() era chamado
+        # UMA ÚNICA VEZ dentro de _connect(), sem checar sucesso, antes
+        # de self.connected=True. Se /api/v1/contracts/active falhasse
+        # naquele instante específico do boot (rede, rate limit, saldo
+        # ainda não propagado), viable_symbols ficava [] e NUNCA MAIS
+        # era re-tentado — connected=True desliga o único gatilho de
+        # reconexão do loop principal (`if not self.connected: ...`).
+        #
+        # Resultado reproduzido em teste: o bot ficava "conectado" e
+        # "ativo" para sempre, sem nenhum par para escanear, exigindo
+        # restart manual mesmo que a KuCoin voltasse a responder
+        # segundos depois.
+        #
+        # FIX: retry com backoff PRÓPRIO para viable_symbols, rodando
+        # a cada ciclo do loop principal (não depende de connected virar
+        # False). Timestamps abaixo controlam esse backoff.
+        # ══════════════════════════════════════════════════════════
+        self._viable_retry_next_ts: float = 0.0
+        self._viable_retry_attempt: int   = 0
         self.connected    = False
         self.active       = False
         self._running     = False
@@ -417,7 +440,8 @@ class TradingEngine:
                     log.info(
                         f"💓 Loop #{_ciclos} | connected={self.connected} "
                         f"active={self.active} pares={len(self.viable_symbols)} "
-                        f"posições={len(self.positions)}"
+                        f"posições={len(self.positions)} "
+                        f"retry_viable={self._viable_retry_attempt}"
                     )
 
                 if not self.connected:
@@ -458,7 +482,31 @@ class TradingEngine:
                         # essa roda antes, sob o _pos_lock.
                         # ══════════════════════════════════════════
                         await self.integrity.assess(self.client, self)
-                        if not self.integrity.can_open_new():
+
+                        # ══════════════════════════════════════════
+                        # P0 — GATE viable_symbols=[] BLOQUEIA ORDENS
+                        #
+                        # Critério de aceite: viable_symbols=[] NUNCA
+                        # pode resultar em tentativa de abertura de
+                        # posição, independente do estado de
+                        # connected/active/integrity.
+                        #
+                        # _ensure_viable_symbols() faz o retry com
+                        # backoff (recarregando instrumentos e preços)
+                        # e retorna True assim que houver >=1 par
+                        # viável — sem exigir restart manual nem
+                        # depender de connected virar False.
+                        # ══════════════════════════════════════════
+                        _tem_pares = await self._ensure_viable_symbols()
+
+                        if not _tem_pares:
+                            log.warning(
+                                f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
+                                f"nenhuma ordem será aberta até a "
+                                f"recuperação automática "
+                                f"(tentativa #{self._viable_retry_attempt})"
+                            )
+                        elif not self.integrity.can_open_new():
                             log.warning(
                                 f"🚫 ENTRADAS BLOQUEADAS: "
                                 f"{self.integrity.block_reason()}"
@@ -789,7 +837,68 @@ class TradingEngine:
             log.error(f"_connect: {e}")
             self.connected = False
 
-    async def _filter_viable_symbols(self):
+    async def _ensure_viable_symbols(self) -> bool:
+        """
+        Retry automático com backoff quando viable_symbols está vazio.
+
+        Chamado a CADA CICLO do loop principal (não depende de
+        self.connected virar False, que era o único gatilho de retry
+        antes desta correção — e nunca disparava porque connected=True
+        é setado incondicionalmente em _connect()).
+
+        Recarrega instrumentos E preços a cada tentativa: uma falha em
+        load_instruments() no boot não se corrige sozinha só rodando
+        _filter_viable_symbols() de novo com o cache antigo (vazio).
+
+        Retorna True se há pelo menos 1 par viável (imediatamente, ou
+        após uma tentativa de recuperação bem-sucedida nesta chamada).
+        """
+        if self.viable_symbols:
+            # Já operacional — reseta o backoff para a próxima falha
+            # começar do zero, e não acumular de uma degradação antiga.
+            if self._viable_retry_attempt > 0:
+                log.info(
+                    f"✅ RECOVERY: viable_symbols recuperado "
+                    f"({len(self.viable_symbols)} pares) após "
+                    f"{self._viable_retry_attempt} tentativa(s) — "
+                    f"voltando ao estado operacional normal"
+                )
+            self._viable_retry_attempt = 0
+            self._viable_retry_next_ts = 0.0
+            return True
+
+        now = time.time()
+        if now < self._viable_retry_next_ts:
+            return False   # ainda dentro da janela de backoff — não tenta agora
+
+        self._viable_retry_attempt += 1
+        _backoff = min(300.0, 5.0 * (2 ** min(self._viable_retry_attempt - 1, 6)))
+        self._viable_retry_next_ts = now + _backoff
+
+        log.warning(
+            f"🔄 RETRY_VIABLE_SYMBOLS: tentativa #{self._viable_retry_attempt} "
+            f"— recarregando instrumentos e preços "
+            f"(próxima tentativa em {_backoff:.0f}s se esta falhar)"
+        )
+
+        try:
+            await self.client.load_instruments()
+            self.instruments = self.client.get_instruments()
+        except Exception as e:
+            log.error(f"RETRY_VIABLE_SYMBOLS: load_instruments falhou: {e}")
+
+        ok = await self._filter_viable_symbols()
+        if ok:
+            log.info(
+                f"✅ RECOVERY: viable_symbols recuperado "
+                f"({len(self.viable_symbols)} pares) na tentativa "
+                f"#{self._viable_retry_attempt} — bot volta a operar"
+            )
+            self._viable_retry_attempt = 0
+            self._viable_retry_next_ts = 0.0
+        return ok
+
+    async def _filter_viable_symbols(self) -> bool:
         """
         BUG CORRIGIDO: o custo mínimo era calculado como minQty × price,
         tratando lotSize como quantidade na moeda base. Na KuCoin Futures
@@ -802,11 +911,44 @@ class TradingEngine:
         — por isso o bot analisava basicamente SOLUSDT.
 
         Fórmula correta: min_cost = lotSize × multiplier × price
+
+        RETORNA True se pelo menos 1 par ficou viável, False caso
+        contrário — usado pelo retry automático em _ensure_viable_symbols
+        para decidir se deve tentar de novo.
         """
         try:
-            tickers   = await self.client.get_all_tickers()
+            # ══════════════════════════════════════════════════════
+            # OBSERVABILIDADE (auditoria de viable_symbols=[]) — cada
+            # causa raiz tem uma assinatura de log DISTINTA, para que
+            # o operador saiba imediatamente se o problema é:
+            #   instrumentos indisponíveis / tickers indisponíveis /
+            #   saldo insuficiente / zero pares viáveis
+            # sem precisar adivinhar a partir de "0/12 pares viáveis".
+            # ══════════════════════════════════════════════════════
+            if not self.instruments:
+                log.warning(
+                    "⛔ INSTRUMENTS_UNAVAILABLE: self.instruments vazio — "
+                    "load_instruments() não populou nenhum símbolo "
+                    "(provável falha de /api/v1/contracts/active)"
+                )
+
+            tickers = await self.client.get_all_tickers()
+            if not tickers:
+                log.warning(
+                    "⛔ TICKERS_UNAVAILABLE: get_all_tickers() retornou "
+                    "vazio — preços indisponíveis via REST, tentando "
+                    "fallback por cache do WS símbolo a símbolo"
+                )
             price_map = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
             buying_power = self.risk.balance * cfg.LEVERAGE
+
+            if buying_power <= 0:
+                log.warning(
+                    f"⛔ INSUFFICIENT_BUYING_POWER: poder de compra "
+                    f"${buying_power:.2f} (saldo=${self.risk.balance:.2f} "
+                    f"× {cfg.LEVERAGE}x) — nenhum par poderá ser viável"
+                )
+
             viable, rejected = [], []
 
             for sym in cfg.SYMBOLS:
@@ -836,15 +978,26 @@ class TradingEngine:
                     rejected.append(f"{sym}(min ${min_cost:.2f})")
 
             self.viable_symbols = viable
-            log.info(
-                f"✅ {len(viable)}/{len(cfg.SYMBOLS)} pares viáveis "
-                f"(poder=${buying_power:.2f}): {', '.join(viable)}"
-            )
+
+            if viable:
+                log.info(
+                    f"✅ {len(viable)}/{len(cfg.SYMBOLS)} pares viáveis "
+                    f"(poder=${buying_power:.2f}): {', '.join(viable)}"
+                )
+            else:
+                log.error(
+                    f"⛔ ZERO_VIABLE_SYMBOLS: 0/{len(cfg.SYMBOLS)} pares "
+                    f"viáveis (poder=${buying_power:.2f}) — nenhuma ordem "
+                    f"pode ser aberta até que isto seja resolvido"
+                )
             if rejected:
                 log.info(f"⛔ Rejeitados: {', '.join(rejected)}")
+
+            return len(viable) > 0
         except Exception as e:
             log.error(f"_filter_viable: {e}")
             self.viable_symbols = list(cfg.SYMBOLS)
+            return True   # fallback conservador preexistente — mantido
 
     # ── Sincronização em tempo real com a exchange ─────────────
     async def _sync_positions(self):
