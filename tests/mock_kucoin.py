@@ -71,6 +71,7 @@ POSITIONS = {}       # posições abertas
 # ── FAULT INJECTOR (Fase 4G) ──────────────────────────────────────
 # Permite ao teste forçar falhas específicas sem alterar o bot.
 FAULTS = {
+    "order_never_fills": False,  # ordem aceita mas isActive permanece True
     "rate_limit_next": 0,    # próximas N respostas retornam 429
     "ws_drop_after":   0,    # derruba o WS após N mensagens
     "ws_duplicate":    False,# reenvia cada evento duas vezes
@@ -221,9 +222,18 @@ async def order_status(req):
     o = next((x for x in ORDERS if x.get("orderId") == order_id), None)
     if not o:
         return web.json_response({"code": "100001", "msg": "order not found"}, status=404)
+    if FAULTS.get("order_never_fills"):
+        return web.json_response({"code": "200000", "data": {
+            "id": order_id, "isActive": True,
+            "filledSize": "0", "dealSize": "0", "dealValue": "0",
+            "cancelExist": False, "status": "open",
+        }})
+    _size = float(o.get("size", "0") or 0)
+    _px   = 100.0
     return web.json_response({"code": "200000", "data": {
         "id": order_id, "isActive": False,
-        "filledSize": o.get("size", "0"), "dealSize": o.get("size", "0"),
+        "filledSize": str(_size), "dealSize": str(_size),
+        "dealValue": str(_size * _px),
         "cancelExist": False, "status": "done",
     }})
 
