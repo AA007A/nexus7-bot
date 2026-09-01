@@ -756,6 +756,18 @@ class TradingEngine:
                 log.warning("⏱️ start_websocket excedeu 10s — seguindo")
             except Exception as e:
                 log.error(f"start_websocket: {e}")
+
+            # WS privado de ordens: confirmação ADICIONAL, não única.
+            # Fecha o gap PRIVATE_WS_RECONCILIATION (FAIL na auditoria
+            # anterior). wait_for_fill() via REST continua rodando em
+            # _open() independentemente — o WS acelera a detecção e
+            # mantém o OrderRegistry atualizado, mas nunca é a única
+            # fonte que decide se uma ordem está FILLED.
+            try:
+                self.client.start_private_websocket(self.orders, ws_symbols)
+            except Exception as e:
+                log.error(f"start_private_websocket: {e}")
+
             log.info(f"✅ Conectado! ${bal:.4f} USDT | {len(self.viable_symbols)} pares | max {cfg.MAX_POSITIONS} posições | score >= {cfg.MIN_ENTRY_SCORE}")
 
             # Telegram em background: uma API lenta não pode atrasar o scan.
@@ -2347,12 +2359,40 @@ class TradingEngine:
                         f"qty_step={qty_step} tick={tick_size} "
                         f"notional={qty * sig.entry:.4f} balance={self.risk.balance:.4f}"
                     )
+
+                    # ══════════════════════════════════════════════════
+                    # CONECTA O OrderRegistry EXISTENTE AO FLUXO REAL
+                    #
+                    # Auditoria anterior confirmou por grep: self.orders
+                    # (OrderRegistry) era instanciado no __init__ mas
+                    # NUNCA chamado dentro de _open() — máquina de
+                    # estados existia sem uso. Corrigido aqui.
+                    # ══════════════════════════════════════════════════
+                    _managed, _ = self.orders.get_or_create(
+                        _idem, sig.symbol, side, qty
+                    )
+                    try:
+                        _managed.transition(OrderState.SUBMITTING, source="REST")
+                    except InvalidTransition as _ie:
+                        log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+
                     _order = await self.client.place_order(
                         symbol=sig.symbol, side=side, qty=qty,
                         sl=sig.sl, tp=sig.tp,
                         instruments=self.instruments,
                         idem_key=_idem,   # P0: mesmo OID em todas as tentativas
                     )
+
+                    _oid_for_registry = _order.get("orderId", "") if _order else ""
+                    if _oid_for_registry:
+                        self.orders.index_order_id(_oid_for_registry, _idem)
+                        try:
+                            _managed.transition(
+                                OrderState.SUBMITTED,
+                                order_id=_oid_for_registry, source="REST",
+                            )
+                        except InvalidTransition as _ie:
+                            log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
 
                     # ── PROTEÇÃO CRÍTICA: posição sem SL não pode existir ──
                     # Com 50x, liquidação ocorre a ~2% de movimento adverso.
@@ -2396,6 +2436,23 @@ class TradingEngine:
                     # ══════════════════════════════════════════════════
                     _oid_real = _order.get("orderId", "") if _order else ""
                     _fill_check = await self.client.wait_for_fill(_oid_real)
+
+                    if _fill_check["filled"]:
+                        _st = _fill_check.get("status", {}) or {}
+                        try:
+                            _managed.transition(
+                                OrderState.FILLED,
+                                filled_qty=float(_st.get("filledSize", 0) or 0),
+                                avg_price=(
+                                    float(_st["dealValue"]) / float(_st["dealSize"])
+                                    if float(_st.get("dealSize", 0) or 0) > 0
+                                    else 0.0
+                                ),
+                                source="REST",
+                            )
+                        except InvalidTransition as _ie:
+                            log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+
                     if not _fill_check["filled"]:
                         log.error(
                             f"🚨 {sig.symbol}: orderId={_oid_real} aceito pela "
