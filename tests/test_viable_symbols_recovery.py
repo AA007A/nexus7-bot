@@ -254,6 +254,48 @@ async def test_G_backoff_nao_agressivo():
     await _set_fault(contracts_fail_next=0)
 
 
+
+
+async def test_H_open_tem_defesa_propria_contra_symbol_fora_da_lista():
+    """
+    TESTE H (auditoria adversarial): _open() chamado DIRETAMENTE para
+    um símbolo fora de viable_symbols deve ser bloqueado por uma
+    guarda PRÓPRIA dentro de _open(), não apenas pela estrutura de
+    chamadas (que hoje só tem 1 call site, mas isso é um single point
+    of failure caso um segundo call site seja adicionado no futuro).
+
+    Encontrado por ataque adversarial: antes desta guarda, _open()
+    chamado com Risk Engine inicializado e sig.symbol fora de
+    viable_symbols ABRIA a ordem normalmente (0 proteção interna).
+    """
+    _reset_mock()
+
+    from bot.kucoin import KuCoinClient
+    from bot.engine import TradingEngine, Signal
+    c, e = await _novo_engine()
+    await c.load_instruments()
+    await e._connect()   # Risk Engine inicializado de verdade
+
+    check("viable_symbols populado após connect", len(e.viable_symbols) > 0)
+
+    # Força o símbolo para FORA da lista viável
+    e.viable_symbols = [s for s in e.viable_symbols if s != "DOGEUSDT"]
+    if "DOGEUSDT" in e.viable_symbols:
+        e.viable_symbols.remove("DOGEUSDT")
+
+    sig = Signal(symbol="DOGEUSDT", direction="LONG", confidence=80,
+                 entry=0.19, sl=0.188, tp=0.20, score=80,
+                 expected_pnl=1.0, reason="teste defesa em profundidade")
+
+    import tests.mock_kucoin as MK
+    MK.ORDERS.clear()
+    await e._open(sig)
+    check("_open() bloqueia símbolo fora de viable_symbols (defesa própria)",
+          len(MK.ORDERS) == 0, f"ordens={len(MK.ORDERS)}")
+
+    await c.close()
+
+
 async def _run_all():
     global _P, _F
     from aiohttp import web
@@ -272,6 +314,7 @@ async def _run_all():
         test_E_nao_chama_open,
         test_F_recovery_nao_duplica_ordem,
         test_G_backoff_nao_agressivo,
+        test_H_open_tem_defesa_propria_contra_symbol_fora_da_lista,
     ]
     for t in testes:
         print(f"\n{t.__name__}:")
