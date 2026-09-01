@@ -78,6 +78,8 @@ FAULTS = {
     "ws_out_of_order": False,# inverte a ordem dos candles
     "ws_no_pong":      False,# ignora pings (heartbeat failure)
     "order_no_reply":  False,# executa a ordem mas não responde
+    "contracts_fail_next": 0,  # próximas N chamadas de /contracts/active falham
+    "balance_override": None, # se setado, sobrepõe availableBalance
 }
 
 
@@ -99,6 +101,9 @@ def _maybe_429():
 async def contracts_active(req):
     _f = _maybe_429()
     if _f is not None: return _f
+    if FAULTS["contracts_fail_next"] > 0:
+        FAULTS["contracts_fail_next"] -= 1
+        return web.json_response({"code": "500000", "msg": "simulated failure"})
     data = []
     for s in SYMBOLS:
         data.append({
@@ -116,8 +121,11 @@ async def contracts_active(req):
 async def account_overview(req):
     _f = _maybe_429()
     if _f is not None: return _f
+    _bal = FAULTS["balance_override"]
+    if _bal is None:
+        _bal = 100.0
     return web.json_response({"code": "200000", "data": {
-        "accountEquity": 100.0, "availableBalance": 100.0,
+        "accountEquity": _bal, "availableBalance": _bal,
         "currency": "USDT",
     }})
 
@@ -212,6 +220,13 @@ async def stats(req):
 
 async def reset(req):
     ORDERS.clear(); STOPS.clear(); POSITIONS.clear()
+    FAULTS.update({
+        "order_never_fills": False, "rate_limit_next": 0,
+        "ws_drop_after": 0, "ws_duplicate": False,
+        "ws_out_of_order": False, "ws_no_pong": False,
+        "order_no_reply": False, "contracts_fail_next": 0,
+        "balance_override": None,
+    })
     return web.json_response({"ok": True})
 
 
