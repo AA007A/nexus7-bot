@@ -24,6 +24,7 @@ O check é barato (~200ms) e não depende de rede.
 import ast
 import builtins
 import os
+import re
 import sys
 from typing import Dict, List
 
@@ -313,6 +314,61 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
     return out
 
 
+
+def check_orphan_modules(paths: List[str]) -> List[str]:
+    """
+    Detecta módulos .py no pacote que não são importados por NENHUM
+    outro arquivo do projeto (nem por main.py).
+
+    Motivação real: bot/bybit.py (510 linhas) permaneceu no repositório
+    por meses após a migração para KuCoin, sem ser importado por nada.
+    Código morto não quebra a execução, mas aumenta a superfície de
+    confusão — foi a origem indireta de vários "resíduos Bybit"
+    encontrados em auditorias anteriores (nomes de variável, comentários
+    e padrões copiados do arquivo morto para o código ativo).
+    """
+    issues = []
+    modulos = {}
+    for p in paths:
+        base = os.path.basename(p)
+        # main.py é o ENTRYPOINT — executado, não importado por nada
+        # dentro do próprio projeto. Falso positivo óbvio sem esta
+        # exclusão (descoberto ao rodar este check pela primeira vez).
+        if base in ("__init__.py", "main.py"):
+            continue
+        modulos[base[:-3]] = p
+
+    if not modulos:
+        return issues
+
+    todo_codigo = ""
+    for p in paths:
+        try:
+            todo_codigo += open(p, encoding="utf-8").read() + "\n"
+        except Exception:
+            continue
+
+    for nome, caminho in modulos.items():
+        # Procura "import bot.X" ou "from bot.X" ou "from bot import ... X"
+        padrao = rf"\bbot\.{re.escape(nome)}\b|\bimport\s+{re.escape(nome)}\b"
+        ocorrencias = len(re.findall(padrao, todo_codigo))
+        # 1 ocorrência = só a própria definição do módulo não conta;
+        # como concatenamos TODOS os arquivos, o próprio arquivo bybit.py
+        # não se auto-referencia por esse padrão, então >0 já indica uso.
+        if ocorrencias == 0:
+            linhas = todo_codigo.count("\n")
+            try:
+                tam = sum(1 for _ in open(caminho, encoding="utf-8"))
+            except Exception:
+                tam = 0
+            issues.append(
+                f"{os.path.basename(caminho)} ({tam} linhas): não é "
+                f"importado por nenhum outro módulo do projeto — "
+                f"código morto"
+            )
+    return issues
+
+
 def check_config_sanity() -> List[str]:
     """
     Combinações de parâmetros matematicamente impossíveis, que só
@@ -381,6 +437,7 @@ def run_selfcheck(verbose: bool = True) -> Dict[str, list]:
     critical += check_missing_self_attrs(files)
 
     warning  = []
+    warning += check_orphan_modules(files)
     warning += check_bare_except(files)
     warning += check_config_sanity()
     silent    = check_silent_excepts(files)
