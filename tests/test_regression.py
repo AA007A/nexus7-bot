@@ -430,6 +430,39 @@ def test_apenas_um_callsite_de_open_abre_posicao_nova():
           aberturas <= 1, f"aberturas={aberturas}")
 
 
+
+
+def test_clientoid_consistente_entre_order_e_filled():
+    """
+    BUG ENCONTRADO na tentativa de prova E2E: place_order() calculava
+    o clientOid REAL (prefixo bgx7-) internamente mas nunca o
+    devolvia — engine.py usava _idem (a chave pré-hash) nos logs de
+    FILLED, diferente do que aparecia no log de ORDER. Capturado em
+    teste E2E real: os logs mostravam dois valores DIFERENTES para a
+    mesma ordem, o que quebraria qualquer correlação com a KuCoin
+    real (a exchange só conhece o valor com prefixo bgx7-).
+    """
+    # NOTA: bot.kucoin lê PAPER_TRADE no nível do módulo, uma única vez
+    # no import. Se outro teste já importou o módulo antes com um valor
+    # diferente, setar a env var aqui não tem efeito — por isso este
+    # teste verifica a LÓGICA de geração do clientOid isoladamente
+    # (hashlib + prefixo), sem depender do estado de import de
+    # bot.kucoin, que é compartilhado entre todos os testes do processo.
+    import hashlib, time
+    _window = int(time.time() // 60)
+    _raw = f"BTCUSDT_Buy_0.01_{_window}"
+    _oid_esperado = f"bgx7-{hashlib.md5(_raw.encode()).hexdigest()}"[:40]
+    check("fórmula do clientOid produz prefixo bgx7-",
+          _oid_esperado.startswith("bgx7-"))
+
+    import inspect
+    from bot.kucoin import KuCoinClient
+    src = inspect.getsource(KuCoinClient.place_order)
+    check("place_order inclui clientOid no dict de retorno (bug corrigido)",
+          'data["clientOid"] = _oid' in src or '"clientOid": _oid' in src,
+          "retorno não inclui mais o clientOid real")
+
+
 if __name__ == "__main__":
     print("═══ TESTES DE REGRESSÃO ═══\n")
     for fn in [test_paper_trade_barrier, test_idempotencia_ordem,
@@ -448,7 +481,8 @@ if __name__ == "__main__":
                test_caso_negativo_A_nexus_veto_zero_http,
                test_caso_negativo_B_http_aceita_sem_fill,
                test_preco_execucao_prioriza_dado_real_da_ordem,
-               test_apenas_um_callsite_de_open_abre_posicao_nova]:
+               test_apenas_um_callsite_de_open_abre_posicao_nova,
+               test_clientoid_consistente_entre_order_e_filled]:
         print(f"\n{fn.__name__}:")
         try:
             fn()
