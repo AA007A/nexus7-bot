@@ -721,7 +721,16 @@ class KuCoinClient:
         """
         if PAPER_TRADE:
             log.info(f"[PAPER] {side} {qty} {symbol} SL={sl} TP={tp}")
-            return {"orderId": f"paper_{int(time.time()*1000)}"}
+            # clientOid consistente com o caminho real: mesmo formato
+            # (prefixo bgx7- + hash), calculado sobre qty pois contracts
+            # ainda não existe neste ponto do fluxo (round_qty é chamado
+            # depois). Suficiente em PAPER_TRADE pois não há correlação
+            # com uma ordem real a preservar.
+            _window_paper = int(time.time() // 60)
+            _raw_paper = idem_key or f"{symbol}_{side}_{qty}_{_window_paper}"
+            _oid_paper = f"bgx7-{hashlib.md5(_raw_paper.encode()).hexdigest()}"[:40]
+            return {"orderId": f"paper_{int(time.time()*1000)}",
+                    "clientOid": _oid_paper}
 
         if not API_KEY:
             log.warning("place_order: KUCOIN_API_KEY não configurado")
@@ -852,9 +861,21 @@ class KuCoinClient:
                     break
 
         if order_id:
+            # ══════════════════════════════════════════════════════
+            # GAP DE OBSERVABILIDADE CORRIGIDO
+            #
+            # clientOid nunca aparecia junto do orderId no log. Isso
+            # impedia a correlação clientOid → orderId exigida pela
+            # Fase 5 do protocolo de prova E2E: sem os dois na mesma
+            # linha, não dá para provar visualmente nos logs do
+            # Railway que "esta ordem específica do bot" (identificada
+            # pelo prefixo bgx7-) é a mesma que aparece na KuCoin com
+            # este orderId.
+            # ══════════════════════════════════════════════════════
             log.info(
-                f"📤 Ordem {side} {contracts} contratos {symbol} "
-                f"@ {body['leverage']}x → orderId={order_id}"
+                f"📤 [ORDER] clientOid={_oid} orderId={order_id} "
+                f"symbol={symbol} side={side} qty={contracts} "
+                f"leverage={body['leverage']}x"
             )
 
             # ── Anexa SL/TP à POSIÇÃO (endpoint correto da KuCoin) ────
@@ -875,6 +896,22 @@ class KuCoinClient:
                     )
         else:
             log.error(f"❌ Ordem {symbol} rejeitada em todas as tentativas")
+
+        # ══════════════════════════════════════════════════════════
+        # BUG CORRIGIDO — clientOid REAL nunca era devolvido ao chamador
+        #
+        # engine.py usava _idem (a chave pré-hash, ex: "SOLUSDT_Buy_
+        # 18.7_29804709") como se fosse o clientOid — mas o clientOid
+        # REALMENTE enviado à KuCoin é _oid ("bgx7-<hash md5>"), gerado
+        # aqui dentro e nunca propagado de volta.
+        #
+        # Consequência prática, capturada em teste E2E nesta sessão:
+        # o log [ORDER] mostrava um clientOid diferente do log [FILLED]
+        # para a MESMA ordem — quebrando exatamente a correlação que a
+        # prova E2E do protocolo exige (Fase 5/7/12).
+        # ══════════════════════════════════════════════════════════
+        if isinstance(data, dict):
+            data["clientOid"] = _oid
         return data
 
     async def _position_exists(self, symbol: str) -> bool:
@@ -1678,8 +1715,11 @@ class KuCoinClient:
                     source="WS",
                 )
                 log.info(
-                    f"✅ WS privado: {mo.symbol} FILLED via evento "
-                    f"(orderId={order_id}, filled={filled})"
+                    f"✅ [FILLED] source=PRIVATE_WS "
+                    f"clientOid={mo.client_oid} orderId={order_id} "
+                    f"symbol={mo.symbol} filledSize={filled} "
+                    f"matchPrice={match_px} topic=/contractMarket/"
+                    f"tradeOrders:{data.get('symbol','?')}"
                 )
             elif _type == "match":
                 mo.transition(
