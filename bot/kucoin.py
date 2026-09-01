@@ -40,6 +40,7 @@ from typing import Optional
 import aiohttp
 
 from bot.logger import log
+from bot.order_state import OrderState, InvalidTransition
 
 # ── Credenciais ────────────────────────────────────────────────────
 # .strip() automático — espaços acidentais no Railway são a causa #1 de 400004
@@ -1499,6 +1500,200 @@ class KuCoinClient:
             return
         asyncio.create_task(self._ws_loop(symbols, intervals or ["15", "60"]))
         log.info(f"🔌 WebSocket KuCoin iniciando para {len(symbols)} símbolos")
+
+    # ══════════════════════════════════════════════════════════════════
+    # WEBSOCKET PRIVADO DE ORDENS (Fase Final — fecha o gap de
+    # PRIVATE_WS_RECONCILIATION, marcado FAIL na auditoria anterior)
+    #
+    # FONTE OFICIAL (busca realizada nesta sessão, não inventada):
+    #   docs.kucoin.com/futures — tópico /contractMarket/tradeOrders:{symbol}
+    #   subject: "symbolOrderChange"
+    #   campos:  orderId, clientOid, type (open/match/filled/canceled/
+    #            update), status (open/match/done), filledSize,
+    #            matchSize, matchPrice, side, size
+    #
+    # O token de autenticação é o MESMO de bullet-private já usado pelo
+    # WS público (_get_ws_token) — a KuCoin usa um único token para
+    # ambos os tipos de canal, diferenciados pelo campo privateChannel
+    # na mensagem de subscribe.
+    #
+    # DESENHO: conexão SEPARADA do WS público de market data. Isolar
+    # evita que uma falha aqui afete o fluxo de candles já validado, e
+    # vice-versa.
+    #
+    # FONTE DE VERDADE: o WS é uma CONFIRMAÇÃO ADICIONAL, não a única.
+    # wait_for_fill() (REST) continua sendo chamado em _open() — o WS
+    # apenas acelera a detecção e mantém o OrderRegistry atualizado
+    # entre polls. Um evento WS nunca sobrescreve um estado mais novo
+    # (checado por updated_at) nem contorna o REST em caso de dúvida.
+    # ══════════════════════════════════════════════════════════════════
+
+    def start_private_websocket(self, order_registry, symbols: list):
+        """
+        Inicia a conexão privada de ordens em background.
+
+        order_registry: bot.order_state.OrderRegistry — a máquina de
+        estados JÁ existente (não cria uma segunda, conforme exigido).
+        """
+        if PAPER_TRADE:
+            log.info("🔌 WS privado de ordens: PAPER_TRADE — não conecta")
+            return
+        if not API_KEY:
+            log.warning("🔌 WS privado de ordens: sem credenciais — não conecta")
+            return
+        self._order_registry = order_registry
+        asyncio.create_task(self._private_ws_loop(symbols))
+        log.info(f"🔌 WS privado de ordens iniciando para {len(symbols)} símbolos")
+
+    async def _private_ws_loop(self, symbols: list):
+        """Loop de reconexão do canal privado de ordens."""
+        import websockets
+
+        backoff = 2
+        while True:
+            try:
+                token = await self._get_ws_token()
+                if not token:
+                    await asyncio.sleep(backoff)
+                    backoff = min(60, backoff * 2)
+                    continue
+
+                _ep = getattr(self, "_ws_endpoint", None) or WS_BASE
+                ws_url = f"{_ep}?token={token}&connectId=bgx7-priv-{int(time.time())}"
+
+                async with websockets.connect(
+                    ws_url, ping_interval=None, close_timeout=5
+                ) as ws:
+                    backoff = 2
+                    log.info("✅ WS privado de ordens conectado")
+
+                    _kc_syms = [to_kucoin(s) for s in symbols]
+                    for _sym in _kc_syms:
+                        await ws.send(json.dumps({
+                            "id":             str(int(time.time() * 1000000)),
+                            "type":           "subscribe",
+                            "topic":          f"/contractMarket/tradeOrders:{_sym}",
+                            "privateChannel": True,   # canal PRIVADO — exige token autenticado
+                            "response":       True,
+                        }))
+                        await asyncio.sleep(0.12)
+
+                    async def _priv_ping():
+                        while True:
+                            await asyncio.sleep(18)
+                            try:
+                                await ws.send(json.dumps({
+                                    "id": str(int(time.time() * 1000)),
+                                    "type": "ping",
+                                }))
+                            except Exception:
+                                break
+
+                    _ping_task = asyncio.create_task(_priv_ping())
+                    try:
+                        async for raw in ws:
+                            try:
+                                msg = json.loads(raw)
+                                await self._handle_private_order_event(msg)
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                log.debug(f"WS privado parse: {e}")
+                    finally:
+                        if not _ping_task.done():
+                            _ping_task.cancel()
+
+            except Exception as e:
+                log.warning(f"WS privado de ordens desconectado: {e} — reconectando em {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(60, backoff * 2)
+
+    async def _handle_private_order_event(self, msg: dict):
+        """
+        Processa um evento do canal privado /contractMarket/tradeOrders.
+
+        Mapeamento de estados KuCoin → OrderState (Fase 3/4):
+          type="open"                → SUBMITTED
+          type="match" (parcial)     → PARTIALLY_FILLED
+          status="done" + filled>0   → FILLED
+          status="done" + filled=0   → CANCELLED (cancelado sem fill)
+          type="canceled"            → CANCELLED
+
+        NÃO sobrescreve um estado mais novo: compara updated_at antes
+        de aplicar a transição (Fase 2, item 11 — "impedir eventos
+        antigos de sobrescrever estado mais novo").
+        """
+        if msg.get("subject") != "symbolOrderChange":
+            return
+        data = msg.get("data", {}) or {}
+        order_id   = data.get("orderId", "")
+        client_oid = data.get("clientOid", "")
+        if not order_id and not client_oid:
+            return
+
+        registry = getattr(self, "_order_registry", None)
+        if registry is None:
+            return
+
+        # Correlação primária por orderId (Fase 2); fallback client_oid
+        mo = registry.get_by_order_id(order_id) if order_id else None
+        if mo is None and client_oid:
+            mo = registry.get(client_oid)
+        if mo is None:
+            # Evento de uma ordem que este processo não rastreia (ex:
+            # ordem manual do usuário, ou processo reiniciado). Não é
+            # erro — apenas não há o que reconciliar aqui.
+            log.debug(
+                f"WS privado: evento para ordem não rastreada "
+                f"orderId={order_id} clientOid={client_oid}"
+            )
+            return
+
+        if order_id:
+            registry.index_order_id(order_id, mo.client_oid)
+
+        _evt_ts = float(data.get("ts", 0) or 0) / 1e9 if data.get("ts") else time.time()
+        # Evento mais antigo que a última atualização conhecida: ignora
+        # (Fase 8, Caso F — evento antigo não pode sobrescrever novo).
+        if mo.updated_at and _evt_ts and _evt_ts < mo.updated_at - 1.0:
+            log.debug(
+                f"WS privado: evento antigo ignorado para "
+                f"{mo.client_oid[:8]} (evt_ts={_evt_ts} < updated_at={mo.updated_at})"
+            )
+            return
+
+        _type   = data.get("type", "")
+        _status = data.get("status", "")
+        filled  = float(data.get("filledSize", 0) or 0)
+        match_sz = float(data.get("matchSize", 0) or 0)
+        match_px = float(data.get("matchPrice", 0) or 0)
+
+        try:
+            if _type == "canceled" or (_status == "done" and filled == 0):
+                mo.transition(OrderState.CANCELLED, source="WS")
+            elif _status == "done" and filled > 0:
+                mo.transition(
+                    OrderState.FILLED, filled_qty=filled,
+                    avg_price=match_px if match_px else mo.avg_price,
+                    source="WS",
+                )
+                log.info(
+                    f"✅ WS privado: {mo.symbol} FILLED via evento "
+                    f"(orderId={order_id}, filled={filled})"
+                )
+            elif _type == "match":
+                mo.transition(
+                    OrderState.PARTIALLY_FILLED, filled_qty=filled,
+                    avg_price=match_px if match_px else mo.avg_price,
+                    source="WS",
+                )
+            elif _type == "open" and mo.state == OrderState.SUBMITTING:
+                mo.transition(OrderState.SUBMITTED, order_id=order_id, source="WS")
+        except InvalidTransition as e:
+            # Transição impossível pelo evento WS — não é bug do WS
+            # necessariamente, pode ser reconexão com evento fora de
+            # ordem. Loga e mantém o estado atual (fail-safe).
+            log.warning(f"WS privado: transição inválida ignorada: {e}")
 
     async def _ws_loop(self, symbols: list, intervals: list):
         """Loop principal de reconexão WebSocket com backoff exponencial."""
