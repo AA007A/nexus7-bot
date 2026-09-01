@@ -214,6 +214,20 @@ async def reset(req):
     return web.json_response({"ok": True})
 
 
+
+async def order_status(req):
+    """GET /api/v1/orders/{orderId} — status real da ordem."""
+    order_id = req.match_info.get("order_id", "")
+    o = next((x for x in ORDERS if x.get("orderId") == order_id), None)
+    if not o:
+        return web.json_response({"code": "100001", "msg": "order not found"}, status=404)
+    return web.json_response({"code": "200000", "data": {
+        "id": order_id, "isActive": False,
+        "filledSize": o.get("size", "0"), "dealSize": o.get("size", "0"),
+        "cancelExist": False, "status": "done",
+    }})
+
+
 async def catch_all(req):
     return web.json_response({"code": "200000", "data": {}})
 
@@ -244,6 +258,7 @@ def make_app():
     app.router.add_get("/api/v1/timestamp", timestamp)
     app.router.add_get("/api/v1/funding-rate/{sym}/current", funding_rate)
     app.router.add_post("/api/v1/orders", orders)
+    app.router.add_get("/api/v1/orders/{order_id}", order_status)
     app.router.add_post("/api/v1/position/trading-stop", trading_stop)
     app.router.add_post("/api/v1/bullet-private", bullet_private)
     app.router.add_get("/ws", ws_handler)
