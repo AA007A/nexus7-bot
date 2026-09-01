@@ -2181,6 +2181,25 @@ class TradingEngine:
     async def _open(self, sig: Signal):
         try:
             # ══════════════════════════════════════════════════════
+            # DEFESA EM PROFUNDIDADE — viable_symbols (auditoria
+            # adversarial: confirmado por execução real que _open()
+            # não tinha proteção PRÓPRIA contra símbolos fora da lista
+            # viável, dependendo inteiramente de nunca ser chamado
+            # fora de _scan_all_and_enter(), que é hoje o único call
+            # site. Isso é um single point of failure estrutural, não
+            # um bug ativo — hoje não há caminho de execução real que
+            # o explore. Esta guarda fecha a lacuna para o futuro, sem
+            # alterar nenhum comportamento do fluxo normal.
+            # ══════════════════════════════════════════════════════
+            if sig.symbol not in self.viable_symbols:
+                log.error(
+                    f"🚫 _open BLOQUEADO: {sig.symbol} não está em "
+                    f"viable_symbols ({len(self.viable_symbols)} pares "
+                    f"viáveis) — abortando por segurança"
+                )
+                return
+
+            # ══════════════════════════════════════════════════════
             # NEXUS AI DECISION ENGINE (seções 1, 9, 12, 22)
             #
             # Camada independente de validação ANTES do Risk Engine.
