@@ -1247,6 +1247,77 @@ class KuCoinClient:
         return float(data.get("value", 0))
 
     # ── Orderbook ─────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # P0 (Auditoria Fase 6/8) — CONFIRMAÇÃO DE FILLED
+    #
+    # GAP ENCONTRADO: nenhum lugar do projeto consultava o status real
+    # da ordem após o POST /api/v1/orders. O código tratava
+    # "HTTP 200 + orderId" como sucesso e criava a posição interna
+    # imediatamente — sem nunca verificar se a ordem foi de fato
+    # FILLED, ficou NEW/parcial, ou foi CANCELED pela exchange.
+    #
+    # Confirmado por busca em todo o repositório: zero ocorrências de
+    # FILLED, filledSize ou dealSize em bot/kucoin.py antes desta
+    # correção. bot/order_state.py já definia os estados corretos
+    # (CREATED→SUBMITTING→SUBMITTED→FILLED) mas OrderRegistry nunca
+    # era alimentado dentro de _open() — máquina de estados existia
+    # e ficava sem uso.
+    #
+    # Endpoint: GET /api/v1/orders/{orderId} (KuCoin Futures).
+    # ══════════════════════════════════════════════════════════════
+    async def get_order_status(self, order_id: str) -> dict:
+        """
+        Consulta o estado real de uma ordem pelo orderId.
+
+        Retorna dict com pelo menos: status, isActive, filledSize,
+        dealSize/dealValue, cancelExist. Em caso de PAPER_TRADE ou
+        orderId sintético (ex: 'paper_...', 'EXISTING_POSITION'),
+        retorna um status FILLED sintético — não é chamada real.
+        """
+        if PAPER_TRADE or not order_id or order_id in (
+            "EXISTING_POSITION",
+        ) or str(order_id).startswith(("paper_",)):
+            return {"status": "done", "isActive": False,
+                    "filledSize": "0", "_synthetic": True}
+        try:
+            data = await self._get(f"/api/v1/orders/{order_id}", auth=True)
+            return data or {}
+        except Exception as e:
+            log.warning(f"get_order_status {order_id}: {e}")
+            return {}
+
+    async def wait_for_fill(self, order_id: str, timeout_s: float = 8.0,
+                            poll_interval_s: float = 0.5) -> dict:
+        """
+        Faz polling de get_order_status até a ordem sair do estado
+        ativo (FILLED, CANCELED ou REJECTED) ou até o timeout.
+
+        Retorna {"filled": bool, "status": dict, "timed_out": bool}.
+        Uma ordem MARKET na KuCoin executa quase instantaneamente —
+        o timeout aqui serve apenas para detectar os casos anômalos
+        em que ela fica presa (ex: liquidez insuficiente).
+        """
+        deadline = time.time() + timeout_s
+        last = {}
+        while time.time() < deadline:
+            last = await self.get_order_status(order_id)
+            if last.get("_synthetic"):
+                return {"filled": True, "status": last, "timed_out": False}
+            is_active = last.get("isActive", True)
+            filled_sz = float(last.get("filledSize", 0) or 0)
+            cancel_ex = last.get("cancelExist", False)
+            if not is_active:
+                return {
+                    "filled": filled_sz > 0 and not cancel_ex,
+                    "status": last, "timed_out": False,
+                }
+            await asyncio.sleep(poll_interval_s)
+        log.warning(
+            f"⏱️ wait_for_fill {order_id}: timeout após {timeout_s}s "
+            f"— último status: {last}"
+        )
+        return {"filled": False, "status": last, "timed_out": True}
+
     async def get_orderbook(self, symbol: str, depth: int = 20) -> dict:
         kc_sym = to_kucoin(symbol)
         data   = await self._get("/api/v1/level2/depth20", {"symbol": kc_sym})
