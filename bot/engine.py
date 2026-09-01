@@ -2387,7 +2387,7 @@ class TradingEngine:
                             log.error(f"🚨 {sig.symbol}: falha ao proteger/fechar: {_e}")
                             return
 
-                            # ══════════════════════════════════════════════════
+                    # ══════════════════════════════════════════════════
                     # P0 — CONFIRMAÇÃO DE FILLED (não apenas HTTP 200)
                     #
                     # Antes, "orderId recebido" era tratado como sucesso
@@ -2476,14 +2476,30 @@ class TradingEngine:
                 )
                 return
 
-            # PREÇO REAL DE EXECUÇÃO (não o estimado no momento do sinal).
-            # sig.entry vem do último candle FECHADO do 15M; a ordem é MARKET
-            # e executa no preço corrente. Com 50x, uma divergência de 0.3%
-            # já representa 15% de diferença no PnL calculado — e o SL/TP
-            # ficavam medidos a partir de um preço que nunca existiu.
+            # ══════════════════════════════════════════════════════
+            # P1 (Auditoria forense final) — PREÇO DE EXECUÇÃO
+            #
+            # GAP ENCONTRADO: wait_for_fill() já consulta
+            # GET /api/v1/orders/{orderId}, que a KuCoin responde com
+            # dealSize/dealValue (de onde dá para derivar o preço médio
+            # REAL de execução). O código descartava esse dado e usava
+            # o ticker público em cache como aproximação — uma fonte
+            # menos precisa quando já havia uma mais precisa disponível
+            # na mesma resposta que acabara de ser consultada.
+            #
+            # Prioridade: avgDealPrice/dealValue-dealSize (dado real da
+            # ordem) > ticker em cache (aproximação de mercado).
+            # ══════════════════════════════════════════════════════
             try:
-                _tk = self.client.get_cached_ticker(sig.symbol) or {}
-                _fill = float(_tk.get("lastPrice", 0) or 0)
+                _fill = 0.0
+                _st = _fill_check.get("status", {}) or {}
+                _deal_size  = float(_st.get("dealSize", 0)  or 0)
+                _deal_value = float(_st.get("dealValue", 0) or 0)
+                if _deal_size > 0 and _deal_value > 0:
+                    _fill = _deal_value / _deal_size   # preço médio real
+                if _fill <= 0:
+                    _tk = self.client.get_cached_ticker(sig.symbol) or {}
+                    _fill = float(_tk.get("lastPrice", 0) or 0)
                 if _fill > 0:
                     _slip_pct = abs(_fill - sig.entry) / sig.entry * 100
                     if _slip_pct > 0.05:
