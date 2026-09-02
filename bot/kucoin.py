@@ -507,7 +507,45 @@ class KuCoinClient:
                 await asyncio.sleep(wait)
         return {}
 
+    def _parse_retry_after(self, header_value) -> float:
+        """
+        Interpreta o header Retry-After com segurança.
+
+        ADV-02: aceita apenas segundos inteiros/decimais dentro de uma
+        faixa razoável. Qualquer valor ausente, malformado ou
+        absurdamente alto cai no backoff interno já existente — nunca
+        dorme por tempo indefinido nem propaga exceção.
+        """
+        if not header_value:
+            return 0.0
+        try:
+            v = float(header_value)
+        except (TypeError, ValueError):
+            return 0.0
+        if v < 0 or v > 120:   # teto de segurança — nunca dorme mais que isso
+            return 0.0
+        return v
+
     async def _post(self, endpoint: str, body: dict) -> dict:
+        """
+        NOTA DE IDEMPOTÊNCIA (ADV-02): body_str é serializado UMA VEZ,
+        antes do loop de retry, e reenviado IDÊNTICO em todas as
+        tentativas — o clientOid embutido em `body` nunca muda entre
+        retries deste método. Isso já era verdade antes desta correção
+        (nenhuma alteração de comportamento aqui); confirmado por
+        teste (RATE-G/H/I).
+
+        LIMITAÇÃO DOCUMENTADA: se a KuCoin processar a ordem mas a
+        resposta HTTP se perder (timeout, conexão cortada), este
+        método não tem como saber que a ordem já foi aceita — ele só
+        vê uma exceção de rede e tenta de novo com o MESMO clientOid,
+        o que é seguro (a exchange rejeita duplicata pelo clientOid).
+        Essa garantia depende inteiramente do lado da exchange
+        reconhecer clientOid repetido como idempotente — este projeto
+        não tem como confirmar isso de forma independente sem acesso à
+        KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
+        auditoria). Não invento uma garantia que não posso comprovar.
+        """
         await self._ensure_session()
         url = REST_BASE + endpoint
         # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
@@ -517,13 +555,75 @@ class KuCoinClient:
             try:
                 await self._throttle()
                 async with self._rate_sem, self._session.post(url, data=body_str, headers=headers) as r:
-                    data = await r.json()
+                    # ══════════════════════════════════════════════════
+                    # ADV-02 — HTTP 429 ERA PERDIDO EM _post()
+                    #
+                    # Mesmo bug já corrigido em _get() (Fase 4F): r.json()
+                    # levanta ContentTypeError quando a KuCoin devolve
+                    # HTTP 429 sem body JSON válido — a exceção caía no
+                    # except genérico, fazendo retry cego sem nunca
+                    # chamar _register_429(). Uma ordem rate-limitada
+                    # nunca alimentava o mecanismo global de backoff.
+                    #
+                    # CASO A do pedido: HTTP status 429 puro.
+                    # ══════════════════════════════════════════════════
+                    if r.status == 429:
+                        self._register_429()
+                        _retry_after = self._parse_retry_after(
+                            r.headers.get("Retry-After")
+                        )
+                        _w = _retry_after if _retry_after > 0 else self._backoff_seconds(attempt)
+                        log.warning(
+                            f"🚦 Rate limit KuCoin HTTP 429 em POST {endpoint} "
+                            f"({self._rate_limit_hits} recentes) — "
+                            f"aguardando {_w:.1f}s"
+                            f"{' (Retry-After)' if _retry_after > 0 else ''}"
+                        )
+                        await asyncio.sleep(_w)
+                        continue   # MESMO body_str/clientOid na próxima tentativa
+
+                    try:
+                        data = await r.json(content_type=None)
+                    except Exception as _je:
+                        log.warning(
+                            f"KuCoin POST {endpoint}: resposta não-JSON "
+                            f"(HTTP {r.status}): {_je}"
+                        )
+                        await asyncio.sleep(self._backoff_seconds(attempt))
+                        continue
+
+                    if not isinstance(data, dict):
+                        log.warning(f"KuCoin POST {endpoint}: payload inesperado")
+                        return {}
+
                     if data.get("code") == "200000":
                         return data.get("data", {})
                     msg  = data.get("msg", "")
                     code = data.get("code", "")
 
+                    # ══════════════════════════════════════════════════
+                    # CASO B do pedido: HTTP 200 mas code="429000" no body.
+                    # Mesma semântica já usada e testada em _get() — a
+                    # KuCoin usa esse código para rate limit também em
+                    # endpoints de escrita.
+                    # ══════════════════════════════════════════════════
+                    if code in ("429000", "429"):
+                        self._register_429()
+                        _retry_after = self._parse_retry_after(
+                            r.headers.get("Retry-After")
+                        )
+                        _w = _retry_after if _retry_after > 0 else self._backoff_seconds(attempt)
+                        log.warning(
+                            f"🚦 Rate limit KuCoin (body) em POST {endpoint} "
+                            f"({self._rate_limit_hits} recentes) — "
+                            f"aguardando {_w:.1f}s"
+                        )
+                        await asyncio.sleep(_w)
+                        continue
+
                     # Erros de autenticação: alterna v2↔v1 + re-sincroniza relógio
+                    # (CASO E — erro definitivo de auth; NÃO é rate limit,
+                    # tratamento pré-existente, inalterado)
                     if code in ("400004", "400005") and attempt < 2:
                         old_ver = self._api_version
                         self._api_version = "1" if old_ver == "2" else "2"
@@ -535,11 +635,16 @@ class KuCoinClient:
                         headers = self._auth_headers("POST", endpoint, body_str)
                         continue
 
+                    # CASO E — erros definitivos: NÃO são rate limit,
+                    # nenhum retry cego (comportamento pré-existente).
                     if code in ("400100", "300004", "200004"):
                         log.error(f"KuCoin POST {endpoint} erro permanente {code}: {msg}")
                         return {}
                     log.warning(f"KuCoin POST {endpoint}: {code} {msg}")
             except Exception as e:
+                # CASO D — erro de rede/timeout. Comportamento
+                # PRÉ-EXISTENTE, não alterado por esta correção (fora
+                # do escopo do ADV-02 conforme instrução explícita).
                 wait = 2 ** attempt
                 log.warning(f"KuCoin POST {endpoint} tentativa {attempt+1}: {e} — retry em {wait}s")
                 await asyncio.sleep(wait)
