@@ -1,5 +1,17 @@
 # BGX Capital — Changelog
 
+## 2026-09-02 — Recuperação de ordem por clientOid
+
+- Recupera imediatamente o `orderId` em `GET /api/v1/orders/byClientOid`
+  quando o POST pode ter sido aceito mas a resposta se perde.
+- Normaliza o campo `id` da KuCoin para o contrato interno `orderId`.
+- Bloqueia fallback de alavancagem enquanto o resultado da ordem original
+  estiver ambíguo, evitando exposição duplicada.
+- Mantém o `clientOid` efetivamente enviado nos logs e no retorno, inclusive
+  após fallback de alavancagem.
+- Adiciona prova B2: uma única ordem, recuperação direta, fill confirmado e
+  posição protegida.
+
 ## v12.0.0 — Melhorias de Robustez, Performance e Arquitetura
 
 ### 🔴 Curto Prazo — Bugs e Configuração
