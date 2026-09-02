@@ -2401,7 +2401,13 @@ class TradingEngine:
             fresh_bal = await self.client.get_balance()
             if fresh_bal > 0:
                 self.risk.update(fresh_bal)
-            qty = self.risk.size(sig.symbol, sig.entry, self.instruments)
+            # ADV-margin: repassa self.positions (fonte real de posições
+            # confirmadas — inclui as reconciliadas pelo ADV-01) para
+            # que o sizing desconte a margem já comprometida.
+            qty = self.risk.size(
+                sig.symbol, sig.entry, self.instruments,
+                open_positions=self.positions,
+            )
             if qty <= 0:
                 log.warning(f"⚠️ {sig.symbol}: qty=0 — saldo insuficiente (${self.risk.balance:.2f})")
                 return
