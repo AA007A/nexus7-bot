@@ -1417,7 +1417,32 @@ class KuCoinClient:
         orderId sintético (ex: 'paper_...', 'EXISTING_POSITION'),
         retorna um status FILLED sintético — não é chamada real.
         """
-        if PAPER_TRADE or not order_id or order_id in (
+        # ══════════════════════════════════════════════════════════
+        # EXEC-02 (CRITICAL) — orderId VAZIO NÃO É FILL SINTÉTICO
+        #
+        # `not order_id` estava agrupado com PAPER_TRADE e os orderIds
+        # sintéticos legítimos, retornando _synthetic=True — que
+        # wait_for_fill() interpreta como filled=True.
+        #
+        # Cadeia do bug (reproduzida em teste):
+        #   place_order falha nas 3 tentativas → data = {}
+        #   → data["clientOid"] = _oid torna o dict NÃO-vazio
+        #   → _open() faz _order.get("orderId", "") = ""
+        #   → get_order_status("") → _synthetic → filled=True
+        #   → Position criada e "✅ ABERTO" logado para uma ordem
+        #     que a exchange NUNCA aceitou.
+        #
+        # orderId ausente significa DESCONHECIDO, nunca preenchido.
+        # ══════════════════════════════════════════════════════════
+        if not order_id:
+            log.error(
+                "get_order_status: orderId vazio — estado da ordem "
+                "DESCONHECIDO (não é fill). Retornando status não-confirmado."
+            )
+            return {"status": "unknown", "isActive": True,
+                    "filledSize": "0", "_unknown": True}
+
+        if PAPER_TRADE or order_id in (
             "EXISTING_POSITION",
         ) or str(order_id).startswith(("paper_",)):
             return {"status": "done", "isActive": False,
