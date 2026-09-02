@@ -366,6 +366,28 @@ class TradingEngine:
         # ══════════════════════════════════════════════════════════
         self._viable_retry_next_ts: float = 0.0
         self._viable_retry_attempt: int   = 0
+
+        # ══════════════════════════════════════════════════════════
+        # P0 (ADV-01) — RECONCILIAÇÃO DE POSIÇÃO ÓRFÃ
+        #
+        # CAUSA RAIZ: quando wait_for_fill() atinge timeout com uma
+        # ordem PARCIALMENTE preenchida mas ainda ativa (isActive=True,
+        # filledSize>0), _open() dava 'return' sem nunca criar
+        # self.positions[symbol]. A posição real (com leverage, sem
+        # stop) continuava existindo na exchange. IntegrityGuard já
+        # detectava a divergência (STATE_DIVERGENCE), mas apenas
+        # BLOQUEAVA novas entradas — nunca descobria a posição, nunca
+        # aplicava proteção. Confirmado por execução real em auditoria
+        # adversarial (mock: fill 90%, isActive=True, timeout 5s).
+        #
+        # _unprotected_symbols: posições reconciliadas da exchange que
+        # AINDA NÃO tiveram set_position_stops() confirmado. Enquanto
+        # não vazio, novas entradas continuam bloqueadas (ver
+        # IntegrityGuard) — a proteção real na exchange, não a marcação
+        # interna, é o critério de saída deste estado.
+        # ══════════════════════════════════════════════════════════
+        self._unprotected_symbols: set = set()
+        self._reconcile_lock = asyncio.Lock()   # evita reconciliações simultâneas
         self.connected    = False
         self.active       = False
         self._running     = False
@@ -1000,6 +1022,132 @@ class TradingEngine:
             return True   # fallback conservador preexistente — mantido
 
     # ── Sincronização em tempo real com a exchange ─────────────
+    async def _reconcile_exchange_positions(self, only_symbol: str = None) -> list:
+        """
+        P0 (ADV-01) — descobre e protege posições que existem na
+        exchange mas não em self.positions (posição órfã).
+
+        Chamada em 3 pontos (Fase 4 da correção):
+          A) logo após wait_for_fill() der timeout em _open()
+          B) periodicamente no ciclo principal (defesa em profundidade,
+             cobre WS perdido, restart, ou qualquer gap não previsto)
+          C) após reconexão do WebSocket privado
+
+        only_symbol: se informado, reconcilia apenas esse símbolo
+        (usado no caminho A, onde já sabemos qual símbolo investigar
+        — evita uma varredura completa desnecessária logo após o
+        timeout de uma ordem específica).
+
+        Retorna a lista de símbolos que continuam SEM proteção
+        confirmada após a tentativa (vazia = tudo protegido ou nada
+        para reconciliar).
+
+        Idempotente e serializada por _reconcile_lock: chamadas
+        concorrentes (REST + WS, ou dois pontos de chamada disparando
+        ao mesmo tempo) não duplicam o registro nem enviam
+        set_position_stops() duas vezes sem necessidade.
+        """
+        async with self._reconcile_lock:
+            try:
+                all_pos = await self.client.get_positions()
+            except Exception as e:
+                log.error(f"_reconcile_exchange_positions: get_positions falhou: {e}")
+                return list(self._unprotected_symbols)
+
+            for p in all_pos:
+                sym = p.get("symbol", "")
+                if only_symbol and sym != only_symbol:
+                    continue
+                size = float(p.get("size", 0) or 0)
+                if size <= 0:
+                    continue
+
+                # ── Posição JÁ conhecida internamente: só falta checar proteção ──
+                if sym in self.positions:
+                    sl_atual = float(p.get("stopLoss", 0) or 0)
+                    if sl_atual > 0:
+                        self._unprotected_symbols.discard(sym)
+                    continue
+
+                # ── POSIÇÃO ÓRFÃ: existe na exchange, não rastreada localmente ──
+                side = p.get("side", "Buy")
+                ep   = float(p.get("entryPrice", p.get("avgPrice", 0)) or 0)
+                liq  = float(p.get("liquidationPrice", p.get("liqPrice", 0)) or 0)
+                upnl = float(p.get("unrealisedPnl", 0) or 0)
+                sl_existente = float(p.get("stopLoss", 0) or 0)
+                tp_existente = float(p.get("takeProfit", 0) or 0)
+
+                if ep <= 0:
+                    log.error(
+                        f"🚨 RECONCILE {sym}: posição órfã mas entryPrice "
+                        f"inválido ({ep}) — NÃO é possível reconstruir com "
+                        f"segurança. Permanece UNPROTECTED. Campos: "
+                        f"{list(p.keys())}"
+                    )
+                    self._unprotected_symbols.add(sym)
+                    continue
+
+                direction = "LONG" if side == "Buy" else "SHORT"
+
+                # Preço de entrada vem da EXCHANGE (ep), nunca do ticker —
+                # exigência explícita da correção. SL/TP: usa o que já
+                # está na exchange se existir; caso contrário, calcula
+                # um SL conservador baseado na liquidação (mesma fórmula
+                # já usada e validada em _load_existing_positions).
+                atr_est = ep * 0.007
+                if sl_existente > 0:
+                    sl = sl_existente
+                elif direction == "LONG":
+                    sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
+                else:
+                    sl = min(liq * 0.98, ep + atr_est * 1.5) if liq > 0 else ep + atr_est * 1.5
+                tp = tp_existente if tp_existente > 0 else (
+                    ep + atr_est * 3.0 if direction == "LONG" else ep - atr_est * 3.0
+                )
+
+                sig = Signal(sym, direction, ep, sl, tp, 0.75, "Reconciled orphan", 75)
+                pos = Position(sig, size)
+                pos.pnl = upnl
+                cur = float(p.get("markPrice", ep))
+                pos.update_pnl(cur)
+                self.positions[sym] = pos
+
+                log.warning(
+                    f"🔧 RECONCILE {sym}: posição ÓRFÃ descoberta e "
+                    f"reconstruída — {direction} {size} @ ${ep:.6f} "
+                    f"(sl_exchange={'sim' if sl_existente>0 else 'NÃO — usando fallback'})"
+                )
+
+                # ── Proteção: só marca protegida se a exchange confirmar ──
+                if sl_existente > 0:
+                    # A exchange já tinha um stop — nada a enviar, só
+                    # confirmar que a marcação de risco está correta.
+                    self._unprotected_symbols.discard(sym)
+                    log.info(f"✓ RECONCILE {sym}: já possuía SL na exchange (${sl_existente:.6f})")
+                else:
+                    self._unprotected_symbols.add(sym)
+                    try:
+                        ok = await self.client.set_position_stops(sym, sl=sl, tp=tp)
+                    except Exception as e:
+                        ok = False
+                        log.error(f"🚨 RECONCILE {sym}: set_position_stops levantou exceção: {e}")
+
+                    if ok:
+                        self._unprotected_symbols.discard(sym)
+                        log.info(
+                            f"✓ RECONCILE {sym}: proteção aplicada e "
+                            f"confirmada — SL=${sl:.6f} TP=${tp:.6f}"
+                        )
+                    else:
+                        log.critical(
+                            f"🚨🚨 RECONCILE {sym}: posição órfã SEM PROTEÇÃO "
+                            f"— set_position_stops falhou. Novas entradas "
+                            f"permanecem bloqueadas. Intervenção manual pode "
+                            f"ser necessária."
+                        )
+
+            return list(self._unprotected_symbols)
+
     async def _sync_positions(self):
         """Puxa posições abertas da exchange e reconcilia estado local."""
         try:
@@ -2655,9 +2803,40 @@ class TradingEngine:
                             f"(status={_fill_check['status']}, "
                             f"timeout={_fill_check['timed_out']})"
                         )
-                        # Não sabemos se há posição real — não assume nada.
-                        # Deixa o guardião de reconciliação (_load_existing_
-                        # positions / IntegrityGuard) resolver no próximo ciclo.
+                        # ══════════════════════════════════════════════
+                        # P0 (ADV-01) — RECONCILIAÇÃO IMEDIATA
+                        #
+                        # ANTES: "não sabemos se há posição real — não
+                        # assume nada" ficava só no comentário. Nada de
+                        # fato consultava a exchange aqui, e
+                        # _load_existing_positions() só roda 1x no
+                        # boot — a posição órfã (ex: 90% preenchida)
+                        # ficava sem SL indefinidamente, com
+                        # IntegrityGuard apenas bloqueando entradas
+                        # NOVAS, sem nunca corrigir a existente.
+                        #
+                        # AGORA: consulta a exchange NA HORA para este
+                        # símbolo específico. Se a posição existir de
+                        # fato (fill parcial real), ela é descoberta,
+                        # registrada com o entry price REAL da exchange
+                        # (nunca ticker) e recebe SL/TP imediatamente.
+                        # ══════════════════════════════════════════════
+                        try:
+                            _ainda_desprotegidos = await self._reconcile_exchange_positions(
+                                only_symbol=sig.symbol
+                            )
+                            if sig.symbol in _ainda_desprotegidos:
+                                log.critical(
+                                    f"🚨🚨 {sig.symbol}: posição órfã "
+                                    f"reconciliada mas AINDA SEM PROTEÇÃO "
+                                    f"confirmada — novas entradas bloqueadas "
+                                    f"até resolução"
+                                )
+                        except Exception as _re:
+                            log.error(
+                                f"_reconcile_exchange_positions falhou para "
+                                f"{sig.symbol}: {_re}"
+                            )
                         last_exc = RuntimeError(
                             f"ordem {_oid_real} não confirmada como FILLED"
                         )
@@ -3057,6 +3236,26 @@ class TradingEngine:
                     f"🚨 {sym}: POSIÇÃO SEM STOP LOSS na exchange "
                     f"(size={size} entry=${entry:.4f}) — reaplicando"
                 )
+
+                # ══════════════════════════════════════════════════
+                # P0 (ADV-01) — REGISTRA A POSIÇÃO ÓRFÃ AQUI TAMBÉM
+                #
+                # Este guardião já rodava a cada ciclo e já reaplicava
+                # o SL na exchange — mas NUNCA adicionava a posição a
+                # self.positions quando ela não existia localmente.
+                # Resultado: mesmo com SL reaplicado, a posição órfã
+                # nunca entrava no trailing/TP-parcial/stagnação, e o
+                # IntegrityGuard continuava vendo STATE_DIVERGENCE para
+                # sempre (bloqueio permanente de novas entradas mesmo
+                # depois de "resolvido").
+                #
+                # Delega para _reconcile_exchange_positions, que já
+                # tem toda a lógica de reconstrução com dados REAIS da
+                # exchange (entry/liq/SL/TP) — evita duplicar a lógica
+                # aqui.
+                # ══════════════════════════════════════════════════
+                if sym not in self.positions:
+                    await self._reconcile_exchange_positions(only_symbol=sym)
 
                 # SL do estado interno, ou 1.5% como fallback de emergência
                 pos_local = self.positions.get(sym)
