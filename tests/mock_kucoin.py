@@ -80,6 +80,7 @@ FAULTS = {
     "order_no_reply":  False,# executa a ordem mas não responde
     "contracts_fail_next": 0,  # próximas N chamadas de /contracts/active falham
     "balance_override": None, # se setado, sobrepõe availableBalance
+    "order_partial_fill_pct": 0,  # se >0, order_status reporta esse % preenchido mas isActive=True
 }
 
 
@@ -225,7 +226,7 @@ async def reset(req):
         "ws_drop_after": 0, "ws_duplicate": False,
         "ws_out_of_order": False, "ws_no_pong": False,
         "order_no_reply": False, "contracts_fail_next": 0,
-        "balance_override": None,
+        "balance_override": None, "order_partial_fill_pct": 0,
     })
     return web.json_response({"ok": True})
 
@@ -237,6 +238,15 @@ async def order_status(req):
     o = next((x for x in ORDERS if x.get("orderId") == order_id), None)
     if not o:
         return web.json_response({"code": "100001", "msg": "order not found"}, status=404)
+    _pct = FAULTS.get("order_partial_fill_pct", 0)
+    if _pct and _pct > 0:
+        _size = float(o.get("size", "0") or 0)
+        return web.json_response({"code": "200000", "data": {
+            "id": order_id, "isActive": True,
+            "filledSize": str(_size * _pct), "dealSize": str(_size * _pct),
+            "dealValue": str(_size * _pct * 100.0),
+            "cancelExist": False, "status": "open",
+        }})
     if FAULTS.get("order_never_fills"):
         return web.json_response({"code": "200000", "data": {
             "id": order_id, "isActive": True,
