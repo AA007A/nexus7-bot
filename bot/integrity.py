@@ -285,6 +285,18 @@ class IntegrityGuard:
                         f"({xq_contratos} contratos × multiplier)"
                     )
 
+                # EXEC-04: divergência de LADO nunca era detectada.
+                # Local LONG + exchange SHORT passava despercebido e
+                # can_open_new() continuava True — PnL invertido e SL
+                # no lado errado, sem nenhum bloqueio.
+                _side_ex = "LONG" if xp.get("side", "Buy") == "Buy" else "SHORT"
+                _side_local = getattr(lp, "direction", "")
+                if _side_local and _side_ex != _side_local:
+                    div.append(
+                        f"{sym}: SIDE divergente — local {_side_local}, "
+                        f"exchange {_side_ex}"
+                    )
+
                 le = float(getattr(lp, "entry", 0) or 0)
                 xe = float(xp.get("entryPrice", 0) or 0)
                 if le > 0 and xe > 0 and abs(le - xe) / xe > _tol_price:
