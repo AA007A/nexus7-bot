@@ -1126,11 +1126,81 @@ class TradingEngine:
                 if size <= 0:
                     continue
 
-                # ── Posição JÁ conhecida internamente: só falta checar proteção ──
+                # ── Posição JÁ conhecida internamente ──
                 if sym in self.positions:
                     sl_atual = float(p.get("stopLoss", 0) or 0)
                     if sl_atual > 0:
                         self._unprotected_symbols.discard(sym)
+
+                    # ══════════════════════════════════════════════════
+                    # EXEC-03 (HIGH) — RECONCILIAR qty DIVERGENTE
+                    #
+                    # Antes: 'continue' direto — a qty local nunca era
+                    # atualizada para posição já conhecida. Se a exchange
+                    # mudasse a quantidade (partial fill que completou,
+                    # fechamento parcial externo, TP executado pela
+                    # própria exchange), o estado local ficava para
+                    # sempre desatualizado e o IntegrityGuard bloqueava
+                    # novas entradas indefinidamente, sem caminho de
+                    # auto-recuperação (exigia restart manual).
+                    #
+                    # Reproduzido: exchange 10→26 contratos, qty local
+                    # travada em 1000.0, STATE_DIVERGENCE permanente.
+                    #
+                    # A EXCHANGE é a fonte de verdade para exposição.
+                    # ══════════════════════════════════════════════════
+                    try:
+                        _qty_ex = self._contracts_to_base_qty(sym, size)
+                    except ValueError as _ue:
+                        log.error(f"RECONCILE {sym}: {_ue}")
+                        continue
+
+                    _pos_local = self.positions[sym]
+
+                    # ══════════════════════════════════════════════════
+                    # EXEC-04 (HIGH) — SIDE DIVERGENTE
+                    #
+                    # Corrigir só a qty quando o LADO diverge é pior que
+                    # não corrigir nada: o bot ficaria com LONG 2600
+                    # local enquanto a exchange tem SHORT 2600 — PnL
+                    # invertido, SL no lado errado, e o IntegrityGuard
+                    # (que não compara side) liberaria novas entradas.
+                    #
+                    # Reproduzido: local LONG, exchange currentQty=-26.
+                    # Antes deste fix: qty convergia p/ 2600 mas
+                    # direction permanecia LONG, can_open=True.
+                    #
+                    # Divergência de lado NÃO é corrigida silenciosamente:
+                    # a posição é marcada desprotegida (bloqueia novas
+                    # entradas) e registrada como incidente para
+                    # resolução explícita.
+                    # ══════════════════════════════════════════════════
+                    _side_ex = "LONG" if p.get("side", "Buy") == "Buy" else "SHORT"
+                    _side_local = getattr(_pos_local, "direction", "")
+                    if _side_local and _side_ex != _side_local:
+                        log.critical(
+                            f"🚨🚨 RECONCILE {sym}: SIDE DIVERGENTE — local "
+                            f"{_side_local}, exchange {_side_ex}. NÃO corrigindo "
+                            f"qty silenciosamente; posição marcada como "
+                            f"desprotegida até resolução explícita."
+                        )
+                        self._unprotected_symbols.add(sym)
+                        continue
+
+                    _qty_local = float(getattr(_pos_local, "qty", 0) or 0)
+                    if _qty_local > 0 and _qty_ex > 0:
+                        _div = abs(_qty_local - _qty_ex) / max(_qty_local, _qty_ex)
+                        if _div > 0.02:      # mesma tolerância do IntegrityGuard
+                            log.warning(
+                                f"🔧 RECONCILE {sym}: qty local {_qty_local} "
+                                f"≠ exchange {_qty_ex} ({size} contratos) — "
+                                f"adotando a da exchange (fonte de verdade)"
+                            )
+                            _pos_local.qty = _qty_ex
+                            # qty_original serve de base para o TP parcial;
+                            # só cresce, nunca encolhe abaixo da atual.
+                            if _qty_ex > float(getattr(_pos_local, "qty_original", 0) or 0):
+                                _pos_local.qty_original = _qty_ex
                     continue
 
                 # ── POSIÇÃO ÓRFÃ: existe na exchange, não rastreada localmente ──
