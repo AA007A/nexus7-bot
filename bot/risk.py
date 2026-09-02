@@ -256,23 +256,73 @@ class RiskManager:
             return False
         return True
 
-    def _margin_in_use(self) -> float:
+    def _margin_in_use(self, open_positions: dict = None) -> float:
         """
         Calcula margem total já comprometida pelas posições abertas.
         Usado pelo sizing para evitar superalocação de capital.
+
+        ══════════════════════════════════════════════════════════
+        ADV-margin — CAUSA RAIZ E CORREÇÃO
+        ══════════════════════════════════════════════════════════
+        Este método sempre leu self.positions (dict interno do
+        RiskManager, populado por open_position_risk/close_position_
+        risk). Mas bot/engine.py NUNCA chama esses dois métodos —
+        confirmado por grep: zero ocorrências. self.positions ficava
+        para sempre {}, e esta função sempre retornava 0.0, mesmo com
+        posições reais e confirmadas abertas.
+
+        Investigação da causa raiz mostrou duas implementações
+        paralelas e desconectadas do mesmo conceito (TP parcial,
+        qty restante, margem por posição):
+          bot/risk.py::PositionRisk (qty_remain, tp1_hit, ...)
+            — usado por check_partial_tps(), que NUNCA é chamado
+              pelo engine.
+          bot/engine.py::Position (qty, tp1_hit, ...)
+            — é a que o engine de fato usa; pos.qty já é decrementado
+              corretamente no TP parcial real (_manage_partial_tp,
+              linha 'pos.qty = pos.qty - partial_qty').
+
+        Reescrever check_partial_tps()/PositionRisk para serem usados
+        exigiria substituir uma implementação já testada por outra
+        não exercitada em produção — risco desproporcional ao escopo
+        desta correção (instrução explícita: não reescrever
+        RiskManager, não duplicar fonte de verdade).
+
+        FIX: open_positions, quando fornecido pelo chamador (engine.
+        positions — a fonte de verdade real, já mantida correta por
+        fill parcial e pela reconciliação do ADV-01), é usado em vez
+        de self.positions. Se omitido, mantém o comportamento anterior
+        (self.positions do RiskManager) — não quebra nenhum chamador
+        existente fora do fluxo principal.
+        ══════════════════════════════════════════════════════════
         """
         total = 0.0
-        for pr in self.positions.values():
-            if hasattr(pr, "entry") and hasattr(pr, "qty_remain"):
+        source = open_positions if open_positions is not None else self.positions
+        for pr in source.values():
+            if hasattr(pr, "entry") and hasattr(pr, "qty"):
+                # engine.Position: qty já reflete o tamanho EFETIVO
+                # (reduzido por TP parcial, ou pelo fill real quando
+                # a posição vem de _reconcile_exchange_positions).
+                total += (pr.entry * pr.qty) / cfg.LEVERAGE
+            elif hasattr(pr, "entry") and hasattr(pr, "qty_remain"):
+                # bot.risk.PositionRisk (caminho legado, mantido para
+                # não quebrar chamadores que ainda usem self.positions
+                # sem passar open_positions).
                 total += (pr.entry * pr.qty_remain) / cfg.LEVERAGE
         return total
 
     def size(self, symbol: str, entry: float, instruments: dict,
-             size_mult: float = 1.0) -> float:
+             size_mult: float = 1.0, open_positions: dict = None) -> float:
         """
         Sizing com cap de margem configurável (cfg.MAX_MARGIN_PCT).
         Desconta margem já em uso por posições abertas (FIX RISK-sizing).
         Risco por trade = balance × LEVERAGE × MAX_RISK_PCT
+
+        open_positions (ADV-margin): dict de engine.Position (a fonte
+        real de posições confirmadas). Repassado a _margin_in_use()
+        para que o sizing considere margem já comprometida por
+        posições reais, não apenas o self.positions interno do
+        RiskManager (que fica vazio — ver docstring de _margin_in_use).
         """
         if entry <= 0 or not self._ready or self.balance <= 0:
             return 0.0
@@ -297,7 +347,7 @@ class RiskManager:
         min_not  = float(info.get("minNotional", 1.0))
 
         # Margem livre = saldo - margem já em uso por posições abertas
-        margin_used = self._margin_in_use()
+        margin_used = self._margin_in_use(open_positions)
         free_margin = max(0.0, self.balance - margin_used)
 
         # Custo REAL do lote mínimo em margem (min_qty já está em unidade
