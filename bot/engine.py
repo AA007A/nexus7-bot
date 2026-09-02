@@ -2795,6 +2795,22 @@ class TradingEngine:
                         idem_key=_idem,   # P0: mesmo OID em todas as tentativas
                     )
 
+                    # EXEC-02: place_order() retorna dict com clientOid mesmo
+                    # quando TODAS as tentativas falham (para correlação de
+                    # log). Um dict não-vazio SEM orderId significa FALHA,
+                    # não sucesso — trata explicitamente antes de seguir.
+                    if not _order or not _order.get("orderId"):
+                        log.error(
+                            f"❌ {sig.symbol}: place_order não retornou "
+                            f"orderId (clientOid="
+                            f"{(_order or {}).get('clientOid','?')}) — "
+                            f"ordem NÃO confirmada pela exchange"
+                        )
+                        last_exc = RuntimeError(
+                            f"place_order sem orderId para {sig.symbol}"
+                        )
+                        break
+
                     _oid_for_registry = _order.get("orderId", "") if _order else ""
                     if _oid_for_registry:
                         self.orders.index_order_id(_oid_for_registry, _idem)
