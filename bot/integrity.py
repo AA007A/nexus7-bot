@@ -251,10 +251,39 @@ class IntegrityGuard:
             _tol_price = float(os.environ.get("RECON_PRICE_TOL", "0.01"))
             for sym in set(local) & set(ex):
                 lp, xp = local[sym], ex[sym]
+                # ══════════════════════════════════════════════════════
+                # EXEC-01 — COMPARAÇÃO DE UNIDADES
+                #
+                # Position.qty está em UNIDADE BASE; get_positions()["size"]
+                # está em CONTRATOS (currentQty da KuCoin). Comparar os dois
+                # diretamente reportava STATE_DIVERGENCE falso em todo
+                # símbolo com multiplier != 1 (ex: DOGEUSDT mult=100 →
+                # "qty local 2600.0 ≠ exchange 26.0"), bloqueando novas
+                # entradas indefinidamente.
+                #
+                # Converte o lado da exchange para unidade base antes de
+                # comparar, usando o mesmo helper do engine (fonte única).
+                # ══════════════════════════════════════════════════════
                 lq = abs(float(getattr(lp, "qty", 0) or 0))
-                xq = abs(float(xp.get("size", 0) or 0))
+                xq_contratos = abs(float(xp.get("size", 0) or 0))
+                try:
+                    xq = engine._contracts_to_base_qty(sym, xq_contratos)
+                except Exception:
+                    # Sem multiplier confiável não dá para comparar
+                    # quantidades — registra e segue (não inventa
+                    # equivalência que não pode ser verificada).
+                    div.append(
+                        f"{sym}: multiplier indisponível — impossível "
+                        f"comparar qty local ({lq}) com exchange "
+                        f"({xq_contratos} contratos)"
+                    )
+                    continue
+
                 if lq > 0 and xq > 0 and abs(lq - xq) / max(lq, xq) > _tol_qty:
-                    div.append(f"{sym}: qty local {lq} ≠ exchange {xq}")
+                    div.append(
+                        f"{sym}: qty local {lq} ≠ exchange {xq} "
+                        f"({xq_contratos} contratos × multiplier)"
+                    )
 
                 le = float(getattr(lp, "entry", 0) or 0)
                 xe = float(xp.get("entryPrice", 0) or 0)
