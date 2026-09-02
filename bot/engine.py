@@ -1022,6 +1022,70 @@ class TradingEngine:
             return True   # fallback conservador preexistente — mantido
 
     # ── Sincronização em tempo real com a exchange ─────────────
+    def _contracts_to_base_qty(self, symbol: str, contracts: float) -> float:
+        """
+        EXEC-01 — Converte CONTRATOS (unidade da KuCoin) → UNIDADE BASE.
+
+        ══════════════════════════════════════════════════════════════
+        INVARIANTE DE UNIDADES (estabelecido nesta correção)
+        ══════════════════════════════════════════════════════════════
+          KuCoin currentQty / get_positions()["size"]  = CONTRATOS
+          engine.Position.qty                          = UNIDADE BASE
+          RiskManager.size()                           = UNIDADE BASE
+          place_order(qty=...)                         = UNIDADE BASE
+          _round_qty()  = ÚNICO ponto base → contratos (para envio)
+
+        CAUSA RAIZ do EXEC-01: Position.qty recebia unidade base quando
+        criada por _open() (via risk.size()), mas CONTRATOS quando
+        criada por qualquer caminho de reconciliação (via
+        get_positions()). Medido com DOGEUSDT (multiplier=100): a mesma
+        posição física produzia qty=2600.0 por _open() e qty=26.0 por
+        reconciliação — margem calculada divergindo em 53.000x.
+
+        Esta conversão é de ESTADO, não de submissão: nenhum
+        arredondamento de lote é aplicado aqui (isso é papel de
+        _round_qty, no momento do envio da ordem).
+
+        FALHA SEGURA (EXEC01-L): multiplier ausente, zero, negativo ou
+        NaN NÃO assume 1 silenciosamente — levanta ValueError. Operar
+        com unidade desconhecida é pior que não operar.
+        """
+        # Fonte primária: instrumentos já carregados no engine.
+        # Fallback: o próprio cliente (self.instruments pode ainda estar
+        # vazio se este método for chamado antes de _connect() popular,
+        # ex: restart que chama _load_existing_positions() cedo). Não é
+        # uma segunda fonte de verdade — é a MESMA (client._instruments),
+        # apenas acessada diretamente.
+        info = (self.instruments or {}).get(symbol) or {}
+        if not info:
+            try:
+                info = (self.client.get_instruments() or {}).get(symbol) or {}
+            except Exception:
+                info = {}
+        raw  = info.get("multiplier", None)
+
+        if raw is None:
+            raise ValueError(
+                f"_contracts_to_base_qty({symbol}): multiplier ausente nos "
+                f"instrumentos carregados — impossível converter contratos "
+                f"para unidade base com segurança"
+            )
+        try:
+            mult = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"_contracts_to_base_qty({symbol}): multiplier inválido "
+                f"({raw!r}) — não é numérico"
+            )
+        # NaN != NaN — única forma confiável de detectar sem importar math
+        if mult != mult or mult <= 0:
+            raise ValueError(
+                f"_contracts_to_base_qty({symbol}): multiplier inválido "
+                f"({mult}) — deve ser > 0 e não-NaN"
+            )
+
+        return float(contracts) * mult
+
     async def _reconcile_exchange_positions(self, only_symbol: str = None) -> list:
         """
         P0 (ADV-01) — descobre e protege posições que existem na
@@ -1105,8 +1169,20 @@ class TradingEngine:
                     ep + atr_est * 3.0 if direction == "LONG" else ep - atr_est * 3.0
                 )
 
+                # EXEC-01: `size` vem de get_positions() e está em CONTRATOS.
+                # Position.qty DEVE ser unidade base.
+                try:
+                    _base_qty = self._contracts_to_base_qty(sym, size)
+                except ValueError as _ue:
+                    log.critical(
+                        f"🚨 RECONCILE {sym}: {_ue} — posição NÃO reconstruída, "
+                        f"marcada como desprotegida para bloquear novas entradas"
+                    )
+                    self._unprotected_symbols.add(sym)
+                    continue
+
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Reconciled orphan", 75)
-                pos = Position(sig, size)
+                pos = Position(sig, _base_qty)
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)
@@ -1260,8 +1336,18 @@ class TradingEngine:
                         else:
                             sl = ep + atr_est * 1.5
                             tp = ep - atr_est * 3.0
+                        # EXEC-01: `sz` vem de get_positions() = CONTRATOS.
+                        try:
+                            _base_sz = self._contracts_to_base_qty(sym, sz)
+                        except ValueError as _ue:
+                            log.critical(
+                                f"🚨 SYNC {sym}: {_ue} — posição externa NÃO "
+                                f"carregada (unidade desconhecida)"
+                            )
+                            continue
+
                         sig = Signal(sym, direction, ep, sl, tp, 0.75, "sync exchange", 75)
-                        pos = Position(sig, sz)
+                        pos = Position(sig, _base_sz)
                         pos.pnl = float(bp.get("unrealisedPnl", 0))
                         cur = float(bp.get("markPrice", ep))
                         pos.update_pnl(cur)
@@ -2952,6 +3038,10 @@ class TradingEngine:
             except Exception as e:
                 log.debug(f"fill price {sig.symbol}: {e}")
 
+            # EXEC-01: `qty` aqui vem de RiskManager.size() e JÁ está em
+            # UNIDADE BASE — NÃO converter. Este é o caminho de origem
+            # da unidade correta; a conversão base→contratos acontece
+            # apenas em _round_qty(), no momento do envio da ordem.
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
@@ -3089,8 +3179,18 @@ class TradingEngine:
                     sl = min(liq * 0.98, ep + atr_est * 1.5) if liq > 0 else ep + atr_est * 1.5
                     tp = ep - atr_est * 3.0
 
+                # EXEC-01: `size` vem de get_positions() = CONTRATOS.
+                try:
+                    _base_size = self._contracts_to_base_qty(sym, size)
+                except ValueError as _ue:
+                    log.critical(
+                        f"🚨 STARTUP SYNC {sym}: {_ue} — posição NÃO carregada "
+                        f"(unidade desconhecida, não é seguro operá-la)"
+                    )
+                    continue
+
                 sig = Signal(sym, direction, ep, sl, tp, 0.75, "Startup sync", 75)
-                pos = Position(sig, size)
+                pos = Position(sig, _base_size)
                 pos.pnl = upnl
                 cur = float(p.get("markPrice", ep))
                 pos.update_pnl(cur)
