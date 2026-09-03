@@ -44,6 +44,7 @@ from bot import optimizer as opt
 # ── Fase 3: hardening ─────────────────────────────────────────────
 from bot.integrity import IntegrityGuard, Severity
 from bot.order_state import OrderRegistry, OrderState, InvalidTransition
+from bot.pilot import PilotGuard
 from bot import liquidation as liq
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
@@ -373,6 +374,10 @@ class TradingEngine:
         # emissão do log; retry, gate e backoff seguem inalterados.
         self._scan_susp_last_log_ts: float = 0.0
         self._scan_susp_last_key:    str   = ""
+
+        # Modo piloto controlado (REAL_TRADING_PILOT). Inerte quando a
+        # variável não está definida — comportamento idêntico ao anterior.
+        self.pilot = PilotGuard()
 
         # ══════════════════════════════════════════════════════════
         # P0 (ADV-01) — RECONCILIAÇÃO DE POSIÇÃO ÓRFÃ
@@ -2573,6 +2578,41 @@ class TradingEngine:
                         notify_nexus(nx_dec.to_dict(), approved=True)
                     )
 
+            # ══════════════════════════════════════════════════════
+            # [AI_DECISION] — log obrigatório do piloto controlado
+            #
+            # Registrado ANTES de qualquer ordem, com os campos exigidos
+            # pela autorização: símbolo, lado, aprovação, score, motivo,
+            # timestamp e preço usado na decisão.
+            # ══════════════════════════════════════════════════════
+            if self.pilot.enabled:
+                _ai_ok = nx_dec is not None and nx_dec.execution_allowed
+                _ai_score = f"{nx_dec.setup_quality:.1f}" if nx_dec else "N/A"
+                _ai_conf = f"{nx_dec.confidence:.0f}" if nx_dec else "N/A"
+                _ai_why = ((nx_dec.reasoning[-1] if nx_dec.reasoning else "—")
+                           if nx_dec else "NEXUS AI não executado")
+                log.critical(
+                    f"[AI_DECISION] symbol={sig.symbol} side={sig.direction} "
+                    f"approved={_ai_ok} score={_ai_score} conf={_ai_conf} "
+                    f"price={sig.entry} ts={int(time.time())} "
+                    f"reason={_ai_why[:120]}"
+                )
+                # Requisito: se o agente AI falhar/não rodar, NÃO abrir
+                # trade no piloto. Sem fallback silencioso.
+                if nx_dec is None:
+                    log.critical(
+                        f"🚁 [PILOT] {sig.symbol} BLOQUEADO — NEXUS AI não "
+                        f"produziu decisão (falha, timeout ou desabilitado). "
+                        f"Piloto não permite fallback silencioso."
+                    )
+                    return
+
+                # 14 pré-condições do piloto controlado
+                if not self.pilot.can_open_pilot(
+                    self, self.client, sig.symbol, nx_dec
+                ):
+                    return
+
             # Atualizar saldo real antes de calcular qty
             fresh_bal = await self.client.get_balance()
             if fresh_bal > 0:
@@ -3151,6 +3191,10 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
+            # Piloto: conta a abertura para o limite de 1 ordem/sessão.
+            # Só aqui — depois do FILLED confirmado e da posição criada.
+            if self.pilot.enabled:
+                self.pilot.register_position_opened(sig.symbol)
             # Persiste no banco
             # ITEM 2: grava os COMPONENTES do score, não só o total.
             # Permite que score_weights.calibrate_from_history() descubra
