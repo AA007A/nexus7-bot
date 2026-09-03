@@ -526,6 +526,55 @@ class KuCoinClient:
             return 0.0
         return v
 
+    async def get_order_by_client_oid(self, client_oid: str) -> dict:
+        """Recupera uma ordem Futures pela chave idempotente do cliente.
+
+        A KuCoin devolve o identificador no campo ``id`` neste endpoint,
+        enquanto o restante do engine usa ``orderId``. O alias é
+        normalizado aqui para manter um contrato interno único.
+        """
+        if not client_oid:
+            return {}
+        try:
+            data = await self._get(
+                "/api/v1/orders/byClientOid",
+                {"clientOid": client_oid},
+                auth=True,
+            )
+        except Exception as e:
+            log.warning(f"get_order_by_client_oid {client_oid}: {e}")
+            return {}
+        if not isinstance(data, dict) or not data:
+            return {}
+        order_id = data.get("orderId") or data.get("id")
+        if not order_id:
+            return {}
+        recovered = dict(data)
+        recovered["orderId"] = str(order_id)
+        recovered["clientOid"] = recovered.get("clientOid") or client_oid
+        recovered["recoveredByClientOid"] = True
+        return recovered
+
+    async def _recover_ambiguous_order(self, endpoint: str, body: dict) -> dict:
+        """Resolve POST de ordem cuja resposta pode ter sido perdida."""
+        if endpoint != "/api/v1/orders":
+            return {}
+        client_oid = body.get("clientOid", "") if isinstance(body, dict) else ""
+        if not client_oid:
+            return {}
+        # A indexação da ordem pode levar alguns milissegundos após o POST.
+        for attempt in range(3):
+            recovered = await self.get_order_by_client_oid(client_oid)
+            if recovered:
+                log.warning(
+                    f"♻️ [ORDER RECOVERED] clientOid={client_oid} "
+                    f"orderId={recovered['orderId']} após resposta ambígua"
+                )
+                return recovered
+            if attempt < 2:
+                await asyncio.sleep(0.25 * (attempt + 1))
+        return {}
+
     async def _post(self, endpoint: str, body: dict) -> dict:
         """
         NOTA DE IDEMPOTÊNCIA (ADV-02): body_str é serializado UMA VEZ,
@@ -551,6 +600,7 @@ class KuCoinClient:
         # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
         body_str = json.dumps(body, separators=(",", ":"))
         headers  = self._auth_headers("POST", endpoint, body_str)
+        ambiguous = False
         for attempt in range(3):
             try:
                 await self._throttle()
@@ -589,6 +639,11 @@ class KuCoinClient:
                             f"KuCoin POST {endpoint}: resposta não-JSON "
                             f"(HTTP {r.status}): {_je}"
                         )
+                        if r.status >= 500:
+                            ambiguous = True
+                            recovered = await self._recover_ambiguous_order(endpoint, body)
+                            if recovered:
+                                return recovered
                         await asyncio.sleep(self._backoff_seconds(attempt))
                         continue
 
@@ -645,9 +700,15 @@ class KuCoinClient:
                 # CASO D — erro de rede/timeout. Comportamento
                 # PRÉ-EXISTENTE, não alterado por esta correção (fora
                 # do escopo do ADV-02 conforme instrução explícita).
+                ambiguous = True
+                recovered = await self._recover_ambiguous_order(endpoint, body)
+                if recovered:
+                    return recovered
                 wait = 2 ** attempt
                 log.warning(f"KuCoin POST {endpoint} tentativa {attempt+1}: {e} — retry em {wait}s")
                 await asyncio.sleep(wait)
+        if ambiguous and endpoint == "/api/v1/orders":
+            return {"clientOid": body.get("clientOid", ""), "_ambiguous": True}
         return {}
 
     # ── Saldo ─────────────────────────────────────────────────────
@@ -930,13 +991,24 @@ class KuCoinClient:
         # endpoint correto para stop de posição na KuCoin Futures.
         # ══════════════════════════════════════════════════════════════
 
+        submitted_oid = body["clientOid"]
         data     = await self._post("/api/v1/orders", body)
         order_id = data.get("orderId", "")
+
+        # Última barreira antes de alterar leverage (e gerar outro OID):
+        # tenta resolver a ordem original pela chave oficial da KuCoin.
+        if not order_id and data.get("_ambiguous"):
+            recovered = await self._recover_ambiguous_order(
+                "/api/v1/orders", {"clientOid": submitted_oid}
+            )
+            if recovered:
+                data = recovered
+                order_id = data["orderId"]
 
         # Fallback de leverage: nem todo par KuCoin permite 50x.
         # Altcoins costumam ter limite de 20x-25x. Se a ordem falhar,
         # retenta com valores menores até conseguir.
-        if not order_id and _lev > 20:
+        if not order_id and not data.get("_ambiguous") and _lev > 20:
             for fallback_lev in (25, 20, 10):
                 if fallback_lev >= _lev:
                     continue
@@ -959,6 +1031,7 @@ class KuCoinClient:
                         f"{_raw}_{fallback_lev}".encode()
                     ).hexdigest()
                 )[:40]
+                submitted_oid = body["clientOid"]
                 data     = await self._post("/api/v1/orders", body)
                 order_id = data.get("orderId", "")
                 if order_id:
@@ -978,7 +1051,7 @@ class KuCoinClient:
             # este orderId.
             # ══════════════════════════════════════════════════════
             log.info(
-                f"📤 [ORDER] clientOid={_oid} orderId={order_id} "
+                f"📤 [ORDER] clientOid={submitted_oid} orderId={order_id} "
                 f"symbol={symbol} side={side} qty={contracts} "
                 f"leverage={body['leverage']}x"
             )
@@ -1016,7 +1089,7 @@ class KuCoinClient:
         # prova E2E do protocolo exige (Fase 5/7/12).
         # ══════════════════════════════════════════════════════════
         if isinstance(data, dict):
-            data["clientOid"] = _oid
+            data["clientOid"] = submitted_oid
         return data
 
     async def _position_exists(self, symbol: str) -> bool:

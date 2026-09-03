@@ -263,6 +263,19 @@ async def order_status(req):
     }})
 
 
+async def order_by_client_oid(req):
+    """GET oficial de Futures para recuperar POST com resposta perdida."""
+    client_oid = req.query.get("clientOid", "")
+    o = next((x for x in ORDERS if x.get("clientOid") == client_oid), None)
+    if not o:
+        return web.json_response(
+            {"code": "100001", "msg": "order not found"}, status=404
+        )
+    return web.json_response({"code": "200000", "data": {
+        **o, "id": o.get("orderId"), "clientOid": client_oid,
+    }})
+
+
 async def catch_all(req):
     return web.json_response({"code": "200000", "data": {}})
 
@@ -293,6 +306,7 @@ def make_app():
     app.router.add_get("/api/v1/timestamp", timestamp)
     app.router.add_get("/api/v1/funding-rate/{sym}/current", funding_rate)
     app.router.add_post("/api/v1/orders", orders)
+    app.router.add_get("/api/v1/orders/byClientOid", order_by_client_oid)
     app.router.add_get("/api/v1/orders/{order_id}", order_status)
     app.router.add_post("/api/v1/position/trading-stop", trading_stop)
     app.router.add_post("/api/v1/bullet-private", bullet_private)

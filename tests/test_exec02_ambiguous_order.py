@@ -1,9 +1,9 @@
 """
 NEXUS-7 — Testes: EXEC-02 (ordem ambígua / orderId ausente)
 
-EXEC-02 (CRITICAL): get_order_status("") agrupava `not order_id` com
-PAPER_TRADE e orderIds sintéticos legítimos, retornando _synthetic=True
-— que wait_for_fill() interpreta como filled=True.
+EXEC-02 (CRITICAL): além de impedir falso fill com orderId vazio, uma
+resposta perdida após a aceitação deve ser recuperada imediatamente por
+GET /api/v1/orders/byClientOid, sem reenviar a ordem.
 
 Cadeia do bug:
   place_order falha 3x → data = {}
@@ -81,8 +81,8 @@ async def test_B2_ordem_aceita_resposta_perdida_converge():
     E a posição, e SÓ ENTÃO a resposta se perde. Diferente de timeout
     antes da exchange receber.
 
-    Exigido: o bot não pode declarar ABERTO falsamente, e deve
-    convergir posteriormente (descobrir e proteger a posição real).
+    Exigido: recuperar o orderId pelo clientOid, confirmar o fill, proteger
+    a posição e não criar uma segunda ordem.
     """
     from aiohttp import web
     import tests.mock_kucoin as MK
@@ -132,17 +132,19 @@ async def test_B2_ordem_aceita_resposta_perdida_converge():
 
     check("exchange REALMENTE tem a posição (cenário montado corretamente)",
           len(MK.POSITIONS) == 1, f"={len(MK.POSITIONS)}")
-    check("bot NÃO declara posição aberta sem orderId confirmado",
-          "DOGEUSDT" not in e.positions,
-          "declarou ABERTO sem confirmação — EXEC-02 regrediu")
+    check("B2: bot recupera orderId diretamente pelo clientOid",
+          "DOGEUSDT" in e.positions,
+          "não recuperou a ordem aceita após perda da resposta")
+    check("B2: POST ambíguo não cria ordens duplicadas",
+          len(MK.ORDERS) == 1, f"ordens={len(MK.ORDERS)}")
 
-    # CONVERGÊNCIA: o guardião periódico deve descobrir e proteger
+    # Não-regressão: o guardião periódico continua idempotente.
     async with e._pos_lock:
         await e._guard_naked_positions()
 
-    check("B2: posição órfã é DESCOBERTA pelo guardião periódico",
+    check("B2: posição permanece registrada após o guardião periódico",
           "DOGEUSDT" in e.positions,
-          "não convergiu — exposição real ficaria invisível")
+          "posição recuperada deixou de ser rastreada")
     if "DOGEUSDT" in e.positions:
         p = e.positions["DOGEUSDT"]
         check("B2: qty em unidade base correta (EXEC-01 mantido)",
