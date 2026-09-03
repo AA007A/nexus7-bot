@@ -366,6 +366,13 @@ class TradingEngine:
         # ══════════════════════════════════════════════════════════
         self._viable_retry_next_ts: float = 0.0
         self._viable_retry_attempt: int   = 0
+        # LOG-throttle (LOW, observabilidade): SCAN_SUSPENSO era emitido
+        # a cada ciclo (~5s) enquanto o retry ficava travado no backoff
+        # de até 300s — ~720 warnings idênticos por hora nos logs do
+        # Railway. Confirmado em produção. Estes campos limitam APENAS a
+        # emissão do log; retry, gate e backoff seguem inalterados.
+        self._scan_susp_last_log_ts: float = 0.0
+        self._scan_susp_last_key:    str   = ""
 
         # ══════════════════════════════════════════════════════════
         # P0 (ADV-01) — RECONCILIAÇÃO DE POSIÇÃO ÓRFÃ
@@ -522,12 +529,25 @@ class TradingEngine:
                         _tem_pares = await self._ensure_viable_symbols()
 
                         if not _tem_pares:
-                            log.warning(
-                                f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
-                                f"nenhuma ordem será aberta até a "
-                                f"recuperação automática "
-                                f"(tentativa #{self._viable_retry_attempt})"
-                            )
+                            # Throttle SOMENTE do log (LOW). O gate acima
+                            # já bloqueou o scan — nada aqui altera
+                            # segurança, retry ou backoff.
+                            #
+                            # Emite imediatamente na primeira vez e sempre
+                            # que o estado relevante mudar (nº da tentativa);
+                            # mensagens idênticas ficam limitadas a 1x/60s.
+                            _susp_key = f"viable_empty|{self._viable_retry_attempt}"
+                            _now_log = time.time()
+                            if (_susp_key != self._scan_susp_last_key or
+                                    _now_log - self._scan_susp_last_log_ts >= 60.0):
+                                self._scan_susp_last_key = _susp_key
+                                self._scan_susp_last_log_ts = _now_log
+                                log.warning(
+                                    f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
+                                    f"nenhuma ordem será aberta até a "
+                                    f"recuperação automática "
+                                    f"(tentativa #{self._viable_retry_attempt})"
+                                )
                         elif not self.integrity.can_open_new():
                             log.warning(
                                 f"🚫 ENTRADAS BLOQUEADAS: "
