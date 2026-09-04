@@ -28,6 +28,7 @@ _AI_APPROVED = 0
 _AI_REJECTED = 0
 _LAST_EVENT = None
 _LAST_SUMMARY_BLOCKS = 0
+_TELEMETRY_ERRORS = Counter()
 
 _SUMMARY_EVERY = max(25, int(os.environ.get("FUNNEL_METRICS_EVERY", "100")))
 _TELEGRAM_ENABLED = os.environ.get("FUNNEL_TELEGRAM", "true").lower() == "true"
@@ -56,6 +57,12 @@ _AI_RE = re.compile(
 )
 
 
+def _record_telemetry_error(kind: str) -> None:
+    """Count best-effort telemetry failures without recursing through logging."""
+    with _LOCK:
+        _TELEMETRY_ERRORS[kind] += 1
+
+
 def _snapshot_locked() -> dict:
     blocked = sum(_BLOCKS.values())
     denom = blocked if blocked else 1
@@ -73,6 +80,7 @@ def _snapshot_locked() -> dict:
         "ai_reached": _AI_REACHED,
         "ai_approved": _AI_APPROVED,
         "ai_rejected": _AI_REJECTED,
+        "telemetry_errors": dict(_TELEMETRY_ERRORS),
         "last_event": dict(_LAST_EVENT) if _LAST_EVENT else None,
         "note": "Contadores observacionais desde o último startup; regras de trading não foram alteradas.",
     }
@@ -115,7 +123,7 @@ def _tg_worker() -> None:
             )
             urllib.request.urlopen(req, timeout=8).read()
         except Exception:
-            pass
+            _record_telemetry_error("telegram_send")
         finally:
             _TG_QUEUE.task_done()
 
@@ -132,7 +140,7 @@ def _enqueue_summary(text: str) -> None:
     try:
         _TG_QUEUE.put_nowait(text)
     except queue.Full:
-        pass
+        _record_telemetry_error("telegram_queue_full")
 
 
 def _record_block(stage: str, symbol: str) -> None:
@@ -190,8 +198,9 @@ class _FunnelHandler(logging.Handler):
         try:
             observe(record.getMessage())
         except Exception:
-            # Telemetry must never affect the trading loop.
-            pass
+            # Do not recurse into logging from a logging.Handler; expose the
+            # failure through the metrics snapshot instead.
+            _record_telemetry_error("handler_emit")
 
 
 def install(logger: logging.Logger) -> None:
