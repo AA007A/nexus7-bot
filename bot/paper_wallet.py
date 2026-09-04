@@ -1,14 +1,16 @@
 """PAPER-only virtual wallet isolation.
 
 A PAPER session must not treat deposits, withdrawals, manual trades, margin
-reservation, or any other KuCoin account balance movement as bot PnL. This
-module snapshots the observed startup balance once, then keeps an internal
-virtual wallet driven only by simulated PAPER trade results.
+reservation, or any other KuCoin account balance movement as bot PnL. PAPER
+capital is sourced from an explicit virtual-capital setting when available and
+then kept in an internal wallet driven only by simulated PAPER trade results.
 
 LIVE behavior is untouched. Trading thresholds, leverage, risk parameters and
 all production decision gates are unchanged.
 """
 from __future__ import annotations
+
+import os
 
 
 def install(log):
@@ -34,6 +36,31 @@ def install(log):
             reason,
         )
 
+    def _virtual_initial_balance(observed_balance: float) -> tuple[float, str]:
+        """Choose PAPER capital without depending on mutable exchange balance."""
+        from bot.config import cfg
+
+        raw = os.environ.get("PAPER_INITIAL_BALANCE", "").strip()
+        if raw:
+            try:
+                configured = float(raw)
+                if configured > 0:
+                    return configured, "PAPER_INITIAL_BALANCE"
+            except (TypeError, ValueError):
+                log.warning(
+                    "[PAPER_WALLET] PAPER_INITIAL_BALANCE inválido; usando fallback seguro"
+                )
+
+        configured = float(getattr(cfg, "INITIAL_CAP", 0.0) or 0.0)
+        if configured > 0:
+            return configured, "INITIAL_CAP"
+
+        observed = max(0.0, float(observed_balance or 0.0))
+        if observed > 0:
+            return observed, "startup_exchange_snapshot"
+
+        return 0.0, "unconfirmed_zero"
+
     async def _connect_with_paper_wallet(self):
         await original_connect(self)
         if not getattr(self, "paper_trade", False):
@@ -41,19 +68,23 @@ def install(log):
         if not getattr(self, "connected", False):
             return
 
-        # Snapshot exactly once per process. From this point on, external
-        # KuCoin balance changes cannot create PAPER drawdown/profit.
+        # Initialize exactly once per process. Prefer explicit virtual capital
+        # over the mutable KuCoin account balance. This means a zero/occupied
+        # exchange balance cannot silently disable PAPER scans when INITIAL_CAP
+        # (or PAPER_INITIAL_BALANCE) defines the simulator's capital.
         if not hasattr(self, "_paper_balance"):
-            initial = float(getattr(self.risk, "balance", 0.0) or 0.0)
+            observed = float(getattr(self.risk, "balance", 0.0) or 0.0)
+            initial, source = _virtual_initial_balance(observed)
             self._paper_balance = initial
             self.risk.peak_balance = initial
             self.risk.balance = initial
             self.risk.drawdown = 0.0
             self.risk.balance_confirmed = initial > 0
             log.info(
-                "🧪 PAPER wallet isolada: saldo virtual inicial=$%.4f; "
-                "mudanças posteriores na conta KuCoin não alteram PnL/drawdown PAPER",
+                "🧪 PAPER wallet isolada: saldo virtual inicial=$%.4f source=%s; "
+                "mudanças na conta KuCoin não alteram PnL/drawdown PAPER",
                 initial,
+                source,
             )
 
     async def _update_balance_paper_safe(self):
