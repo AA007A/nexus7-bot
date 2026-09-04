@@ -21,6 +21,7 @@ try:
     from bot import paper_wallet as _paper_wallet
     from bot import pretrade_hardening as _pretrade_hardening
     from bot import rr_precision_hardening as _rr_precision_hardening
+    from bot import scan_summary_hardening as _scan_summary_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -29,6 +30,7 @@ try:
     _rh.install_paper_execution_fix(_log)
     _pretrade_hardening.install(_log)
     _rr_precision_hardening.install(_log)
+    _scan_summary_hardening.install(_log)
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
