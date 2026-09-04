@@ -194,8 +194,10 @@ def _candle_ts(c):
                 x = float(c[k])
                 if x > 1e12: x /= 1000.0
                 return x
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                # A malformed timestamp candidate is skipped; other known keys
+                # are still tried before declaring the candle unusable.
+                continue
     return None
 
 
@@ -329,6 +331,7 @@ async def close():
         return
     try:
         await _conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Shutdown must remain best-effort, but a failed close should not vanish.
+        log.debug("NEXUS history close failed: %s: %s", type(exc).__name__, exc)
     _conn = None
