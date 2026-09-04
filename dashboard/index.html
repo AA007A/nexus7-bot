@@ -1,94 +1,42 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NEXUS AI · Control Center</title>
 <style>
-:root{--bg:#07090f;--panel:#0d111a;--panel2:#121826;--b:#1d2636;--tx:#e8edf5;--muted:#7e8aa3;--green:#39e58c;--red:#ff5e78;--amber:#ffd166;--blue:#67a6ff;--cyan:#5ce1e6}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#07090f,#090d14);color:var(--tx);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.brand{font-weight:800;letter-spacing:.08em}.sub{color:var(--muted);font-size:12px;margin-top:4px}.pill{border:1px solid var(--b);background:var(--panel);padding:8px 10px;border-radius:999px;font-size:12px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{background:rgba(13,17,26,.96);border:1px solid var(--b);border-radius:16px;padding:14px}.span3{grid-column:span 3}.span4{grid-column:span 4}.span6{grid-column:span 6}.span8{grid-column:span 8}.span12{grid-column:span 12}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em}.value{font-size:26px;font-weight:800;margin-top:4px}.small{font-size:12px;color:var(--muted)}.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.blue{color:var(--blue)}.row{display:flex;align-items:center;justify-content:space-between;gap:8px}.divider{height:1px;background:var(--b);margin:12px 0}.auth{display:flex;gap:8px;flex-wrap:wrap}.auth input,.auth select{flex:1;min-width:180px;background:#080c13;border:1px solid var(--b);color:var(--tx);padding:11px 12px;border-radius:10px;outline:none}.btn{background:#131b2a;border:1px solid #2a3851;color:var(--tx);padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}.btn:hover{border-color:#46638f}.btn.primary{background:#17311f;border-color:#275b38;color:#9af0b7}.tbl{width:100%;border-collapse:collapse;font-size:12px}.tbl th,.tbl td{text-align:left;padding:9px 7px;border-bottom:1px solid #182131}.tbl th{color:var(--muted);font-weight:600}.bar{height:8px;background:#101724;border-radius:999px;overflow:hidden;margin-top:7px}.bar>i{display:block;height:100%;background:var(--blue);width:0}.statusline{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;color:#b8c2d7;line-height:1.55}.error{background:#2a1116;border:1px solid #6a2430;color:#ff9bad;padding:10px;border-radius:10px;display:none;margin-bottom:12px}.kpi-note{font-size:11px;color:var(--muted);margin-top:5px}.decision{border:1px solid var(--b);border-radius:12px;padding:10px;margin-top:9px;background:#0a0f17}.decision .head{display:flex;justify-content:space-between;font-weight:700}.reason{color:#aab5ca;font-size:12px;margin-top:7px}.footer{color:#59667c;font-size:11px;text-align:center;padding:18px 0 4px}
-@media(max-width:800px){.span3,.span4,.span6,.span8{grid-column:span 12}.top{align-items:flex-start;flex-direction:column}.value{font-size:23px}.wrap{padding:12px}.card{border-radius:13px}.tbl{font-size:11px}.hide-mobile{display:none}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="top">
-    <div><div class="brand">NEXUS AI · CONTROL CENTER</div><div class="sub">BGX Capital · Decision Intelligence & Risk Observability</div></div>
-    <div class="pill" id="onlinePill">● verificando...</div>
-  </div>
+:root{--bg:#07090f;--p:#0d111a;--p2:#111826;--b:#1e293b;--t:#edf2f7;--m:#8090aa;--g:#39e58c;--r:#ff667e;--a:#ffd166;--bl:#67a6ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(#07090f,#090d14);color:var(--t);font-family:Inter,system-ui,-apple-system,sans-serif}.wrap{max-width:1180px;margin:auto;padding:16px}.top,.row{display:flex;justify-content:space-between;align-items:center;gap:10px}.brand{font-weight:900;letter-spacing:.08em}.sub,.small{color:var(--m);font-size:12px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{background:var(--p);border:1px solid var(--b);border-radius:16px;padding:14px}.s3{grid-column:span 3}.s4{grid-column:span 4}.s6{grid-column:span 6}.s8{grid-column:span 8}.s12{grid-column:span 12}.label{color:var(--m);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.value{font-size:25px;font-weight:850;margin-top:4px}.pill{border:1px solid var(--b);padding:7px 10px;border-radius:999px;font-size:12px}.green{color:var(--g)}.red{color:var(--r)}.amber{color:var(--a)}.blue{color:var(--bl)}.auth{display:flex;gap:8px;flex-wrap:wrap}.auth input{flex:1;min-width:220px;background:#080c13;border:1px solid var(--b);color:var(--t);padding:11px;border-radius:10px}.btn{background:#142033;border:1px solid #2b3b55;color:var(--t);padding:10px 14px;border-radius:10px;font-weight:700}.btn.primary{background:#17311f;border-color:#2f6b43;color:#a4f2bd}.error{display:none;background:#2b1117;border:1px solid #6e2532;color:#ff9dad;padding:10px;border-radius:10px;margin:12px 0}.decision{border:1px solid var(--b);background:#0a0f17;padding:10px;border-radius:12px;margin-top:8px}.decision .h{display:flex;justify-content:space-between;font-weight:800}.tbl{width:100%;border-collapse:collapse;font-size:12px}.tbl th,.tbl td{padding:8px 6px;border-bottom:1px solid #1a2433;text-align:left}.tbl th{color:var(--m)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;font-size:12px;color:#b7c3d7;line-height:1.5}.note{color:var(--m);font-size:11px;margin-top:6px}.divider{height:1px;background:var(--b);margin:12px 0}@media(max-width:800px){.s3,.s4,.s6,.s8{grid-column:span 12}.top{align-items:flex-start;flex-direction:column}.value{font-size:22px}.wrap{padding:11px}}
+</style></head><body><div class="wrap">
+<div class="top"><div><div class="brand">NEXUS AI · CONTROL CENTER</div><div class="sub">BGX Capital · decisão, persistência e avaliação shadow</div></div><div class="pill" id="online">● verificando</div></div>
+<div id="err" class="error"></div>
+<div class="card" style="margin:12px 0"><div class="label">Autenticação</div><div class="auth" style="margin-top:8px"><input id="token" type="password" placeholder="BOT_API_SECRET"><button class="btn primary" onclick="saveToken()">Conectar</button><button class="btn" onclick="refreshAll()">Atualizar</button></div><div class="note">O segredo fica apenas no sessionStorage do navegador e é usado como Bearer token.</div></div>
+<div class="grid">
+<div class="card s3"><div class="label">Modo</div><div class="value" id="mode">—</div><div class="note" id="modeReason">—</div></div>
+<div class="card s3"><div class="label">NEXUS AI</div><div class="value" id="ai">—</div><div class="note" id="minScore">—</div></div>
+<div class="card s3"><div class="label">Histórico persistente</div><div class="value" id="histTotal">—</div><div class="note" id="storage">—</div></div>
+<div class="card s3"><div class="label">AI Value Added</div><div class="value" id="valueAdded">—</div><div class="note">Δ expectancy shadow: aprovados − vetados</div></div>
 
-  <div id="err" class="error"></div>
+<div class="card s4"><div class="label">Aprovados</div><div class="value green" id="approved">—</div><div class="note" id="approvedN">shadow avaliados: —</div></div>
+<div class="card s4"><div class="label">Expectancy shadow · aprovados</div><div class="value" id="approvedExp">—</div><div class="note">Resultado hipotético usando entry/SL/TP congelados.</div></div>
+<div class="card s4"><div class="label">Vetados</div><div class="value red" id="vetoed">—</div><div class="note" id="vetoedN">shadow avaliados: —</div></div>
+<div class="card s4"><div class="label">Expectancy shadow · vetados</div><div class="value" id="vetoedExp">—</div><div class="note">Nenhuma ordem é enviada para sinais vetados.</div></div>
+<div class="card s4"><div class="label">Shadow pendentes</div><div class="value amber" id="pending">—</div><div class="note">Janela padrão: 16 candles de 15m.</div></div>
+<div class="card s4"><div class="label">Ambíguos excluídos</div><div class="value" id="ambiguous">—</div><div class="note">TP e SL no mesmo candle não entram na expectancy.</div></div>
 
-  <div class="card" style="margin-bottom:12px">
-    <div class="label">Autenticação local</div>
-    <div class="auth" style="margin-top:8px">
-      <input id="token" type="password" autocomplete="off" placeholder="BOT_API_SECRET" />
-      <button class="btn primary" onclick="saveToken()">Conectar</button>
-      <button class="btn" onclick="refreshAll()">Atualizar</button>
-    </div>
-    <div class="kpi-note">O segredo fica apenas no sessionStorage deste navegador e é enviado como Bearer token para as APIs protegidas.</div>
-  </div>
+<div class="card s8"><div class="row"><div><div class="label">Últimas decisões NEXUS em memória</div><div class="small">Decisão bruta do engine por símbolo</div></div><div class="pill" id="decisionCount">0</div></div><div id="decisions"><div class="small" style="padding:12px 0">Sem decisões.</div></div></div>
+<div class="card s4"><div class="label">Operação</div><div class="divider"></div><div class="row"><span class="small">Posições abertas</span><b id="positions">—</b></div><div class="row" style="margin-top:8px"><span class="small">Máximo</span><b id="maxPositions">—</b></div><div class="row" style="margin-top:8px"><span class="small">Pares monitorados</span><b id="pairs">—</b></div><div class="row" style="margin-top:8px"><span class="small">Score mínimo</span><b id="scoreMin">—</b></div></div>
 
-  <div class="grid">
-    <div class="card span3"><div class="label">Modo</div><div class="value" id="mode">—</div><div class="kpi-note" id="modeReason">—</div></div>
-    <div class="card span3"><div class="label">NEXUS AI</div><div class="value" id="aiStatus">—</div><div class="kpi-note" id="minScore">—</div></div>
-    <div class="card span3"><div class="label">Posições abertas</div><div class="value" id="positions">—</div><div class="kpi-note" id="maxPositions">—</div></div>
-    <div class="card span3"><div class="label">Pares monitorados</div><div class="value" id="pairs">—</div><div class="kpi-note" id="scanVerdict">—</div></div>
-
-    <div class="card span8">
-      <div class="row"><div><div class="label">Últimas decisões da NEXUS AI</div><div class="small">Aprovações, vetos, confiança e motivo</div></div><div class="pill" id="decisionCount">0 decisões</div></div>
-      <div id="decisions"><div class="small" style="padding:16px 0">Nenhuma decisão carregada.</div></div>
-    </div>
-
-    <div class="card span4">
-      <div class="label">Qualidade do funil</div>
-      <div style="margin-top:12px"><div class="row"><span class="small">Score máximo recente</span><b id="maxScore">—</b></div><div class="bar"><i id="maxScoreBar"></i></div></div>
-      <div style="margin-top:14px"><div class="row"><span class="small">Score médio</span><b id="avgScore">—</b></div><div class="bar"><i id="avgScoreBar"></i></div></div>
-      <div class="divider"></div>
-      <div class="row"><span class="small">Acima do mínimo</span><b id="aboveMin">—</b></div>
-      <div class="row" style="margin-top:8px"><span class="small">A ≤5 pts</span><b id="nearMin">—</b></div>
-      <div class="row" style="margin-top:8px"><span class="small">Score técnico mínimo</span><b id="scoreMin">—</b></div>
-      <div class="row" style="margin-top:8px"><span class="small">Score NEXUS mínimo</span><b id="nexusMin">—</b></div>
-    </div>
-
-    <div class="card span6">
-      <div class="label">Expectancy & Edge</div>
-      <div class="grid" style="margin-top:10px">
-        <div class="span6"><div class="small">Expectancy</div><div class="value" style="font-size:22px" id="expectancy">—</div></div>
-        <div class="span6"><div class="small">Profit Factor</div><div class="value" style="font-size:22px" id="profitFactor">—</div></div>
-        <div class="span6"><div class="small">Win rate</div><div class="value" style="font-size:22px" id="winRate">—</div></div>
-        <div class="span6"><div class="small">Breakeven WR</div><div class="value" style="font-size:22px" id="breakeven">—</div></div>
-      </div>
-      <div class="kpi-note">Essas métricas vêm do histórico de trades fechado e não representam garantia de lucro futuro.</div>
-    </div>
-
-    <div class="card span6">
-      <div class="label">Últimos pares avaliados</div>
-      <div style="overflow:auto;margin-top:8px"><table class="tbl"><thead><tr><th>Par</th><th>Score</th><th>4H</th><th>1H</th><th>15M</th></tr></thead><tbody id="evaluated"></tbody></table></div>
-    </div>
-
-    <div class="card span12">
-      <div class="row"><div><div class="label">Diagnóstico operacional</div><div class="small">Resposta consolidada do endpoint why-no-trade</div></div><div class="pill" id="updatedAt">—</div></div>
-      <div class="statusline" id="diag" style="margin-top:12px">Conecte com o BOT_API_SECRET para carregar o diagnóstico.</div>
-    </div>
-  </div>
-  <div class="footer">NEXUS AI Control Center · Interface de observabilidade. Não altera parâmetros, gates ou execução de ordens.</div>
-</div>
+<div class="card s6"><div class="label">Trades fechados · métricas existentes</div><div class="grid" style="margin-top:10px"><div class="s6"><div class="small">Expectancy</div><div class="value" id="expectancy">—</div></div><div class="s6"><div class="small">Profit Factor</div><div class="value" id="pf">—</div></div><div class="s6"><div class="small">Win rate</div><div class="value" id="wr">—</div></div><div class="s6"><div class="small">Breakeven WR</div><div class="value" id="bewr">—</div></div></div><div class="note">Histórico observado; não é garantia de desempenho futuro.</div></div>
+<div class="card s6"><div class="label">Últimos pares avaliados</div><div style="overflow:auto;margin-top:8px"><table class="tbl"><thead><tr><th>Par</th><th>Score</th><th>4H</th><th>1H</th><th>15M</th></tr></thead><tbody id="evaluated"></tbody></table></div></div>
+<div class="card s12"><div class="row"><div><div class="label">Diagnóstico</div><div class="small">Estado consolidado</div></div><div class="pill" id="updated">—</div></div><div class="mono" id="diag" style="margin-top:10px">Conecte para carregar.</div></div>
+</div><div class="note" style="text-align:center;padding:18px">Observabilidade somente leitura. O painel não altera estratégia, risco ou execução.</div></div>
 <script>
-const $=id=>document.getElementById(id);
-let token=sessionStorage.getItem('bgx_token')||'';
-$('token').value=token;
-function authHeaders(){return token?{'Authorization':'Bearer '+token}:{};}
-function showErr(msg){$('err').style.display='block';$('err').textContent=msg;}
-function clearErr(){$('err').style.display='none';$('err').textContent='';}
-function fmt(v,d=2){return (v===null||v===undefined||Number.isNaN(Number(v)))?'—':Number(v).toFixed(d)}
-function setBar(id,v){$(id).style.width=Math.max(0,Math.min(100,Number(v)||0))+'%';}
-async function getJSON(path,auth=true){const r=await fetch(path,{headers:auth?authHeaders():{}});if(!r.ok){let t=await r.text();throw new Error(path+' → HTTP '+r.status+' '+t.slice(0,160));}return r.json();}
-function saveToken(){token=$('token').value.trim();if(token)sessionStorage.setItem('bgx_token',token);else sessionStorage.removeItem('bgx_token');refreshAll();}
-function renderDecisions(obj){const list=Object.values(obj||{});$('decisionCount').textContent=list.length+' decisões';if(!list.length){$('decisions').innerHTML='<div class="small" style="padding:16px 0">Ainda não há decisão NEXUS registrada neste processo.</div>';return;}list.sort((a,b)=>String(b.timestamp||b.ts||'').localeCompare(String(a.timestamp||a.ts||'')));$('decisions').innerHTML=list.slice(0,12).map(d=>{const ok=d.execution_allowed===true||String(d.decision||'').toUpperCase()==='APPROVE';const score=d.score??d.nexus_score??'—';const conf=d.confidence??'—';const regime=d.regime??'—';const sym=d.symbol??'—';const side=d.direction??d.side??'—';const reason=(d.reasoning||d.reason||d.primary_reason||'Sem motivo disponível');return `<div class="decision"><div class="head"><span>${sym} · ${side}</span><span class="${ok?'green':'red'}">${ok?'APPROVED':'VETO / WAIT'}</span></div><div class="small" style="margin-top:6px">Score ${score} · confiança ${conf} · regime ${regime}</div><div class="reason">${String(reason).slice(0,280)}</div></div>`}).join('');}
-function renderEvaluated(items){$('evaluated').innerHTML=(items||[]).slice(0,12).map(x=>`<tr><td>${x.par}</td><td><b>${x.score}</b></td><td>${x['4H']}</td><td>${x['1H']}</td><td>${x['15M']}</td></tr>`).join('')||'<tr><td colspan="5" class="small">Sem avaliações recentes.</td></tr>';}
-async function refreshAll(){clearErr();try{const health=await getJSON('/health',false);$('onlinePill').textContent='● ONLINE';$('onlinePill').className='pill green';$('mode').textContent=health.trading_mode||'—';$('mode').className='value '+(health.trading_mode==='LIVE'?'red':'amber');$('modeReason').textContent=health.mode_reason||'';}catch(e){$('onlinePill').textContent='● OFFLINE';$('onlinePill').className='pill red';showErr(e.message);return;}if(!token){showErr('Informe o BOT_API_SECRET para consultar as APIs protegidas.');return;}try{const [nx,why,exp,pnl]=await Promise.all([getJSON('/api/nexus'),getJSON('/api/why-no-trade'),getJSON('/api/expectancy'),getJSON('/api/pnl')]);$('aiStatus').textContent=nx.enabled?'ONLINE':'AGUARDANDO';$('aiStatus').className='value '+(nx.enabled?'green':'amber');$('minScore').textContent='NEXUS mínimo: '+(nx.min_score??'—');$('positions').textContent=why.posicoes_abertas??'—';$('maxPositions').textContent='máximo '+(why.max_posicoes??'—');$('pairs').textContent=why.pares_monitorados??'—';$('scanVerdict').textContent=why.veredito||'—';const s=why.scores_recentes||{};$('maxScore').textContent=s.maximo??'—';$('avgScore').textContent=s.media??'—';$('aboveMin').textContent=s.acima_do_minimo??0;$('nearMin').textContent=s.a_5pts_ou_menos??0;$('scoreMin').textContent=why.thresholds?.score_minimo??'—';$('nexusMin').textContent=why.thresholds?.nexus_minimo??'—';setBar('maxScoreBar',s.maximo||0);setBar('avgScoreBar',s.media||0);renderDecisions(nx.decisions);renderEvaluated(why.ultimos_avaliados);$('expectancy').textContent=(exp.expectancy_r!==undefined?fmt(exp.expectancy_r,3)+' R':exp.expectancy!==undefined?fmt(exp.expectancy,3):'—');$('profitFactor').textContent=exp.profit_factor!==undefined?fmt(exp.profit_factor,2):'—';$('winRate').textContent=exp.win_rate_pct!==undefined?fmt(exp.win_rate_pct,1)+'%':exp.win_rate!==undefined?fmt(exp.win_rate,1)+'%':'—';$('breakeven').textContent=exp.breakeven_wr_pct!==undefined?fmt(exp.breakeven_wr_pct,1)+'%':exp.breakeven_wr!==undefined?fmt(exp.breakeven_wr,1)+'%':'—';$('diag').textContent=JSON.stringify({veredito:why.veredito,thresholds:why.thresholds,scores_recentes:why.scores_recentes,pnl_session:pnl?.session||null},null,2);$('updatedAt').textContent='Atualizado '+new Date().toLocaleTimeString('pt-BR');}catch(e){showErr(e.message);}}
-refreshAll();setInterval(()=>{if(token)refreshAll();},30000);
-</script>
-</body>
-</html>
+const $=x=>document.getElementById(x);let token=sessionStorage.getItem('bgx_token')||'';$('token').value=token;
+function h(){return token?{Authorization:'Bearer '+token}:{}}function err(x){$('err').style.display='block';$('err').textContent=x}function clear(){ $('err').style.display='none';$('err').textContent=''}
+function fmt(v,d=2){return v===null||v===undefined||Number.isNaN(Number(v))?'—':Number(v).toFixed(d)}
+async function j(path,auth=true){const r=await fetch(path,{headers:auth?h():{}});if(!r.ok)throw new Error(path+' HTTP '+r.status+' '+(await r.text()).slice(0,140));return r.json()}
+function saveToken(){token=$('token').value.trim();token?sessionStorage.setItem('bgx_token',token):sessionStorage.removeItem('bgx_token');refreshAll()}
+function renderDecisions(obj){const a=Object.values(obj||{});$('decisionCount').textContent=a.length+' decisões';$('decisions').innerHTML=a.length?a.slice(0,12).map(d=>{const ok=d.execution_allowed===true;return `<div class="decision"><div class="h"><span>${d.symbol||'—'} · ${d.direction||d.side||'—'}</span><span class="${ok?'green':'red'}">${ok?'APPROVED':'VETO / WAIT'}</span></div><div class="small" style="margin-top:6px">score ${d.setup_quality??d.score??'—'} · confiança ${d.confidence??'—'} · regime ${d.regime??'—'}</div></div>`}).join(''):'<div class="small" style="padding:12px 0">Ainda não há decisões neste processo.</div>'}
+function renderEval(a){$('evaluated').innerHTML=(a||[]).slice(0,12).map(x=>`<tr><td>${x.par}</td><td><b>${x.score}</b></td><td>${x['4H']}</td><td>${x['1H']}</td><td>${x['15M']}</td></tr>`).join('')||'<tr><td colspan="5" class="small">Sem dados recentes.</td></tr>'}
+async function refreshAll(){clear();try{const he=await j('/health',false);$('online').textContent='● ONLINE';$('online').className='pill green';$('mode').textContent=he.trading_mode||'—';$('mode').className='value '+(he.trading_mode==='LIVE'?'red':'amber');$('modeReason').textContent=he.mode_reason||''}catch(e){$('online').textContent='● OFFLINE';$('online').className='pill red';err(e.message);return}if(!token){err('Informe o BOT_API_SECRET.');return}try{const [st,nx,why,exp]=await Promise.all([j('/api/status'),j('/api/nexus'),j('/api/why-no-trade'),j('/api/expectancy')]);$('ai').textContent=nx.enabled?'ONLINE':'AGUARDANDO';$('ai').className='value '+(nx.enabled?'green':'amber');$('minScore').textContent='mínimo '+(nx.min_score??'—');renderDecisions(nx.decisions);$('positions').textContent=why.posicoes_abertas??'—';$('maxPositions').textContent=why.max_posicoes??'—';$('pairs').textContent=why.pares_monitorados??'—';$('scoreMin').textContent=why.thresholds?.score_minimo??'—';renderEval(why.ultimos_avaliados);$('expectancy').textContent=exp.expectancy_r!==undefined?fmt(exp.expectancy_r,3)+' R':'—';$('pf').textContent=fmt(exp.profit_factor,2);$('wr').textContent=exp.win_rate_pct!==undefined?fmt(exp.win_rate_pct,1)+'%':'—';$('bewr').textContent=exp.breakeven_wr_pct!==undefined?fmt(exp.breakeven_wr_pct,1)+'%':'—';const m=st.nexus_persistent_metrics||{};$('histTotal').textContent=m.total??0;$('storage').textContent='storage: '+(m.storage||'uninitialized');$('approved').textContent=m.approved??0;$('vetoed').textContent=m.vetoed??0;$('pending').textContent=m.pending_shadow??0;$('ambiguous').textContent=m.ambiguous??0;$('approvedN').textContent='shadow avaliados: '+(m.approved_shadow_n??0);$('vetoedN').textContent='shadow avaliados: '+(m.vetoed_shadow_n??0);$('approvedExp').textContent=m.approved_shadow_expectancy_r===null||m.approved_shadow_expectancy_r===undefined?'—':fmt(m.approved_shadow_expectancy_r,3)+' R';$('vetoedExp').textContent=m.vetoed_shadow_expectancy_r===null||m.vetoed_shadow_expectancy_r===undefined?'—':fmt(m.vetoed_shadow_expectancy_r,3)+' R';$('valueAdded').textContent=m.ai_value_added_r===null||m.ai_value_added_r===undefined?'—':fmt(m.ai_value_added_r,3)+' R';$('valueAdded').className='value '+(Number(m.ai_value_added_r)>=0?'green':'red');$('diag').textContent=JSON.stringify({veredito:why.veredito,nexus_persistent_metrics:m,thresholds:why.thresholds,scores_recentes:why.scores_recentes},null,2);$('updated').textContent='Atualizado '+new Date().toLocaleTimeString('pt-BR')}catch(e){err(e.message)}}
+refreshAll();setInterval(()=>{if(token)refreshAll()},30000)
+</script></body></html>
