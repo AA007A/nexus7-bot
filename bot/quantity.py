@@ -5,7 +5,7 @@ minNotional: quote currency (USDT), zero if the exchange has no such rule.
 All engine/Position/RiskManager quantities are base asset. Only _round_qty
 converts an outgoing base quantity to native contracts.
 """
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 
 def number(value, *, positive=False):
@@ -44,3 +44,13 @@ def validate_base_quantity(qty, info, price):
         raise ValueError('base qty violates minQty or lotSize')
     if qty * price < notional:
         raise ValueError('quote notional below exchange minimum')
+
+
+def base_to_contracts(qty, info):
+    """Single outgoing conversion. Floor to a native lot; never grow exposure."""
+    multiplier, lot, minimum, _ = quantity_rules(info)
+    qty = number(qty, positive=True)
+    contracts = (qty / (multiplier * lot)).to_integral_value(rounding=ROUND_FLOOR) * lot
+    if contracts < minimum:
+        raise ValueError("quantity below exchange minimum")
+    return int(contracts)

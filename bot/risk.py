@@ -11,6 +11,7 @@ import time, math
 from dataclasses import dataclass, field
 from bot.logger import log
 from bot.config import cfg
+from bot.quantity import minimum_base_quantity, quantity_rules
 
 # ── Constantes unificadas — lidas de config.py (NÃO hardcoded) ──
 # REMOVIDOS: MAX_RISK_PCT=0.01 e MAX_DRAWDOWN=0.08 hardcoded
@@ -345,11 +346,9 @@ class RiskManager:
         #
         # Converte o lote mínimo para a mesma unidade de qty.
         # ══════════════════════════════════════════════════════════
-        _lot_contratos = float(info.get("minQty",  1.0))
-        _multiplier    = float(info.get("multiplier", 1.0))
-        min_qty  = _lot_contratos * _multiplier          # em unidade base
-        qty_step = min_qty                                # passo = 1 lote
-        min_not  = float(info.get("minNotional", 1.0))
+        multiplier, lot, _, _ = quantity_rules(info)
+        min_qty = minimum_base_quantity(info, entry)   # base asset, includes quote minimum
+        qty_step = float(lot * multiplier)             # base asset per lot
 
         # Margem livre = saldo - margem já em uso por posições abertas
         margin_used = self._margin_in_use(open_positions)

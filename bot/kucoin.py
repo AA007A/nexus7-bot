@@ -41,6 +41,7 @@ import aiohttp
 
 from bot.logger import log
 from bot.order_state import OrderState, InvalidTransition
+from bot.quantity import base_to_contracts
 
 # ── Credenciais ────────────────────────────────────────────────────
 # .strip() automático — espaços acidentais no Railway são a causa #1 de 400004
@@ -875,15 +876,8 @@ class KuCoinClient:
         return f"{clean:.{decimals}f}"
 
     def _round_qty(self, qty: float, symbol: str) -> int:
-        """
-        KuCoin Futures usa CONTRATOS (inteiros), não quantidade base.
-        qty (USDT-base) → contratos = round(qty / multiplier)
-        """
-        info       = self._instruments.get(symbol, {})
-        multiplier = float(info.get("multiplier", 1.0))
-        lot_size   = float(info.get("minQty",     1.0))
-        contracts  = max(1, round(qty / multiplier / lot_size)) * int(lot_size)
-        return max(1, int(contracts))
+        """Boundary: base asset -> integer KuCoin contracts, exactly once."""
+        return base_to_contracts(qty, self._instruments[symbol])
 
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float = 0, tp: float = 0,
