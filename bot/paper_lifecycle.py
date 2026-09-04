@@ -68,11 +68,20 @@ def install(log):
 
         kept = []
         removed = []
+        paper_balance = float(
+            getattr(engine, "_paper_balance", getattr(engine.risk, "balance", 0.0)) or 0.0
+        )
         for issue in state.issues:
+            # In PAPER the virtual wallet, not the mutable KuCoin available
+            # balance, is the capital source. A zero exchange balance must not
+            # block simulated entries when the virtual wallet is confirmed.
+            if issue.code == "BALANCE_ZERO" and paper_balance > 0:
+                removed.append(issue)
+                continue
             if issue.code == "STATE_DIVERGENCE" and "INEXISTENTE na exchange" in issue.detail:
                 removed.append(issue)
-            else:
-                kept.append(issue)
+                continue
+            kept.append(issue)
 
         if removed:
             if any(i.severity == Severity.BLOCKED for i in kept):
@@ -88,9 +97,10 @@ def install(log):
                 checked_at=state.checked_at,
                 exchange_known=state.exchange_known,
             )
+            removed_codes = ",".join(sorted({i.code for i in removed}))
             log.debug(
-                "[PAPER] integrity: ignorada divergência esperada de %d posição(ões) simulada(s)",
-                len(removed),
+                "[PAPER] integrity: removidas divergências esperadas (%s)",
+                removed_codes,
             )
         else:
             self.state = state
