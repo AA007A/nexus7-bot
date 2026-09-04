@@ -8,6 +8,11 @@ import asyncio
 try:
     from bot.engine import TradingEngine
     from bot import nexus_persistence as _np
+    from bot import funnel_metrics as _fm
+    from bot.logger import log as _log
+
+    # Passive log observer: counts where the pre-NEXUS funnel is stopping.
+    _fm.install(_log)
 
     if not getattr(TradingEngine, "_nexus_persistence_patched", False):
         _orig_validate = TradingEngine._nexus_validate
@@ -33,6 +38,7 @@ try:
                     if isinstance(out, dict):
                         out = dict(out)
                         out["nexus_persistent_metrics"] = _np.get_cached_metrics()
+                        out["funnel_metrics"] = _fm.get_funnel_metrics()
                 except Exception:
                     pass
                 return out
