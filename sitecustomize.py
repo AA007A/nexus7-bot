@@ -1,4 +1,4 @@
-"""Runtime-only observability hooks for NEXUS AI.
+"""Runtime-only observability and infrastructure hardening for NEXUS AI.
 
 Loaded automatically by Python's site module. It wraps decision validation,
 engine status, and the Analyzer for shadow-only A/B measurement without
@@ -15,12 +15,18 @@ try:
     from bot import funnel_metrics as _fm
     from bot import mtf_shadow as _ms
     from bot import logger as _logger
+    from bot import runtime_hardening as _rh
     from bot.logger import log as _log
+
+    # Infrastructure-only hardening. Neither patch changes signal/risk/order
+    # criteria or trading mode.
+    _rh.install_database_schema_fix(_log)
+    _rh.install_telegram_fix(_log)
 
     # Pace the independent NEXUS audit mirror. A burst of many symbols used to
     # enqueue messages back-to-back and trigger Telegram flood control. Audit
     # telemetry is lossy by design; dropping burst duplicates is preferable to
-    # blocking the Telegram channel. Normal bot.notifier traffic is untouched.
+    # blocking the Telegram channel.
     if not getattr(_logger, "_audit_pacing_patched", False):
         _orig_enqueue = _logger._enqueue
         _audit_lock = threading.Lock()
@@ -117,5 +123,5 @@ try:
 
         TradingEngine._nexus_persistence_patched = True
 except Exception:
-    # Startup must remain fail-safe: telemetry hooks cannot block the app.
+    # Startup must remain fail-safe: telemetry/hooks cannot block the app.
     pass
