@@ -20,8 +20,8 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
         start = max(0, (getattr(node, "lineno", 1) or 1) - 8)
         end = min(len(src), (getattr(node, "end_lineno", node.lineno) or node.lineno) + 2)
         text = " ".join(src[start:end]).lower()
-    except Exception:
-        pass
+    except Exception as exc:
+        text = f"audit_read_error:{type(exc).__name__}"
 
     critical_terms = (
         "place_order", "set_sl", "set_position_stops", "save_trade", "database",
@@ -41,7 +41,7 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
 
 
 def audit_silent_excepts(log):
-    root = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.join(os.getcwd(), "bot")
     rows = []
     for filename in sorted(os.listdir(root)):
         if not filename.endswith(".py"):
@@ -62,8 +62,8 @@ def audit_silent_excepts(log):
             if node.type is not None:
                 try:
                     exc_type = ast.unparse(node.type)
-                except Exception:
-                    exc_type = type(node.type).__name__
+                except Exception as exc:
+                    exc_type = f"{type(node.type).__name__}:{type(exc).__name__}"
             rows.append((filename, node.lineno, exc_type, _classify(path, node)))
 
     counts = {}
