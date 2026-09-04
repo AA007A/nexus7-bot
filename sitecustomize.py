@@ -25,6 +25,27 @@ try:
     _rh.install_paper_execution_fix(_log)
     _paper_e2e.install(_log)
 
+    # nexus_persistence uses one asyncpg connection. Concurrent record_decision
+    # and evaluate_pending tasks can otherwise issue overlapping operations on
+    # that connection and raise InterfaceError: another operation is in progress.
+    # Serialize only persistence I/O; trading/execution paths are not changed.
+    if not getattr(_np, "_single_conn_serialized", False):
+        _np_orig_execute = _np._execute
+        _np_orig_fetchall = _np._fetchall
+        _np_io_lock = asyncio.Lock()
+
+        async def _np_execute_serialized(sql, params=()):
+            async with _np_io_lock:
+                return await _np_orig_execute(sql, params)
+
+        async def _np_fetchall_serialized(sql, params=()):
+            async with _np_io_lock:
+                return await _np_orig_fetchall(sql, params)
+
+        _np._execute = _np_execute_serialized
+        _np._fetchall = _np_fetchall_serialized
+        _np._single_conn_serialized = True
+
     if not getattr(_logger, "_audit_pacing_patched", False):
         _orig_enqueue = _logger._enqueue
         _audit_lock = threading.Lock()
