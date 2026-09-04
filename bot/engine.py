@@ -48,8 +48,9 @@ from bot.pilot import PilotGuard
 from bot import liquidation as liq
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
-from bot.nexus_types import NexusDecision
+from bot.nexus_types import NexusDecision, decision_validation_error
 _NEXUS_ENABLED = os.environ.get("NEXUS_AI_ENABLED", "true").lower() == "true"
+_NEXUS_TIMEOUT_S = 10.0
 
 
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
@@ -2439,10 +2440,8 @@ class TradingEngine:
         """
         Consulta o NEXUS AI Decision Engine para o sinal proposto.
 
-        Reúne os dados disponíveis (nunca inventa — seção 14) e delega a
-        decisão. Retorna NexusDecision ou None se a própria consulta
-        falhar (nesse caso o fluxo antigo segue, para não travar o bot
-        por um erro da camada de IA).
+        Reúne os dados disponíveis e delega a decisão. Falhas propagam
+        para o gate fail-closed em _open; nunca autorizam fallback.
         """
         try:
             k15 = self.client.get_cached_klines(sig.symbol, "15",  200)
@@ -2496,16 +2495,16 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"nexus: news sentiment indisponível: {_e}")
 
-            return nexus_ai.decide(
-                symbol=sig.symbol,
+            return await asyncio.to_thread(
+                nexus_ai.decide, symbol=sig.symbol,
                 k15=k15, k1h=k1h, k4h=k4h,
                 entry=sig.entry, sl=sig.sl, tp=sig.tp,
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
             )
         except Exception as e:
-            log.error(f"_nexus_validate {sig.symbol}: {e}")
-            return None
+            log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
+            raise
 
     async def _open(self, sig: Signal):
         try:
@@ -2528,90 +2527,44 @@ class TradingEngine:
                 )
                 return
 
-            # ══════════════════════════════════════════════════════
-            # NEXUS AI DECISION ENGINE (seções 1, 9, 12, 22)
-            #
-            # Camada independente de validação ANTES do Risk Engine.
-            # A IA apenas autoriza ou veta — não executa nada. O sizing
-            # e os limites continuam sob responsabilidade do Risk Engine.
-            #
-            # Desativável via NEXUS_AI_ENABLED=false.
-            # ══════════════════════════════════════════════════════
+            # Mandatory for every new entry, including paper/pilot. Closing
+            # reduceOnly routes do not pass through this gate.
+            nx_dec = None
+            decision_source = "validation_failure"
+            reason = "ai_disabled"
             if _NEXUS_ENABLED:
-                nx_dec = await self._nexus_validate(sig)
-
-                if nx_dec is not None and not nx_dec.execution_allowed:
-                    _motivo = (nx_dec.reasoning[-1] if nx_dec.reasoning
-                               else "sem motivo registrado")
-                    log.info(
-                        f"[{sig.symbol}] 🧠 NEXUS AI VETOU | "
-                        f"score={nx_dec.setup_quality:.1f} ({nx_dec.setup_grade}) "
-                        f"regime={nx_dec.market_regime} "
-                        f"dq={nx_dec.data_quality:.0f} | {_motivo}"
+                try:
+                    nx_dec = await asyncio.wait_for(
+                        self._nexus_validate(sig), timeout=_NEXUS_TIMEOUT_S
                     )
-                    try:
-                        await db.save_signal(
-                            sig.symbol, sig.direction,
-                            {"total": int(nx_dec.setup_quality)},
-                            entrou=False,
-                            motivo=f"NEXUS_AI: {_motivo[:180]}",
-                        )
-                    except Exception as _e:
-                        log.debug(f"save_signal veto: {_e}")
-
-                    # Telegram — deduplicado por símbolo+motivo no notifier
-                    asyncio.create_task(
-                        notify_nexus(nx_dec.to_dict(), approved=False)
+                    reason = decision_validation_error(
+                        nx_dec, sig.symbol, sig.direction, sig.entry, sig.sl, sig.tp
                     )
-                    return
+                    decision_source = "validation_failure" if reason else "nexus_ai"
+                except asyncio.TimeoutError:
+                    decision_source, reason = "timeout", "ai_timeout"
+                except Exception as exc:
+                    decision_source, reason = "exception", type(exc).__name__
 
-                if nx_dec is not None:
-                    log.info(
-                        f"[{sig.symbol}] 🧠 NEXUS AI APROVOU | "
-                        f"score={nx_dec.setup_quality:.1f} ({nx_dec.setup_grade}) "
-                        f"conf={nx_dec.confidence:.0f} EV={nx_dec.expected_value:+.3f}% "
-                        f"RR_net={nx_dec.risk_reward:.2f} regime={nx_dec.market_regime}"
-                    )
-                    self._last_nexus[sig.symbol] = nx_dec.to_dict()
-                    # Aprovações passam sempre — são raras e relevantes
-                    asyncio.create_task(
-                        notify_nexus(nx_dec.to_dict(), approved=True)
-                    )
+            approved = (reason is None and nx_dec.execution_allowed is True)
+            # Log both outcomes before any order. Failure records never claim
+            # to be a decision made by nexus_ai; arbitrary exception text is omitted.
+            score = nx_dec.setup_quality if decision_source == "nexus_ai" else "N/A"
+            confidence = nx_dec.confidence if decision_source == "nexus_ai" else "N/A"
+            log.info(
+                f"[AI_DECISION] symbol={sig.symbol} side={sig.direction} "
+                f"decision={'APPROVE' if approved else 'REJECT'} approved={approved} "
+                f"decision_source={decision_source} score={score} confidence={confidence} "
+                f"ts={int(time.time())} reason={reason or ('approved' if approved else 'ai_veto')}"
+            )
+            if not approved:
+                return
 
-            # ══════════════════════════════════════════════════════
-            # [AI_DECISION] — log obrigatório do piloto controlado
-            #
-            # Registrado ANTES de qualquer ordem, com os campos exigidos
-            # pela autorização: símbolo, lado, aprovação, score, motivo,
-            # timestamp e preço usado na decisão.
-            # ══════════════════════════════════════════════════════
-            if self.pilot.enabled:
-                _ai_ok = nx_dec is not None and nx_dec.execution_allowed
-                _ai_score = f"{nx_dec.setup_quality:.1f}" if nx_dec else "N/A"
-                _ai_conf = f"{nx_dec.confidence:.0f}" if nx_dec else "N/A"
-                _ai_why = ((nx_dec.reasoning[-1] if nx_dec.reasoning else "—")
-                           if nx_dec else "NEXUS AI não executado")
-                log.critical(
-                    f"[AI_DECISION] symbol={sig.symbol} side={sig.direction} "
-                    f"approved={_ai_ok} score={_ai_score} conf={_ai_conf} "
-                    f"price={sig.entry} ts={int(time.time())} "
-                    f"reason={_ai_why[:120]}"
-                )
-                # Requisito: se o agente AI falhar/não rodar, NÃO abrir
-                # trade no piloto. Sem fallback silencioso.
-                if nx_dec is None:
-                    log.critical(
-                        f"🚁 [PILOT] {sig.symbol} BLOQUEADO — NEXUS AI não "
-                        f"produziu decisão (falha, timeout ou desabilitado). "
-                        f"Piloto não permite fallback silencioso."
-                    )
-                    return
-
-                # 14 pré-condições do piloto controlado
-                if not self.pilot.can_open_pilot(
-                    self, self.client, sig.symbol, nx_dec
-                ):
-                    return
+            self._last_nexus[sig.symbol] = nx_dec.to_dict()
+            asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
+            # Piloto não permite fallback silencioso: same mandatory AI gate.
+            if not self.pilot.can_open_pilot(self, self.client, sig.symbol, nx_dec):
+                return
 
             # Atualizar saldo real antes de calcular qty
             fresh_bal = await self.client.get_balance()

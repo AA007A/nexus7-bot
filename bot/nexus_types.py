@@ -189,3 +189,36 @@ class NexusDecision:
             reasoning=[reason],
             warnings=warnings or [],
         )
+
+
+def decision_validation_error(decision, symbol, side, entry, sl, tp):
+    """Validate the execution boundary, not the strategy's score threshold.
+
+    Dataclass annotations do not enforce runtime types. Only a boolean True
+    for this exact proposed trade can authorize a new entry.
+    """
+    import math
+    if not isinstance(decision, NexusDecision):
+        return "invalid_decision_type"
+    if type(decision.execution_allowed) is not bool:
+        return "invalid_approval_type"
+    if decision.symbol != symbol:
+        return "symbol_mismatch"
+    if decision.execution_allowed is False:
+        return None  # a legitimate veto, not a schema failure
+    if decision.decision != side:
+        return "side_mismatch"
+    for name in ("confidence", "setup_quality", "data_quality", "entry",
+                 "stop_loss", "take_profit", "expected_value", "risk_reward"):
+        value = getattr(decision, name, None)
+        if type(value) not in (int, float) or not math.isfinite(value):
+            return "invalid_numeric_field"
+    if not all(0 <= getattr(decision, n) <= 100
+               for n in ("confidence", "setup_quality", "data_quality")):
+        return "invalid_score_range"
+    if (decision.entry, decision.stop_loss, decision.take_profit) != (entry, sl, tp):
+        return "trade_levels_mismatch"
+    if not isinstance(decision.reasoning, list) or not all(
+            isinstance(reason, str) for reason in decision.reasoning):
+        return "invalid_reasoning"
+    return None

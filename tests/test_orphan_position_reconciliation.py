@@ -28,7 +28,7 @@ os.environ.update({
     "LIVE_TRADING_CONFIRMED": "I_UNDERSTAND_THE_RISK",
     "BOT_API_SECRET": "t", "LOG_LEVEL": "ERROR",
     "LEVERAGE": "10", "MAX_RISK_PCT": "0.5", "MAX_MARGIN_PCT": "0.98",
-    "NEXUS_AI_ENABLED": "false", "NEXUS_TELEGRAM": "false",
+    "NEXUS_AI_ENABLED": "true", "NEXUS_TELEGRAM": "false",
 })
 
 
@@ -71,6 +71,12 @@ async def test_P0A_fill_parcial_ativo_timeout_reconcilia():
     sig = Signal(symbol="DOGEUSDT", direction="LONG", confidence=80,
                  entry=0.19, sl=0.188, tp=0.20, score=80,
                  expected_pnl=1.0, reason="teste P0-A")
+    from unittest.mock import AsyncMock
+    from bot.nexus_types import NexusDecision
+    e._nexus_validate = AsyncMock(return_value=NexusDecision(
+        symbol=sig.symbol, decision=sig.direction, execution_allowed=True,
+        entry=sig.entry, stop_loss=sig.sl, take_profit=sig.tp,
+        confidence=80., setup_quality=80.))
     await asyncio.wait_for(e._open(sig), timeout=60)
     await _set_fault(order_partial_fill_pct=0)   # limpa para os próximos testes
 
