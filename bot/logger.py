@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import urllib.request
+from collections import Counter
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +25,29 @@ _AI_TG_LOCK = threading.Lock()
 _AI_TG_WORKER_STARTED = False
 _AI_TG_REJECT_COOLDOWN = int(os.environ.get("NEXUS_VETO_COOLDOWN", "900"))
 _FUNNEL_TG_COOLDOWN = int(os.environ.get("NEXUS_FUNNEL_COOLDOWN", "900"))
+
+# Métricas operacionais desde o último startup. Não alteram decisões nem risco.
+# Elas existem para responder objetivamente: quantos sinais chegaram à IA,
+# quantos foram aprovados/vetados, por quê, e onde o funil pré-IA está parando.
+_METRICS_LOCK = threading.Lock()
+_AI_METRICS = {
+    "started_at": time.time(),
+    "total": 0,
+    "approved": 0,
+    "rejected": 0,
+    "score_sum": 0.0,
+    "score_count": 0,
+    "reasons": Counter(),
+    "sources": Counter(),
+    "sides": Counter(),
+    "funnel_total": 0,
+    "funnel_stages": Counter(),
+    "funnel_symbols": Counter(),
+    "last_summary_ai_total": 0,
+    "last_summary_funnel_total": 0,
+}
+_AI_METRICS_EVERY = max(1, int(os.environ.get("NEXUS_METRICS_EVERY", "10")))
+_FUNNEL_METRICS_EVERY = max(10, int(os.environ.get("NEXUS_FUNNEL_METRICS_EVERY", "50")))
 
 _AI_DECISION_RE = re.compile(
     r"^\[AI_DECISION\]\s+"
@@ -76,6 +100,13 @@ def _tg_enabled():
         and bool(os.environ.get("TELEGRAM_TOKEN"))
         and bool(os.environ.get("TELEGRAM_CHAT"))
     )
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ai_tg_format(d):
@@ -204,6 +235,98 @@ def _funnel_tg_should_send(d):
     return _should_send(key, _FUNNEL_TG_COOLDOWN)
 
 
+def _metrics_snapshot_locked():
+    total = _AI_METRICS["total"]
+    approved = _AI_METRICS["approved"]
+    rejected = _AI_METRICS["rejected"]
+    avg_score = (
+        _AI_METRICS["score_sum"] / _AI_METRICS["score_count"]
+        if _AI_METRICS["score_count"] else None
+    )
+    return {
+        "uptime_minutes": round((time.time() - _AI_METRICS["started_at"]) / 60.0, 1),
+        "ai_total": total,
+        "approved": approved,
+        "rejected": rejected,
+        "approval_rate_pct": round(approved / total * 100, 1) if total else 0.0,
+        "avg_nexus_score": round(avg_score, 2) if avg_score is not None else None,
+        "top_reject_reasons": _AI_METRICS["reasons"].most_common(5),
+        "decision_sources": _AI_METRICS["sources"].most_common(5),
+        "sides": _AI_METRICS["sides"].most_common(5),
+        "pre_ai_total": _AI_METRICS["funnel_total"],
+        "pre_ai_stages": _AI_METRICS["funnel_stages"].most_common(5),
+        "pre_ai_symbols": _AI_METRICS["funnel_symbols"].most_common(5),
+    }
+
+
+def get_nexus_metrics():
+    """Snapshot thread-safe das métricas NEXUS desde o último startup."""
+    with _METRICS_LOCK:
+        return _metrics_snapshot_locked()
+
+
+def _metrics_summary_text(snapshot):
+    reasons = ", ".join(f"{k}:{v}" for k, v in snapshot["top_reject_reasons"]) or "nenhum"
+    stages = ", ".join(f"{k}:{v}" for k, v in snapshot["pre_ai_stages"]) or "nenhum"
+    score = snapshot["avg_nexus_score"]
+    return (
+        "📊 NEXUS AI — MÉTRICAS\n"
+        f"Decisões IA: {snapshot['ai_total']}\n"
+        f"Aprovadas: {snapshot['approved']}\n"
+        f"Vetadas: {snapshot['rejected']}\n"
+        f"Taxa de aprovação: {snapshot['approval_rate_pct']:.1f}%\n"
+        f"Score NEXUS médio: {score if score is not None else 'N/A'}\n"
+        f"Principais vetos: {reasons}\n"
+        f"Bloqueios pré-IA: {snapshot['pre_ai_total']}\n"
+        f"Estágios pré-IA: {stages}\n"
+        f"Janela: {snapshot['uptime_minutes']} min desde o startup"
+    )
+
+
+def _record_ai_metric(d):
+    approved = str(d.get("approved", "False")).lower() == "true"
+    with _METRICS_LOCK:
+        _AI_METRICS["total"] += 1
+        _AI_METRICS["approved" if approved else "rejected"] += 1
+        _AI_METRICS["sources"][d.get("source", "unknown")] += 1
+        _AI_METRICS["sides"][d.get("side", "unknown")] += 1
+        if not approved:
+            _AI_METRICS["reasons"][d.get("reason", "unknown")] += 1
+        score = _safe_float(d.get("score"))
+        if score is not None:
+            _AI_METRICS["score_sum"] += score
+            _AI_METRICS["score_count"] += 1
+        due = (
+            _AI_METRICS["total"] - _AI_METRICS["last_summary_ai_total"]
+            >= _AI_METRICS_EVERY
+        )
+        if due:
+            _AI_METRICS["last_summary_ai_total"] = _AI_METRICS["total"]
+            snap = _metrics_snapshot_locked()
+        else:
+            snap = None
+    if snap:
+        _enqueue(_metrics_summary_text(snap))
+
+
+def _record_funnel_metric(d):
+    with _METRICS_LOCK:
+        _AI_METRICS["funnel_total"] += 1
+        _AI_METRICS["funnel_stages"][d.get("stage", "unknown")] += 1
+        _AI_METRICS["funnel_symbols"][d.get("symbol", "unknown")] += 1
+        due = (
+            _AI_METRICS["funnel_total"] - _AI_METRICS["last_summary_funnel_total"]
+            >= _FUNNEL_METRICS_EVERY
+        )
+        if due:
+            _AI_METRICS["last_summary_funnel_total"] = _AI_METRICS["funnel_total"]
+            snap = _metrics_snapshot_locked()
+        else:
+            snap = None
+    if snap:
+        _enqueue(_metrics_summary_text(snap))
+
+
 def _tg_worker():
     while True:
         text = _AI_TG_QUEUE.get()
@@ -257,8 +380,6 @@ class _DecisionTelegramHandler(logging.Handler):
 
     def emit(self, record):
         try:
-            if not _tg_enabled():
-                return
             msg = record.getMessage()
 
             if msg.startswith("[AI_DECISION]"):
@@ -266,15 +387,18 @@ class _DecisionTelegramHandler(logging.Handler):
                 if not m:
                     return
                 data = m.groupdict()
-                if _ai_tg_should_send(data):
+                _record_ai_metric(data)
+                if _tg_enabled() and _ai_tg_should_send(data):
                     _enqueue(_ai_tg_format(data))
                 return
 
             data = _parse_funnel(msg)
-            if data and _funnel_tg_should_send(data):
-                _enqueue(_funnel_tg_format(data))
+            if data:
+                _record_funnel_metric(data)
+                if _tg_enabled() and _funnel_tg_should_send(data):
+                    _enqueue(_funnel_tg_format(data))
         except Exception:
-            # Logging/Telegram can never break the engine.
+            # Logging/Telegram/metrics can never break the engine.
             pass
 
 
