@@ -3,7 +3,7 @@
 The live engine reconciles positions against the exchange. In PAPER mode that is
 incorrect because simulated positions deliberately do not exist at KuCoin.
 This patch keeps PAPER positions internal, marks them to current market prices,
-and simulates SL/TP exits without touching exchange state. LIVE is untouched.
+simulates SL/TP exits, and keeps the live integrity/exchange path untouched.
 """
 from __future__ import annotations
 
@@ -18,11 +18,84 @@ def install(log):
     from bot.kucoin import TAKER_FEE
     from bot import database as db
     from bot.notifier import notify, close_msg
+    from bot.integrity import IntegrityGuard, IntegrityState, Severity
 
     if getattr(TradingEngine, "_paper_lifecycle_patched", False):
         return
 
     original_sync = TradingEngine._sync_positions
+    original_init = TradingEngine.__init__
+    original_assess = IntegrityGuard.assess
+
+    def init_with_paper_stop_sim(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not self.paper_trade:
+            return
+
+        client = self.client
+        if getattr(client, "_paper_stop_sim_patched", False):
+            return
+
+        client._real_set_sl = getattr(client, "set_sl", None)
+        client._real_set_position_stops = getattr(client, "set_position_stops", None)
+
+        async def _paper_set_sl(symbol: str, sl: float):
+            # Exchange mutation is intentionally skipped in PAPER, but the
+            # simulator must acknowledge the stop update so trailing/BE state
+            # advances exactly as a successful exchange acknowledgement would.
+            log.info("[PAPER] set_sl simulated OK: %s -> %.6f", symbol, sl)
+            return True
+
+        async def _paper_set_position_stops(symbol: str, sl: float = 0, tp: float = 0):
+            log.info(
+                "[PAPER] set_position_stops simulated OK: %s SL=%.6f TP=%.6f",
+                symbol, sl, tp,
+            )
+            return True
+
+        client.set_sl = _paper_set_sl
+        client.set_position_stops = _paper_set_position_stops
+        client._paper_stop_sim_patched = True
+        log.info("🧪 PAPER stops: acknowledgements simulados; nenhuma mutação na exchange")
+
+    async def assess_with_paper_semantics(self, client, engine):
+        state = await original_assess(self, client, engine)
+        if not getattr(engine, "paper_trade", False):
+            return state
+
+        # In PAPER, local simulated positions are intentionally absent from the
+        # real exchange. Therefore STATE_DIVERGENCE caused solely by that fact is
+        # not an integrity fault. All other checks remain active: balance, REST,
+        # instruments, clock, market-data freshness, risk engine and rate limits.
+        kept = []
+        removed = []
+        for issue in state.issues:
+            if issue.code == "STATE_DIVERGENCE" and "INEXISTENTE na exchange" in issue.detail:
+                removed.append(issue)
+            else:
+                kept.append(issue)
+
+        if not removed:
+            return state
+
+        if any(i.severity == Severity.BLOCKED for i in kept):
+            sev = Severity.BLOCKED
+        elif any(i.severity == Severity.DEGRADED for i in kept):
+            sev = Severity.DEGRADED
+        else:
+            sev = Severity.OK
+
+        self.state = IntegrityState(
+            severity=sev,
+            issues=kept,
+            checked_at=state.checked_at,
+            exchange_known=state.exchange_known,
+        )
+        log.debug(
+            "[PAPER] integrity: ignorada divergência esperada de %d posição(ões) simulada(s)",
+            len(removed),
+        )
+        return self.state
 
     async def _finish_paper_position(self, sym, pos, exit_px: float, reason: str):
         # Idempotency: another lifecycle rule may have closed it in this loop.
@@ -97,8 +170,6 @@ def install(log):
 
         for sym, pos in list(self.positions.items()):
             try:
-                # Prefer the WS ticker; REST is a fallback only when startup cache
-                # has not received a price yet.
                 tk = self.client.get_cached_ticker(sym) or {}
                 price = float(tk.get("lastPrice", 0) or 0)
                 if price <= 0:
@@ -126,7 +197,6 @@ def install(log):
                 elif hit_tp:
                     await _finish_paper_position(self, sym, pos, price, "TP")
                 else:
-                    # Sparse heartbeat for E2E evidence; avoids flooding logs.
                     last = getattr(pos, "_paper_heartbeat", 0.0)
                     if time.time() - last >= 60:
                         pos._paper_heartbeat = time.time()
@@ -137,6 +207,10 @@ def install(log):
             except Exception as exc:
                 log.error("[PAPER] _sync_positions %s: %s", sym, exc)
 
+    TradingEngine.__init__ = init_with_paper_stop_sim
     TradingEngine._sync_positions = paper_sync
+    IntegrityGuard.assess = assess_with_paper_semantics
     TradingEngine._paper_lifecycle_patched = True
-    log.info("🧪 PAPER lifecycle: posições simuladas geridas internamente; LIVE sync inalterado")
+    log.info(
+        "🧪 PAPER lifecycle: posições/stops/integridade simulados internamente; LIVE inalterado"
+    )
