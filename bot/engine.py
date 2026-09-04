@@ -2507,6 +2507,20 @@ class TradingEngine:
             log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
             raise
 
+    async def _refresh_entry_balance(self) -> bool:
+        """Zero/negative is a valid account result; query failure is separate."""
+        try:
+            balance = await self.client.get_balance()
+            self.risk.update(balance)
+        except Exception as exc:
+            self.risk.balance_confirmed = False
+            log.warning(f"[BALANCE] entry blocked source=query_failure error={type(exc).__name__}")
+            return False
+        if balance <= 0:
+            log.warning("[BALANCE] entry blocked source=account availableBalance<=0")
+            return False
+        return True
+
     async def _open(self, sig: Signal):
         try:
             # ══════════════════════════════════════════════════════
@@ -2563,14 +2577,13 @@ class TradingEngine:
 
             self._last_nexus[sig.symbol] = nx_dec.to_dict()
             asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
+            if not await self._refresh_entry_balance():
+                return
+            fresh_bal = self.risk.balance
             # Piloto não permite fallback silencioso: same mandatory AI gate.
             if not self.pilot.can_open_pilot(self, self.client, sig.symbol, nx_dec):
                 return
 
-            # Atualizar saldo real antes de calcular qty
-            fresh_bal = await self.client.get_balance()
-            if fresh_bal > 0:
-                self.risk.update(fresh_bal)
             # ADV-margin: repassa self.positions (fonte real de posições
             # confirmadas — inclui as reconciliadas pelo ADV-01) para
             # que o sizing desconte a margem já comprometida.
@@ -2862,6 +2875,14 @@ class TradingEngine:
                     # NUNCA chamado dentro de _open() — máquina de
                     # estados existia sem uso. Corrigido aqui.
                     # ══════════════════════════════════════════════════
+                    # Recheck after analysis/network waits, immediately before
+                    # reservation and dispatch. Never size/send against stale funds.
+                    if not await self._refresh_entry_balance():
+                        return
+                    required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
+                    if required > self.risk.balance:
+                        log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
+                        return
                     _managed, _ = self.orders.get_or_create(
                         _idem, sig.symbol, side, qty
                     )
@@ -3546,9 +3567,6 @@ class TradingEngine:
         """
         try:
             bal = await self.client.get_balance()
-            if bal < 0:
-                return
-
             self.risk.update(bal)
 
             # BUG CORRIGIDO: self._recalc_daily_limits() era chamado aqui mas
@@ -3574,7 +3592,8 @@ class TradingEngine:
                 # Drawdown normalizou → rearma o alerta para o próximo evento
                 self._dd_alerted = False
         except Exception as e:
-            log.error(f"_update_balance: {e}")
+            self.risk.balance_confirmed = False
+            log.error(f"_update_balance: {type(e).__name__}")
 
     # ── Status (endpoint /api/status) ──────────────────────────
     def get_status(self) -> dict:

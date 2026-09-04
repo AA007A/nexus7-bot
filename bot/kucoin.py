@@ -716,7 +716,16 @@ class KuCoinClient:
     async def get_balance(self) -> float:
         """Retorna saldo disponível em USDT na conta de futuros."""
         data = await self._get("/api/v1/account-overview", {"currency": "USDT"}, auth=True)
-        bal = float(data.get("availableBalance", 0))
+        if not isinstance(data, dict) or "availableBalance" not in data:
+            raise RuntimeError("Futures availableBalance unavailable")
+        try:
+            if isinstance(data["availableBalance"], bool):
+                raise ValueError("boolean balance")
+            bal = float(data["availableBalance"])
+            if not math.isfinite(bal):
+                raise ValueError("nonfinite balance")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("Futures availableBalance invalid") from exc
         log.info(f"💰 Saldo USDT: ${bal:.4f}")
         return bal
 
