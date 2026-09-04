@@ -29,6 +29,7 @@ try:
                 min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult,
             )
             try:
+                before = _ms.snapshot().get("unique_states", 0)
                 _ms.observe(
                     symbol, k15, k1h, k4h,
                     production_result=result,
@@ -36,6 +37,21 @@ try:
                     fee_mult=fee_mult,
                     vol_mult=vol_mult,
                 )
+                snap = _ms.snapshot()
+                unique = snap.get("unique_states", 0)
+                # Sparse, machine-readable progress marker for Railway audits.
+                # It is emitted only when a new closed-candle state is observed,
+                # at the first state and then every 25 unique states.
+                if unique != before and (unique == 1 or unique % 25 == 0):
+                    _log.info(
+                        "[MTF_SHADOW] unique=%s eligible=%s survivors=%s "
+                        "nexus_approved=%s nexus_vetoed=%s execution_effect=NONE",
+                        unique,
+                        snap.get("eligible_4h_dir_1h_neutral", 0),
+                        snap.get("shadow_pre_ai_survivors", 0),
+                        snap.get("shadow_nexus_approved", 0),
+                        snap.get("shadow_nexus_vetoed", 0),
+                    )
             except Exception:
                 # Shadow telemetry can never affect the strategy result.
                 pass
