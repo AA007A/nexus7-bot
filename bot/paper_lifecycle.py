@@ -59,10 +59,6 @@ def install(log):
         if not getattr(engine, "paper_trade", False):
             return await original_assess(self, client, engine)
 
-        # original_assess calls _log_state before returning. In PAPER that would
-        # emit a false STATE_DIVERGENCE alarm for every simulated position before
-        # we can remove the expected local-only divergence. Suppress only that
-        # premature log, filter the state, then log the final PAPER-aware state.
         original_log_state = self._log_state
         self._log_state = lambda: None
         try:
@@ -99,7 +95,6 @@ def install(log):
         else:
             self.state = state
 
-        # Emit exactly one integrity log based on the final PAPER-aware state.
         self._log_state()
         return self.state
 
@@ -156,12 +151,22 @@ def install(log):
         except Exception as exc:
             log.debug("PAPER close loss-counter: %s", exc)
 
+        # Settle the simulated result into the isolated PAPER wallet. This is
+        # intentionally absent in LIVE and cannot mutate the KuCoin balance.
+        try:
+            apply_wallet = getattr(self, "_paper_apply_virtual_balance", None)
+            if callable(apply_wallet):
+                current = float(getattr(self, "_paper_balance", self.risk.balance) or 0.0)
+                apply_wallet(current + pnl_net, f"close:{sym}:{reason}:{pnl_net:+.4f}")
+        except Exception as exc:
+            log.error("[PAPER_WALLET] close settlement failed %s: %s", sym, exc)
+
         log.info(
             "📭 [PAPER] %s fechado por %s | exit=%.6f Bruto=$%+.4f Taxas=-$%.4f Líquido=$%+.4f",
             sym, reason, exit_px, pnl_gross, total_fee, pnl_net,
         )
         try:
-            bal = await self.client.get_balance()
+            bal = float(getattr(self, "_paper_balance", self.risk.balance) or 0.0)
             await notify(await close_msg(
                 sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px,
                 bal, bal * cfg.LEVERAGE,
