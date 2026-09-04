@@ -596,6 +596,9 @@ class KuCoinClient:
         KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
         auditoria). Não invento uma garantia que não posso comprovar.
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] _post: exchange mutation skipped")
+            return {}
         await self._ensure_session()
         url = REST_BASE + endpoint
         # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
@@ -850,6 +853,9 @@ class KuCoinClient:
         # (place_order → body["leverage"]), então esta chamada é
         # redundante. Vira no-op por padrão.
         # ══════════════════════════════════════════════════════════
+        if PAPER_TRADE:
+            log.info("[PAPER] set_leverage: exchange mutation skipped")
+            return None
         if os.environ.get("KUCOIN_SET_LEVERAGE_ENDPOINT", "false").lower() == "true":
             kc_sym = to_kucoin(symbol)
             try:
@@ -1134,6 +1140,9 @@ class KuCoinClient:
         Preços arredondados ao tickSize — a KuCoin rejeita silenciosamente
         valores fora do múltiplo correto.
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] set_position_stops: exchange mutation skipped")
+            return False
         if not API_KEY:
             return False
         kc_sym = to_kucoin(symbol)
@@ -1206,6 +1215,9 @@ class KuCoinClient:
         KuCoin: POST /api/v1/position/trading-stop
         SL arredondado ao tickSize correto (bug corrigido v12).
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] set_sl: exchange mutation skipped")
+            return False
         if not API_KEY:
             return False
         kc_sym    = to_kucoin(symbol)
@@ -1224,6 +1236,9 @@ class KuCoinClient:
         KuCoin Futures: DELETE /api/v1/orders
         CORRIGIDO: removido código duplicado (POST + DELETE ao mesmo tempo).
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] cancel_all_orders: exchange mutation skipped")
+            return False
         await self._ensure_session()
         kc_sym   = to_kucoin(symbol) if symbol else ""
         params   = {"symbol": kc_sym} if kc_sym else {}
@@ -1694,8 +1709,10 @@ class KuCoinClient:
             return self._ws_token   # reusa token válido
 
         await self._ensure_session()
-        endpoint = "/api/v1/bullet-private"
-        headers  = self._auth_headers("POST", endpoint, "")
+        # Market-data websocket token is public in paper mode. No account
+        # mutation/authentication is needed for simulated trading.
+        endpoint = "/api/v1/bullet-public" if PAPER_TRADE else "/api/v1/bullet-private"
+        headers  = {} if PAPER_TRADE else self._auth_headers("POST", endpoint, "")
         url      = REST_BASE + endpoint
         try:
             async with self._session.post(url, headers=headers) as r:
