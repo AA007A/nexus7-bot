@@ -1,17 +1,15 @@
-"""Runtime hardening for scan observability and daily-target initialization.
+"""Runtime hardening for validation observability.
 
-The strategy keeps an append-only score history. The engine asks for the last
-N rows when printing a scan summary, which can return the same symbols several
-times when only a few pairs reached the score stage in consecutive scans.
-This module exposes the latest score per symbol while preserving the underlying
-history and all trading decisions.
+Keeps scan summaries unique per symbol, clarifies that their count is the
+score-stage count (not the monitored universe), prevents an uninitialized
+zero daily target from being treated as achieved, and teaches the static
+self-check about modules intentionally loaded by root sitecustomize.py.
 
-It also guards a startup-only DailyTracker edge case: when DAILY_TARGET is
-configured dynamically (zero in config), check_limits() can run before a
-positive balance has initialized the tracker target. In that state 0 >= 0 must
-never be interpreted as a profit target hit.
+No trading decision, threshold, risk parameter or execution gate is changed.
 """
 import logging
+import os
+import re
 
 
 def latest_unique(records, limit):
@@ -39,16 +37,12 @@ def latest_unique(records, limit):
 
 
 class _ScanSummaryLabelFilter(logging.Filter):
-    """Make it explicit that SCAN rows count score-stage records, not universe size."""
+    """Make score-stage telemetry explicit without altering scan logic."""
 
     def filter(self, record):
         try:
             msg = record.getMessage()
             if msg.startswith("🔎 SCAN:"):
-                # The count comes from strategy._SCORE_LOG. Symbols rejected
-                # before score construction are still monitored/scanned, but
-                # correctly do not have a score row. Avoid calling this count
-                # the total number of monitored pairs.
                 msg = msg.replace("🔎 SCAN:", "🔎 SCORE_STAGE:", 1)
                 marker = " pares |"
                 if marker in msg:
@@ -74,8 +68,8 @@ def _install_daily_target_guard(log):
         if target > 0:
             return original_check_limits(self)
 
-        # Preserve monthly/weekly stop evaluation in the original method while
-        # making the not-yet-initialized daily target unreachable for this call.
+        # Preserve monthly/weekly stop evaluation while making an uninitialized
+        # daily target unreachable for this call.
         old_target = getattr(self, "daily_target", 0.0)
         self.daily_target = float("inf")
         try:
@@ -90,6 +84,50 @@ def _install_daily_target_guard(log):
     )
 
 
+def _install_selfcheck_sitecustomize_awareness(log):
+    """Suppress only orphan warnings disproved by explicit sitecustomize imports."""
+    try:
+        from bot import selfcheck
+    except Exception:
+        return
+
+    if getattr(selfcheck, "_sitecustomize_imports_patched", False):
+        return
+
+    original = selfcheck.check_orphan_modules
+
+    def check_orphan_modules_with_runtime_entrypoint(paths):
+        issues = original(paths)
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            entrypoint = os.path.join(root, "sitecustomize.py")
+            with open(entrypoint, encoding="utf-8") as fh:
+                src = fh.read()
+        except Exception:
+            return issues
+
+        # Build the exact set of bot modules referenced by sitecustomize.py.
+        imported = set(re.findall(r"\bfrom\s+bot\s+import\s+([A-Za-z_][A-Za-z0-9_]*)", src))
+        imported.update(re.findall(r"\bfrom\s+bot\.([A-Za-z_][A-Za-z0-9_]*)\s+import\b", src))
+        imported.update(re.findall(r"\bimport\s+bot\.([A-Za-z_][A-Za-z0-9_]*)\b", src))
+
+        if not imported:
+            return issues
+
+        kept = []
+        for issue in issues:
+            filename = issue.split(" ", 1)[0]
+            stem = filename[:-3] if filename.endswith(".py") else filename
+            if stem in imported:
+                continue
+            kept.append(issue)
+        return kept
+
+    selfcheck.check_orphan_modules = check_orphan_modules_with_runtime_entrypoint
+    selfcheck._sitecustomize_imports_patched = True
+    log.info("[SELFCHECK] root sitecustomize imports recognized as active runtime references")
+
+
 def install(log):
     from bot import strategy
 
@@ -102,7 +140,6 @@ def install(log):
     strategy.get_score_log = get_score_log_unique
     strategy._scan_summary_unique_patched = True
 
-    # Clarify the existing INFO summary without touching scan/entry logic.
     try:
         for handler in getattr(log, "handlers", []):
             if isinstance(handler, logging.StreamHandler):
@@ -111,6 +148,7 @@ def install(log):
         pass
 
     _install_daily_target_guard(log)
+    _install_selfcheck_sitecustomize_awareness(log)
 
     log.info(
         "[SCAN_SUMMARY] latest-per-symbol score-stage view enabled; trading logic unchanged"
