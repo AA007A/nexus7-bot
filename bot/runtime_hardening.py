@@ -1,15 +1,17 @@
-"""Runtime hardening that does not alter strategy, risk, sizing or trading mode.
+"""Runtime hardening that does not alter live strategy thresholds or trading mode.
 
-Two narrow fixes:
+Fixes:
 1) deterministic/idempotent DB schema bootstrap (tables -> migrations -> indexes),
-2) Telegram transport that falls back to plain text on Markdown 400 and never
-   blocks the trading coroutine for a long Telegram retry_after.
+2) Telegram transport with plain-text fallback and background 429 retry,
+3) PAPER isolation from real/manual exchange positions,
+4) stagnation age based on position opened_at instead of cache length.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import time
+from datetime import datetime
 from typing import Set
 
 import aiohttp
@@ -179,6 +181,16 @@ def install_telegram_fix(log):
         if not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT:
             return
 
+        # A candidate exists before the mandatory NEXUS gate. Do not label it
+        # as an opened/sent order. This prevents operators from assuming that
+        # a Telegram candidate implies execution.
+        if "*SINAL DETECTADO*" in text:
+            text = text.replace(
+                "*SINAL DETECTADO*",
+                "*CANDIDATO DETECTADO — AGUARDANDO NEXUS AI*",
+            )
+            text += "\n\n⏳ _Nenhuma ordem foi enviada ainda. O NEXUS AI precisa aprovar._"
+
         key = _key(text)
         now = time.monotonic()
         if now - seen.get(key, 0.0) < dedup_window:
@@ -200,7 +212,6 @@ def install_telegram_fix(log):
                 last_send[0] = time.monotonic()
                 return
 
-            # Markdown entity failures: immediately retry as plain text.
             if status == 400:
                 status2, _ = await _post(text, None)
                 if status2 == 200:
@@ -210,8 +221,6 @@ def install_telegram_fix(log):
                     log.warning("Telegram fallback falhou HTTP %s", status2)
                 return
 
-            # Flood control: schedule retry in background; never sleep hundreds
-            # of seconds in the trading coroutine.
             if status == 429:
                 retry_after = int((data.get("parameters") or {}).get("retry_after", 10))
                 if key not in pending and len(pending) < 20:
@@ -226,6 +235,139 @@ def install_telegram_fix(log):
                 log.debug("Telegram HTTP %s", status)
 
     notifier.notify = robust_notify
-    # engine.py imported notify by value; replace that bound global as well.
     engine_module.notify = robust_notify
     notifier._transport_hardening_patched = True
+
+
+def install_paper_execution_fix(log):
+    """Keep PAPER simulation independent from manual/real exchange positions.
+
+    In PAPER mode, real positions must not be imported into the paper engine,
+    otherwise a manual position without exchange SL can trigger the global
+    integrity gate and block every simulated candidate. Live mode is untouched.
+
+    Also fixes the stagnation timer: cache length is historical data, not trade
+    age. A newly opened position with a 100-candle cache was incorrectly treated
+    as 100 candles old and immediately closed.
+    """
+    import bot.engine as engine_module
+    from bot.engine import TradingEngine
+    from bot.config import cfg
+    from bot.kucoin import TAKER_FEE
+
+    if getattr(TradingEngine, "_paper_execution_hardening_patched", False):
+        return
+
+    orig_init = TradingEngine.__init__
+    orig_reconcile = TradingEngine._reconcile_exchange_positions
+
+    def init_with_paper_isolation(self, client):
+        orig_init(self, client)
+        if self.paper_trade and not getattr(client, "_paper_positions_isolated", False):
+            original_get_positions = client.get_positions
+            client._real_get_positions = original_get_positions
+
+            async def _paper_get_positions():
+                return []
+
+            client.get_positions = _paper_get_positions
+            client._paper_positions_isolated = True
+            log.info("🟡 PAPER isolation: posições reais/manuais não contaminam o simulador")
+
+    async def reconcile_with_paper_guard(self, only_symbol=None):
+        if self.paper_trade:
+            self._unprotected_symbols.clear()
+            return []
+        return await orig_reconcile(self, only_symbol=only_symbol)
+
+    async def stagnation_with_real_age(self):
+        from bot.indicators import atr as calc_atr
+        from bot.strategy import detect_regime
+
+        for sym, pos in list(self.positions.items()):
+            try:
+                k15 = self.client.get_cached_klines(sym, "15", limit=100) or []
+                if len(k15) < 20:
+                    continue
+
+                closes = [float(k["c"]) for k in k15[:-1]]
+                highs = [float(k["h"]) for k in k15[:-1]]
+                lows = [float(k["l"]) for k in k15[:-1]]
+                cur = pos.current_price or closes[-1]
+                atr_val = float(calc_atr(highs, lows, closes, 14)[-1])
+                if atr_val <= 0:
+                    continue
+
+                STAGNATION_BARS = 16
+                STAGNATION_MULT = 0.5
+                movement = abs(cur - pos.entry)
+                opened = getattr(pos, "opened_at", datetime.utcnow())
+                bars_open = max(0, int((datetime.utcnow() - opened).total_seconds() // (15 * 60)))
+
+                if bars_open >= STAGNATION_BARS and movement < atr_val * STAGNATION_MULT:
+                    log.info(
+                        f"⏱️  [{sym}] Saída por TEMPO: {bars_open} candles aberto, "
+                        f"movimento={movement:.4f} < {atr_val*STAGNATION_MULT:.4f} "
+                        f"(0.5×ATR) → fechando para evitar funding acumulado"
+                    )
+                    close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                    await self.client.place_order(
+                        symbol=sym, side=close_side, qty=pos.qty, sl=0, tp=0,
+                        instruments=self.instruments, reduce_only=True,
+                    )
+                    continue
+
+                if len(closes) >= 10:
+                    recent_c = closes[-10:]
+                    recent_h = highs[-10:]
+                    recent_l = lows[-10:]
+                    choch_bear = (
+                        recent_h[-1] < recent_h[-3]
+                        and recent_l[-1] < recent_l[-3]
+                        and recent_c[-1] < recent_c[-3]
+                    )
+                    choch_bull = (
+                        recent_l[-1] > recent_l[-3]
+                        and recent_h[-1] > recent_h[-3]
+                        and recent_c[-1] > recent_c[-3]
+                    )
+                    invalidated = (
+                        (pos.direction == "LONG" and choch_bear)
+                        or (pos.direction == "SHORT" and choch_bull)
+                    )
+                    if invalidated and not pos.tp1_hit:
+                        log.info(
+                            f"❌ [{sym}] Saída por INVALIDAÇÃO: CHoCH oposto detectado "
+                            f"após entrada {pos.direction} → fechando antes do SL"
+                        )
+                        close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                        await self.client.place_order(
+                            symbol=sym, side=close_side, qty=pos.qty, sl=0, tp=0,
+                            instruments=self.instruments, reduce_only=True,
+                        )
+                        continue
+
+                k4h = self.client.get_cached_klines(sym, "240", limit=120) or []
+                if len(k4h) >= 20:
+                    c4h = [float(k["c"]) for k in k4h[:-1]]
+                    h4h = [float(k["h"]) for k in k4h[:-1]]
+                    l4h = [float(k["l"]) for k in k4h[:-1]]
+                    atr4h = float(calc_atr(h4h, l4h, c4h, 14)[-1])
+                    regime_now = detect_regime(c4h, h4h, l4h, atr4h)
+                    if regime_now in ("RANGING", "COMPRESSED", "CHOPPY") and not pos.tp1_hit:
+                        log.info(
+                            f"🔄 [{sym}] Saída por REGIME: mercado mudou para "
+                            f"{regime_now} → setup trend-follow inválido, fechando"
+                        )
+                        close_side = "Sell" if pos.direction == "LONG" else "Buy"
+                        await self.client.place_order(
+                            symbol=sym, side=close_side, qty=pos.qty, sl=0, tp=0,
+                            instruments=self.instruments, reduce_only=True,
+                        )
+            except Exception as exc:
+                log.error(f"_check_stagnation_and_invalidation {sym}: {exc}")
+
+    TradingEngine.__init__ = init_with_paper_isolation
+    TradingEngine._reconcile_exchange_positions = reconcile_with_paper_guard
+    TradingEngine._check_stagnation_and_invalidation = stagnation_with_real_age
+    TradingEngine._paper_execution_hardening_patched = True
