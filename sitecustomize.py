@@ -16,12 +16,14 @@ try:
     from bot import mtf_shadow as _ms
     from bot import logger as _logger
     from bot import runtime_hardening as _rh
+    from bot import paper_e2e as _paper_e2e
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
     _rh.install_database_schema_fix(_log)
     _rh.install_telegram_fix(_log)
     _rh.install_paper_execution_fix(_log)
+    _paper_e2e.install(_log)
 
     if not getattr(_logger, "_audit_pacing_patched", False):
         _orig_enqueue = _logger._enqueue
