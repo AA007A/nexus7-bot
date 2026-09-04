@@ -68,8 +68,6 @@ def _install_daily_target_guard(log):
         if target > 0:
             return original_check_limits(self)
 
-        # Preserve monthly/weekly stop evaluation while making an uninitialized
-        # daily target unreachable for this call.
         old_target = getattr(self, "daily_target", 0.0)
         self.daily_target = float("inf")
         try:
@@ -99,14 +97,16 @@ def _install_selfcheck_sitecustomize_awareness(log):
     def check_orphan_modules_with_runtime_entrypoint(paths):
         issues = original(paths)
         try:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # selfcheck already owns the canonical project root. Reuse it
+            # instead of relying on __file__, which its intentionally strict
+            # undefined-name analyzer does not model as an implicit builtin.
+            root = selfcheck._ROOT
             entrypoint = os.path.join(root, "sitecustomize.py")
             with open(entrypoint, encoding="utf-8") as fh:
                 src = fh.read()
         except Exception:
             return issues
 
-        # Build the exact set of bot modules referenced by sitecustomize.py.
         imported = set(re.findall(r"\bfrom\s+bot\s+import\s+([A-Za-z_][A-Za-z0-9_]*)", src))
         imported.update(re.findall(r"\bfrom\s+bot\.([A-Za-z_][A-Za-z0-9_]*)\s+import\b", src))
         imported.update(re.findall(r"\bimport\s+bot\.([A-Za-z_][A-Za-z0-9_]*)\b", src))
