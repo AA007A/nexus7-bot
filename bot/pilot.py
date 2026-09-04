@@ -13,28 +13,37 @@ ORDEM DAS BARREIRAS (todas precisam passar):
     5. NEXUS AI approval                           (bot/engine.py)
     6. ESTE MÓDULO — 14 pré-condições do piloto
 
-ATIVAÇÃO: REAL_TRADING_PILOT=true
+ATIVAÇÃO: REAL_TRADING_PILOT=true, efetivo somente fora de PAPER.
 
 Sem essa variável o módulo fica inerte: não bloqueia nem libera nada,
-o comportamento é exatamente o de antes. Com ela ativa, aplica limites
-mais restritivos que o normal (1 posição, 1 ordem por sessão).
+o comportamento é exatamente o de antes. Em PAPER ele também fica
+inerte, porque as 14 pré-condições pertencem exclusivamente ao piloto
+real (por exemplo private order WS e confirmação humana da conta).
+Com piloto real efetivo, aplica limites mais restritivos que o normal
+(1 posição, 1 ordem por sessão).
 
 Este módulo NUNCA libera algo que outra barreira bloqueou. Ele só
-adiciona motivos para NÃO operar.
+adiciona motivos para NÃO operar no piloto real.
 """
 import os
 import time
 import threading
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 from bot.logger import log
 
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 
+
+def _paper_trade_enabled() -> bool:
+    """Read PAPER_TRADE at decision time so runtime/test patches stay authoritative."""
+    return os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
+
+
 # Limites do piloto — deliberadamente mais restritivos que a config normal
-PILOT_MAX_CONCURRENT_POSITIONS   = 1
+PILOT_MAX_CONCURRENT_POSITIONS = 1
 MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 1
 PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 
@@ -54,12 +63,7 @@ class PilotState:
 
 
 class PilotGuard:
-    """
-    Aplica as 14 pré-condições do modo piloto.
-
-    can_open_pilot() só retorna True se TODAS passarem. Qualquer
-    requisito indeterminado conta como falha (fail-closed).
-    """
+    """Aplica as 14 pré-condições somente ao piloto de dinheiro real."""
 
     def __init__(self):
         self.state = PilotState()
@@ -69,14 +73,13 @@ class PilotGuard:
 
     @property
     def enabled(self) -> bool:
-        return PILOT_ENABLED
+        # REAL_TRADING_PILOT is a real-money safety layer. Applying its
+        # private-order-WS/account-confirmation requirements to PAPER makes a
+        # valid simulated candidate impossible to open and defeats paper E2E.
+        return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Consume the session BEFORE sending. Never refunded after ambiguity.
-
-        No await between checking and consuming; the lock also protects against
-        callers on other threads. ReduceOnly callers do not invoke this method.
-        """
+        """Consume the real-pilot session BEFORE sending; never refunded."""
         if not self.enabled:
             return True
         with self._submission_lock:
@@ -89,7 +92,9 @@ class PilotGuard:
         return True
 
     def register_position_opened(self, symbol: str):
-        """Chamado após uma abertura confirmada, para contar a sessão."""
+        """Chamado após uma abertura confirmada no piloto real."""
+        if not self.enabled:
+            return
         self.state.positions_opened_this_session += 1
         if self.state.first_order_ts == 0.0:
             self.state.first_order_ts = time.time()
@@ -101,15 +106,8 @@ class PilotGuard:
             f"reconciliado."
         )
 
-    def evaluate(self, engine, client, symbol: str,
-                 ai_decision=None) -> List[str]:
-        """
-        Avalia as 14 pré-condições. Retorna a lista de motivos de
-        bloqueio — vazia significa liberado.
-
-        NUNCA levanta exceção: falha na própria avaliação é, ela mesma,
-        motivo para bloquear.
-        """
+    def evaluate(self, engine, client, symbol: str, ai_decision=None) -> List[str]:
+        """Retorna motivos de bloqueio do piloto real; vazio significa liberado."""
         r: List[str] = []
         try:
             # 1. API autenticada — credenciais presentes
@@ -118,8 +116,6 @@ class PilotGuard:
                 r.append("1_AUTH: credenciais KuCoin ausentes")
 
             # 2. Ambiente confirmado como a conta real pretendida
-            #    NÃO VERIFICÁVEL automaticamente pelo bot — exige
-            #    confirmação humana explícita via env var.
             if os.environ.get("PILOT_ACCOUNT_CONFIRMED", "").strip().lower() != "true":
                 r.append(
                     "2_ACCOUNT: conta real não confirmada — defina "
@@ -180,13 +176,10 @@ class PilotGuard:
                         f"(máx {PILOT_MAX_MARKET_DATA_AGE_S:.0f}s)"
                     )
 
-            # 12. Quantidade respeitando regras da exchange — validado no
-            #     _open() (minQty/lotSize/multiplier/minNotional). Aqui só
-            #     confirmamos que a metadata necessária existe.
+            # 12. Quantidade respeitando regras da exchange — validado no _open()
             if symbol and symbol in inst:
                 meta = inst[symbol]
-                faltando = [k for k in ("minQty", "multiplier")
-                            if not meta.get(k)]
+                faltando = [k for k in ("minQty", "multiplier") if not meta.get(k)]
                 if faltando:
                     r.append(f"12_QTY_RULES: metadata incompleta {faltando}")
 
@@ -203,19 +196,18 @@ class PilotGuard:
                 except Exception as e:
                     r.append(f"13_AMBIGUOUS: falha ao consultar registry: {e}")
 
-            # 14. Private WS ou mecanismo equivalente ativo
+            # 14. Private WS ou mecanismo equivalente ativo — requisito real only
             if getattr(client, "_order_registry", None) is None:
                 r.append("14_WS: WS privado de ordens não inicializado")
 
-            # ── Limites do piloto ──────────────────────────────────
+            # Limites do piloto real
             n_pos = len(getattr(engine, "positions", {}) or {})
             if n_pos >= PILOT_MAX_CONCURRENT_POSITIONS:
                 r.append(
                     f"PILOT_CONCURRENT: {n_pos} posição(ões) aberta(s), "
                     f"máx {PILOT_MAX_CONCURRENT_POSITIONS} no piloto"
                 )
-            if (self.state.new_order_submissions_this_session >=
-                    MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION):
+            if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
                 r.append(
                     f"PILOT_SESSION: {self.state.new_order_submissions_this_session}"
                     f"/{PILOT_MAX_NEW_POSITIONS_SESSION} ordens já abertas "
@@ -229,15 +221,12 @@ class PilotGuard:
         self.state.blocked_reasons = r
         return r
 
-    def can_open_pilot(self, engine, client, symbol: str,
-                       ai_decision=None) -> bool:
-        """
-        True somente se TODAS as 14 pré-condições passarem.
-
-        Se o piloto não estiver habilitado, retorna True — o módulo é
-        inerte e o comportamento anterior é preservado integralmente.
-        """
-        if not PILOT_ENABLED:
+    def can_open_pilot(self, engine, client, symbol: str, ai_decision=None) -> bool:
+        """True outside an effective real pilot; otherwise all 14 gates must pass."""
+        if not self.enabled:
+            # Clear stale real-pilot diagnostics so PAPER status cannot claim it
+            # is blocked by a gate that is intentionally inapplicable.
+            self.state.blocked_reasons = []
             return True
 
         motivos = self.evaluate(engine, client, symbol, ai_decision)
@@ -261,11 +250,12 @@ class PilotGuard:
     def status(self, engine=None, client=None) -> dict:
         """Snapshot para /health e relatórios."""
         return {
-            "pilot_enabled": PILOT_ENABLED,
+            "pilot_configured": PILOT_ENABLED,
+            "pilot_enabled": self.enabled,
+            "paper_trade": _paper_trade_enabled(),
             "max_concurrent_positions": PILOT_MAX_CONCURRENT_POSITIONS,
             "max_new_order_submissions_session": MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
             "new_order_submissions_this_session": self.state.new_order_submissions_this_session,
-            "positions_opened_this_session":
-                self.state.positions_opened_this_session,
+            "positions_opened_this_session": self.state.positions_opened_this_session,
             "blocked_reasons": list(self.state.blocked_reasons),
         }
