@@ -17,6 +17,7 @@ try:
     from bot import logger as _logger
     from bot import runtime_hardening as _rh
     from bot import paper_e2e as _paper_e2e
+    from bot import paper_lifecycle as _paper_lifecycle
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -24,6 +25,7 @@ try:
     _rh.install_telegram_fix(_log)
     _rh.install_paper_execution_fix(_log)
     _paper_e2e.install(_log)
+    _paper_lifecycle.install(_log)
 
     # nexus_persistence uses one asyncpg connection. Concurrent record_decision
     # and evaluate_pending tasks can otherwise issue overlapping operations on
@@ -114,9 +116,6 @@ try:
             except Exception:
                 pass
 
-            # The candidate Telegram alert is pre-NEXUS. If NEXUS rejects it,
-            # explicitly tell the operator why no order followed. This does not
-            # change or bypass execution_allowed.
             try:
                 if getattr(dec, "execution_allowed", False) is not True:
                     asyncio.create_task(
