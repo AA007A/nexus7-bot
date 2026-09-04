@@ -20,6 +20,7 @@ try:
     from bot import paper_lifecycle as _paper_lifecycle
     from bot import paper_wallet as _paper_wallet
     from bot import pretrade_hardening as _pretrade_hardening
+    from bot import rr_precision_hardening as _rr_precision_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -27,14 +28,11 @@ try:
     _rh.install_telegram_fix(_log)
     _rh.install_paper_execution_fix(_log)
     _pretrade_hardening.install(_log)
+    _rr_precision_hardening.install(_log)
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
 
-    # nexus_persistence uses one asyncpg connection. Concurrent record_decision
-    # and evaluate_pending tasks can otherwise issue overlapping operations on
-    # that connection and raise InterfaceError: another operation is in progress.
-    # Serialize only persistence I/O; trading/execution paths are not changed.
     if not getattr(_np, "_single_conn_serialized", False):
         _np_orig_execute = _np._execute
         _np_orig_fetchall = _np._fetchall
