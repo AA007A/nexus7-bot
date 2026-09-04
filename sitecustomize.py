@@ -24,6 +24,7 @@ try:
     from bot import scan_summary_hardening as _scan_summary_hardening
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import silent_except_audit as _silent_except_audit
+    from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -38,6 +39,7 @@ try:
     _paper_lifecycle.install(_log)
     _validation_safety_lock.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
+    _nexus_decision_dedupe.install(_log)
 
     if not getattr(_np, "_single_conn_serialized", False):
         _np_orig_execute = _np._execute
@@ -144,6 +146,7 @@ try:
                         out["nexus_persistent_metrics"] = _np.get_cached_metrics()
                         out["funnel_metrics"] = _fm.get_funnel_metrics()
                         out["mtf_shadow_metrics"] = _ms.snapshot()
+                        out["nexus_dedupe_metrics"] = _nexus_decision_dedupe.snapshot()
                         if getattr(self, "paper_trade", False):
                             out["paper_wallet"] = {
                                 "balance": round(float(getattr(self, "_paper_balance", self.risk.balance) or 0.0), 4),
