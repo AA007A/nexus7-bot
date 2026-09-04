@@ -49,8 +49,13 @@ class _ScanSummaryLabelFilter(logging.Filter):
                     msg = msg.replace(marker, " pares com score registrado |", 1)
                 record.msg = msg
                 record.args = ()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never hide an observability formatting failure. Mutate the same
+            # record instead of logging recursively from inside a logging filter.
+            record.msg = (
+                f"[SCAN_SUMMARY_FILTER_ERROR] {type(exc).__name__}: {exc}"
+            )
+            record.args = ()
         return True
 
 
@@ -86,7 +91,11 @@ def _install_selfcheck_sitecustomize_awareness(log):
     """Suppress only orphan warnings disproved by explicit sitecustomize imports."""
     try:
         from bot import selfcheck
-    except Exception:
+    except Exception as exc:
+        log.debug(
+            "[SELFCHECK_RUNTIME_IMPORTS] selfcheck import unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
         return
 
     if getattr(selfcheck, "_sitecustomize_imports_patched", False):
@@ -104,7 +113,11 @@ def _install_selfcheck_sitecustomize_awareness(log):
             entrypoint = os.path.join(root, "sitecustomize.py")
             with open(entrypoint, encoding="utf-8") as fh:
                 src = fh.read()
-        except Exception:
+        except Exception as exc:
+            log.debug(
+                "[SELFCHECK_RUNTIME_IMPORTS] entrypoint scan failed: %s: %s",
+                type(exc).__name__, exc,
+            )
             return issues
 
         imported = set(re.findall(r"\bfrom\s+bot\s+import\s+([A-Za-z_][A-Za-z0-9_]*)", src))
@@ -144,8 +157,11 @@ def install(log):
         for handler in getattr(log, "handlers", []):
             if isinstance(handler, logging.StreamHandler):
                 handler.addFilter(_ScanSummaryLabelFilter())
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug(
+            "[SCAN_SUMMARY] filter installation failed: %s: %s",
+            type(exc).__name__, exc,
+        )
 
     _install_daily_target_guard(log)
     _install_selfcheck_sitecustomize_awareness(log)
