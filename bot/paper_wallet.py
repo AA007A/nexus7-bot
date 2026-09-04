@@ -1,12 +1,12 @@
 """PAPER-only virtual wallet isolation.
 
-A PAPER session must not treat deposits, withdrawals, manual trades, margin
-reservation, or any other KuCoin account balance movement as bot PnL. PAPER
-capital is sourced from an explicit virtual-capital setting when available and
-then kept in an internal wallet driven only by simulated PAPER trade results.
+PAPER capital must not depend on deposits, withdrawals, manual trades, margin
+reservation, or any other KuCoin account-balance movement. The simulator uses
+explicit virtual capital when configured and then changes that capital only
+through simulated PAPER results.
 
-LIVE behavior is untouched. Trading thresholds, leverage, risk parameters and
-all production decision gates are unchanged.
+LIVE behavior, trading thresholds, leverage, risk parameters and production
+decision gates are unchanged.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ def install(log):
         return
 
     original_connect = TradingEngine._connect
+    original_filter_viable = TradingEngine._filter_viable_symbols
     original_update_balance = TradingEngine._update_balance
     original_refresh_entry_balance = TradingEngine._refresh_entry_balance
     original_manage_partial_tp = TradingEngine._manage_partial_tp
@@ -61,6 +62,44 @@ def install(log):
 
         return 0.0, "unconfirmed_zero"
 
+    def _sync_daily_limits(self, balance: float):
+        """Keep engine and DailyTracker limits on the same PAPER capital."""
+        from bot.config import cfg
+
+        if balance <= 0:
+            return
+        if cfg.DAILY_TARGET <= 0:
+            self.daily_target = round(balance * cfg.DAILY_TARGET_PCT, 2)
+        if cfg.DAILY_STOP_LOSS <= 0:
+            self.daily_stop_loss = round(balance * cfg.DAILY_STOP_LOSS_PCT, 2)
+        try:
+            self.daily_tracker.recalc_limits(balance)
+            self.daily_tracker.daily_target = self.daily_target
+            self.daily_tracker.daily_stop_loss = self.daily_stop_loss
+        except Exception as exc:
+            log.warning("[PAPER_WALLET] daily-limit sync failed: %s", exc)
+
+    async def _filter_viable_symbols_paper_safe(self):
+        """Use virtual buying power during PAPER startup viability filtering."""
+        if not getattr(self, "paper_trade", False):
+            return await original_filter_viable(self)
+
+        current = float(getattr(self.risk, "balance", 0.0) or 0.0)
+        virtual, source = _virtual_initial_balance(current)
+        if virtual > 0 and current <= 0:
+            # original _connect() reads the authenticated exchange balance before
+            # viability filtering. In PAPER that balance may legitimately be 0.
+            # Seed RiskManager with simulator capital before the filter so a
+            # harmless exchange-balance state cannot produce ZERO_VIABLE_SYMBOLS.
+            self.risk.update(virtual)
+            self.risk.balance_confirmed = True
+            log.info(
+                "[PAPER_WALLET] viability uses virtual capital=$%.4f source=%s",
+                virtual,
+                source,
+            )
+        return await original_filter_viable(self)
+
     async def _connect_with_paper_wallet(self):
         await original_connect(self)
         if not getattr(self, "paper_trade", False):
@@ -68,10 +107,6 @@ def install(log):
         if not getattr(self, "connected", False):
             return
 
-        # Initialize exactly once per process. Prefer explicit virtual capital
-        # over the mutable KuCoin account balance. This means a zero/occupied
-        # exchange balance cannot silently disable PAPER scans when INITIAL_CAP
-        # (or PAPER_INITIAL_BALANCE) defines the simulator's capital.
         if not hasattr(self, "_paper_balance"):
             observed = float(getattr(self.risk, "balance", 0.0) or 0.0)
             initial, source = _virtual_initial_balance(observed)
@@ -80,6 +115,7 @@ def install(log):
             self.risk.balance = initial
             self.risk.drawdown = 0.0
             self.risk.balance_confirmed = initial > 0
+            _sync_daily_limits(self, initial)
             log.info(
                 "🧪 PAPER wallet isolada: saldo virtual inicial=$%.4f source=%s; "
                 "mudanças na conta KuCoin não alteram PnL/drawdown PAPER",
@@ -93,14 +129,9 @@ def install(log):
 
         bal = float(getattr(self, "_paper_balance", self.risk.balance) or 0.0)
         self.risk.update(bal)
+        _sync_daily_limits(self, bal)
 
-        # Preserve the engine's dynamic daily limits, but derive them from the
-        # virtual PAPER wallet instead of the external account balance.
         from bot.config import cfg
-        if bal > 0:
-            self.daily_target = round(bal * cfg.DAILY_TARGET_PCT, 2)
-            self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
-
         if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
             if not getattr(self, "_dd_alerted", False):
                 self._dd_alerted = True
@@ -155,7 +186,6 @@ def install(log):
             if partial_qty <= 0:
                 continue
 
-            # Match engine._manage_partial_tp accounting exactly.
             risk_dist = abs(old["entry"] - old["sl"])
             cur = float(getattr(pos, "current_price", old["entry"]) or old["entry"])
             pnl_partial = risk_dist * partial_qty
@@ -169,6 +199,7 @@ def install(log):
 
         return result
 
+    TradingEngine._filter_viable_symbols = _filter_viable_symbols_paper_safe
     TradingEngine._connect = _connect_with_paper_wallet
     TradingEngine._update_balance = _update_balance_paper_safe
     TradingEngine._refresh_entry_balance = _refresh_entry_balance_paper_safe
@@ -176,6 +207,4 @@ def install(log):
     TradingEngine._paper_apply_virtual_balance = _apply_virtual_balance
     TradingEngine._paper_wallet_patched = True
 
-    log.info(
-        "🧪 PAPER wallet isolation installed; LIVE balance path unchanged"
-    )
+    log.info("🧪 PAPER wallet isolation installed; LIVE balance path unchanged")
