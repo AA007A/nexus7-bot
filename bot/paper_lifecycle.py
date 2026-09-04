@@ -40,9 +40,6 @@ def install(log):
         client._real_set_position_stops = getattr(client, "set_position_stops", None)
 
         async def _paper_set_sl(symbol: str, sl: float):
-            # Exchange mutation is intentionally skipped in PAPER, but the
-            # simulator must acknowledge the stop update so trailing/BE state
-            # advances exactly as a successful exchange acknowledgement would.
             log.info("[PAPER] set_sl simulated OK: %s -> %.6f", symbol, sl)
             return True
 
@@ -59,14 +56,20 @@ def install(log):
         log.info("🧪 PAPER stops: acknowledgements simulados; nenhuma mutação na exchange")
 
     async def assess_with_paper_semantics(self, client, engine):
-        state = await original_assess(self, client, engine)
         if not getattr(engine, "paper_trade", False):
-            return state
+            return await original_assess(self, client, engine)
 
-        # In PAPER, local simulated positions are intentionally absent from the
-        # real exchange. Therefore STATE_DIVERGENCE caused solely by that fact is
-        # not an integrity fault. All other checks remain active: balance, REST,
-        # instruments, clock, market-data freshness, risk engine and rate limits.
+        # original_assess calls _log_state before returning. In PAPER that would
+        # emit a false STATE_DIVERGENCE alarm for every simulated position before
+        # we can remove the expected local-only divergence. Suppress only that
+        # premature log, filter the state, then log the final PAPER-aware state.
+        original_log_state = self._log_state
+        self._log_state = lambda: None
+        try:
+            state = await original_assess(self, client, engine)
+        finally:
+            self._log_state = original_log_state
+
         kept = []
         removed = []
         for issue in state.issues:
@@ -75,30 +78,32 @@ def install(log):
             else:
                 kept.append(issue)
 
-        if not removed:
-            return state
+        if removed:
+            if any(i.severity == Severity.BLOCKED for i in kept):
+                sev = Severity.BLOCKED
+            elif any(i.severity == Severity.DEGRADED for i in kept):
+                sev = Severity.DEGRADED
+            else:
+                sev = Severity.OK
 
-        if any(i.severity == Severity.BLOCKED for i in kept):
-            sev = Severity.BLOCKED
-        elif any(i.severity == Severity.DEGRADED for i in kept):
-            sev = Severity.DEGRADED
+            self.state = IntegrityState(
+                severity=sev,
+                issues=kept,
+                checked_at=state.checked_at,
+                exchange_known=state.exchange_known,
+            )
+            log.debug(
+                "[PAPER] integrity: ignorada divergência esperada de %d posição(ões) simulada(s)",
+                len(removed),
+            )
         else:
-            sev = Severity.OK
+            self.state = state
 
-        self.state = IntegrityState(
-            severity=sev,
-            issues=kept,
-            checked_at=state.checked_at,
-            exchange_known=state.exchange_known,
-        )
-        log.debug(
-            "[PAPER] integrity: ignorada divergência esperada de %d posição(ões) simulada(s)",
-            len(removed),
-        )
+        # Emit exactly one integrity log based on the final PAPER-aware state.
+        self._log_state()
         return self.state
 
     async def _finish_paper_position(self, sym, pos, exit_px: float, reason: str):
-        # Idempotency: another lifecycle rule may have closed it in this loop.
         if sym not in self.positions:
             return
 
