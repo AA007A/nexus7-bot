@@ -2,7 +2,7 @@
 
 Loaded automatically by Python's site module. It wraps decision validation,
 engine status, and the Analyzer for shadow-only A/B measurement without
-changing order submission, risk, sizing, strategy return values, or trading mode.
+changing live trading mode or bypassing the mandatory NEXUS gate.
 """
 import asyncio
 import threading
@@ -16,17 +16,13 @@ try:
     from bot import mtf_shadow as _ms
     from bot import logger as _logger
     from bot import runtime_hardening as _rh
+    from bot import notifier as _notifier
     from bot.logger import log as _log
 
-    # Infrastructure-only hardening. Neither patch changes signal/risk/order
-    # criteria or trading mode.
     _rh.install_database_schema_fix(_log)
     _rh.install_telegram_fix(_log)
+    _rh.install_paper_execution_fix(_log)
 
-    # Pace the independent NEXUS audit mirror. A burst of many symbols used to
-    # enqueue messages back-to-back and trigger Telegram flood control. Audit
-    # telemetry is lossy by design; dropping burst duplicates is preferable to
-    # blocking the Telegram channel.
     if not getattr(_logger, "_audit_pacing_patched", False):
         _orig_enqueue = _logger._enqueue
         _audit_lock = threading.Lock()
@@ -44,11 +40,8 @@ try:
         _logger._enqueue = _paced_enqueue
         _logger._audit_pacing_patched = True
 
-    # Passive log observer: counts where the pre-NEXUS funnel is stopping.
     _fm.install(_log)
 
-    # Shadow A/B observer for the strict 4H+1H alignment gate.
-    # IMPORTANT: it always returns the production Analyzer result unchanged.
     if not getattr(Analyzer, "_mtf_shadow_patched", False):
         _orig_analyze_mtf = Analyzer.analyze_mtf
 
@@ -69,9 +62,6 @@ try:
                 )
                 snap = _ms.snapshot()
                 unique = snap.get("unique_states", 0)
-                # Sparse, machine-readable progress marker for Railway audits.
-                # It is emitted only when a new closed-candle state is observed,
-                # at the first state and then every 25 unique states.
                 if unique != before and (unique == 1 or unique % 25 == 0):
                     _log.info(
                         "[MTF_SHADOW] unique=%s eligible=%s survivors=%s "
@@ -83,7 +73,6 @@ try:
                         snap.get("shadow_nexus_vetoed", 0),
                     )
             except Exception:
-                # Shadow telemetry can never affect the strategy result.
                 pass
             return result
 
@@ -98,10 +87,19 @@ try:
             dec = await _orig_validate(self, sig)
             try:
                 await _np.record_decision(sig, dec)
-                # Evaluate previously frozen decisions with future candles only.
                 asyncio.create_task(_np.evaluate_pending(self.client))
             except Exception:
-                # Observability must never affect the execution gate.
+                pass
+
+            # The candidate Telegram alert is pre-NEXUS. If NEXUS rejects it,
+            # explicitly tell the operator why no order followed. This does not
+            # change or bypass execution_allowed.
+            try:
+                if getattr(dec, "execution_allowed", False) is not True:
+                    asyncio.create_task(
+                        _notifier.notify_nexus(dec.to_dict(), approved=False)
+                    )
+            except Exception:
                 pass
             return dec
 
@@ -123,5 +121,4 @@ try:
 
         TradingEngine._nexus_persistence_patched = True
 except Exception:
-    # Startup must remain fail-safe: telemetry/hooks cannot block the app.
     pass
