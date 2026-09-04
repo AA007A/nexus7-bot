@@ -11,6 +11,7 @@ import time, math
 from dataclasses import dataclass, field
 from bot.logger import log
 from bot.config import cfg
+from bot.quantity import minimum_base_quantity, quantity_rules
 
 # ── Constantes unificadas — lidas de config.py (NÃO hardcoded) ──
 # REMOVIDOS: MAX_RISK_PCT=0.01 e MAX_DRAWDOWN=0.08 hardcoded
@@ -213,12 +214,12 @@ class RiskManager:
         self.balance      = 0.0
         self.drawdown     = 0.0
         self._ready       = False
+        self.balance_confirmed = False
         self.positions: dict = {}
 
     def init(self, bal: float):
-        if not self._ready and bal > 0:
-            self.peak_balance = bal
-            self.balance      = bal
+        if not self._ready:
+            self.update(bal)
             self._ready       = True
             log.info(
                 f"📊 RiskManager: ${bal:.2f} | "
@@ -227,8 +228,10 @@ class RiskManager:
             )
 
     def update(self, bal: float):
-        if bal <= 0:
-            return
+        self.balance_confirmed = False
+        if type(bal) not in (int, float) or not math.isfinite(bal):
+            raise ValueError("balance unavailable or invalid")
+        self.balance_confirmed = True
         self.balance      = bal
         self.peak_balance = max(self.peak_balance, bal)
         self.drawdown     = (
@@ -244,6 +247,9 @@ class RiskManager:
                 f"⛔ RiskManager não inicializado (saldo lido: "
                 f"${self.balance:.2f}) — scan bloqueado"
             )
+            return False
+        if not self.balance_confirmed or self.balance <= 0:
+            log.warning("[BALANCE] new entries blocked: zero or unconfirmed balance")
             return False
         if self.drawdown >= cfg.MAX_DRAWDOWN:
             log.warning(
@@ -340,11 +346,9 @@ class RiskManager:
         #
         # Converte o lote mínimo para a mesma unidade de qty.
         # ══════════════════════════════════════════════════════════
-        _lot_contratos = float(info.get("minQty",  1.0))
-        _multiplier    = float(info.get("multiplier", 1.0))
-        min_qty  = _lot_contratos * _multiplier          # em unidade base
-        qty_step = min_qty                                # passo = 1 lote
-        min_not  = float(info.get("minNotional", 1.0))
+        multiplier, lot, _, _ = quantity_rules(info)
+        min_qty = minimum_base_quantity(info, entry)   # base asset, includes quote minimum
+        qty_step = float(lot * multiplier)             # base asset per lot
 
         # Margem livre = saldo - margem já em uso por posições abertas
         margin_used = self._margin_in_use(open_positions)

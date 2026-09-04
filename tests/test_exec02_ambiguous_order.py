@@ -33,7 +33,7 @@ os.environ.update({
     "LIVE_TRADING_CONFIRMED": "I_UNDERSTAND_THE_RISK",
     "BOT_API_SECRET": "t", "LOG_LEVEL": "ERROR",
     "LEVERAGE": "10", "MAX_RISK_PCT": "0.5", "MAX_MARGIN_PCT": "0.98",
-    "NEXUS_AI_ENABLED": "false", "NEXUS_TELEGRAM": "false",
+    "NEXUS_AI_ENABLED": "true", "NEXUS_TELEGRAM": "false",
 })
 
 
@@ -126,6 +126,12 @@ async def test_B2_ordem_aceita_resposta_perdida_converge():
     MK.ORDERS.clear(); MK.POSITIONS.clear()
 
     try:
+        from unittest.mock import AsyncMock
+        from bot.nexus_types import NexusDecision
+        e._nexus_validate = AsyncMock(return_value=NexusDecision(
+            symbol=sig.symbol, decision=sig.direction, execution_allowed=True,
+            entry=sig.entry, stop_loss=sig.sl, take_profit=sig.tp,
+            confidence=80., setup_quality=80.))
         await asyncio.wait_for(e._open(sig), timeout=120)
     except Exception:
         pass

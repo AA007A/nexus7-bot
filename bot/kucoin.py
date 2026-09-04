@@ -41,6 +41,7 @@ import aiohttp
 
 from bot.logger import log
 from bot.order_state import OrderState, InvalidTransition
+from bot.quantity import base_to_contracts
 
 # ── Credenciais ────────────────────────────────────────────────────
 # .strip() automático — espaços acidentais no Railway são a causa #1 de 400004
@@ -575,7 +576,7 @@ class KuCoinClient:
                 await asyncio.sleep(0.25 * (attempt + 1))
         return {}
 
-    async def _post(self, endpoint: str, body: dict) -> dict:
+    async def _post(self, endpoint: str, body: dict, *, single_attempt: bool = False) -> dict:
         """
         NOTA DE IDEMPOTÊNCIA (ADV-02): body_str é serializado UMA VEZ,
         antes do loop de retry, e reenviado IDÊNTICO em todas as
@@ -595,13 +596,16 @@ class KuCoinClient:
         KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
         auditoria). Não invento uma garantia que não posso comprovar.
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] _post: exchange mutation skipped")
+            return {}
         await self._ensure_session()
         url = REST_BASE + endpoint
         # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
         body_str = json.dumps(body, separators=(",", ":"))
         headers  = self._auth_headers("POST", endpoint, body_str)
         ambiguous = False
-        for attempt in range(3):
+        for attempt in range(1 if single_attempt else 3):
             try:
                 await self._throttle()
                 async with self._rate_sem, self._session.post(url, data=body_str, headers=headers) as r:
@@ -706,7 +710,8 @@ class KuCoinClient:
                     return recovered
                 wait = 2 ** attempt
                 log.warning(f"KuCoin POST {endpoint} tentativa {attempt+1}: {e} — retry em {wait}s")
-                await asyncio.sleep(wait)
+                if not single_attempt:
+                    await asyncio.sleep(wait)
         if ambiguous and endpoint == "/api/v1/orders":
             return {"clientOid": body.get("clientOid", ""), "_ambiguous": True}
         return {}
@@ -715,7 +720,16 @@ class KuCoinClient:
     async def get_balance(self) -> float:
         """Retorna saldo disponível em USDT na conta de futuros."""
         data = await self._get("/api/v1/account-overview", {"currency": "USDT"}, auth=True)
-        bal = float(data.get("availableBalance", 0))
+        if not isinstance(data, dict) or "availableBalance" not in data:
+            raise RuntimeError("Futures availableBalance unavailable")
+        try:
+            if isinstance(data["availableBalance"], bool):
+                raise ValueError("boolean balance")
+            bal = float(data["availableBalance"])
+            if not math.isfinite(bal):
+                raise ValueError("nonfinite balance")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("Futures availableBalance invalid") from exc
         log.info(f"💰 Saldo USDT: ${bal:.4f}")
         return bal
 
@@ -787,16 +801,16 @@ class KuCoinClient:
             max_lev  = float(c.get("maxLeverage", 0) or 0)
 
             self._instruments[std_sym] = {
-                "minQty":      lot_size,
+                "minQty":      float(c.get("minQty", lot_size)),
+                "lotSize":     lot_size,
                 "qtyStep":     lot_size,
                 "tickSize":    tick_sz,
                 "multiplier":  mult,
                 "maxLeverage": max_lev,
-                # minNotional aqui é a QUANTIDADE base mínima (lote × multiplicador),
-                # não valor em USDT — o valor depende do preço e é calculado em
-                # _filter_viable_symbols como lot_size × multiplier × price.
-                "minBaseQty":  lot_size * mult,
-                "minNotional": lot_size * mult,   # mantido por compatibilidade
+                # Native lot size is contracts; base minimum is diagnostic only.
+                # A missing notional rule means no quote minimum, not base quantity.
+                "minBaseQty":  float(c.get("minQty", lot_size)) * mult,
+                "minNotional": float(c.get("minNotional", 0) or 0),  # USDT
                 "kucoinSymbol": kc_sym,
             }
             matched.append(f"{std_sym}→{kc_sym}")
@@ -839,6 +853,9 @@ class KuCoinClient:
         # (place_order → body["leverage"]), então esta chamada é
         # redundante. Vira no-op por padrão.
         # ══════════════════════════════════════════════════════════
+        if PAPER_TRADE:
+            log.info("[PAPER] set_leverage: exchange mutation skipped")
+            return None
         if os.environ.get("KUCOIN_SET_LEVERAGE_ENDPOINT", "false").lower() == "true":
             kc_sym = to_kucoin(symbol)
             try:
@@ -865,21 +882,15 @@ class KuCoinClient:
         return f"{clean:.{decimals}f}"
 
     def _round_qty(self, qty: float, symbol: str) -> int:
-        """
-        KuCoin Futures usa CONTRATOS (inteiros), não quantidade base.
-        qty (USDT-base) → contratos = round(qty / multiplier)
-        """
-        info       = self._instruments.get(symbol, {})
-        multiplier = float(info.get("multiplier", 1.0))
-        lot_size   = float(info.get("minQty",     1.0))
-        contracts  = max(1, round(qty / multiplier / lot_size)) * int(lot_size)
-        return max(1, int(contracts))
+        """Boundary: base asset -> integer KuCoin contracts, exactly once."""
+        return base_to_contracts(qty, self._instruments[symbol])
 
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float = 0, tp: float = 0,
                           instruments: dict = None,
                           reduce_only: bool = False,
-                          idem_key: str = None) -> dict:
+                          idem_key: str = None,
+                          single_submission: bool = False) -> dict:
         """
         Envia ordem a mercado com SL e TP opcionais.
         side: "Buy" ou "Sell" (mesmo padrão do BybitClient)
@@ -992,7 +1003,8 @@ class KuCoinClient:
         # ══════════════════════════════════════════════════════════════
 
         submitted_oid = body["clientOid"]
-        data     = await self._post("/api/v1/orders", body)
+        post_options = {"single_attempt": True} if single_submission and not reduce_only else {}
+        data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
         # Última barreira antes de alterar leverage (e gerar outro OID):
@@ -1008,7 +1020,7 @@ class KuCoinClient:
         # Fallback de leverage: nem todo par KuCoin permite 50x.
         # Altcoins costumam ter limite de 20x-25x. Se a ordem falhar,
         # retenta com valores menores até conseguir.
-        if not order_id and not data.get("_ambiguous") and _lev > 20:
+        if not single_submission and not order_id and not data.get("_ambiguous") and _lev > 20:
             for fallback_lev in (25, 20, 10):
                 if fallback_lev >= _lev:
                     continue
@@ -1128,6 +1140,9 @@ class KuCoinClient:
         Preços arredondados ao tickSize — a KuCoin rejeita silenciosamente
         valores fora do múltiplo correto.
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] set_position_stops: exchange mutation skipped")
+            return False
         if not API_KEY:
             return False
         kc_sym = to_kucoin(symbol)
@@ -1200,6 +1215,9 @@ class KuCoinClient:
         KuCoin: POST /api/v1/position/trading-stop
         SL arredondado ao tickSize correto (bug corrigido v12).
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] set_sl: exchange mutation skipped")
+            return False
         if not API_KEY:
             return False
         kc_sym    = to_kucoin(symbol)
@@ -1218,6 +1236,9 @@ class KuCoinClient:
         KuCoin Futures: DELETE /api/v1/orders
         CORRIGIDO: removido código duplicado (POST + DELETE ao mesmo tempo).
         """
+        if PAPER_TRADE:
+            log.info("[PAPER] cancel_all_orders: exchange mutation skipped")
+            return False
         await self._ensure_session()
         kc_sym   = to_kucoin(symbol) if symbol else ""
         params   = {"symbol": kc_sym} if kc_sym else {}
@@ -1688,8 +1709,10 @@ class KuCoinClient:
             return self._ws_token   # reusa token válido
 
         await self._ensure_session()
-        endpoint = "/api/v1/bullet-private"
-        headers  = self._auth_headers("POST", endpoint, "")
+        # Market-data websocket token is public in paper mode. No account
+        # mutation/authentication is needed for simulated trading.
+        endpoint = "/api/v1/bullet-public" if PAPER_TRADE else "/api/v1/bullet-private"
+        headers  = {} if PAPER_TRADE else self._auth_headers("POST", endpoint, "")
         url      = REST_BASE + endpoint
         try:
             async with self._session.post(url, headers=headers) as r:

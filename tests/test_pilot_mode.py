@@ -137,7 +137,7 @@ async def test_PILOT07_limite_uma_ordem_por_sessao():
     import bot.pilot as P
     P.PILOT_ENABLED = True
     c, e = await _engine()
-    e.pilot.register_position_opened("BTCUSDT")
+    e.pilot.reserve_submission("BTCUSDT")
     e.positions.clear()   # mesmo sem posição aberta, a sessão já contou
     motivos = e.pilot.evaluate(e, c, "DOGEUSDT", _AiOk())
     check("PILOT-07: 1 ordem/sessão bloqueia a segunda",
@@ -183,7 +183,7 @@ async def test_PILOT10_nao_afrouxa_barreiras_existentes():
     # caminhos de fechamento (reduce_only), que não são relevantes aqui.
     _m = re.search(r"    async def _open\(self.*?(?=\n    async def )", src, re.S)
     corpo = _m.group(0)
-    i_ai = corpo.find("nx_dec is not None and not nx_dec.execution_allowed")
+    i_ai = corpo.find("if not approved:")
     i_pilot = corpo.find("self.pilot.can_open_pilot")
     i_place = corpo.find("await self.client.place_order")
     check("PILOT-10: gate do piloto vem DEPOIS do veto do NEXUS AI",

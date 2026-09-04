@@ -34,7 +34,7 @@ os.environ.update({
     "LIVE_TRADING_CONFIRMED": "I_UNDERSTAND_THE_RISK",
     "BOT_API_SECRET": "t", "LOG_LEVEL": "ERROR",
     "LEVERAGE": "10", "MAX_RISK_PCT": "0.5", "MAX_MARGIN_PCT": "0.98",
-    "NEXUS_AI_ENABLED": "false", "NEXUS_TELEGRAM": "false",
+    "NEXUS_AI_ENABLED": "true", "NEXUS_TELEGRAM": "false",
 })
 
 
@@ -125,6 +125,12 @@ async def test_EXEC01_D_open_vs_reconcile_mesma_qty():
                  entry=0.19, sl=0.188, tp=0.20, score=80,
                  expected_pnl=1.0, reason="EXEC01-D")
     MK.ORDERS.clear(); MK.POSITIONS.clear()
+    from unittest.mock import AsyncMock
+    from bot.nexus_types import NexusDecision
+    e._nexus_validate = AsyncMock(return_value=NexusDecision(
+        symbol=sig.symbol, decision=sig.direction, execution_allowed=True,
+        entry=sig.entry, stop_loss=sig.sl, take_profit=sig.tp,
+        confidence=80., setup_quality=80.))
     await asyncio.wait_for(e._open(sig), timeout=60)
     qty_open = e.positions["DOGEUSDT"].qty
 
