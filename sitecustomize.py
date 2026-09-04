@@ -18,6 +18,7 @@ try:
     from bot import runtime_hardening as _rh
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
+    from bot import paper_wallet as _paper_wallet
     from bot import pretrade_hardening as _pretrade_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
@@ -27,6 +28,7 @@ try:
     _rh.install_paper_execution_fix(_log)
     _pretrade_hardening.install(_log)
     _paper_e2e.install(_log)
+    _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
 
     # nexus_persistence uses one asyncpg connection. Concurrent record_decision
@@ -138,6 +140,12 @@ try:
                         out["nexus_persistent_metrics"] = _np.get_cached_metrics()
                         out["funnel_metrics"] = _fm.get_funnel_metrics()
                         out["mtf_shadow_metrics"] = _ms.snapshot()
+                        if getattr(self, "paper_trade", False):
+                            out["paper_wallet"] = {
+                                "balance": round(float(getattr(self, "_paper_balance", self.risk.balance) or 0.0), 4),
+                                "drawdown_pct": round(float(self.risk.drawdown) * 100.0, 2),
+                                "isolated_from_exchange": True,
+                            }
                 except Exception:
                     pass
                 return out
