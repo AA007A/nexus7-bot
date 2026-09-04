@@ -2686,7 +2686,7 @@ class TradingEngine:
             )
 
             # ── Retry com backoff exponencial (3 tentativas) ─────
-            MAX_RETRIES   = 3
+            MAX_RETRIES   = 1 if self.pilot.enabled else 3
             RETRY_DELAYS  = [1.0, 2.0, 4.0]   # segundos entre tentativas
             last_exc: Exception | None = None
 
@@ -2870,8 +2870,11 @@ class TradingEngine:
                     except InvalidTransition as _ie:
                         log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
 
+                    if not self.pilot.reserve_submission(sig.symbol):
+                        return
                     _order = await self.client.place_order(
                         symbol=sig.symbol, side=side, qty=qty,
+                        single_submission=self.pilot.enabled,
                         sl=sig.sl, tp=sig.tp,
                         instruments=self.instruments,
                         idem_key=_idem,   # P0: mesmo OID em todas as tentativas
@@ -3143,8 +3146,8 @@ class TradingEngine:
             pos = Position(sig, qty)
             pos.pre_score = pre_score["total"]
             self.positions[sig.symbol] = pos
-            # Piloto: conta a abertura para o limite de 1 ordem/sessão.
-            # Só aqui — depois do FILLED confirmado e da posição criada.
+            # Diagnostic filled-position count only. Submission was consumed
+            # before sending, including every ambiguous/error path.
             if self.pilot.enabled:
                 self.pilot.register_position_opened(sig.symbol)
             # Persiste no banco

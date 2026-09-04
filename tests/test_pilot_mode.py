@@ -137,7 +137,7 @@ async def test_PILOT07_limite_uma_ordem_por_sessao():
     import bot.pilot as P
     P.PILOT_ENABLED = True
     c, e = await _engine()
-    e.pilot.register_position_opened("BTCUSDT")
+    e.pilot.reserve_submission("BTCUSDT")
     e.positions.clear()   # mesmo sem posição aberta, a sessão já contou
     motivos = e.pilot.evaluate(e, c, "DOGEUSDT", _AiOk())
     check("PILOT-07: 1 ordem/sessão bloqueia a segunda",

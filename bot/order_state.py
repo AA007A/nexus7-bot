@@ -172,6 +172,10 @@ class OrderRegistry:
         if order_id and client_oid:
             self._by_order_id[order_id] = client_oid
 
+    def pending_orders(self) -> List[ManagedOrder]:
+        """Include submissions whose exchange acknowledgement may be lost."""
+        return [o for o in self._orders.values() if not o.is_terminal]
+
     def open_orders(self, symbol: str = None) -> List[ManagedOrder]:
         return [o for o in self._orders.values()
                 if o.is_open and (symbol is None or o.symbol == symbol)]

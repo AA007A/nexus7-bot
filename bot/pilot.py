@@ -24,6 +24,7 @@ adiciona motivos para NÃO operar.
 """
 import os
 import time
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -34,7 +35,8 @@ PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "tru
 
 # Limites do piloto — deliberadamente mais restritivos que a config normal
 PILOT_MAX_CONCURRENT_POSITIONS   = 1
-PILOT_MAX_NEW_POSITIONS_SESSION  = 1
+MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 1
+PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 
 # Idade máxima aceitável do dado de mercado usado na decisão (requisito 11)
 PILOT_MAX_MARKET_DATA_AGE_S = float(
@@ -45,6 +47,7 @@ PILOT_MAX_MARKET_DATA_AGE_S = float(
 @dataclass
 class PilotState:
     """Estado do piloto — quantas ordens já foram abertas nesta sessão."""
+    new_order_submissions_this_session: int = 0
     positions_opened_this_session: int = 0
     first_order_ts: float = 0.0
     blocked_reasons: List[str] = field(default_factory=list)
@@ -60,12 +63,30 @@ class PilotGuard:
 
     def __init__(self):
         self.state = PilotState()
+        self._submission_lock = threading.Lock()
         self._last_block_log = 0.0
         self._last_block_key = ""
 
     @property
     def enabled(self) -> bool:
         return PILOT_ENABLED
+
+    def reserve_submission(self, symbol: str) -> bool:
+        """Consume the session BEFORE sending. Never refunded after ambiguity.
+
+        No await between checking and consuming; the lock also protects against
+        callers on other threads. ReduceOnly callers do not invoke this method.
+        """
+        if not self.enabled:
+            return True
+        with self._submission_lock:
+            if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
+                log.warning(f"[PILOT] {symbol} second submission blocked")
+                return False
+            self.state.new_order_submissions_this_session += 1
+            self.state.first_order_ts = time.time()
+        log.critical(f"[PILOT] symbol={symbol} submission_reserved=1 session_consumed=true")
+        return True
 
     def register_position_opened(self, symbol: str):
         """Chamado após uma abertura confirmada, para contar a sessão."""
@@ -144,7 +165,7 @@ class PilotGuard:
             # 10. NEXUS AI executado e aprovando
             if ai_decision is None:
                 r.append("10_AI: nenhuma decisão do NEXUS AI recebida")
-            elif not getattr(ai_decision, "execution_allowed", False):
+            elif getattr(ai_decision, "execution_allowed", None) is not True:
                 r.append("10_AI: NEXUS AI não aprovou a entrada")
 
             # 11. Market data recente
@@ -169,14 +190,14 @@ class PilotGuard:
                 if faltando:
                     r.append(f"12_QTY_RULES: metadata incompleta {faltando}")
 
-            # 13. Nenhuma ordem ambígua pendente no mesmo símbolo
+            # 13. Nenhuma submission pendente, em QUALQUER símbolo
             reg = getattr(engine, "orders", None)
             if reg is not None and symbol:
                 try:
-                    for mo in reg.open_orders(symbol):
+                    for mo in reg.pending_orders():
                         r.append(
                             f"13_AMBIGUOUS: ordem pendente {mo.client_oid[:12]} "
-                            f"em {symbol} (estado {mo.state.value})"
+                            f"em {mo.symbol} (estado {mo.state.value})"
                         )
                         break
                 except Exception as e:
@@ -193,10 +214,10 @@ class PilotGuard:
                     f"PILOT_CONCURRENT: {n_pos} posição(ões) aberta(s), "
                     f"máx {PILOT_MAX_CONCURRENT_POSITIONS} no piloto"
                 )
-            if (self.state.positions_opened_this_session >=
-                    PILOT_MAX_NEW_POSITIONS_SESSION):
+            if (self.state.new_order_submissions_this_session >=
+                    MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION):
                 r.append(
-                    f"PILOT_SESSION: {self.state.positions_opened_this_session}"
+                    f"PILOT_SESSION: {self.state.new_order_submissions_this_session}"
                     f"/{PILOT_MAX_NEW_POSITIONS_SESSION} ordens já abertas "
                     f"nesta sessão — ciclo E2E precisa ser encerrado e "
                     f"reconciliado antes de outra entrada"
@@ -242,7 +263,8 @@ class PilotGuard:
         return {
             "pilot_enabled": PILOT_ENABLED,
             "max_concurrent_positions": PILOT_MAX_CONCURRENT_POSITIONS,
-            "max_new_positions_session": PILOT_MAX_NEW_POSITIONS_SESSION,
+            "max_new_order_submissions_session": MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
+            "new_order_submissions_this_session": self.state.new_order_submissions_this_session,
             "positions_opened_this_session":
                 self.state.positions_opened_this_session,
             "blocked_reasons": list(self.state.blocked_reasons),

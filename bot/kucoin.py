@@ -575,7 +575,7 @@ class KuCoinClient:
                 await asyncio.sleep(0.25 * (attempt + 1))
         return {}
 
-    async def _post(self, endpoint: str, body: dict) -> dict:
+    async def _post(self, endpoint: str, body: dict, *, single_attempt: bool = False) -> dict:
         """
         NOTA DE IDEMPOTÊNCIA (ADV-02): body_str é serializado UMA VEZ,
         antes do loop de retry, e reenviado IDÊNTICO em todas as
@@ -601,7 +601,7 @@ class KuCoinClient:
         body_str = json.dumps(body, separators=(",", ":"))
         headers  = self._auth_headers("POST", endpoint, body_str)
         ambiguous = False
-        for attempt in range(3):
+        for attempt in range(1 if single_attempt else 3):
             try:
                 await self._throttle()
                 async with self._rate_sem, self._session.post(url, data=body_str, headers=headers) as r:
@@ -706,7 +706,8 @@ class KuCoinClient:
                     return recovered
                 wait = 2 ** attempt
                 log.warning(f"KuCoin POST {endpoint} tentativa {attempt+1}: {e} — retry em {wait}s")
-                await asyncio.sleep(wait)
+                if not single_attempt:
+                    await asyncio.sleep(wait)
         if ambiguous and endpoint == "/api/v1/orders":
             return {"clientOid": body.get("clientOid", ""), "_ambiguous": True}
         return {}
@@ -879,7 +880,8 @@ class KuCoinClient:
                           sl: float = 0, tp: float = 0,
                           instruments: dict = None,
                           reduce_only: bool = False,
-                          idem_key: str = None) -> dict:
+                          idem_key: str = None,
+                          single_submission: bool = False) -> dict:
         """
         Envia ordem a mercado com SL e TP opcionais.
         side: "Buy" ou "Sell" (mesmo padrão do BybitClient)
@@ -992,7 +994,8 @@ class KuCoinClient:
         # ══════════════════════════════════════════════════════════════
 
         submitted_oid = body["clientOid"]
-        data     = await self._post("/api/v1/orders", body)
+        post_options = {"single_attempt": True} if single_submission and not reduce_only else {}
+        data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
         # Última barreira antes de alterar leverage (e gerar outro OID):
@@ -1008,7 +1011,7 @@ class KuCoinClient:
         # Fallback de leverage: nem todo par KuCoin permite 50x.
         # Altcoins costumam ter limite de 20x-25x. Se a ordem falhar,
         # retenta com valores menores até conseguir.
-        if not order_id and not data.get("_ambiguous") and _lev > 20:
+        if not single_submission and not order_id and not data.get("_ambiguous") and _lev > 20:
             for fallback_lev in (25, 20, 10):
                 if fallback_lev >= _lev:
                     continue
