@@ -53,8 +53,15 @@ def install(log):
                     detail.get("orderflow", {}),
                     detail.get("macro", {}),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Diagnostic formatting is best-effort, but failures must remain visible.
+            log.debug(
+                "[PRETRADE_DETAIL] diagnostic_failed %s %s: %s: %s",
+                symbol,
+                direction,
+                type(exc).__name__,
+                exc,
+            )
 
         return result
 
