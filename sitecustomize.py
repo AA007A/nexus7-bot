@@ -18,12 +18,14 @@ try:
     from bot import runtime_hardening as _rh
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
+    from bot import pretrade_hardening as _pretrade_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
     _rh.install_database_schema_fix(_log)
     _rh.install_telegram_fix(_log)
     _rh.install_paper_execution_fix(_log)
+    _pretrade_hardening.install(_log)
     _paper_e2e.install(_log)
     _paper_lifecycle.install(_log)
 
