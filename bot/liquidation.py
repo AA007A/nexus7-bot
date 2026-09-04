@@ -58,50 +58,15 @@ from typing import Optional, Dict
 
 from bot.logger import log
 
-# ══════════════════════════════════════════════════════════════════
-# TIERS DE MMR (Fase 5C) — CONFIRMADO na documentação oficial
-#
-# FONTE: kucoin.com/support/26685810193433 (Risk Limit Levels)
-#        + fichas de contrato (kucoin.com/futures/contract/detail/*)
-#
-# "with the BTC perpetual contract (USDT)... Position Size = 300,000
-#  USDT... this would fall under Level 1, where the MMR is 0.4%"
-#
-# CONFIRMADO: Tier 1 do XBTUSDTM tem MMR = 0.40%. Isso bate com o
-# DEFAULT_MMR usado desde a Fase 4 — não era um chute, mas eu não tinha
-# a fonte direta até agora.
-#
-# NÃO CONFIRMADO: o MMR SOBE por tier conforme o valor da posição
-# aumenta ("the maintenance margin rate is 0.5%" em outro exemplo da
-# doc, para posição maior). Os limiares exatos de cada tier e a tabela
-# completa por símbolo exigem o endpoint /api/v1/contracts/risk-limit,
-# que está bloqueado neste ambiente (Fase 5A).
-#
-# Por isso o Tier 1 (0.4%) é usado como fallback SEMPRE que a API não
-# responder — é o cenário mais comum (posições pequenas) e o valor tem
-# fonte primária confirmada. Posições GRANDES terão MMR real maior que
-# este fallback, subestimando o risco de liquidação nesse caso
-# específico. set_mmr_from_api() deve sobrepor assim que disponível.
-# ══════════════════════════════════════════════════════════════════
 DEFAULT_MMR      = float(os.environ.get("DEFAULT_MMR", "0.004"))
-# Taxa de liquidação usada no exemplo oficial da documentação
 LIQUIDATION_FEE  = float(os.environ.get("LIQUIDATION_FEE", "0.0006"))
-# Folga mínima exigida entre stop e liquidação (% do preço de entrada)
 MIN_GAP_PCT      = float(os.environ.get("MIN_STOP_LIQ_GAP_PCT", "0.30"))
 
-# MMR por símbolo, populado da API quando disponível.
-# Enquanto vazio, usa DEFAULT_MMR e o modelo é marcado como aproximação.
 _MMR_BY_SYMBOL: Dict[str, float] = {}
 _MMR_SOURCE:    Dict[str, str]   = {}
 
 
 def set_mmr_from_api(symbol: str, mmr: float, source: str = "api"):
-    """
-    Registra o MMR real vindo da exchange.
-
-    A KuCoin expõe isso em /api/v2/batchGetCrossOrderLimit (campo "mmr")
-    e nas fichas de contrato. Sem isso o cálculo é APROXIMAÇÃO.
-    """
     if mmr and 0 < mmr < 1:
         _MMR_BY_SYMBOL[symbol] = float(mmr)
         _MMR_SOURCE[symbol] = source
@@ -109,28 +74,17 @@ def set_mmr_from_api(symbol: str, mmr: float, source: str = "api"):
 
 
 def get_mmr(symbol: str) -> tuple:
-    """Retorna (mmr, is_official)."""
     if symbol in _MMR_BY_SYMBOL:
         return _MMR_BY_SYMBOL[symbol], True
     return DEFAULT_MMR, False
 
 
-# Acima deste notional, o Tier 1 (0.4%) pode não ser mais válido — a
-# doc cita 300.000 USDT como exemplo do limite do Tier 1 do BTC.
-# Fallback conservador: alerta, não bloqueia (não temos a tabela exata).
 TIER1_NOTIONAL_CEILING = float(
     os.environ.get("TIER1_NOTIONAL_CEILING_USDT", "300000")
 )
 
 
 def notional_exceeds_tier1(notional_usdt: float) -> bool:
-    """
-    True se o notional pode ter saído do Tier 1 assumido pelo fallback.
-
-    Isso NÃO é uma tabela de tiers real — é um teto conservador citado
-    no exemplo oficial da KuCoin para o BTC. Serve para avisar, não
-    para decidir com precisão.
-    """
     return notional_usdt > TIER1_NOTIONAL_CEILING
 
 
@@ -149,7 +103,7 @@ class LiquidationAnalysis:
     max_safe_stop_pct: float
     mmr:               float
     mmr_official:      bool
-    model:             str      # "OFFICIAL_FORMULA" ou "APPROXIMATION"
+    model:             str
     reason:            str
 
     def to_dict(self):
@@ -170,18 +124,10 @@ class LiquidationAnalysis:
 
 def liquidation_price(entry: float, leverage: int, is_long: bool,
                       mmr: float, liq_fee: float = LIQUIDATION_FEE) -> float:
-    """
-    Fórmula oficial da KuCoin, em forma normalizada por unidade.
-
-    Opening Value e Position Margin escalam com (size × multiplier), que
-    aparece nos dois lados e se cancela. O preço de liquidação depende
-    apenas de entry, leverage, MMR e taxa de liquidação — NÃO do tamanho
-    da posição (dentro do mesmo tier).
-    """
     if entry <= 0 or leverage <= 0:
         return 0.0
     side = 1 if is_long else -1
-    im   = 1.0 / leverage                      # margem inicial (fração)
+    im   = 1.0 / leverage
     denom = 1 - side * mmr - side * liq_fee
     if denom == 0:
         return 0.0
@@ -191,17 +137,6 @@ def liquidation_price(entry: float, leverage: int, is_long: bool,
 def analyze(entry: float, stop: float, leverage: int, is_long: bool,
             symbol: str = "", funding_pct: float = 0.0,
             n_open_positions: int = 1) -> LiquidationAnalysis:
-    """
-    Análise completa de stop vs liquidação usando a fórmula oficial.
-
-    n_open_positions: quantas posições estão abertas SIMULTANEAMENTE na
-    conta. Confirmado em produção (print de tela real) que a conta
-    opera em CROSS MARGIN. A fórmula foi validada apenas para o caso de
-    posição isolada / única posição em cross (que convergem quando há
-    apenas uma posição). Com 2+ posições em cross, a margem de
-    manutenção real depende da conta inteira — este módulo NÃO calcula
-    isso, e o resultado é marcado como não confiável.
-    """
     mmr, oficial = get_mmr(symbol)
     model = "OFFICIAL_FORMULA" if oficial else "APPROXIMATION"
     _cross_multi_risk = n_open_positions > 1
@@ -214,7 +149,6 @@ def analyze(entry: float, stop: float, leverage: int, is_long: bool,
     liq_p = liquidation_price(entry, leverage, is_long, mmr)
     liq_move_pct = abs(entry - liq_p) / entry * 100
 
-    # Funding acumulado reduz a margem e aproxima a liquidação
     if funding_pct > 0:
         liq_move_pct = max(0.0, liq_move_pct - funding_pct)
 
@@ -236,7 +170,7 @@ def analyze(entry: float, stop: float, leverage: int, is_long: bool,
         motivo += f" [MMR estimado {mmr:.4f} — não confirmado pela API]"
 
     if _cross_multi_risk:
-        efetivo = False   # não confia no gap calculado — força cautela
+        efetivo = False
         motivo += (
             f" [CROSS MARGIN com {n_open_positions} posições simultâneas — "
             f"cálculo de liquidação NÃO CONSIDERA margem compartilhada da "
@@ -254,16 +188,28 @@ def analyze(entry: float, stop: float, leverage: int, is_long: bool,
 
 
 def max_leverage_for_stop(stop_pct: float, symbol: str = "") -> int:
-    """
-    Maior alavancagem em que um stop de `stop_pct` permanece efetivo.
+    """Maior alavancagem em que um stop permanece efetivo.
 
-    Resolve a fórmula oficial para leverage, dado o movimento adverso
-    necessário (stop + folga mínima).
+    Inverte exatamente a fórmula usada por ``liquidation_price`` para LONG:
+
+        liq_move = (1/L - MMR - fee) / (1 - MMR - fee)
+
+    Para que o stop seja efetivo, ``liq_move`` precisa ser pelo menos
+    ``stop_pct + MIN_GAP_PCT``. A implementação anterior subtraía MMR/fee
+    do alvo e podia reportar, por exemplo, 54x como seguro para um stop de
+    2.0% quando o próprio ``analyze`` corretamente rejeitava 50x.
     """
+    try:
+        stop = float(stop_pct)
+    except (TypeError, ValueError):
+        return 1
+    if stop < 0:
+        return 1
+
     mmr, _ = get_mmr(symbol)
-    alvo = (stop_pct + MIN_GAP_PCT) / 100.0        # movimento necessário
-    # LONG: liq_move = (1/lev + mmr + fee) / (1 + mmr + fee) ≈ 1/lev + mmr + fee
-    denom = alvo - mmr - LIQUIDATION_FEE
+    target = (stop + MIN_GAP_PCT) / 100.0
+    maintenance = mmr + LIQUIDATION_FEE
+    denom = target * (1.0 - maintenance) + maintenance
     if denom <= 0:
         return 1
     lev = int(1.0 / denom)
