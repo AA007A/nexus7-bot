@@ -183,7 +183,7 @@ class PilotGuard:
                     r.append(f"13_AMBIGUOUS: falha ao consultar registry: {e}")
 
             # 14. Private WS ou mecanismo equivalente ativo
-            if not getattr(client, "_order_registry", None):
+            if getattr(client, "_order_registry", None) is None:
                 r.append("14_WS: WS privado de ordens não inicializado")
 
             # ── Limites do piloto ──────────────────────────────────

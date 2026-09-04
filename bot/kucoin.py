@@ -787,16 +787,16 @@ class KuCoinClient:
             max_lev  = float(c.get("maxLeverage", 0) or 0)
 
             self._instruments[std_sym] = {
-                "minQty":      lot_size,
+                "minQty":      float(c.get("minQty", lot_size)),
+                "lotSize":     lot_size,
                 "qtyStep":     lot_size,
                 "tickSize":    tick_sz,
                 "multiplier":  mult,
                 "maxLeverage": max_lev,
-                # minNotional aqui é a QUANTIDADE base mínima (lote × multiplicador),
-                # não valor em USDT — o valor depende do preço e é calculado em
-                # _filter_viable_symbols como lot_size × multiplier × price.
-                "minBaseQty":  lot_size * mult,
-                "minNotional": lot_size * mult,   # mantido por compatibilidade
+                # Native lot size is contracts; base minimum is diagnostic only.
+                # A missing notional rule means no quote minimum, not base quantity.
+                "minBaseQty":  float(c.get("minQty", lot_size)) * mult,
+                "minNotional": float(c.get("minNotional", 0) or 0),  # USDT
                 "kucoinSymbol": kc_sym,
             }
             matched.append(f"{std_sym}→{kc_sym}")

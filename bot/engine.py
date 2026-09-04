@@ -45,6 +45,7 @@ from bot import optimizer as opt
 from bot.integrity import IntegrityGuard, Severity
 from bot.order_state import OrderRegistry, OrderState, InvalidTransition
 from bot.pilot import PilotGuard
+from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot import liquidation as liq
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
@@ -2573,10 +2574,19 @@ class TradingEngine:
             # ADV-margin: repassa self.positions (fonte real de posições
             # confirmadas — inclui as reconciliadas pelo ADV-01) para
             # que o sizing desconte a margem já comprometida.
-            qty = self.risk.size(
-                sig.symbol, sig.entry, self.instruments,
-                open_positions=self.positions,
-            )
+            if self.pilot.enabled:
+                qty = minimum_base_quantity(self.instruments[sig.symbol], sig.entry)
+                # A minimum lot is not permission to exceed available margin.
+                # Include opening taker fee; use the current read, never cached balance.
+                required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
+                if fresh_bal <= 0 or required > fresh_bal:
+                    log.warning(f"[PILOT] {sig.symbol} minimum lot exceeds available balance")
+                    return
+            else:
+                qty = self.risk.size(
+                    sig.symbol, sig.entry, self.instruments,
+                    open_positions=self.positions,
+                )
             if qty <= 0:
                 log.warning(f"⚠️ {sig.symbol}: qty=0 — saldo insuficiente (${self.risk.balance:.2f})")
                 return
@@ -2635,20 +2645,9 @@ class TradingEngine:
             info      = self.instruments.get(sig.symbol, {})
             qty_step  = float(info.get("qtyStep",  0.001))
             tick_size = float(info.get("tickSize", 0.01))
-            min_qty   = float(info.get("minQty",   0.001))
-            min_not   = float(info.get("minNotional", 1.0))
-
-            # Validar qty
-            if qty < min_qty:
-                log.error(
-                    f"❌ _open {sig.symbol}: qty={qty} < minQty={min_qty} — abortando"
-                )
-                return
-            if qty * sig.entry < min_not:
-                log.error(
-                    f"❌ _open {sig.symbol}: notional={qty * sig.entry:.4f} < minNotional={min_not} — abortando"
-                )
-                return
+            min_not   = float(info.get("minNotional", 0.0))  # USDT
+            # Exchange limits are normalized explicitly; qty stays in base asset.
+            validate_base_quantity(qty, info, sig.entry)
 
             # Validar SL/TP — devem estar no lado correto da entrada
             if sig.sl <= 0 or sig.tp <= 0:
