@@ -22,6 +22,7 @@ try:
     from bot import pretrade_hardening as _pretrade_hardening
     from bot import rr_precision_hardening as _rr_precision_hardening
     from bot import scan_summary_hardening as _scan_summary_hardening
+    from bot import validation_safety_lock as _validation_safety_lock
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -34,6 +35,7 @@ try:
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
+    _validation_safety_lock.install(_log)
 
     if not getattr(_np, "_single_conn_serialized", False):
         _np_orig_execute = _np._execute
