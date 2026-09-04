@@ -5,6 +5,8 @@ engine status, and the Analyzer for shadow-only A/B measurement without
 changing order submission, risk, sizing, strategy return values, or trading mode.
 """
 import asyncio
+import threading
+import time
 
 try:
     from bot.engine import TradingEngine
@@ -12,7 +14,29 @@ try:
     from bot import nexus_persistence as _np
     from bot import funnel_metrics as _fm
     from bot import mtf_shadow as _ms
+    from bot import logger as _logger
     from bot.logger import log as _log
+
+    # Pace the independent NEXUS audit mirror. A burst of many symbols used to
+    # enqueue messages back-to-back and trigger Telegram flood control. Audit
+    # telemetry is lossy by design; dropping burst duplicates is preferable to
+    # blocking the Telegram channel. Normal bot.notifier traffic is untouched.
+    if not getattr(_logger, "_audit_pacing_patched", False):
+        _orig_enqueue = _logger._enqueue
+        _audit_lock = threading.Lock()
+        _audit_last = [0.0]
+        _audit_min_interval = 1.5
+
+        def _paced_enqueue(text):
+            now = time.monotonic()
+            with _audit_lock:
+                if now - _audit_last[0] < _audit_min_interval:
+                    return
+                _audit_last[0] = now
+            return _orig_enqueue(text)
+
+        _logger._enqueue = _paced_enqueue
+        _logger._audit_pacing_patched = True
 
     # Passive log observer: counts where the pre-NEXUS funnel is stopping.
     _fm.install(_log)
