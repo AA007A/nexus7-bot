@@ -54,6 +54,9 @@ jobs:
       - name: NEXUS zero-veto diagnostics
         run: python -m unittest tests.test_nexus_zero_observability -v
 
+      - name: RR precision config isolation
+        run: python -m unittest tests.test_rr_precision_isolation -v
+
       - name: Imports em runtime
         run: |
           python - <<'EOF'
