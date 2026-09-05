@@ -87,6 +87,49 @@ def install(log):
             log.warning("[PAPER_WALLET] persisted state invalid; ignoring: %s", exc)
             return None
 
+    def _sync_daily_limits(self, balance: float):
+        """Keep engine and DailyTracker limits on the same PAPER capital."""
+        from bot.config import cfg
+
+        if balance <= 0:
+            return
+        if cfg.DAILY_TARGET <= 0:
+            self.daily_target = round(balance * cfg.DAILY_TARGET_PCT, 2)
+        # Daily stop is intentionally disabled in DailyTracker. Do not revive it
+        # here merely because a legacy config value is zero.
+        self.daily_stop_loss = 0.0
+        try:
+            self.daily_tracker.recalc_limits(balance)
+            self.daily_tracker.daily_target = self.daily_target
+            self.daily_tracker.daily_stop_loss = 0.0
+        except Exception as exc:
+            log.warning("[PAPER_WALLET] daily-limit sync failed: %s", exc)
+
+    async def _restore_persisted_state(self) -> bool:
+        """Restore a validated PAPER wallet snapshot without exchange I/O.
+
+        Kept as a dedicated method so restart semantics can be regression-tested
+        deterministically without connecting to KuCoin or placing any order.
+        """
+        persisted = await _load_persisted_state(self)
+        if persisted is None:
+            return False
+
+        balance = persisted["balance"]
+        peak = persisted["peak_balance"]
+        self._paper_balance = balance
+        self.risk.peak_balance = peak
+        self.risk.balance = balance
+        self.risk.drawdown = ((peak - balance) / peak) if peak > 0 else 0.0
+        self.risk.balance_confirmed = balance > 0
+        _sync_daily_limits(self, balance)
+        log.info(
+            "🧪 PAPER wallet restaurada: saldo=$%.4f peak=$%.4f drawdown=%.2f%% "
+            "source=database; restart não resetou o histórico virtual",
+            balance, peak, self.risk.drawdown * 100.0,
+        )
+        return True
+
     def _apply_virtual_balance(self, new_balance: float, reason: str):
         new_balance = max(0.0, float(new_balance))
         self._paper_balance = new_balance
@@ -124,24 +167,6 @@ def install(log):
 
         return 0.0, "unconfirmed_zero"
 
-    def _sync_daily_limits(self, balance: float):
-        """Keep engine and DailyTracker limits on the same PAPER capital."""
-        from bot.config import cfg
-
-        if balance <= 0:
-            return
-        if cfg.DAILY_TARGET <= 0:
-            self.daily_target = round(balance * cfg.DAILY_TARGET_PCT, 2)
-        # Daily stop is intentionally disabled in DailyTracker. Do not revive it
-        # here merely because a legacy config value is zero.
-        self.daily_stop_loss = 0.0
-        try:
-            self.daily_tracker.recalc_limits(balance)
-            self.daily_tracker.daily_target = self.daily_target
-            self.daily_tracker.daily_stop_loss = 0.0
-        except Exception as exc:
-            log.warning("[PAPER_WALLET] daily-limit sync failed: %s", exc)
-
     async def _filter_viable_symbols_paper_safe(self):
         """Use virtual buying power during PAPER startup viability filtering."""
         if not getattr(self, "paper_trade", False):
@@ -171,21 +196,7 @@ def install(log):
             return
 
         if not hasattr(self, "_paper_balance"):
-            persisted = await _load_persisted_state(self)
-            if persisted is not None:
-                balance = persisted["balance"]
-                peak = persisted["peak_balance"]
-                self._paper_balance = balance
-                self.risk.peak_balance = peak
-                self.risk.balance = balance
-                self.risk.drawdown = ((peak - balance) / peak) if peak > 0 else 0.0
-                self.risk.balance_confirmed = balance > 0
-                _sync_daily_limits(self, balance)
-                log.info(
-                    "🧪 PAPER wallet restaurada: saldo=$%.4f peak=$%.4f drawdown=%.2f%% "
-                    "source=database; restart não resetou o histórico virtual",
-                    balance, peak, self.risk.drawdown * 100.0,
-                )
+            if await _restore_persisted_state(self):
                 return
 
             observed = float(getattr(self.risk, "balance", 0.0) or 0.0)
@@ -287,6 +298,7 @@ def install(log):
     TradingEngine._manage_partial_tp = _manage_partial_tp_with_wallet
     TradingEngine._paper_apply_virtual_balance = _apply_virtual_balance
     TradingEngine._paper_persist_wallet = _persist_state
+    TradingEngine._paper_restore_wallet_from_db = _restore_persisted_state
     TradingEngine._paper_wallet_patched = True
 
     log.info("🧪 PAPER wallet isolation + persistence installed; LIVE balance path unchanged")
