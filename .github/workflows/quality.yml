@@ -48,6 +48,9 @@ jobs:
       - name: Self-check de integridade
         run: python -m bot.selfcheck
 
+      - name: PAPER wallet restart persistence
+        run: python -m unittest tests.test_paper_wallet_restart -v
+
       - name: Imports em runtime
         run: |
           python - <<'EOF'
