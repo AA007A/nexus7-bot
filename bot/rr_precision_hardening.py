@@ -31,7 +31,10 @@ class _CfgProxy:
         object.__setattr__(self, "MIN_RR_RATIO", min_rr_ratio)
 
     def __getattr__(self, name):
-        return getattr(self._base, name)
+        # Match the low-level slot initialization above and avoid re-entering
+        # __getattr__ if the proxy is ever accessed before initialization.
+        base = object.__getattribute__(self, "_base")
+        return getattr(base, name)
 
     def __setattr__(self, name, value):
         raise AttributeError(f"RR precision cfg proxy is read-only: {name}")
