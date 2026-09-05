@@ -31,6 +31,18 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
     best_effort_terms = (
         "notify", "telegram", "metrics", "log.debug", "observability", "heartbeat",
     )
+
+    # A very common pattern in engine.py is a tiny try/except whose only work is
+    # scheduling a Telegram notification after the real error has already been
+    # logged. Nearby context can mention positions/risk and previously caused a
+    # false REVIEW_HIGH. Match the operation itself before broad context terms.
+    notification_only_terms = (
+        "asyncio.create_task(notify(",
+        "create_task(notify(",
+    )
+    if any(t in text for t in notification_only_terms):
+        return "BEST_EFFORT_LIKELY"
+
     if any(t in text for t in critical_terms):
         return "REVIEW_HIGH"
     if any(t in text for t in best_effort_terms):
