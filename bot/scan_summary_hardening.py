@@ -47,6 +47,14 @@ class _ScanSummaryLabelFilter(logging.Filter):
                 marker = " pares |"
                 if marker in msg:
                     msg = msg.replace(marker, " pares com score registrado |", 1)
+                # O engine conta score >= (mínimo-5), o que inclui também
+                # scores já acima do mínimo. O rótulo antigo "a ≤5pts" fazia
+                # esse total parecer exclusivamente abaixo do threshold.
+                msg = re.sub(
+                    r"(\d+)\s+a\s+≤5pts",
+                    r"\1 em faixa ≥(mín-5), incluindo ≥mín",
+                    msg,
+                )
                 record.msg = msg
                 record.args = ()
         except Exception as exc:
