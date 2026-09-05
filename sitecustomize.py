@@ -26,6 +26,7 @@ try:
     from bot import silent_except_audit as _silent_except_audit
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
+    from bot import daily_stop_observability as _daily_stop_observability
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -35,6 +36,7 @@ try:
     _pretrade_hardening.install(_log)
     _rr_precision_hardening.install(_log)
     _scan_summary_hardening.install(_log)
+    _daily_stop_observability.install(_log)
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
