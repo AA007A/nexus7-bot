@@ -11,6 +11,8 @@ import ast
 import os
 from pathlib import Path
 
+_BOT_ROOT = Path(__file__).resolve().parent
+
 
 def _classify(path: str, node: ast.ExceptHandler) -> str:
     """Conservative static triage for review priority, not an execution gate."""
@@ -54,7 +56,7 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
 
 
 def audit_silent_excepts(log):
-    root = Path(__file__).resolve().parent
+    root = _BOT_ROOT
     rows = []
     for candidate in sorted(root.iterdir()):
         if candidate.suffix != ".py":
