@@ -51,6 +51,9 @@ jobs:
       - name: Startup self-check fail-closed
         run: python -m unittest tests.test_startup_selfcheck_fail_closed -v
 
+      - name: Pretrade market data fail-closed
+        run: python -m unittest tests.test_pretrade_fail_closed -v
+
       - name: PAPER wallet restart persistence
         run: python -m unittest tests.test_paper_wallet_restart -v
 

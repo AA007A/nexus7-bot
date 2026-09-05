@@ -2618,16 +2618,21 @@ class TradingEngine:
                     )
                     kl = []
 
-            if len(kl) >= 10:
-                c = [float(k.get("c", sig.entry) if isinstance(k, dict) else (k[4] if len(k) > 4 else sig.entry)) for k in kl]
-                h = [float(k.get("h", sig.entry) if isinstance(k, dict) else (k[2] if len(k) > 2 else sig.entry)) for k in kl]
-                l = [float(k.get("l", sig.entry) if isinstance(k, dict) else (k[3] if len(k) > 3 else sig.entry)) for k in kl]
-                v = [float(k.get("v", 1000.0) if isinstance(k, dict) else (k[5] if len(k) > 5 else 1000.0)) for k in kl]
-            else:
-                c = [sig.entry] * 20
-                h = [sig.entry * 1.001] * 20
-                l = [sig.entry * 0.999] * 20
-                v = [1000.0] * 20
+            # The final cache candle is still forming. Pretrade needs at least
+            # 20 closed candles after pretrade_hardening removes that final
+            # candle. Missing market data is not replaced with synthetic flat
+            # candles: execution must fail closed.
+            if len(kl) <= 20:
+                log.warning(
+                    f"[PRETRADE] {sig.symbol} bloqueado: dados insuficientes "
+                    f"para 20 candles fechados (recebidos={len(kl)})"
+                )
+                return
+
+            c = [float(k.get("c", sig.entry) if isinstance(k, dict) else (k[4] if len(k) > 4 else sig.entry)) for k in kl]
+            h = [float(k.get("h", sig.entry) if isinstance(k, dict) else (k[2] if len(k) > 2 else sig.entry)) for k in kl]
+            l = [float(k.get("l", sig.entry) if isinstance(k, dict) else (k[3] if len(k) > 3 else sig.entry)) for k in kl]
+            v = [float(k.get("v", 1000.0) if isinstance(k, dict) else (k[5] if len(k) > 5 else 1000.0)) for k in kl]
 
             pre_score = await scoring.calculate(
                 sig.symbol, sig.direction, c, h, l, v, self.client
