@@ -26,6 +26,7 @@ try:
     from bot import silent_except_audit as _silent_except_audit
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
+    from bot import nexus_zero_observability as _nexus_zero_observability
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import notifier as _notifier
     from bot.logger import log as _log
@@ -124,6 +125,7 @@ try:
 
         async def _validate_with_history(self, sig):
             dec = await _orig_validate(self, sig)
+            _nexus_zero_observability.observe(dec, _log)
             try:
                 await _np.record_decision(sig, dec)
                 asyncio.create_task(_np.evaluate_pending(self.client))
