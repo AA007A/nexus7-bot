@@ -57,6 +57,9 @@ jobs:
       - name: RR precision config isolation
         run: python -m unittest tests.test_rr_precision_isolation -v
 
+      - name: PAPER projected loss budget
+        run: python -m unittest tests.test_paper_loss_budget -v
+
       - name: Imports em runtime
         run: |
           python - <<'EOF'

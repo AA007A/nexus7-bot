@@ -46,6 +46,7 @@ from bot.integrity import IntegrityGuard, Severity
 from bot.order_state import OrderRegistry, OrderState, InvalidTransition
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
+from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
 from bot import liquidation as liq
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
@@ -2834,6 +2835,22 @@ class TradingEngine:
                     ))
                 return
 
+            if self.paper_trade:
+                try:
+                    qty_before = qty
+                    qty = cap_paper_quantity(
+                        qty, self.risk.balance, sig.entry, sig.sl,
+                        sig.direction, self.instruments[sig.symbol], TAKER_FEE,
+                    )
+                    log.info(
+                        "[PAPER_LOSS_BUDGET] %s qty=%s -> %s; projected stop loss "
+                        "including fees/slippage <=70%%; drawdown gate unchanged",
+                        sig.symbol, qty_before, qty,
+                    )
+                except (ValueError, ArithmeticError, TypeError, KeyError) as exc:
+                    log.warning("[PAPER_LOSS_BUDGET] %s blocked: %s", sig.symbol, exc)
+                    return
+
             # P0: chave de idempotência FIXA para todas as tentativas deste
             # sinal. Garante que retries reusem o mesmo clientOid e a
             # exchange rejeite duplicatas.
@@ -2879,6 +2896,19 @@ class TradingEngine:
                     # reservation and dispatch. Never size/send against stale funds.
                     if not await self._refresh_entry_balance():
                         return
+                    if self.paper_trade:
+                        # Do not change an idempotent order's quantity on retry.
+                        try:
+                            allowed_qty = cap_paper_quantity(
+                                qty, self.risk.balance, sig.entry, sig.sl,
+                                sig.direction, self.instruments[sig.symbol], TAKER_FEE,
+                            )
+                            if allowed_qty < qty:
+                                log.warning("[PAPER_LOSS_BUDGET] balance changed; entry blocked")
+                                return
+                        except (ValueError, ArithmeticError, TypeError, KeyError) as exc:
+                            log.warning("[PAPER_LOSS_BUDGET] entry blocked: %s", exc)
+                            return
                     required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
                     if required > self.risk.balance:
                         log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
