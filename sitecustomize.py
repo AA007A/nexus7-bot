@@ -5,8 +5,12 @@ engine status, and the Analyzer for shadow-only A/B measurement without
 changing live trading mode or bypassing the mandatory NEXUS gate.
 """
 import asyncio
+import builtins
+import sys
 import threading
 import time
+
+builtins._nexus_sitecustomize_status = "installing"
 
 try:
     from bot.engine import TradingEngine
@@ -165,5 +169,11 @@ try:
             TradingEngine.get_status = _status_with_nexus_metrics
 
         TradingEngine._nexus_persistence_patched = True
-except Exception:
-    pass
+    builtins._nexus_sitecustomize_status = "ok"
+except Exception as _sitecustomize_error:
+    builtins._nexus_sitecustomize_status = "failed"
+    print(
+        "CRITICAL: NEXUS sitecustomize hardening installation failed: "
+        f"{type(_sitecustomize_error).__name__}: {_sitecustomize_error}",
+        file=sys.stderr,
+    )

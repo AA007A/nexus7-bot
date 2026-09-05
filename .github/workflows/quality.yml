@@ -51,6 +51,9 @@ jobs:
       - name: Startup self-check fail-closed
         run: python -m unittest tests.test_startup_selfcheck_fail_closed -v
 
+      - name: Startup hardenings fail-closed
+        run: python -m unittest tests.test_sitecustomize_fail_closed -v
+
       - name: Pretrade market data fail-closed
         run: python -m unittest tests.test_pretrade_fail_closed -v
 

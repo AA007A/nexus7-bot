@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+from pathlib import Path
 
 
 def _classify(path: str, node: ast.ExceptHandler) -> str:
@@ -16,7 +17,7 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
     name = os.path.basename(path)
     text = ""
     try:
-        src = open(path, encoding="utf-8").read().splitlines()
+        src = Path(path).read_text(encoding="utf-8").splitlines()
         start = max(0, (getattr(node, "lineno", 1) or 1) - 8)
         end = min(len(src), (getattr(node, "end_lineno", node.lineno) or node.lineno) + 2)
         text = " ".join(src[start:end]).lower()
@@ -53,14 +54,15 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
 
 
 def audit_silent_excepts(log):
-    root = os.path.join(os.getcwd(), "bot")
+    root = Path(__file__).resolve().parent
     rows = []
-    for filename in sorted(os.listdir(root)):
-        if not filename.endswith(".py"):
+    for candidate in sorted(root.iterdir()):
+        if candidate.suffix != ".py":
             continue
-        path = os.path.join(root, filename)
+        filename = candidate.name
+        path = str(candidate)
         try:
-            tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+            tree = ast.parse(candidate.read_text(encoding="utf-8"), filename=path)
         except Exception as exc:
             log.warning("[SILENT_EXCEPT_AUDIT] parse_failed file=%s error=%s", filename, exc)
             continue
