@@ -10,6 +10,7 @@ LIVE mode, trading gates, leverage and risk parameters are not modified.
 import asyncio
 import json
 import unittest
+from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
 from bot import database as db
@@ -133,6 +134,38 @@ class PaperWalletRestartTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(restored)
         self.assertEqual(process._paper_balance, before)
+
+    async def test_viability_uses_persisted_wallet_not_small_real_balance(self):
+        self.store["paper_wallet_state_v1"] = json.dumps({
+            "version": 1,
+            "balance": 14.50,
+            "peak_balance": 20.0,
+        })
+        process = SimpleNamespace(
+            paper_trade=True,
+            risk=_FakeRisk(balance=0.0038, peak=0.0038),
+            daily_tracker=_FakeDailyTracker(),
+            daily_target=0.0,
+            daily_stop_loss=999.0,
+            instruments={
+                "BTCUSDT": {"minQty": 1, "multiplier": 0.001},
+            },
+            viable_symbols=[],
+            client=SimpleNamespace(
+                get_all_tickers=AsyncMock(return_value=[{
+                    "symbol": "BTCUSDT", "lastPrice": "50000"
+                }]),
+                get_cached_ticker=lambda _symbol: None,
+            ),
+        )
+
+        ok = await TradingEngine._filter_viable_symbols(process)
+
+        self.assertTrue(ok)
+        self.assertEqual(process.viable_symbols, ["BTCUSDT"])
+        self.assertAlmostEqual(process._paper_balance, 14.50)
+        self.assertAlmostEqual(process.risk.balance, 14.50)
+        self.assertAlmostEqual(process.risk.peak_balance, 20.0)
 
 
 if __name__ == "__main__":

@@ -172,20 +172,32 @@ def install(log):
         if not getattr(self, "paper_trade", False):
             return await original_filter_viable(self)
 
-        current = float(getattr(self.risk, "balance", 0.0) or 0.0)
-        virtual, source = _virtual_initial_balance(current)
-        if virtual > 0 and current <= 0:
-            # original _connect() reads the authenticated exchange balance before
-            # viability filtering. In PAPER that balance may legitimately be 0.
-            # Seed RiskManager with simulator capital before the filter so a
-            # harmless exchange-balance state cannot produce ZERO_VIABLE_SYMBOLS.
+        # original _connect() reads authenticated exchange balance before this
+        # filter. PAPER viability must never depend on that mutable real value,
+        # including when it is a small positive balance rather than exactly 0.
+        if not hasattr(self, "_paper_balance"):
+            restored = await _restore_persisted_state(self)
+            if not restored:
+                observed = float(getattr(self.risk, "balance", 0.0) or 0.0)
+                initial, source = _virtual_initial_balance(observed)
+                self._paper_balance = initial
+                self.risk.peak_balance = initial
+                self.risk.balance = initial
+                self.risk.drawdown = 0.0
+                self.risk.balance_confirmed = initial > 0
+                _sync_daily_limits(self, initial)
+                log.info(
+                    "[PAPER_WALLET] viability uses virtual capital=$%.4f source=%s",
+                    initial,
+                    source,
+                )
+                await _persist_state(self, f"initial_seed:{source}")
+        else:
+            virtual = float(getattr(self, "_paper_balance", 0.0) or 0.0)
             self.risk.update(virtual)
-            self.risk.balance_confirmed = True
-            log.info(
-                "[PAPER_WALLET] viability uses virtual capital=$%.4f source=%s",
-                virtual,
-                source,
-            )
+            self.risk.balance_confirmed = virtual > 0
+            _sync_daily_limits(self, virtual)
+
         return await original_filter_viable(self)
 
     async def _connect_with_paper_wallet(self):
