@@ -99,13 +99,11 @@ def check_undefined_names(paths: List[str]) -> List[str]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             local = _collect_scope(node)
-            # Nomes de escopos externos (closures) — sobe a cadeia
             enclosing = set()
             for outer in ast.walk(tree):
                 if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if outer is node:
                         continue
-                    # node está dentro de outer?
                     for sub in ast.walk(outer):
                         if sub is node:
                             enclosing |= _collect_scope(outer)
@@ -182,7 +180,6 @@ def check_bare_except(paths: List[str]) -> List[str]:
     return issues
 
 
-
 def check_missing_self_methods(paths: List[str]) -> List[str]:
     """
     Detecta self.metodo() que não existe na classe nem nos mixins.
@@ -192,7 +189,6 @@ def check_missing_self_methods(paths: List[str]) -> List[str]:
     que o except engolia — e o alerta de drawdown nunca era avaliado.
     """
     issues = []
-    # Coleta todos os métodos de todas as classes do pacote (mixins incluídos)
     all_methods = set()
     class_attrs = set()
     trees = {}
@@ -213,7 +209,6 @@ def check_missing_self_methods(paths: List[str]) -> List[str]:
                                 class_attrs.add(tg.id)
                     elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                         class_attrs.add(item.target.id)
-            # self.x = ... em qualquer lugar
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 if node.value.id == "self" and isinstance(node.ctx, ast.Store):
                     class_attrs.add(node.attr)
@@ -233,7 +228,6 @@ def check_missing_self_methods(paths: List[str]) -> List[str]:
     return issues
 
 
-
 def check_missing_self_attrs(paths: List[str]) -> List[str]:
     """
     Detecta self.atributo LIDO mas nunca atribuído em lugar nenhum.
@@ -247,7 +241,7 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
     falso positivo em acesso defensivo.
     """
     issues = []
-    assigned = set()     # tudo que recebe self.x = ...
+    assigned = set()
     trees = {}
 
     for p in paths:
@@ -257,13 +251,11 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
         except Exception:
             continue
         for node in ast.walk(t):
-            # self.x = ...
             if (isinstance(node, ast.Attribute)
                     and isinstance(node.value, ast.Name)
                     and node.value.id == "self"
                     and isinstance(node.ctx, ast.Store)):
                 assigned.add(node.attr)
-            # x: tipo = ... dentro de classe (atributo de classe)
             if isinstance(node, ast.ClassDef):
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -274,7 +266,6 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
                         for tg in item.targets:
                             if isinstance(tg, ast.Name):
                                 assigned.add(tg.id)
-            # setattr(self, "x", ...)
             if (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name)
                     and node.func.id == "setattr"
@@ -283,7 +274,6 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
                 assigned.add(str(node.args[1].value))
 
     for p, t in trees.items():
-        # Atributos acessados via getattr(self, "x", default) são seguros
         safe = set()
         for node in ast.walk(t):
             if (isinstance(node, ast.Call)
@@ -304,7 +294,6 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
                         f"AttributeError latente: self.{node.attr} "
                         f"lido mas nunca atribuído"
                     )
-    # Deduplica mantendo a primeira ocorrência de cada atributo
     seen, out = set(), []
     for i in issues:
         key = i.split("self.")[-1]
@@ -314,26 +303,20 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
     return out
 
 
-
 def check_orphan_modules(paths: List[str]) -> List[str]:
     """
     Detecta módulos .py no pacote que não são importados por NENHUM
-    outro arquivo do projeto (nem por main.py).
+    outro arquivo do projeto (nem por main.py nem por entrypoints Python
+    explícitos na raiz, como sitecustomize.py).
 
-    Motivação real: bot/bybit.py (510 linhas) permaneceu no repositório
-    por meses após a migração para KuCoin, sem ser importado por nada.
-    Código morto não quebra a execução, mas aumenta a superfície de
-    confusão — foi a origem indireta de vários "resíduos Bybit"
-    encontrados em auditorias anteriores (nomes de variável, comentários
-    e padrões copiados do arquivo morto para o código ativo).
+    O sitecustomize.py é um entrypoint real carregado automaticamente pelo
+    interpretador. Ignorá-lo cria falsos positivos para hardening/runtime
+    modules que só precisam ser ativados nesse ponto de entrada.
     """
     issues = []
     modulos = {}
     for p in paths:
         base = os.path.basename(p)
-        # main.py é o ENTRYPOINT — executado, não importado por nada
-        # dentro do próprio projeto. Falso positivo óbvio sem esta
-        # exclusão (descoberto ao rodar este check pela primeira vez).
         if base in ("__init__.py", "main.py"):
             continue
         modulos[base[:-3]] = p
@@ -342,28 +325,28 @@ def check_orphan_modules(paths: List[str]) -> List[str]:
         return issues
 
     todo_codigo = ""
-    for p in paths:
+    scan_paths = list(paths)
+    sitecustomize_py = os.path.join(_ROOT, "sitecustomize.py")
+    if os.path.exists(sitecustomize_py):
+        scan_paths.append(sitecustomize_py)
+
+    for p in scan_paths:
         try:
             todo_codigo += open(p, encoding="utf-8").read() + "\n"
         except Exception:
             continue
 
     for nome, caminho in modulos.items():
-        # Procura "import bot.X" ou "from bot.X" ou "from bot import ... X"
         padrao = rf"\bbot\.{re.escape(nome)}\b|\bimport\s+{re.escape(nome)}\b"
         ocorrencias = len(re.findall(padrao, todo_codigo))
-        # 1 ocorrência = só a própria definição do módulo não conta;
-        # como concatenamos TODOS os arquivos, o próprio arquivo bybit.py
-        # não se auto-referencia por esse padrão, então >0 já indica uso.
         if ocorrencias == 0:
-            linhas = todo_codigo.count("\n")
             try:
                 tam = sum(1 for _ in open(caminho, encoding="utf-8"))
             except Exception:
                 tam = 0
             issues.append(
                 f"{os.path.basename(caminho)} ({tam} linhas): não é "
-                f"importado por nenhum outro módulo do projeto — "
+                f"importado por nenhum outro módulo do projeto/entrypoint — "
                 f"código morto"
             )
     return issues
@@ -458,7 +441,6 @@ def run_selfcheck(verbose: bool = True) -> Dict[str, list]:
 
 
 if __name__ == "__main__":
-    # Permite rodar standalone: python -m bot.selfcheck
     sys.path.insert(0, _ROOT)
     rep = run_selfcheck(verbose=False)
     print(f"Arquivos verificados: {rep['files_checked']}")
