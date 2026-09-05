@@ -1,15 +1,24 @@
 """Runtime hardening for validation observability.
 
 Keeps scan summaries unique per symbol, clarifies that their count is the
-score-stage count (not the monitored universe), prevents an uninitialized
-zero daily target from being treated as achieved, and teaches the static
-self-check about modules intentionally loaded by root sitecustomize.py.
+score-stage count (not the monitored universe), aligns HOLD diagnostics with
+production MTF semantics, prevents an uninitialized zero daily target from
+being treated as achieved, and teaches the static self-check about modules
+intentionally loaded by root sitecustomize.py.
 
 No trading decision, threshold, risk parameter or execution gate is changed.
 """
 import logging
 import os
 import re
+
+
+_HOLD_DIAG_RE = re.compile(
+    r"^(?P<prefix>\[[^\]]+\]) Score=(?P<score>[-+\d.]+)/100 "
+    r"\(4H:(?P<s4>[-+\d.]+) 1H:(?P<s1>[-+\d.]+) 15M:(?P<s15>[-+\d.]+)\) "
+    r"(?P<context>\| regime=.*? \| )"
+    r"4H=(?P<t4>[↑↓→]) 1H=(?P<t1>[↑↓→]) → HOLD$"
+)
 
 
 def latest_unique(records, limit):
@@ -36,12 +45,49 @@ def latest_unique(records, limit):
     return out
 
 
+def _rewrite_hold_diagnostic(msg):
+    """Render HOLD telemetry using the same strict MTF semantics as production.
+
+    Production only has a directional setup when 4H and 1H agree. The legacy
+    diagnostic used LONG whenever either timeframe was bullish and weighted
+    30/30/40, so a HOLD line could look stronger/directional even though the
+    strategy correctly rejected it. This function changes only the log text.
+    """
+    match = _HOLD_DIAG_RE.match(msg)
+    if not match:
+        return msg
+
+    d = match.groupdict()
+    t4, t1 = d["t4"], d["t1"]
+    aligned = (t4 == t1) and t4 in {"↑", "↓"}
+
+    if not aligned:
+        return (
+            f"{d['prefix']} MTF_ALIGN=NO "
+            f"(4H:{d['s4']} 1H:{d['s1']} 15M:{d['s15']}) "
+            f"{d['context']}4H={t4} 1H={t1} → HOLD"
+        )
+
+    combined = round(
+        float(d["s4"]) * 0.25
+        + float(d["s1"]) * 0.30
+        + float(d["s15"]) * 0.45
+    )
+    return (
+        f"{d['prefix']} Score={combined}/100 "
+        f"(4H:{d['s4']} 1H:{d['s1']} 15M:{d['s15']}) "
+        f"{d['context']}4H={t4} 1H={t1} → HOLD"
+    )
+
+
 class _ScanSummaryLabelFilter(logging.Filter):
-    """Make score-stage telemetry explicit without altering scan logic."""
+    """Make validation telemetry explicit without altering scan logic."""
 
     def filter(self, record):
         try:
             msg = record.getMessage()
+            if " → HOLD" in msg and " Score=" in msg and "(4H:" in msg:
+                msg = _rewrite_hold_diagnostic(msg)
             if msg.startswith("🔎 SCAN:"):
                 msg = msg.replace("🔎 SCAN:", "🔎 SCORE_STAGE:", 1)
                 marker = " pares |"
@@ -55,8 +101,8 @@ class _ScanSummaryLabelFilter(logging.Filter):
                     r"\1 em faixa ≥(mín-5), incluindo ≥mín",
                     msg,
                 )
-                record.msg = msg
-                record.args = ()
+            record.msg = msg
+            record.args = ()
         except Exception as exc:
             # Never hide an observability formatting failure. Mutate the same
             # record instead of logging recursively from inside a logging filter.
@@ -114,9 +160,6 @@ def _install_selfcheck_sitecustomize_awareness(log):
     def check_orphan_modules_with_runtime_entrypoint(paths):
         issues = original(paths)
         try:
-            # selfcheck already owns the canonical project root. Reuse it
-            # instead of relying on __file__, which its intentionally strict
-            # undefined-name analyzer does not model as an implicit builtin.
             root = selfcheck._ROOT
             entrypoint = os.path.join(root, "sitecustomize.py")
             with open(entrypoint, encoding="utf-8") as fh:
@@ -175,5 +218,5 @@ def install(log):
     _install_selfcheck_sitecustomize_awareness(log)
 
     log.info(
-        "[SCAN_SUMMARY] latest-per-symbol score-stage view enabled; trading logic unchanged"
+        "[SCAN_SUMMARY] latest-per-symbol score-stage + HOLD diagnostic hardening enabled; trading logic unchanged"
     )
