@@ -38,8 +38,25 @@ class RRPrecisionIsolationTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             proxy.MIN_RR_RATIO = 1.0
 
+    def test_rr_boundary_tolerance_is_local_and_exact(self):
+        configured = float(cfg.MIN_RR_RATIO)
+        proxy = rrh._CfgProxy(cfg, configured - rrh._RR_EPSILON)
+
+        cases = (
+            (configured - rrh._RR_EPSILON - 0.000001, False),
+            (configured - 0.0001, True),
+            (configured, True),
+            (configured + 0.0001, True),
+        )
+        for actual_rr, accepted in cases:
+            with self.subTest(actual_rr=actual_rr):
+                self.assertIs(actual_rr >= proxy.MIN_RR_RATIO, accepted)
+
+        self.assertEqual(float(cfg.MIN_RR_RATIO), configured)
+
     def test_hardening_does_not_assign_shared_threshold(self):
-        source = pathlib.Path("bot/rr_precision_hardening.py").read_text(encoding="utf-8")
+        source = (pathlib.Path(__file__).resolve().parents[1]
+                  / "bot/rr_precision_hardening.py").read_text(encoding="utf-8")
         self.assertNotIn("cfg.MIN_RR_RATIO =", source)
         self.assertNotIn("original_cfg.MIN_RR_RATIO =", source)
         self.assertIn("strategy.cfg = _CfgProxy", source)

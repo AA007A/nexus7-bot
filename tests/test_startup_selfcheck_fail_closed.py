@@ -6,7 +6,8 @@ import unittest
 
 class StartupSelfcheckFailClosedTests(unittest.TestCase):
     def test_selfcheck_exception_sets_block_flag(self):
-        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        main_path = Path(__file__).resolve().parents[1] / "main.py"
+        tree = ast.parse(main_path.read_text(encoding="utf-8"))
         guarded = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Try):

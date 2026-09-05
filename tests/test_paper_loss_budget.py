@@ -4,10 +4,12 @@ import unittest
 
 from bot.paper_loss_budget import cap_quantity
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class PaperLossBudgetTests(unittest.TestCase):
     def test_engine_budget_calls_are_paper_only(self):
-        tree = ast.parse(Path("bot/engine.py").read_text())
+        tree = ast.parse((ROOT / "bot/engine.py").read_text())
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Name) and n.func.id == "cap_paper_quantity"]
         self.assertEqual(len(calls), 2)

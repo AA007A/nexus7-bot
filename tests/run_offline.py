@@ -11,7 +11,9 @@ import re
 import runpy
 import subprocess
 import sys
+import sysconfig
 import tempfile
+import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,11 +42,22 @@ def install_network_guard():
 
 def run_one(module):
     env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG') if k in os.environ}
-    env.update(PYTHONPATH=str(ROOT), PAPER_TRADE='true', LOG_LEVEL='ERROR',
+    # -S prevents the repository's production sitecustomize from importing
+    # trading modules before each suite can install its loopback mock and mode.
+    # Add the active interpreter's dependencies explicitly because -S also
+    # skips automatic site-packages discovery.
+    child_path = os.pathsep.join((str(ROOT), sysconfig.get_paths()['purelib']))
+    env.update(PYTHONPATH=child_path, PAPER_TRADE='true', LOG_LEVEL='ERROR',
                KUCOIN_REST_BASE='http://127.0.0.1:1', NEXUS_TELEGRAM='false')
-    with tempfile.TemporaryDirectory(prefix='nexus-test-') as cwd:
-        proc = subprocess.run([sys.executable, '-m', 'tests.run_offline', '--child', module],
-                              cwd=cwd, env=env, capture_output=True, text=True, timeout=240)
+    try:
+        with tempfile.TemporaryDirectory(prefix='nexus-test-') as cwd:
+            proc = subprocess.run(
+                [sys.executable, '-S', '-m', 'tests.run_offline', '--child', module],
+                cwd=cwd, env=env, capture_output=True, text=True, timeout=240,
+            )
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stdout or '') + (exc.stderr or '')
+        return module, 124, 0, output + f'\nTIMEOUT: {module} exceeded 240s\n'
     output = proc.stdout + proc.stderr
     count = re.findall(r'(?:PASSOU|PASSARAM|PASS|Passou):\s*(\d+)', output)
     unit = re.search(r'Ran (\d+) tests?', output)
@@ -56,6 +69,11 @@ if __name__ == '__main__':
         module = sys.argv[2]
         sys.argv = [module]
         install_network_guard()
+        loaded = __import__(module, fromlist=['*'])
+        suite = unittest.defaultTestLoader.loadTestsFromModule(loaded)
+        if suite.countTestCases():
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            sys.exit(not result.wasSuccessful())
         runpy.run_module(module, run_name='__main__', alter_sys=True)
     else:
         modules = sys.argv[1:] or ['tests.' + p.stem for p in sorted((ROOT/'tests').glob('test_*.py'))]

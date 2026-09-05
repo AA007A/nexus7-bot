@@ -7,7 +7,8 @@ import unittest
 class PretradeFailClosedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tree = ast.parse(Path("bot/engine.py").read_text(encoding="utf-8"))
+        cls.engine_path = Path(__file__).resolve().parents[1] / "bot/engine.py"
+        cls.tree = ast.parse(cls.engine_path.read_text(encoding="utf-8"))
 
     def test_open_has_no_synthetic_entry_price_candle_series(self):
         synthetic = []
@@ -25,7 +26,7 @@ class PretradeFailClosedTests(unittest.TestCase):
         self.assertEqual(synthetic, [])
 
     def test_pretrade_requires_twenty_closed_plus_current_candle(self):
-        source = Path("bot/engine.py").read_text(encoding="utf-8")
+        source = self.engine_path.read_text(encoding="utf-8")
         self.assertIn("if len(kl) <= 20:", source)
         self.assertIn("dados insuficientes", source)
 
