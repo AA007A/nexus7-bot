@@ -17,7 +17,7 @@ Fluxo:
 
 Parâmetros otimizados:
   sl_mult, tp_mult       — multiplicadores de ATR para SL/TP
-  rsi_ob, rsi_os         — níveis de sobrecomprado/sobrevendido
+  rsi_ob, rsi_os         — níveis de sobrecompra/sobrevenda
   min_adx                — ADX mínimo para considerar tendência
   vol_threshold          — volume mínimo relativo à média
   min_score              — score mínimo de confluência MTF
@@ -135,8 +135,10 @@ def save_optimized_params(params: dict, metadata: dict = None):
         asyncio.get_event_loop().create_task(
             _db.save_key_value("optimizer_params", json.dumps(payload))
         ) if asyncio.get_event_loop().is_running() else None
-    except Exception:
-        pass   # silencioso — arquivo local é suficiente em dev
+    except Exception as e:
+        # Persistência em DB é fallback; falha não interrompe a otimização,
+        # mas precisa ficar observável para evitar falso senso de durabilidade.
+        log.warning(f"save_optimized_params (DB fallback): {type(e).__name__}: {e}")
 
 
 def _run_strategy_with_params(klines_15, klines_1h, klines_4h, params: dict) -> list:
