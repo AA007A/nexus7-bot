@@ -25,6 +25,7 @@ try:
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import silent_except_audit as _silent_except_audit
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
+    from bot import nexus_grade_display as _nexus_grade_display
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -40,6 +41,7 @@ try:
     _validation_safety_lock.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
     _nexus_decision_dedupe.install(_log)
+    _nexus_grade_display.install(_notifier, _log)
 
     if not getattr(_np, "_single_conn_serialized", False):
         _np_orig_execute = _np._execute
