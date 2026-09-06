@@ -12,6 +12,7 @@ para "enviando", abrindo caminho para duplicação.
 Estados terminais (FILLED, REJECTED, CANCELLED, FAILED) não admitem
 saída — uma vez lá, a ordem não volta atrás.
 """
+import math
 import time
 from enum import Enum
 from dataclasses import dataclass, field
@@ -127,6 +128,53 @@ class ManagedOrder:
             "transitions": len(self.history),
         }
 
+    def to_record(self) -> dict:
+        """Lossless JSON-safe representation used for durable restart state."""
+        return {
+            "client_oid": self.client_oid,
+            "symbol": self.symbol,
+            "side": self.side,
+            "qty": self.qty,
+            "state": self.state.value,
+            "order_id": self.order_id,
+            "filled_qty": self.filled_qty,
+            "avg_price": self.avg_price,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_source": self.last_source,
+            "history": self.history,
+        }
+
+    @classmethod
+    def from_record(cls, record: dict) -> "ManagedOrder":
+        if not isinstance(record, dict):
+            raise ValueError("managed order record must be a mapping")
+        client_oid = str(record.get("client_oid", ""))
+        symbol = str(record.get("symbol", ""))
+        side = str(record.get("side", ""))
+        qty = float(record.get("qty", 0))
+        if not client_oid.startswith("bgx7-") or not symbol or side not in ("Buy", "Sell"):
+            raise ValueError("invalid managed order identity")
+        if not math.isfinite(qty) or qty <= 0:
+            raise ValueError("invalid managed order quantity")
+        order = cls(client_oid=client_oid, symbol=symbol, side=side, qty=qty)
+        order.state = OrderState(str(record.get("state", "")))
+        order.order_id = str(record.get("order_id") or "") or None
+        order.filled_qty = max(0.0, float(record.get("filled_qty", 0) or 0))
+        order.avg_price = max(0.0, float(record.get("avg_price", 0) or 0))
+        order.created_at = float(record.get("created_at", time.time()))
+        order.updated_at = float(record.get("updated_at", order.created_at))
+        if not all(math.isfinite(v) for v in (
+            order.filled_qty, order.avg_price, order.created_at, order.updated_at
+        )):
+            raise ValueError("non-finite managed order state")
+        order.last_source = str(record.get("last_source", ""))[:24]
+        history = record.get("history", [])
+        if not isinstance(history, list):
+            raise ValueError("invalid managed order history")
+        order.history = history
+        return order
+
 
 class OrderRegistry:
     """
@@ -172,6 +220,27 @@ class OrderRegistry:
         if order_id and client_oid:
             self._by_order_id[order_id] = client_oid
 
+    def snapshot(self) -> list:
+        return [order.to_record() for order in self._orders.values()]
+
+    def restore(self, records: list):
+        """Replace registry state only after validating the whole snapshot."""
+        if not isinstance(records, list):
+            raise ValueError("order registry snapshot must be a list")
+        restored = {}
+        by_order_id = {}
+        for record in records:
+            order = ManagedOrder.from_record(record)
+            if order.client_oid in restored:
+                raise ValueError("duplicate client_oid in order registry snapshot")
+            if order.order_id:
+                if order.order_id in by_order_id:
+                    raise ValueError("duplicate order_id in order registry snapshot")
+                by_order_id[order.order_id] = order.client_oid
+            restored[order.client_oid] = order
+        self._orders = restored
+        self._by_order_id = by_order_id
+
     def pending_orders(self) -> List[ManagedOrder]:
         """Include submissions whose exchange acknowledgement may be lost."""
         return [o for o in self._orders.values() if not o.is_terminal]
@@ -185,7 +254,9 @@ class OrderRegistry:
         agora = time.time()
         for k in [k for k, o in list(self._orders.items())
                   if o.is_terminal and agora - o.created_at > max_age]:
-            self._orders.pop(k, None)
+            removed = self._orders.pop(k, None)
+            if removed and removed.order_id:
+                self._by_order_id.pop(removed.order_id, None)
 
     def __len__(self):
         return len(self._orders)

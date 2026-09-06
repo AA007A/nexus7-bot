@@ -62,7 +62,11 @@ def install(log):
         except RuntimeError:
             log.warning("[PAPER_WALLET] persistence skipped: no running event loop")
             return
-        loop.create_task(_persist_state(self, reason))
+        runtime_persist = getattr(self, "_paper_persist_runtime", None)
+        if callable(runtime_persist) and getattr(self, "_durable_state_enforced", False):
+            loop.create_task(runtime_persist(reason))
+        else:
+            loop.create_task(_persist_state(self, reason))
 
     async def _load_persisted_state(self):
         """Return validated persisted state or None when no valid state exists."""
@@ -300,6 +304,9 @@ def install(log):
                 float(getattr(self, "_paper_balance", self.risk.balance)) + pnl_net,
                 f"partial_tp:{sym}:{pnl_net:+.4f}",
             )
+            runtime_persist = getattr(self, "_paper_persist_runtime", None)
+            if callable(runtime_persist) and getattr(self, "_durable_state_enforced", False):
+                await runtime_persist(f"partial_tp:{sym}")
 
         return result
 
@@ -311,6 +318,12 @@ def install(log):
     TradingEngine._paper_apply_virtual_balance = _apply_virtual_balance
     TradingEngine._paper_persist_wallet = _persist_state
     TradingEngine._paper_restore_wallet_from_db = _restore_persisted_state
+
+    async def _persist_runtime(self, reason: str):
+        from bot import durable_execution as durable
+        return await durable.persist_paper_runtime(self, reason, strict=False)
+
+    TradingEngine._paper_persist_runtime = _persist_runtime
     TradingEngine._paper_wallet_patched = True
 
     log.info("🧪 PAPER wallet isolation + persistence installed; LIVE balance path unchanged")

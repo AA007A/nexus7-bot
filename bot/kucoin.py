@@ -885,6 +885,25 @@ class KuCoinClient:
         """Boundary: base asset -> integer KuCoin contracts, exactly once."""
         return base_to_contracts(qty, self._instruments[symbol])
 
+    def build_client_oid(self, symbol: str, side: str, qty: float,
+                         idem_key: str = None, contracts: int = None) -> str:
+        """Return the exact clientOid that ``place_order`` will submit.
+
+        Callers can durably persist this identifier before any network
+        dispatch. The calculation is pure and does not contact the exchange.
+        """
+        window = int(time.time() // 60)
+        if idem_key:
+            raw = idem_key
+        elif PAPER_TRADE:
+            raw = f"{symbol}_{side}_{qty}_{window}"
+        else:
+            contract_qty = contracts
+            if contract_qty is None:
+                contract_qty = self._round_qty(qty, symbol)
+            raw = f"{symbol}_{side}_{contract_qty}_{window}"
+        return f"bgx7-{hashlib.md5(raw.encode()).hexdigest()}"[:40]
+
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float = 0, tp: float = 0,
                           instruments: dict = None,
@@ -903,9 +922,7 @@ class KuCoinClient:
             # ainda não existe neste ponto do fluxo (round_qty é chamado
             # depois). Suficiente em PAPER_TRADE pois não há correlação
             # com uma ordem real a preservar.
-            _window_paper = int(time.time() // 60)
-            _raw_paper = idem_key or f"{symbol}_{side}_{qty}_{_window_paper}"
-            _oid_paper = f"bgx7-{hashlib.md5(_raw_paper.encode()).hexdigest()}"[:40]
+            _oid_paper = self.build_client_oid(symbol, side, qty, idem_key)
             return {"orderId": f"paper_{int(time.time()*1000)}",
                     "clientOid": _oid_paper}
 
@@ -949,10 +966,9 @@ class KuCoinClient:
         # diretamente na tela "Ordens" da KuCoin (campo clientOid é
         # visível lá), sem precisar cruzar com logs internos.
         # ══════════════════════════════════════════════════════════
-        _window  = int(time.time() // 60)      # janela de 1 minuto
-        _raw     = idem_key or f"{symbol}_{side}_{contracts}_{_window}"
-        _hash    = hashlib.md5(_raw.encode()).hexdigest()
-        _oid     = f"bgx7-{_hash}"[:40]
+        _oid = self.build_client_oid(
+            symbol, side, qty, idem_key, contracts=contracts
+        )
 
         # BUG CORRIGIDO: lia os.environ diretamente com default "10", ignorando
         # o valor de config.py. Se LEVERAGE não estivesse setado no Railway,
@@ -1927,6 +1943,10 @@ class KuCoinClient:
             # necessariamente, pode ser reconexão com evento fora de
             # ordem. Loga e mantém o estado atual (fail-safe).
             log.warning(f"WS privado: transição inválida ignorada: {e}")
+
+        persist_callback = getattr(registry, "persist_callback", None)
+        if callable(persist_callback):
+            await persist_callback(mo)
 
     async def _ws_loop(self, symbols: list, intervals: list):
         """Loop principal de reconexão WebSocket com backoff exponencial."""

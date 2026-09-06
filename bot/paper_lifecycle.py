@@ -17,6 +17,7 @@ def install(log):
     from bot.config import cfg
     from bot.kucoin import TAKER_FEE
     from bot import database as db
+    from bot import durable_execution as durable
     from bot.notifier import notify, close_msg
     from bot.integrity import IntegrityGuard, IntegrityState, Severity
 
@@ -124,18 +125,50 @@ def install(log):
             pos.qty, pnl_gross, pos.opened_at,
             fee_open=fee_open, fee_close=fee_close,
         )
-        self.stats.add(trade)
 
-        tid = self._trade_ids.pop(sym, 0)
-        if tid:
-            await db.save_trade_close(
+        tid = self._trade_ids.get(sym, 0)
+        if not tid:
+            durable._block(self, "trade")
+            log.critical(
+                "[PAPER_STATE] %s close blocked: durable trade id missing", sym
+            )
+            return
+        current_balance = float(
+            getattr(self, "_paper_balance", self.risk.balance) or 0.0
+        )
+        next_balance = max(0.0, current_balance + pnl_net)
+        next_peak = max(
+            next_balance,
+            float(getattr(self.risk, "peak_balance", next_balance) or next_balance),
+        )
+        cooldown_until = time.time() + 1800
+        try:
+            post_close_state = durable.build_paper_runtime_payload(
+                self,
+                f"position_closed:{sym}:{reason}",
+                balance_override=next_balance,
+                peak_override=next_peak,
+                exclude_symbols={sym},
+                cooldown_override={sym: cooldown_until},
+            )
+            await db.save_paper_close_atomic(
                 tid, exit_px, pnl_net, total_fee,
                 (datetime.utcnow() - pos.opened_at).total_seconds() / 60,
-                exit_reason=f"PAPER_{reason}",
+                f"PAPER_{reason}", durable.PAPER_STATE_KEY, post_close_state,
             )
+        except (db.PersistenceError, TypeError, ValueError) as exc:
+            durable._block(self, "trade")
+            log.critical(
+                "[PAPER_STATE] %s close persistence failed; position retained: %s",
+                sym, exc,
+            )
+            return
+        self.stats.add(trade)
+        self._trade_ids.pop(sym, None)
+        durable._clear(self, "trade")
 
         del self.positions[sym]
-        self._cooldown[sym] = time.time() + 1800
+        self._cooldown[sym] = cooldown_until
         await self._record_trade_result(sym, pnl_net)
         self.daily_tracker.add_pnl(
             pnl_net,
@@ -166,10 +199,14 @@ def install(log):
         try:
             apply_wallet = getattr(self, "_paper_apply_virtual_balance", None)
             if callable(apply_wallet):
-                current = float(getattr(self, "_paper_balance", self.risk.balance) or 0.0)
-                apply_wallet(current + pnl_net, f"close:{sym}:{reason}:{pnl_net:+.4f}")
+                apply_wallet(next_balance, f"close:{sym}:{reason}:{pnl_net:+.4f}")
         except Exception as exc:
             log.error("[PAPER_WALLET] close settlement failed %s: %s", sym, exc)
+
+        if getattr(self, "_durable_state_enforced", False):
+            await durable.persist_paper_runtime(
+                self, f"position_closed:{sym}:{reason}", strict=True
+            )
 
         log.info(
             "📭 [PAPER] %s fechado por %s | exit=%.6f Bruto=$%+.4f Taxas=-$%.4f Líquido=$%+.4f",
@@ -226,6 +263,9 @@ def install(log):
                         )
             except Exception as exc:
                 log.error("[PAPER] _sync_positions %s: %s", sym, exc)
+
+        if getattr(self, "_durable_state_enforced", False) and self.positions:
+            await durable.persist_paper_runtime(self, "position_mark", strict=False)
 
     TradingEngine.__init__ = init_with_paper_stop_sim
     TradingEngine._sync_positions = paper_sync
