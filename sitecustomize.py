@@ -23,6 +23,7 @@ try:
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
     from bot import paper_wallet as _paper_wallet
+    from bot import paper_validation_reset as _paper_validation_reset
     from bot import pretrade_hardening as _pretrade_hardening
     from bot import rr_precision_hardening as _rr_precision_hardening
     from bot import scan_summary_hardening as _scan_summary_hardening
@@ -45,6 +46,7 @@ try:
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
+    _paper_validation_reset.install(_log)
     _validation_safety_lock.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
     _nexus_decision_dedupe.install(_log)
