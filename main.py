@@ -23,6 +23,7 @@ from bot.engine import TradingEngine
 from bot.config import cfg
 from bot.logger import log
 from bot import database as db
+from bot.startup_block import classify_startup_block, telegram_block_message
 
 
 # ── Autenticação ──────────────────────────────────────────────────
@@ -71,42 +72,43 @@ async def lifespan(app: FastAPI):
 
     # ══════════════════════════════════════════════════════════════
     # SELF-CHECK DE INTEGRIDADE (previne bugs silenciosos)
-    #
-    # Vários bugs deste projeto só apareceram após horas em produção
-    # porque erros de programação eram engolidos por except genérico.
-    # Esta verificação roda em ~200ms e detecta, ANTES de operar:
-    #   • NameError latente (ex: aiohttp usado sem import)
-    #   • AttributeError latente (self.metodo() inexistente)
-    #   • métodos duplicados que se sobrescrevem
-    #   • combinações de config matematicamente impossíveis
-    #
-    # Bug crítico → bot inicia em modo BLOQUEADO. O /health continua
-    # respondendo (o deploy não falha), mas nenhuma ordem é enviada.
     # ══════════════════════════════════════════════════════════════
-    _blocked_by_selfcheck = False
     _sitecustomize_status = getattr(
         builtins, "_nexus_sitecustomize_status", "not_loaded"
     )
-    if _sitecustomize_status != "ok":
-        _blocked_by_selfcheck = True
-        log.critical(
-            "🚫 OPERAÇÃO BLOQUEADA: hardenings de startup não foram "
-            f"confirmados (sitecustomize={_sitecustomize_status})"
-        )
+    _report = None
+    _selfcheck_error = None
     try:
         from bot.selfcheck import run_selfcheck
         _report = run_selfcheck()
-        if _report["critical"]:
-            _blocked_by_selfcheck = True
-            log.critical(
-                f"🚫 OPERAÇÃO BLOQUEADA: {len(_report['critical'])} bug(s) "
-                f"crítico(s) detectado(s) no código. Corrija antes de operar."
-            )
     except Exception as _e:
-        _blocked_by_selfcheck = True
+        _selfcheck_error = _e
+
+    _startup_block = classify_startup_block(
+        sitecustomize_status=_sitecustomize_status,
+        critical_issues=(_report or {}).get("critical", ()),
+        selfcheck_error=_selfcheck_error,
+    )
+    _blocked_by_selfcheck = _startup_block is not None
+    _startup_id = (
+        os.environ.get("RAILWAY_DEPLOYMENT_ID")
+        or os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+        or f"pid-{os.getpid()}"
+    )[:16]
+    app.state.startup_block = (
+        {
+            "code": _startup_block.code,
+            "detail": _startup_block.detail,
+            "startup_id": _startup_id,
+        }
+        if _startup_block else None
+    )
+    if _startup_block:
         log.critical(
-            f"🚫 OPERAÇÃO BLOQUEADA: self-check falhou e não pôde "
-            f"confirmar a integridade do código: {_e}"
+            "🚫 OPERAÇÃO BLOQUEADA: code=%s startup_id=%s detail=%s",
+            _startup_block.code,
+            _startup_id,
+            _startup_block.detail,
         )
     if PAPER_TRADE:
         log.warning("🟡 PAPER TRADE MODE ATIVO")
@@ -130,22 +132,17 @@ async def lifespan(app: FastAPI):
         app.state.ready = True
 
         if _blocked_by_selfcheck:
-            # Não inicia o engine: bug de código não vai a produção.
             app.state.blocked = True
             log.critical(
-                "🚫 Engine NÃO iniciado — self-check encontrou bugs críticos. "
-                "Veja os logs acima. Corrija e faça redeploy."
+                "🚫 Engine NÃO iniciado — code=%s startup_id=%s",
+                _startup_block.code,
+                _startup_id,
             )
             try:
                 from bot.notifier import notify as _n
-                await _n(
-                    "🚫 *BOT BLOQUEADO NO STARTUP*\n"
-                    "O self-check detectou bug(s) crítico(s) no código.\n"
-                    "Nenhuma ordem será enviada até a correção.\n"
-                    "_Verifique os logs do Railway._"
-                )
-            except Exception:
-                pass
+                await _n(telegram_block_message(_startup_block, _startup_id))
+            except Exception as _e:
+                log.warning("startup block notify failed: %s", type(_e).__name__)
             return
 
         # Verifica o canal do Telegram ANTES de iniciar o engine.
@@ -235,6 +232,7 @@ async def health():
         "exchange": "kucoin",
         "ready":    bool(getattr(app.state, "ready", False)),
         "blocked":  bool(getattr(app.state, "blocked", False)),
+        "startup_block": getattr(app.state, "startup_block", None),
         # Modo de operação exposto aqui para responder rapidamente
         # "por que o bot não abre ordens?"
         "telegram":     getattr(app.state, "telegram", {"ok": None}),
@@ -276,20 +274,20 @@ async def pause(request: Request):
 
 @app.post("/api/resume", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def resume(request: Request):
-    engine = app.state.engine
-    task   = getattr(app.state, "engine_task", None)
+    engine=app.state.engine
+    task=getattr(app.state,"engine_task",None)
     if task and not task.done():
-        engine.active = True
-        return {"message": "Bot reativado"}
-    app.state.engine_task = asyncio.create_task(engine.run())
-    return {"message": "Bot retomado"}
+        engine.active=True
+        return {"message":"Bot reativado"}
+    app.state.engine_task=asyncio.create_task(engine.run())
+    return {"message":"Bot retomado"}
 
 @app.post("/api/close-all", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def close_all(request: Request):
-    engine = app.state.engine
+    engine=app.state.engine
     engine.stop()
-    result = await engine.close_all_positions()
-    return {"message": f"Emergency close: {result['closed']} posições fechadas", **result}
+    result=await engine.close_all_positions()
+    return {"message":f"Emergency close: {result['closed']} posições fechadas",**result}
 
 
 # ── PnL / Stats ───────────────────────────────────────────────────
@@ -301,13 +299,13 @@ async def pnl():
 async def test_telegram_endpoint():
     """Envia uma mensagem de teste ao Telegram e reporta o resultado."""
     from bot.notifier import test_telegram, notify
-    res = await test_telegram()
+    res=await test_telegram()
     if res.get("ok"):
         await notify(
             "🧪 *TESTE DE CONEXÃO*\n"
             "Se você está lendo isto, o canal está funcionando."
         )
-        res["mensagem_enviada"] = True
+        res["mensagem_enviada"]=True
     return res
 
 
@@ -318,12 +316,12 @@ async def integrity_status():
 
     Responde: o bot PODE abrir novas posições agora? Se não, por quê?
     """
-    eng = app.state.engine
-    g = getattr(eng, "integrity", None)
+    eng=app.state.engine
+    g=getattr(eng,"integrity",None)
     if g is None:
-        return {"error": "IntegrityGuard não inicializado"}
-    d = g.to_dict()
-    d["orders_tracked"] = len(getattr(eng, "orders", []) or [])
+        return {"error":"IntegrityGuard não inicializado"}
+    d=g.to_dict()
+    d["orders_tracked"]=len(getattr(eng,"orders",[]) or [])
     return d
 
 
@@ -384,7 +382,6 @@ async def why_no_trade():
         veredito = "Nenhum sinal avaliado ainda — bot pode ter acabado de subir"
 
     return {
-        # Os 10 pares mais recentes avaliados, com o detalhe por timeframe
         "ultimos_avaliados": [
             {"par": x["symbol"], "score": x["score"],
              "4H": x["s4h"], "1H": x["s1h"], "15M": x["s15"]}
@@ -427,6 +424,7 @@ async def selfcheck():
         "critical":       rep["critical"],
         "warnings":       rep["warning"],
         "engine_blocked": bool(getattr(app.state, "blocked", False)),
+        "startup_block":  getattr(app.state, "startup_block", None),
     }
 
 
@@ -454,7 +452,6 @@ async def nexus_decision(symbol: str, direction: str = "LONG"):
             k4h = await eng.client.get_klines(sym, "240", 60)
 
         px = float(k15[-1]["c"]) if k15 else 0.0
-        # Níveis ilustrativos apenas para avaliação via endpoint
         if direction.upper() == "LONG":
             sl, tp = px * 0.985, px * 1.03
         else:
