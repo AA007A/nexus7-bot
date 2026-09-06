@@ -24,7 +24,7 @@ def _requested_reset_id() -> str:
     return os.environ.get(_RESET_ENV, "").strip()[:160]
 
 
-def _initial_balance() -> float:
+def _initial_balance(log) -> float:
     from bot.config import cfg
 
     raw = os.environ.get("PAPER_INITIAL_BALANCE", "").strip()
@@ -33,8 +33,15 @@ def _initial_balance() -> float:
             value = float(raw)
             if value > 0:
                 return value
-        except (TypeError, ValueError):
-            pass
+            log.warning(
+                "[PAPER_RESET] PAPER_INITIAL_BALANCE must be > 0; falling back to INITIAL_CAP"
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning(
+                "[PAPER_RESET] invalid PAPER_INITIAL_BALANCE=%r (%s); falling back to INITIAL_CAP",
+                raw,
+                type(exc).__name__,
+            )
     return max(0.0, float(getattr(cfg, "INITIAL_CAP", 0.0) or 0.0))
 
 
@@ -85,7 +92,7 @@ def install(log):
                                 "PAPER reset refused: persisted simulated positions are still open"
                             )
 
-                    balance = _initial_balance()
+                    balance = _initial_balance(log)
                     if balance <= 0:
                         raise RuntimeError(
                             "PAPER reset refused: PAPER_INITIAL_BALANCE/INITIAL_CAP must be > 0"
