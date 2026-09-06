@@ -29,6 +29,7 @@ try:
     from bot import scan_summary_hardening as _scan_summary_hardening
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import liquidation_override_guard as _liquidation_override_guard
+    from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import silent_except_audit as _silent_except_audit
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
@@ -52,6 +53,7 @@ try:
     _paper_validation_reset.install(_log)
     _validation_safety_lock.install(_log)
     _liquidation_override_guard.install(_log)
+    _instrument_readiness_guard.install(_log)
     _news_context_hardening.install(_log)
     _balance_observability.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
