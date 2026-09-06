@@ -40,6 +40,14 @@ def install_network_guard():
     sys.addaudithook(audit)
 
 
+def _function_test_names(module):
+    """Return module-level test_* callables missed by unittest discovery."""
+    return sorted(
+        name for name, value in vars(module).items()
+        if name.startswith('test_') and callable(value)
+    )
+
+
 def run_one(module):
     env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG') if k in os.environ}
     # -S prevents the repository's production sitecustomize from importing
@@ -66,21 +74,50 @@ def run_one(module):
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--child':
-        module = sys.argv[2]
-        sys.argv = [module]
+        module_name = sys.argv[2]
+        sys.argv = [module_name]
         install_network_guard()
-        loaded = __import__(module, fromlist=['*'])
+        loaded = __import__(module_name, fromlist=['*'])
         suite = unittest.defaultTestLoader.loadTestsFromModule(loaded)
-        if suite.countTestCases():
+        unit_count = suite.countTestCases()
+        function_names = _function_test_names(loaded)
+
+        if unit_count:
             result = unittest.TextTestRunner(verbosity=2).run(suite)
-            sys.exit(not result.wasSuccessful())
-        runpy.run_module(module, run_name='__main__', alter_sys=True)
+            if not result.wasSuccessful():
+                sys.exit(1)
+
+        function_failures = 0
+        for name in function_names:
+            try:
+                getattr(loaded, name)()
+                print(f'{name} ... ok', flush=True)
+            except Exception:
+                function_failures += 1
+                print(f'{name} ... FAIL', flush=True)
+                import traceback
+                traceback.print_exc()
+
+        executed = unit_count + len(function_names)
+        if executed:
+            print(f'OFFLINE_TESTS_EXECUTED: {executed}', flush=True)
+            sys.exit(bool(function_failures))
+
+        # Legacy script-style suites are allowed only when they actually report
+        # a non-zero test count. A silent import / PASS(0) is a CI failure.
+        runpy.run_module(module_name, run_name='__main__', alter_sys=True)
     else:
         modules = sys.argv[1:] or ['tests.' + p.stem for p in sorted((ROOT/'tests').glob('test_*.py'))]
         failed = 0
         total = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             for module, rc, count, output in pool.map(run_one, modules):
+                explicit = re.findall(r'OFFLINE_TESTS_EXECUTED:\s*(\d+)', output)
+                if explicit:
+                    count = int(explicit[-1])
+                if rc == 0 and count == 0:
+                    rc = 3
+                    output += f'\nZERO-TEST FAILURE: {module} completed without executing any tests\n'
                 print(f'{module}: {"PASS" if rc == 0 else "FAIL"} ({count})', flush=True)
                 total += count
                 if rc:
