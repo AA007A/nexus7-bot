@@ -115,10 +115,7 @@ def _nexus_reason(dec):
 
 
 def _emit(tag, payload):
-    try:
-        log.info("[%s] %s", tag, json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    except Exception:
-        pass
+    log.info("[%s] %s", tag, json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 def _register_shadow_state(payload):
