@@ -27,6 +27,8 @@ DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 60
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_INT_RE = re.compile(r"^\d+$")
+_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
 class RateLimitError(RuntimeError):
@@ -88,19 +90,15 @@ def _github_token() -> str:
 
 
 def _retry_after_from_http_error(exc: HTTPError) -> int | None:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(1, int(retry_after))
-        except ValueError:
-            pass
+    retry_after = (exc.headers.get("Retry-After") if exc.headers else None) or ""
+    retry_after = retry_after.strip()
+    if _INT_RE.fullmatch(retry_after):
+        return max(1, int(retry_after))
 
-    reset = exc.headers.get("X-RateLimit-Reset") if exc.headers else None
-    if reset:
-        try:
-            return max(1, int(float(reset) - time.time()) + 1)
-        except ValueError:
-            pass
+    reset = (exc.headers.get("X-RateLimit-Reset") if exc.headers else None) or ""
+    reset = reset.strip()
+    if _NUMBER_RE.fullmatch(reset):
+        return max(1, int(float(reset) - time.time()) + 1)
     return None
 
 
