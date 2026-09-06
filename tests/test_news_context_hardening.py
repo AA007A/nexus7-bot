@@ -19,6 +19,15 @@ def test_headline_score_signed_and_stale():
     assert hardening._headline_score(scoring) == (0, "STALE_OR_EMPTY")
 
 
+def test_relevance_filter_accepts_crypto_and_macro_but_rejects_unrelated_ai():
+    assert hardening._is_relevant_headline("Bitcoin ETF inflows jump after Fed decision")
+    assert hardening._is_relevant_headline("Ethereum falls as CPI surprises markets")
+    assert not hardening._is_relevant_headline(
+        "AI Just Solved a 350-Year-Old Math Problem By Writing the Longest Proof Ever"
+    )
+    assert not hardening._is_relevant_headline("New smartphone launch breaks sales record")
+
+
 def test_install_feeds_headline_score_into_nexus_market_sentiment():
     from bot import market_data as mdata
     from bot import score as scoring
