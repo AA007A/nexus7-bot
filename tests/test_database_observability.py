@@ -1,4 +1,5 @@
-import pytest
+import unittest
+from unittest.mock import patch
 
 from bot import database
 
@@ -11,27 +12,35 @@ class FailingPG:
         raise RuntimeError("read boom")
 
 
-@pytest.mark.asyncio
-async def test_fetchall_non_strict_is_observable_and_returns_empty(monkeypatch, caplog):
-    monkeypatch.setattr(database, "_conn", FailingPG())
-    monkeypatch.setattr(database, "_is_pg", True)
-    rows = await database._fetchall("SELECT 1")
-    assert rows == []
-    assert "DB fetchall failed" in caplog.text
+class DatabaseObservabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetchall_non_strict_is_observable_and_returns_empty(self):
+        with patch.object(database, "_conn", FailingPG()), \
+             patch.object(database, "_is_pg", True), \
+             patch.object(database.log, "error") as log_error:
+            rows = await database._fetchall("SELECT 1")
+
+        self.assertEqual(rows, [])
+        self.assertTrue(
+            any("DB fetchall failed" in str(call) for call in log_error.call_args_list)
+        )
+
+    async def test_fetchall_strict_fails_closed(self):
+        with patch.object(database, "_conn", FailingPG()), \
+             patch.object(database, "_is_pg", True):
+            with self.assertRaises(database.PersistenceError):
+                await database._fetchall("SELECT 1", strict=True)
+
+    async def test_fetchone_non_strict_is_observable(self):
+        with patch.object(database, "_conn", FailingPG()), \
+             patch.object(database, "_is_pg", True), \
+             patch.object(database.log, "error") as log_error:
+            row = await database._fetchone("SELECT 1")
+
+        self.assertIsNone(row)
+        self.assertTrue(
+            any("DB fetchone failed" in str(call) for call in log_error.call_args_list)
+        )
 
 
-@pytest.mark.asyncio
-async def test_fetchall_strict_fails_closed(monkeypatch):
-    monkeypatch.setattr(database, "_conn", FailingPG())
-    monkeypatch.setattr(database, "_is_pg", True)
-    with pytest.raises(database.PersistenceError):
-        await database._fetchall("SELECT 1", strict=True)
-
-
-@pytest.mark.asyncio
-async def test_fetchone_non_strict_is_observable(monkeypatch, caplog):
-    monkeypatch.setattr(database, "_conn", FailingPG())
-    monkeypatch.setattr(database, "_is_pg", True)
-    row = await database._fetchone("SELECT 1")
-    assert row is None
-    assert "DB fetchone failed" in caplog.text
+if __name__ == "__main__":
+    unittest.main()
