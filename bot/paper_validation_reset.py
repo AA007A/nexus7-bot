@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 _RESET_ENV = "PAPER_RESET_STATE_ONCE"
 _RESET_MARKER_KEY = "paper_validation_reset_marker_v1"
@@ -22,6 +23,15 @@ _WALLET_KEY = "paper_wallet_state_v1"
 
 def _requested_reset_id() -> str:
     return os.environ.get(_RESET_ENV, "").strip()[:160]
+
+
+def _direct_observe(message: str) -> None:
+    """Emit reset evidence independently of the application logger."""
+    try:
+        sys.stderr.write(f"[PAPER_RESET_OBSERVABILITY] {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        return
 
 
 def _initial_balance(log) -> float:
@@ -114,13 +124,28 @@ def install(log):
                         "LIVE/exchange state untouched",
                         request_id, balance,
                     )
+                    _direct_observe(
+                        f"state=APPLIED balance={balance:.4f} peak={balance:.4f} positions=0"
+                    )
                 else:
                     log.info("[PAPER_RESET] request id=%s already applied; skipping", request_id)
+                    raw_wallet = await db.load_key_value(_WALLET_KEY, strict=True)
+                    raw_runtime = await db.load_key_value(durable.PAPER_STATE_KEY, strict=True)
+                    wallet = json.loads(raw_wallet) if raw_wallet else {}
+                    runtime = json.loads(raw_runtime) if raw_runtime else {}
+                    balance = float(wallet.get("balance", runtime.get("balance", 0.0)) or 0.0)
+                    peak = float(wallet.get("peak_balance", runtime.get("peak_balance", 0.0)) or 0.0)
+                    positions = runtime.get("positions", []) if isinstance(runtime, dict) else []
+                    position_count = len(positions) if isinstance(positions, list) else -1
+                    _direct_observe(
+                        f"state=ALREADY_APPLIED balance={balance:.4f} peak={peak:.4f} positions={position_count}"
+                    )
             except Exception as exc:
                 log.critical(
                     "[PAPER_RESET] reset failed closed; new PAPER entries remain protected: %s: %s",
                     type(exc).__name__, exc,
                 )
+                _direct_observe(f"state=FAILED error={type(exc).__name__}")
                 durable._block(engine, "paper_reset")
                 return False
 

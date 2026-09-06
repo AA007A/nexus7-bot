@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import unittest
@@ -26,6 +27,17 @@ class PaperValidationResetTests(unittest.TestCase):
         with patch.dict(os.environ, {"PAPER_RESET_STATE_ONCE": "x" * 500}, clear=False):
             request_id = reset._requested_reset_id()
         self.assertEqual(len(request_id), 160)
+
+    def test_direct_observability_bypasses_application_logger(self):
+        stream = io.StringIO()
+        with patch.object(reset.sys, "stderr", stream):
+            reset._direct_observe("state=ALREADY_APPLIED balance=20.0000 peak=20.0000 positions=0")
+        text = stream.getvalue()
+        self.assertIn("[PAPER_RESET_OBSERVABILITY]", text)
+        self.assertIn("state=ALREADY_APPLIED", text)
+        self.assertIn("balance=20.0000", text)
+        self.assertIn("peak=20.0000", text)
+        self.assertIn("positions=0", text)
 
 
 if __name__ == "__main__":
