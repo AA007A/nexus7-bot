@@ -7,14 +7,19 @@ Policy B (shadow only): permits 4H directional + 1H neutral, never 1H opposite.
 The shadow candidate is then run through the same downstream strategy filters
 (score, RSI, volume, entry trigger, R:R, costs) and through nexus_ai.decide().
 No Signal is returned to the trading engine and no order path is invoked.
+
+This module also tracks outcome telemetry for shadow-only survivors. It never
+submits, amends, cancels, or routes orders and never alters production gates.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
 import threading
 import time
 from collections import Counter, deque
-from typing import Optional
 
 import numpy as np
 
@@ -23,9 +28,13 @@ from bot.indicators import atr, ema
 from bot.strategy import TOTAL_COST, detect_entry, detect_regime, score_tf
 from bot import nexus_ai
 
+log = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _SEEN = set()
 _SEEN_ORDER = deque(maxlen=5000)
+_ACTIVE = {}
+_MAX_ACTIVE = 1000
+_MAX_OUTCOME_BARS = 96  # 24h on 15m bars
 
 _METRICS = {
     "started_at": time.time(),
@@ -41,20 +50,38 @@ _METRICS = {
     "shadow_blocks": Counter(),
     "symbols": Counter(),
     "nexus_reasons": Counter(),
+    "outcomes": Counter(),
+    "resolved_outcomes": 0,
+    "resolved_r_sum": 0.0,
+    "resolved_net_pct_sum": 0.0,
+    "mfe_pct_sum": 0.0,
+    "mae_pct_sum": 0.0,
     "last": [],
+    "last_outcomes": [],
 }
 
 
-def _closed_ts(klines):
+def _closed_bar(klines):
     if not klines:
         return None
     idx = -2 if len(klines) > 1 else -1
-    k = klines[idx]
-    return k.get("ts") or k.get("time") or k.get("timestamp") or idx
+    return klines[idx]
+
+
+def _closed_ts(klines):
+    k = _closed_bar(klines)
+    if not k:
+        return None
+    return k.get("ts") or k.get("time") or k.get("timestamp")
 
 
 def _unique_key(symbol, k15, k1h, k4h):
     return (symbol, _closed_ts(k15), _closed_ts(k1h), _closed_ts(k4h))
+
+
+def _state_id(key):
+    raw = "|".join(str(v) for v in key)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _remember_unique(key):
@@ -110,12 +137,142 @@ def _nexus_reason(dec):
         return "unknown"
 
 
+def _emit(tag, payload):
+    """Structured runtime telemetry only; never influences trading behavior."""
+    try:
+        log.info("[%s] %s", tag, json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        pass
+
+
+def _register_shadow_state(payload):
+    with _LOCK:
+        if len(_ACTIVE) >= _MAX_ACTIVE:
+            oldest = min(_ACTIVE, key=lambda sid: _ACTIVE[sid].get("opened_at", 0.0))
+            _ACTIVE.pop(oldest, None)
+            _METRICS["outcomes"]["EVICTED"] += 1
+        _ACTIVE[payload["state_id"]] = payload
+    _emit("MTF_SHADOW_EVENT", payload)
+
+
+def _finalize_outcome(state_id, state, outcome, close_price, bar_ts):
+    entry = float(state["entry"])
+    sl = float(state["sl"])
+    risk_abs = abs(entry - sl)
+    side = state["direction"]
+    if outcome == "TP":
+        exit_price = float(state["tp"])
+    elif outcome == "SL":
+        exit_price = sl
+    else:
+        exit_price = float(close_price)
+
+    signed_move = (exit_price - entry) if side == "LONG" else (entry - exit_price)
+    r_multiple = signed_move / risk_abs if risk_abs > 0 else 0.0
+    gross_pct = (signed_move / entry) * 100 if entry else 0.0
+    net_pct = gross_pct - (TOTAL_COST * 100)
+    resolved = outcome in {"TP", "SL", "TIMEOUT"}
+
+    payload = {
+        "state_id": state_id,
+        "symbol": state["symbol"],
+        "direction": side,
+        "nexus_approved": state["nexus_approved"],
+        "nexus_reason": state["nexus_reason"],
+        "outcome": outcome,
+        "entry": entry,
+        "sl": sl,
+        "tp": float(state["tp"]),
+        "exit": round(exit_price, 10),
+        "mfe_pct": round(state["mfe_pct"], 5),
+        "mae_pct": round(state["mae_pct"], 5),
+        "r_multiple": round(r_multiple, 4),
+        "gross_pct": round(gross_pct, 5),
+        "net_pct_after_cost_model": round(net_pct, 5),
+        "bars_observed": state["bars_observed"],
+        "opened_bar_ts": state["opened_bar_ts"],
+        "resolved_bar_ts": bar_ts,
+        "execution_effect": "NONE",
+    }
+    with _LOCK:
+        _ACTIVE.pop(state_id, None)
+        _METRICS["outcomes"][outcome] += 1
+        if resolved:
+            _METRICS["resolved_outcomes"] += 1
+            _METRICS["resolved_r_sum"] += r_multiple
+            _METRICS["resolved_net_pct_sum"] += net_pct
+            _METRICS["mfe_pct_sum"] += state["mfe_pct"]
+            _METRICS["mae_pct_sum"] += state["mae_pct"]
+        _METRICS["last_outcomes"].append(payload)
+        _METRICS["last_outcomes"] = _METRICS["last_outcomes"][-30:]
+    _emit("MTF_SHADOW_OUTCOME", payload)
+
+
+def _update_shadow_outcomes(symbol, k15):
+    """Mark-to-market active shadow states using the latest closed 15m candle."""
+    bar = _closed_bar(k15)
+    if not bar:
+        return
+    try:
+        bar_ts = bar.get("ts") or bar.get("time") or bar.get("timestamp")
+        hi = float(bar["h"])
+        lo = float(bar["l"])
+        close = float(bar["c"])
+    except Exception:
+        return
+
+    with _LOCK:
+        active_ids = [sid for sid, st in _ACTIVE.items() if st["symbol"] == symbol]
+
+    for sid in active_ids:
+        with _LOCK:
+            state = _ACTIVE.get(sid)
+            if not state:
+                continue
+            if bar_ts is not None and state.get("last_bar_ts") == bar_ts:
+                continue
+            if bar_ts is not None and state.get("opened_bar_ts") == bar_ts:
+                state["last_bar_ts"] = bar_ts
+                continue
+            state["last_bar_ts"] = bar_ts
+            state["bars_observed"] += 1
+            entry = float(state["entry"])
+            sl = float(state["sl"])
+            tp = float(state["tp"])
+            if state["direction"] == "LONG":
+                favorable = max(0.0, hi - entry)
+                adverse = max(0.0, entry - lo)
+                hit_tp = hi >= tp
+                hit_sl = lo <= sl
+            else:
+                favorable = max(0.0, entry - lo)
+                adverse = max(0.0, hi - entry)
+                hit_tp = lo <= tp
+                hit_sl = hi >= sl
+            state["mfe_pct"] = max(state["mfe_pct"], favorable / entry * 100 if entry else 0.0)
+            state["mae_pct"] = max(state["mae_pct"], adverse / entry * 100 if entry else 0.0)
+            bars = state["bars_observed"]
+
+        if hit_tp and hit_sl:
+            # Candle ordering is unknowable from OHLC alone; do not manufacture expectancy.
+            _finalize_outcome(sid, state, "AMBIGUOUS_BOTH", close, bar_ts)
+        elif hit_tp:
+            _finalize_outcome(sid, state, "TP", close, bar_ts)
+        elif hit_sl:
+            _finalize_outcome(sid, state, "SL", close, bar_ts)
+        elif bars >= _MAX_OUTCOME_BARS:
+            _finalize_outcome(sid, state, "TIMEOUT", close, bar_ts)
+
+
 def observe(symbol, k15, k1h, k4h, production_result=None,
             min_score=60, fee_mult=2.0, vol_mult=1.0):
     """Observe one analyzer call. Never changes or returns production decisions."""
+    _update_shadow_outcomes(symbol, k15)
+
     key = _unique_key(symbol, k15, k1h, k4h)
     if not _remember_unique(key):
         return
+    sid = _state_id(key)
 
     with _LOCK:
         if production_result is not None:
@@ -153,14 +310,13 @@ def observe(symbol, k15, k1h, k4h, production_result=None,
         bull1 = e20_1h > e50_1h and c1h[-1] > e20_1h
         bear1 = e20_1h < e50_1h and c1h[-1] < e20_1h
 
-        # Policy B only: 4H must be directional. 1H may be neutral, but never opposite.
         if bull4:
             if bear1:
                 with _LOCK: _METRICS["blocked_1h_opposite"] += 1
                 _record_block("MTF_1H_OPPOSITE", symbol)
                 return
             if bull1:
-                return  # this would not be a Policy-A HOLD caused by alignment
+                return
             direction = "LONG"
         elif bear4:
             if bull1:
@@ -231,7 +387,6 @@ def observe(symbol, k15, k1h, k4h, production_result=None,
         with _LOCK:
             _METRICS["shadow_pre_ai_survivors"] += 1
 
-        # Pure local NEXUS evaluation. No notifier, no persistence hook, no order path.
         dec = nexus_ai.decide(
             symbol=symbol, k15=k15, k1h=k1h, k4h=k4h,
             entry=price, sl=sl, tp=tp,
@@ -239,17 +394,44 @@ def observe(symbol, k15, k1h, k4h, production_result=None,
         )
         approved = getattr(dec, "execution_allowed", False) is True
         reason = _nexus_reason(dec)
+        payload = {
+            "state_id": sid,
+            "ts": time.time(),
+            "opened_bar_ts": _closed_ts(k15),
+            "symbol": symbol,
+            "direction": direction,
+            "regime": regime,
+            "score": combined,
+            "score_4h": s4.get("total"),
+            "score_1h": s1.get("total"),
+            "score_15m": s15.get("total"),
+            "rsi_15m": round(float(s15.get("rsi_v", 0.0)), 4),
+            "volume_ratio_15m": round(float(s15.get("vol_r", 0.0)), 4),
+            "aligned_15m": bool(s15.get("aligned")),
+            "entry_type": entry_type,
+            "entry": round(float(price), 10),
+            "sl": round(float(sl), 10),
+            "tp": round(float(tp), 10),
+            "rr_gross": round(float(rr), 4),
+            "cost_pct_model": round(float(cost_pct), 5),
+            "move_to_tp_pct": round(float(move_to_tp), 5),
+            "nexus_approved": approved,
+            "nexus_reason": reason,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+            "bars_observed": 0,
+            "last_bar_ts": _closed_ts(k15),
+            "opened_at": time.time(),
+            "execution_effect": "NONE",
+        }
         with _LOCK:
             _METRICS["shadow_nexus_approved" if approved else "shadow_nexus_vetoed"] += 1
             if not approved:
                 _METRICS["nexus_reasons"][reason] += 1
             _METRICS["symbols"][symbol] += 1
-            _METRICS["last"].append({
-                "ts": time.time(), "symbol": symbol, "direction": direction,
-                "score": combined, "rr": round(rr,2), "entry_type": entry_type,
-                "nexus_approved": approved, "nexus_reason": reason,
-            })
+            _METRICS["last"].append(dict(payload))
             _METRICS["last"] = _METRICS["last"][-30:]
+        _register_shadow_state(payload)
     except Exception as exc:
         _record_block("SHADOW_ERROR", symbol, {
             "ts": time.time(), "symbol": symbol, "error": type(exc).__name__
@@ -262,6 +444,7 @@ def snapshot():
         eligible = _METRICS["eligible_4h_dir_1h_neutral"]
         survivors = _METRICS["shadow_pre_ai_survivors"]
         nx_total = _METRICS["shadow_nexus_approved"] + _METRICS["shadow_nexus_vetoed"]
+        resolved = _METRICS["resolved_outcomes"]
         return {
             "mode": "SHADOW_ONLY",
             "policy_a": "4H+1H explicit alignment",
@@ -283,6 +466,14 @@ def snapshot():
             "shadow_blocks": _METRICS["shadow_blocks"].most_common(),
             "nexus_reasons": _METRICS["nexus_reasons"].most_common(10),
             "symbols": _METRICS["symbols"].most_common(12),
+            "active_shadow_states": len(_ACTIVE),
+            "outcomes": _METRICS["outcomes"].most_common(),
+            "resolved_outcomes": resolved,
+            "shadow_expectancy_r": round(_METRICS["resolved_r_sum"]/resolved,4) if resolved else None,
+            "shadow_expectancy_net_pct": round(_METRICS["resolved_net_pct_sum"]/resolved,5) if resolved else None,
+            "avg_mfe_pct": round(_METRICS["mfe_pct_sum"]/resolved,5) if resolved else None,
+            "avg_mae_pct": round(_METRICS["mae_pct_sum"]/resolved,5) if resolved else None,
             "last": list(_METRICS["last"][-12:]),
+            "last_outcomes": list(_METRICS["last_outcomes"][-12:]),
             "execution_effect": "NONE",
         }
