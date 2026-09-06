@@ -7,12 +7,44 @@ Fault-tolerant: se DB cair, bot continua operando.
 """
 import os, json, asyncio
 from datetime import datetime, timezone, date
+from functools import wraps
 from bot.logger import log
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
 SQLITE_PATH  = "/tmp/bgx_capital.db"
 _conn        = None
 _is_pg       = False
+_io_lock     = asyncio.Lock()
+
+
+class PersistenceError(RuntimeError):
+    """Critical durable-state operation could not be confirmed."""
+
+
+def _serialized_io(func):
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        async with _io_lock:
+            return await func(*args, **kwargs)
+    return wrapped
+
+
+def _pg_sql(sql: str) -> str:
+    """Translate qmark placeholders to asyncpg placeholders."""
+    index = 0
+    parts = []
+    for char in sql:
+        if char == "?":
+            index += 1
+            parts.append(f"${index}")
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
+def configured_postgres_unavailable() -> bool:
+    """True when production requested PostgreSQL but only fallback/no DB exists."""
+    return DATABASE_URL.startswith("postgresql") and (not _conn or not _is_pg)
 
 
 async def init():
@@ -152,68 +184,60 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _exec(sql: str, params: tuple = ()):
+async def _exec(sql: str, params: tuple = (), *, strict: bool = False):
     if not _conn:
-        return
-    try:
-        if _is_pg:
-            # asyncpg usa $1,$2...
-            i = [1]
-            new = ""
-            for c in sql:
-                if c == "?":
-                    new += f"${i[0]}"; i[0] += 1
-                else:
-                    new += c
-            await _conn.execute(new, *params)
-        else:
-            await _conn.execute(sql, params)
-            await _conn.commit()
-    except Exception as e:
-        log.error(f"DB exec: {e}")
+        if strict:
+            raise PersistenceError("database unavailable")
+        return False
+    async with _io_lock:
+        try:
+            if _is_pg:
+                await _conn.execute(_pg_sql(sql), *params)
+            else:
+                await _conn.execute(sql, params)
+                await _conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"DB exec: {e}")
+            if strict:
+                raise PersistenceError("database write failed") from e
+            return False
 
 
-async def _fetchone(sql: str, params: tuple = ()):
+async def _fetchone(sql: str, params: tuple = (), *, strict: bool = False):
     if not _conn:
+        if strict:
+            raise PersistenceError("database unavailable")
         return None
-    try:
-        if _is_pg:
-            i = [1]
-            new = ""
-            for c in sql:
-                if c == "?":
-                    new += f"${i[0]}"; i[0] += 1
-                else:
-                    new += c
-            return await _conn.fetchrow(new, *params)
-        else:
-            async with _conn.execute(sql, params) as cur:
-                return await cur.fetchone()
-    except Exception:
-        return None
+    async with _io_lock:
+        try:
+            if _is_pg:
+                return await _conn.fetchrow(_pg_sql(sql), *params)
+            else:
+                async with _conn.execute(sql, params) as cur:
+                    return await cur.fetchone()
+        except Exception as exc:
+            if strict:
+                raise PersistenceError("database read failed") from exc
+            return None
 
 
 async def _fetchall(sql: str, params: tuple = ()):
     if not _conn:
         return []
-    try:
-        if _is_pg:
-            i = [1]
-            new = ""
-            for c in sql:
-                if c == "?":
-                    new += f"${i[0]}"; i[0] += 1
-                else:
-                    new += c
-            return await _conn.fetch(new, *params)
-        else:
-            async with _conn.execute(sql, params) as cur:
-                return await cur.fetchall()
-    except Exception:
-        return []
+    async with _io_lock:
+        try:
+            if _is_pg:
+                return await _conn.fetch(_pg_sql(sql), *params)
+            else:
+                async with _conn.execute(sql, params) as cur:
+                    return await cur.fetchall()
+        except Exception:
+            return []
 
 
 # ── API pública ──────────────────────────────────────────────────
+@_serialized_io
 async def save_trade_open(symbol, side, entry, size, leverage, score,
                           strategy="MTF", score_features: dict = None,
                           sl: float = 0, direction: str = "") -> int:
@@ -237,15 +261,97 @@ async def save_trade_open(symbol, side, entry, size, leverage, score,
         (timestamp,strategy,side,symbol,entry_price,size,leverage,
          score_entrada,status,score_features,risk_amount,direction)
         VALUES (?,?,?,?,?,?,?,?,'open',?,?,?)"""
-    await _exec(sql, (_now(), strategy, side, symbol, entry, size, leverage,
-                      score, feats, risk_amount, direction or side))
-    row = await _fetchone("SELECT MAX(id) FROM trades")
-    return row[0] if row else 0
+    params = (_now(), strategy, side, symbol, entry, size, leverage,
+              score, feats, risk_amount, direction or side)
+    if not _conn:
+        raise PersistenceError("trade open blocked: database unavailable")
+    try:
+        if _is_pg:
+            row = await _conn.fetchrow(_pg_sql(sql) + " RETURNING id", *params)
+            trade_id = int(row[0]) if row else 0
+        else:
+            cursor = await _conn.execute(sql, params)
+            trade_id = int(cursor.lastrowid or 0)
+            await _conn.commit()
+        if trade_id <= 0:
+            raise PersistenceError("trade open insert returned no id")
+        return trade_id
+    except PersistenceError:
+        raise
+    except Exception as exc:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        log.error("save_trade_open: %s", exc)
+        raise PersistenceError("trade open insert failed") from exc
+
+
+@_serialized_io
+async def save_paper_open_atomic(
+    symbol, side, entry, size, leverage, score, state_key, state_factory,
+    strategy="MTF", score_features: dict = None, sl: float = 0,
+    direction: str = "",
+) -> int:
+    """Insert a PAPER trade and its position snapshot in one transaction."""
+    if not _conn:
+        raise PersistenceError("PAPER open blocked: database unavailable")
+    feats = json.dumps(score_features or {})
+    risk_amount = abs(entry - sl) * size if sl and entry else 0.0
+    sql = """INSERT INTO trades
+        (timestamp,strategy,side,symbol,entry_price,size,leverage,
+         score_entrada,status,score_features,risk_amount,direction)
+        VALUES (?,?,?,?,?,?,?,?,'open',?,?,?)"""
+    params = (_now(), strategy, side, symbol, entry, size, leverage,
+              score, feats, risk_amount, direction or side)
+    ts = _now()
+    try:
+        if _is_pg:
+            async with _conn.transaction():
+                row = await _conn.fetchrow(_pg_sql(sql) + " RETURNING id", *params)
+                trade_id = int(row[0]) if row else 0
+                if trade_id <= 0:
+                    raise PersistenceError("PAPER open insert returned no id")
+                state_value = state_factory(trade_id)
+                await _conn.execute(
+                    "INSERT INTO key_value (key,value,updated_at) VALUES ($1,$2,$3) "
+                    "ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3",
+                    state_key, state_value, ts,
+                )
+        else:
+            await _conn.execute("BEGIN IMMEDIATE")
+            cursor = await _conn.execute(sql, params)
+            trade_id = int(cursor.lastrowid or 0)
+            if trade_id <= 0:
+                raise PersistenceError("PAPER open insert returned no id")
+            state_value = state_factory(trade_id)
+            await _conn.execute(
+                "INSERT OR REPLACE INTO key_value (key,value,updated_at) VALUES (?,?,?)",
+                (state_key, state_value, ts),
+            )
+            await _conn.commit()
+        return trade_id
+    except PersistenceError:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception as exc:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        log.error("save_paper_open_atomic: %s", exc)
+        raise PersistenceError("atomic PAPER open failed") from exc
 
 
 async def save_trade_close(trade_id: int, exit_price: float, pnl: float,
                            fees: float, duration_min: float,
-                           exit_reason: str = ""):
+                           exit_reason: str = "", *, strict: bool = False):
     """
     ITEM 4: calcula r_multiple = pnl / risk_amount.
 
@@ -255,7 +361,11 @@ async def save_trade_close(trade_id: int, exit_price: float, pnl: float,
     Uma com 90% de acerto e R:R 0.3:1 tem E = +0.17R (pior).
     Gravar r_multiple por trade é o que permite essa comparação.
     """
-    row = await _fetchone("SELECT risk_amount FROM trades WHERE id=?", (trade_id,))
+    row = await _fetchone(
+        "SELECT risk_amount FROM trades WHERE id=?", (trade_id,), strict=strict
+    )
+    if strict and not row:
+        raise PersistenceError(f"trade {trade_id} not found for close")
     risk_amount = float(row[0]) if row and row[0] else 0.0
     r_multiple  = (pnl / risk_amount) if risk_amount > 0 else 0.0
 
@@ -263,8 +373,96 @@ async def save_trade_close(trade_id: int, exit_price: float, pnl: float,
              duration_minutes=?,status='closed',r_multiple=?,exit_reason=?
              WHERE id=?"""
     await _exec(sql, (exit_price, pnl, fees, duration_min,
-                      round(r_multiple, 4), exit_reason, trade_id))
+                      round(r_multiple, 4), exit_reason, trade_id), strict=strict)
     await _update_performance()
+
+
+@_serialized_io
+async def _save_paper_close_atomic_locked(
+    trade_id: int, exit_price: float, pnl: float, fees: float,
+    duration_min: float, exit_reason: str, state_key: str, state_value: str,
+):
+    """Commit the PAPER trade close and post-close runtime snapshot together."""
+    if not _conn:
+        raise PersistenceError("PAPER close blocked: database unavailable")
+    ts = _now()
+    try:
+        if _is_pg:
+            async with _conn.transaction():
+                row = await _conn.fetchrow(
+                    "SELECT risk_amount FROM trades WHERE id=$1 FOR UPDATE", trade_id
+                )
+                if not row:
+                    raise PersistenceError(f"trade {trade_id} not found for PAPER close")
+                risk_amount = float(row[0] or 0)
+                r_multiple = (pnl / risk_amount) if risk_amount > 0 else 0.0
+                result = await _conn.execute(
+                    "UPDATE trades SET exit_price=$1,pnl=$2,fees=$3,"
+                    "duration_minutes=$4,status='closed',r_multiple=$5,exit_reason=$6 "
+                    "WHERE id=$7 AND status='open'",
+                    exit_price, pnl, fees, duration_min,
+                    round(r_multiple, 4), exit_reason, trade_id,
+                )
+                if result != "UPDATE 1":
+                    raise PersistenceError(f"trade {trade_id} was not open")
+                await _conn.execute(
+                    "INSERT INTO key_value (key,value,updated_at) VALUES ($1,$2,$3) "
+                    "ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3",
+                    state_key, state_value, ts,
+                )
+        else:
+            await _conn.execute("BEGIN IMMEDIATE")
+            async with _conn.execute(
+                "SELECT risk_amount FROM trades WHERE id=?", (trade_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                raise PersistenceError(f"trade {trade_id} not found for PAPER close")
+            risk_amount = float(row[0] or 0)
+            r_multiple = (pnl / risk_amount) if risk_amount > 0 else 0.0
+            cursor = await _conn.execute(
+                "UPDATE trades SET exit_price=?,pnl=?,fees=?,duration_minutes=?,"
+                "status='closed',r_multiple=?,exit_reason=? "
+                "WHERE id=? AND status='open'",
+                (exit_price, pnl, fees, duration_min,
+                 round(r_multiple, 4), exit_reason, trade_id),
+            )
+            if cursor.rowcount != 1:
+                raise PersistenceError(f"trade {trade_id} was not open")
+            await _conn.execute(
+                "INSERT OR REPLACE INTO key_value (key,value,updated_at) VALUES (?,?,?)",
+                (state_key, state_value, ts),
+            )
+            await _conn.commit()
+        return True
+    except PersistenceError:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception as exc:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        log.error("save_paper_close_atomic: %s", exc)
+        raise PersistenceError("atomic PAPER close failed") from exc
+
+
+async def save_paper_close_atomic(
+    trade_id: int, exit_price: float, pnl: float, fees: float,
+    duration_min: float, exit_reason: str, state_key: str, state_value: str,
+):
+    """Atomically close PAPER state, then refresh derived observability."""
+    result = await _save_paper_close_atomic_locked(
+        trade_id, exit_price, pnl, fees, duration_min,
+        exit_reason, state_key, state_value,
+    )
+    await _update_performance()
+    return result
 
 
 async def save_signal(symbol, direction, scores: dict, entrou: bool, motivo=""):
@@ -412,6 +610,7 @@ async def get_stats() -> dict:
         ],
     }
 
+@_serialized_io
 async def get_recent_decisions(limit: int = 60) -> list:
     """Retorna as últimas decisões de scan para o SCAN LOG do dashboard."""
     if not _conn:
@@ -439,13 +638,16 @@ async def get_recent_decisions(limit: int = 60) -> list:
         return []
 
 
-async def save_key_value(key: str, value: str):
+@_serialized_io
+async def save_key_value(key: str, value: str, *, strict: bool = False):
     """
     Persiste par chave-valor no banco.
     Usado para salvar parâmetros do Optuna que sobrevivem a deploys (INFRA-3).
     """
     if not _conn:
-        return
+        if strict:
+            raise PersistenceError(f"save_key_value {key}: database unavailable")
+        return False
     try:
         from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).isoformat()
@@ -461,13 +663,20 @@ async def save_key_value(key: str, value: str):
                 (key, value, ts)
             )
             await _conn.commit()
+        return True
     except Exception as e:
         log.warning(f"save_key_value {key}: {e}")
+        if strict:
+            raise PersistenceError(f"save_key_value {key} failed") from e
+        return False
 
 
-async def load_key_value(key: str) -> str:
+@_serialized_io
+async def load_key_value(key: str, *, strict: bool = False) -> str:
     """Carrega valor por chave. Retorna None se não encontrar."""
     if not _conn:
+        if strict:
+            raise PersistenceError(f"load_key_value {key}: database unavailable")
         return None
     try:
         if _is_pg:
@@ -476,11 +685,14 @@ async def load_key_value(key: str) -> str:
             async with _conn.execute("SELECT value FROM key_value WHERE key=?", (key,)) as cur:
                 row = await cur.fetchone()
         return row[0] if row else None
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise PersistenceError(f"load_key_value {key} failed") from exc
         return None
 
 
 
+@_serialized_io
 async def get_trades_with_features(limit: int = 1000) -> list:
     """
     Retorna trades com as features do score para calibração estatística
