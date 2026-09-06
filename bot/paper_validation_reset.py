@@ -1,0 +1,126 @@
+"""Explicit, idempotent PAPER validation-state reset.
+
+This module exists only to recover a deliberately persisted PAPER simulation
+when a completed validation run has exhausted its virtual drawdown budget.
+It never touches LIVE mode, KuCoin positions, orders, balances, leverage, risk
+limits, or execution gates.
+
+A reset is applied only when PAPER_RESET_STATE_ONCE contains a non-empty request
+id. The request id is persisted, making the operation idempotent across deploy
+restarts. Persisted PAPER positions must be empty; otherwise the reset fails
+closed instead of discarding simulated position state.
+"""
+from __future__ import annotations
+
+import json
+import os
+
+_RESET_ENV = "PAPER_RESET_STATE_ONCE"
+_RESET_MARKER_KEY = "paper_validation_reset_marker_v1"
+_WALLET_KEY = "paper_wallet_state_v1"
+
+
+def _requested_reset_id() -> str:
+    return os.environ.get(_RESET_ENV, "").strip()[:160]
+
+
+def _initial_balance() -> float:
+    from bot.config import cfg
+
+    raw = os.environ.get("PAPER_INITIAL_BALANCE", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return max(0.0, float(getattr(cfg, "INITIAL_CAP", 0.0) or 0.0))
+
+
+def _fresh_runtime_payload(balance: float, request_id: str) -> str:
+    return json.dumps({
+        "version": 1,
+        "reason": f"paper_validation_reset:{request_id}"[:160],
+        "balance": balance,
+        "peak_balance": balance,
+        "positions": [],
+        "trade_ids": {},
+        "cooldown": {},
+    }, separators=(",", ":"), sort_keys=True)
+
+
+def _fresh_wallet_payload(balance: float, request_id: str) -> str:
+    return json.dumps({
+        "version": 1,
+        "balance": balance,
+        "peak_balance": balance,
+        "reason": f"paper_validation_reset:{request_id}"[:160],
+    }, separators=(",", ":"), sort_keys=True)
+
+
+def install(log):
+    from bot import database as db
+    from bot import durable_execution as durable
+
+    if getattr(durable, "_paper_validation_reset_patched", False):
+        return
+
+    original_restore = durable.restore_engine_state
+
+    async def restore_with_optional_paper_reset(engine):
+        request_id = _requested_reset_id()
+        if getattr(engine, "paper_trade", False) and request_id:
+            try:
+                already_applied = await db.load_key_value(_RESET_MARKER_KEY, strict=True)
+                if already_applied != request_id:
+                    raw_runtime = await db.load_key_value(durable.PAPER_STATE_KEY, strict=True)
+                    if raw_runtime:
+                        state = json.loads(raw_runtime)
+                        positions = state.get("positions", []) if isinstance(state, dict) else None
+                        if not isinstance(positions, list):
+                            raise ValueError("invalid persisted PAPER positions")
+                        if positions:
+                            raise RuntimeError(
+                                "PAPER reset refused: persisted simulated positions are still open"
+                            )
+
+                    balance = _initial_balance()
+                    if balance <= 0:
+                        raise RuntimeError(
+                            "PAPER reset refused: PAPER_INITIAL_BALANCE/INITIAL_CAP must be > 0"
+                        )
+
+                    await db.save_key_value(
+                        _WALLET_KEY,
+                        _fresh_wallet_payload(balance, request_id),
+                        strict=True,
+                    )
+                    await db.save_key_value(
+                        durable.PAPER_STATE_KEY,
+                        _fresh_runtime_payload(balance, request_id),
+                        strict=True,
+                    )
+                    await db.save_key_value(_RESET_MARKER_KEY, request_id, strict=True)
+                    log.warning(
+                        "[PAPER_RESET] validation state reset id=%s balance=$%.4f; "
+                        "LIVE/exchange state untouched",
+                        request_id, balance,
+                    )
+                else:
+                    log.info("[PAPER_RESET] request id=%s already applied; skipping", request_id)
+            except Exception as exc:
+                log.critical(
+                    "[PAPER_RESET] reset failed closed; new PAPER entries remain protected: %s: %s",
+                    type(exc).__name__, exc,
+                )
+                durable._block(engine, "paper_reset")
+                return False
+
+        result = await original_restore(engine)
+        if request_id and getattr(engine, "paper_trade", False):
+            durable._clear(engine, "paper_reset")
+        return result
+
+    durable.restore_engine_state = restore_with_optional_paper_reset
+    durable._paper_validation_reset_patched = True
