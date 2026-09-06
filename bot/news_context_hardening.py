@@ -10,6 +10,7 @@ routing are not changed here.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 import aiohttp
@@ -20,6 +21,26 @@ _RSS_FEEDS = (
     "https://www.theblock.co/rss.xml",
     "https://decrypt.co/feed",
 )
+
+_RELEVANT_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\bbitcoin\b", r"\bbtc\b", r"\bethereum\b", r"\beth\b",
+    r"\bsolana\b", r"\bsol\b", r"\bxrp\b", r"\bdogecoin\b", r"\bdoge\b",
+    r"\bcardano\b", r"\bada\b", r"\bchainlink\b", r"\blink\b",
+    r"\bavalanche\b", r"\bavax\b", r"\bpolkadot\b", r"\bdot\b",
+    r"\blitecoin\b", r"\bltc\b", r"\bnear\b", r"\bcosmos\b", r"\batom\b",
+    r"\bcrypto(?:currency|currencies)?\b", r"\bblockchain\b", r"\bstablecoin\b",
+    r"\bdefi\b", r"\btoken\b", r"\betf\b", r"\bsec\b", r"\bcftc\b",
+    r"\bfomc\b", r"\bfederal reserve\b", r"\bfed\b", r"\bpowell\b",
+    r"\bcpi\b", r"\bpce\b", r"\bnfp\b", r"\binflation\b", r"\binterest rate\b",
+    r"\btreasury\b", r"\bdollar index\b", r"\bdxy\b",
+))
+
+
+def _is_relevant_headline(title: str) -> bool:
+    text = str(title or "").strip()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _RELEVANT_PATTERNS)
 
 
 def _headline_score(scoring) -> tuple[int, str]:
@@ -45,7 +66,7 @@ def install(log):
         return
 
     async def rss_news_reader_loop():
-        """Refresh public headline sentiment every two minutes."""
+        """Refresh public, market-relevant headline sentiment every two minutes."""
         log.info(
             "[NEWS_CONTEXT] public RSS enabled; no CryptoPanic token required; "
             "sources=CoinDesk,CoinTelegraph,TheBlock,Decrypt"
@@ -54,6 +75,8 @@ def install(log):
             try:
                 async with aiohttp.ClientSession() as session:
                     best = None
+                    seen = 0
+                    relevant = 0
                     for feed_url in _RSS_FEEDS:
                         try:
                             async with session.get(
@@ -66,10 +89,14 @@ def install(log):
                                 content = await response.text()
                             import feedparser
                             feed = feedparser.parse(content)
-                            for entry in feed.entries[:5]:
+                            for entry in feed.entries[:8]:
                                 title = str(entry.get("title", "") or "").strip()
                                 if not title:
                                     continue
+                                seen += 1
+                                if not _is_relevant_headline(title):
+                                    continue
+                                relevant += 1
                                 classification, confidence, is_fomc = scoring._classify_news(title)
                                 candidate = (
                                     float(confidence), classification, is_fomc, title
@@ -103,9 +130,21 @@ def install(log):
                             title[:100],
                         )
                     else:
-                        log.warning(
-                            "[NEWS_CONTEXT] no usable RSS headline; existing cache retained"
+                        log.info(
+                            "[NEWS_CONTEXT] no relevant RSS headline; seen=%s relevant=%s; "
+                            "headline contribution remains neutral",
+                            seen,
+                            relevant,
                         )
+                        scoring._news_cache.update({
+                            "classificacao": "NEUTRO",
+                            "score_confianca": 0.0,
+                            "impacto": 0,
+                            "timestamp": time.time(),
+                            "fomc_window": False,
+                            "source": "PUBLIC_RSS",
+                            "headline": "",
+                        })
             except Exception as exc:
                 log.warning(
                     "[NEWS_CONTEXT] RSS refresh failed: %s: %s",
@@ -135,6 +174,6 @@ def install(log):
     mdata.get_market_sentiment = market_sentiment_with_headlines
     scoring._rss_only_news_hardening = True
     log.info(
-        "[NEWS_CONTEXT] installed: NEXUS market sentiment includes public RSS "
+        "[NEWS_CONTEXT] installed: NEXUS market sentiment includes relevant public RSS "
         "headline score; CryptoPanic token removed from active news path"
     )
