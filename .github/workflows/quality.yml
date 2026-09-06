@@ -1,6 +1,7 @@
 # BGX Capital — Verificação de qualidade em cada push
 #
-# Roda ANTES do deploy no Railway. Se falhar, o bug nunca chega em produção.
+# Quality gate for main and pull requests. Railway deployment gating is a
+# separate repository/deployment setting and must not be inferred from this file.
 # Detecta a classe de erro que historicamente passou despercebida:
 # NameError/AttributeError latentes engolidos por except genérico.
 
@@ -34,8 +35,6 @@ jobs:
 
       - name: Pyflakes — nomes indefinidos
         run: |
-          # Falha SOMENTE em undefined name (bug real).
-          # Imports não usados são ruído e não bloqueiam.
           OUT=$(python -m pyflakes bot/ main.py 2>&1 || true)
           echo "$OUT"
           UNDEF=$(echo "$OUT" | grep -c "undefined name" || true)
@@ -62,6 +61,14 @@ jobs:
 
       - name: Full offline test suite
         run: python -m tests.run_offline
+
+      - name: Critical safety regressions execute non-zero tests
+        run: |
+          python -m tests.run_offline \
+            tests.test_liquidation_override_guard \
+            tests.test_balance_observability \
+            tests.test_news_context_hardening \
+            tests.test_scan_summary_hardening
 
       - name: PAPER wallet restart persistence
         run: python -m unittest tests.test_paper_wallet_restart -v
