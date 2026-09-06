@@ -33,6 +33,7 @@ try:
     from bot import nexus_grade_display as _nexus_grade_display
     from bot import nexus_zero_observability as _nexus_zero_observability
     from bot import daily_stop_observability as _daily_stop_observability
+    from bot import news_context_hardening as _news_context_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -48,6 +49,7 @@ try:
     _paper_lifecycle.install(_log)
     _paper_validation_reset.install(_log)
     _validation_safety_lock.install(_log)
+    _news_context_hardening.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
