@@ -23,6 +23,9 @@ _AI_TG_QUEUE = queue.Queue(maxsize=100)
 _AI_TG_CACHE = {}
 _AI_TG_LOCK = threading.Lock()
 _AI_TG_WORKER_STARTED = False
+_OBS_FAILURE_LOCK = threading.Lock()
+_OBS_FAILURE_LAST = {}
+_OBS_FAILURE_COOLDOWN = 300.0
 _AI_TG_REJECT_COOLDOWN = int(os.environ.get("NEXUS_VETO_COOLDOWN", "900"))
 _FUNNEL_TG_COOLDOWN = int(os.environ.get("NEXUS_FUNNEL_COOLDOWN", "900"))
 
@@ -100,6 +103,25 @@ def _tg_enabled():
         and bool(os.environ.get("TELEGRAM_TOKEN"))
         and bool(os.environ.get("TELEGRAM_CHAT"))
     )
+
+
+def _report_observability_failure(component, exc):
+    """Report telemetry loss without re-entering logging or the trading loop."""
+    try:
+        now = time.monotonic()
+        with _OBS_FAILURE_LOCK:
+            last = _OBS_FAILURE_LAST.get(component, 0.0)
+            if now - last < _OBS_FAILURE_COOLDOWN:
+                return
+            _OBS_FAILURE_LAST[component] = now
+        sys.stderr.write(
+            f"[OBSERVABILITY_FAILURE] component={component} "
+            f"error={type(exc).__name__}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        # Reporting telemetry loss must never affect order/risk execution.
+        return
 
 
 def _safe_float(value):
@@ -345,9 +367,9 @@ def _tg_worker():
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 resp.read(64)
-        except Exception:
+        except Exception as exc:
             # Observability must never affect order/risk execution.
-            pass
+            _report_observability_failure("telegram_delivery", exc)
         finally:
             _AI_TG_QUEUE.task_done()
 
@@ -397,9 +419,9 @@ class _DecisionTelegramHandler(logging.Handler):
                 _record_funnel_metric(data)
                 if _tg_enabled() and _funnel_tg_should_send(data):
                     _enqueue(_funnel_tg_format(data))
-        except Exception:
+        except Exception as exc:
             # Logging/Telegram/metrics can never break the engine.
-            pass
+            _report_observability_failure("decision_handler", exc)
 
 
 def _make(name):

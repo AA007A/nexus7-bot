@@ -84,6 +84,9 @@ jobs:
       - name: Atomic PAPER database state
         run: python -m unittest tests.test_database_atomic_paper -v
 
+      - name: Observability failures remain non-blocking and visible
+        run: python -m unittest tests.test_logger_observability_failure -v
+
       - name: Imports em runtime
         run: |
           python - <<'EOF'
