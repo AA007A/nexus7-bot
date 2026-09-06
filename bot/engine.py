@@ -48,6 +48,7 @@ from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
 from bot import liquidation as liq
+from bot import durable_execution as durable
 # ── NEXUS AI Decision Engine (seções 1-24) ────────────────────────
 from bot import nexus_ai
 from bot.nexus_types import NexusDecision, decision_validation_error
@@ -420,6 +421,11 @@ class TradingEngine:
         # Registro de ordens com máquina de estados (idempotência que
         # sobrevive a retry, timeout, restart e múltiplos workers).
         self.orders = OrderRegistry()
+        # Enabled by run() only after the database has initialized and durable
+        # snapshots have been restored. Direct unit construction stays inert.
+        self._durable_state_enforced = False
+        self._durable_state_ok = True
+        self._durable_state_errors = set()
 
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
@@ -459,6 +465,8 @@ class TradingEngine:
         self._running = True
         log.info("⚡ Engine v10 iniciando...")
         await db.init()   # inicia DB (PostgreSQL ou SQLite)
+        self._durable_state_enforced = True
+        await durable.restore_engine_state(self)
         asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
         asyncio.create_task(scoring.news_reader_loop())           # news 24/7
         asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
@@ -466,6 +474,7 @@ class TradingEngine:
         asyncio.create_task(opt.weekly_optimization_loop(self.client)) # otimização semanal
         asyncio.create_task(self._monitor_news_pipeline())               # pipeline de notícias
         await self._connect()
+        await durable.reconcile_orders(self)
 
         _ciclos = 0
         while self._running:
@@ -1830,6 +1839,11 @@ class TradingEngine:
                 pos.trailing_sl = new_sl
                 pos.sl          = new_sl   # mantém sl e trailing_sl sincronizados
 
+                if self.paper_trade and self._durable_state_enforced:
+                    await durable.persist_paper_runtime(
+                        self, f"trailing_sl:{sym}", strict=True
+                    )
+
                 log.info(
                     f"🔒 [{sym}] Trailing SL: {old_sl:.6f} → {new_sl:.6f} "
                     f"| preço={cur:.6f} pnl=${pos.pnl:.2f} "
@@ -2543,6 +2557,14 @@ class TradingEngine:
                 )
                 return
 
+            if (self._durable_state_enforced
+                    and not durable.can_open(self)):
+                log.critical(
+                    "[DURABLE_STATE] nova entrada bloqueada: estado persistente "
+                    "não confirmado; posições existentes continuam gerenciadas"
+                )
+                return
+
             # Mandatory for every new entry, including paper/pilot. Closing
             # reduceOnly routes do not pass through this gate.
             nx_dec = None
@@ -2860,6 +2882,9 @@ class TradingEngine:
             # sinal. Garante que retries reusem o mesmo clientOid e a
             # exchange rejeite duplicatas.
             _idem = f"{sig.symbol}_{side}_{qty}_{int(time.time()//60)}"
+            _client_oid = self.client.build_client_oid(
+                sig.symbol, side, qty, _idem
+            )
 
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
@@ -2919,12 +2944,20 @@ class TradingEngine:
                         log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
                         return
                     _managed, _ = self.orders.get_or_create(
-                        _idem, sig.symbol, side, qty
+                        _client_oid, sig.symbol, side, qty
                     )
                     try:
                         _managed.transition(OrderState.SUBMITTING, source="REST")
                     except InvalidTransition as _ie:
                         log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+
+                    # The exact exchange clientOid and SUBMITTING intent must
+                    # be durable before place_order can perform network I/O.
+                    if (self._durable_state_enforced
+                            and not await durable.persist_orders(
+                                self, "before_dispatch", strict=True
+                            )):
+                        return
 
                     if not self.pilot.reserve_submission(sig.symbol):
                         return
@@ -2950,11 +2983,16 @@ class TradingEngine:
                         last_exc = RuntimeError(
                             f"place_order sem orderId para {sig.symbol}"
                         )
+                        if self._durable_state_enforced:
+                            await durable.persist_orders(
+                                self, "ambiguous_dispatch", strict=False
+                            )
+                            durable._block(self, "orders")
                         break
 
                     _oid_for_registry = _order.get("orderId", "") if _order else ""
                     if _oid_for_registry:
-                        self.orders.index_order_id(_oid_for_registry, _idem)
+                        self.orders.index_order_id(_oid_for_registry, _client_oid)
                         try:
                             _managed.transition(
                                 OrderState.SUBMITTED,
@@ -2962,6 +3000,10 @@ class TradingEngine:
                             )
                         except InvalidTransition as _ie:
                             log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+                        if self._durable_state_enforced:
+                            await durable.persist_orders(
+                                self, "submitted", strict=False
+                            )
 
                     # ── PROTEÇÃO CRÍTICA: posição sem SL não pode existir ──
                     # Com 50x, liquidação ocorre a ~2% de movimento adverso.
@@ -3019,6 +3061,10 @@ class TradingEngine:
                             )
                         except InvalidTransition as _ie:
                             log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
+                        if self._durable_state_enforced:
+                            await durable.persist_orders(
+                                self, "filled", strict=False
+                            )
 
                         # GAP DE OBSERVABILIDADE CORRIGIDO — não existia
                         # log de sucesso do FILLED via REST. A Fase 8 do
@@ -3074,6 +3120,15 @@ class TradingEngine:
                             _ainda_desprotegidos = await self._reconcile_exchange_positions(
                                 only_symbol=sig.symbol
                             )
+                            if sig.symbol in self.positions:
+                                try:
+                                    _managed.transition(
+                                        OrderState.FILLED,
+                                        order_id=_oid_real,
+                                        source="POSITION_RECONCILE",
+                                    )
+                                except InvalidTransition as _ie:
+                                    log.debug(f"OrderRegistry {sig.symbol}: {_ie}")
                             if sig.symbol in _ainda_desprotegidos:
                                 log.critical(
                                     f"🚨🚨 {sig.symbol}: posição órfã "
@@ -3086,6 +3141,12 @@ class TradingEngine:
                                 f"_reconcile_exchange_positions falhou para "
                                 f"{sig.symbol}: {_re}"
                             )
+                        if self._durable_state_enforced:
+                            await durable.persist_orders(
+                                self, "fill_timeout_reconcile", strict=False
+                            )
+                            if sig.symbol not in self.positions:
+                                durable._block(self, "orders")
                         last_exc = RuntimeError(
                             f"ordem {_oid_real} não confirmada como FILLED"
                         )
@@ -3222,14 +3283,56 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"score_features {sig.symbol}: {_e}")
 
-            trade_id = await db.save_trade_open(
-                sig.symbol, side, sig.entry, qty,
-                cfg.LEVERAGE, pre_score["total"],
-                score_features=_feats,
-                sl=sig.sl,                 # ITEM 4: define 1R do trade
-                direction=sig.direction,
-            )
+            try:
+                if self.paper_trade and self._durable_state_enforced:
+                    def _paper_open_snapshot(new_trade_id):
+                        self._trade_ids[sig.symbol] = int(new_trade_id)
+                        return durable.build_paper_runtime_payload(
+                            self, f"position_opened:{sig.symbol}"
+                        )
+
+                    trade_id = await db.save_paper_open_atomic(
+                        sig.symbol, side, sig.entry, qty,
+                        cfg.LEVERAGE, pre_score["total"],
+                        durable.PAPER_STATE_KEY, _paper_open_snapshot,
+                        score_features=_feats,
+                        sl=sig.sl,             # ITEM 4: define 1R do trade
+                        direction=sig.direction,
+                    )
+                else:
+                    trade_id = await db.save_trade_open(
+                        sig.symbol, side, sig.entry, qty,
+                        cfg.LEVERAGE, pre_score["total"],
+                        score_features=_feats,
+                        sl=sig.sl,             # ITEM 4: define 1R do trade
+                        direction=sig.direction,
+                    )
+            except db.PersistenceError as exc:
+                self._trade_ids.pop(sig.symbol, None)
+                if self.paper_trade:
+                    # PAPER has no external fill to preserve. Roll back the
+                    # in-memory simulation when its durable open did not commit.
+                    self.positions.pop(sig.symbol, None)
+                durable._block(self, "trade")
+                if self.paper_trade:
+                    log.critical(
+                        "[DURABLE_TRADE] %s PAPER open rolled back because its "
+                        "atomic snapshot failed; new entries blocked: %s",
+                        sig.symbol, exc,
+                    )
+                else:
+                    log.critical(
+                        "[DURABLE_TRADE] %s filled but trade row was not persisted; "
+                        "new entries blocked, position management remains active: %s",
+                        sig.symbol, exc,
+                    )
+                if self.paper_trade and self._durable_state_enforced:
+                    await durable.persist_paper_runtime(
+                        self, "trade_row_failure", strict=False
+                    )
+                return
             self._trade_ids[sig.symbol] = trade_id
+            durable._clear(self, "trade")
             entry_type = "BOS_BREAK" if "ENTRY:BOS_BREAK" in sig.reason else \
                          "MOMENTUM" if "ENTRY:MOMENTUM" in sig.reason else "PULLBACK"
             log.info(
