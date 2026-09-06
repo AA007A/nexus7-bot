@@ -9,6 +9,25 @@ from __future__ import annotations
 import math
 
 
+def exchange_metadata(balance, paper_trade: bool) -> dict:
+    return {
+        "available_usdt": (
+            round(float(balance), 4) if balance is not None else None
+        ),
+        "source": "KuCoin",
+        "read_only": bool(paper_trade),
+        "used_for_paper_sizing": False,
+    }
+
+
+def paper_metadata(balance) -> dict:
+    return {
+        "balance": round(float(balance or 0.0), 4),
+        "source": "isolated_paper_wallet",
+        "used_for_paper_sizing": True,
+    }
+
+
 def install(log) -> None:
     from bot.engine import TradingEngine
     from bot.kucoin import KuCoinClient, PAPER_TRADE
@@ -53,33 +72,19 @@ def install(log) -> None:
             if not isinstance(out, dict):
                 return out
             result = dict(out)
+            paper_trade = bool(getattr(self, "paper_trade", PAPER_TRADE))
             exchange_balance = getattr(self.client, "_last_exchange_balance", None)
-            result["exchange_balance"] = {
-                "available_usdt": (
-                    round(float(exchange_balance), 4)
-                    if exchange_balance is not None
-                    else None
-                ),
-                "source": "KuCoin",
-                "read_only": bool(getattr(self, "paper_trade", PAPER_TRADE)),
-                "used_for_paper_sizing": False,
-            }
-            if getattr(self, "paper_trade", PAPER_TRADE):
-                result["paper_balance_source"] = {
-                    "balance": round(
-                        float(
-                            getattr(
-                                self,
-                                "_paper_balance",
-                                getattr(self.risk, "balance", 0.0),
-                            )
-                            or 0.0
-                        ),
-                        4,
-                    ),
-                    "source": "isolated_paper_wallet",
-                    "used_for_paper_sizing": True,
-                }
+            result["exchange_balance"] = exchange_metadata(
+                exchange_balance, paper_trade
+            )
+            if paper_trade:
+                result["paper_balance_source"] = paper_metadata(
+                    getattr(
+                        self,
+                        "_paper_balance",
+                        getattr(self.risk, "balance", 0.0),
+                    )
+                )
             return result
 
         TradingEngine.get_status = status_with_balance_sources
