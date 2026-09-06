@@ -10,6 +10,7 @@ routing are not changed here.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import re
 import time
 
@@ -21,6 +22,9 @@ _RSS_FEEDS = (
     "https://www.theblock.co/rss.xml",
     "https://decrypt.co/feed",
 )
+
+_NEWS_TTL_SECONDS = 1800
+_MAX_FUTURE_SKEW_SECONDS = 300
 
 _RELEVANT_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bbitcoin\b", r"\bbtc\b", r"\bethereum\b", r"\beth\b",
@@ -43,10 +47,34 @@ def _is_relevant_headline(title: str) -> bool:
     return any(pattern.search(text) for pattern in _RELEVANT_PATTERNS)
 
 
+def _entry_published_ts(entry) -> float | None:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not parsed:
+        return None
+    try:
+        return float(calendar.timegm(parsed))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _is_fresh_published_ts(published_ts: float | None, now: float | None = None) -> bool:
+    if published_ts is None or published_ts <= 0:
+        return False
+    current = time.time() if now is None else float(now)
+    age = current - float(published_ts)
+    if age < -_MAX_FUTURE_SKEW_SECONDS:
+        return False
+    return age <= _NEWS_TTL_SECONDS
+
+
 def _headline_score(scoring) -> tuple[int, str]:
     cache = getattr(scoring, "_news_cache", {}) or {}
-    ts = float(cache.get("timestamp", 0) or 0)
-    if ts <= 0 or time.time() - ts > 1800:
+    fetched_ts = float(cache.get("timestamp", 0) or 0)
+    published_ts = float(cache.get("published_at", 0) or 0)
+    now = time.time()
+    if fetched_ts <= 0 or now - fetched_ts > _NEWS_TTL_SECONDS:
+        return 0, "STALE_OR_EMPTY"
+    if not _is_fresh_published_ts(published_ts, now):
         return 0, "STALE_OR_EMPTY"
     classification = str(cache.get("classificacao", "NEUTRO")).upper()
     confidence = max(0.0, min(1.0, float(cache.get("score_confianca", 0) or 0)))
@@ -66,7 +94,7 @@ def install(log):
         return
 
     async def rss_news_reader_loop():
-        """Refresh public, market-relevant headline sentiment every two minutes."""
+        """Refresh fresh, public, market-relevant headline sentiment every two minutes."""
         log.info(
             "[NEWS_CONTEXT] public RSS enabled; no CryptoPanic token required; "
             "sources=CoinDesk,CoinTelegraph,TheBlock,Decrypt"
@@ -77,6 +105,9 @@ def install(log):
                     best = None
                     seen = 0
                     relevant = 0
+                    fresh = 0
+                    dedupe = set()
+                    now = time.time()
                     for feed_url in _RSS_FEEDS:
                         try:
                             async with session.get(
@@ -93,15 +124,23 @@ def install(log):
                                 title = str(entry.get("title", "") or "").strip()
                                 if not title:
                                     continue
+                                dedupe_key = re.sub(r"\s+", " ", title.casefold()).strip()
+                                if dedupe_key in dedupe:
+                                    continue
+                                dedupe.add(dedupe_key)
                                 seen += 1
                                 if not _is_relevant_headline(title):
                                     continue
                                 relevant += 1
+                                published_ts = _entry_published_ts(entry)
+                                if not _is_fresh_published_ts(published_ts, now):
+                                    continue
+                                fresh += 1
                                 classification, confidence, is_fomc = scoring._classify_news(title)
                                 candidate = (
-                                    float(confidence), classification, is_fomc, title
+                                    float(confidence), float(published_ts), classification, is_fomc, title
                                 )
-                                if best is None or candidate[0] > best[0]:
+                                if best is None or candidate[:2] > best[:2]:
                                     best = candidate
                         except Exception as exc:
                             log.debug(
@@ -110,37 +149,42 @@ def install(log):
                                 type(exc).__name__,
                             )
                     if best is not None:
-                        confidence, classification, is_fomc, title = best
+                        confidence, published_ts, classification, is_fomc, title = best
                         impact = 15 if confidence >= 0.8 else 5
                         scoring._news_cache.update({
                             "classificacao": classification,
                             "score_confianca": confidence,
                             "impacto": impact,
                             "timestamp": time.time(),
+                            "published_at": published_ts,
                             "fomc_window": is_fomc,
                             "source": "PUBLIC_RSS",
                             "headline": title[:180],
                         })
+                        age_seconds = max(0, int(time.time() - published_ts))
                         log.info(
                             "[NEWS_CONTEXT] headline sentiment=%s confidence=%.2f "
-                            "fomc=%s title=%s",
+                            "age=%ss fomc=%s title=%s",
                             classification,
                             confidence,
+                            age_seconds,
                             is_fomc,
                             title[:100],
                         )
                     else:
                         log.info(
-                            "[NEWS_CONTEXT] no relevant RSS headline; seen=%s relevant=%s; "
+                            "[NEWS_CONTEXT] no fresh relevant RSS headline; seen=%s relevant=%s fresh=%s; "
                             "headline contribution remains neutral",
                             seen,
                             relevant,
+                            fresh,
                         )
                         scoring._news_cache.update({
                             "classificacao": "NEUTRO",
                             "score_confianca": 0.0,
                             "impacto": 0,
                             "timestamp": time.time(),
+                            "published_at": time.time(),
                             "fomc_window": False,
                             "source": "PUBLIC_RSS",
                             "headline": "",
@@ -174,6 +218,6 @@ def install(log):
     mdata.get_market_sentiment = market_sentiment_with_headlines
     scoring._rss_only_news_hardening = True
     log.info(
-        "[NEWS_CONTEXT] installed: NEXUS market sentiment includes relevant public RSS "
+        "[NEWS_CONTEXT] installed: NEXUS market sentiment includes fresh relevant public RSS "
         "headline score; CryptoPanic token removed from active news path"
     )
