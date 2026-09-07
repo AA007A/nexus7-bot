@@ -23,6 +23,8 @@ def install(log):
             return await original_connect(self, *args, **kwargs)
         self._validation_safety_lock_active = True
         from bot import shadow_live
+        from bot import shadow_integrity_isolation
+        shadow_integrity_isolation.install_for_engine(self, log)
         log.warning(
             "[VALIDATION_LOCK] LIVE mutation blocked; starting read-only SHADOW LIVE pipeline"
         )
