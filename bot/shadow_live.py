@@ -14,6 +14,7 @@ from bot.config import cfg
 from bot.logger import log
 from bot import score as scoring
 from bot import liquidation as liq
+from bot import shadow_balance_semantics as balance_semantics
 from bot.kucoin import TAKER_FEE
 from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.nexus_types import decision_validation_error
@@ -45,11 +46,10 @@ async def connect_readonly(engine) -> bool:
         ping_ok = await engine.client.ping()
         if not ping_ok:
             log.warning("[SHADOW_LIVE] exchange ping failed; continuing with REST read-only checks")
-        balance = await engine.client.get_balance()
-        if balance < 0:
+        state = await balance_semantics.refresh_shadow_risk(engine)
+        if state["equity"] < 0 or state["available"] < 0:
             engine.connected = False; engine.active = False
             return False
-        engine.risk.init(balance); engine.risk.update(balance)
         await engine.client.load_instruments()
         engine.instruments = engine.client.get_instruments()
         await engine._filter_viable_symbols()
@@ -105,19 +105,31 @@ async def evaluate_candidate(engine, sig):
         if not approved:
             return None
 
-        if not await engine._refresh_entry_balance():
+        state = await balance_semantics.refresh_shadow_risk(engine)
+        equity = float(state["equity"])
+        available = float(state["available"])
+        if equity <= 0:
+            log.warning("[SHADOW_LIVE] %s blocked: non-positive account equity", sig.symbol)
             return None
-        fresh_bal = float(engine.risk.balance or 0)
+
         if engine.pilot.enabled:
             qty = minimum_base_quantity(engine.instruments[sig.symbol], sig.entry)
-            required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
-            if fresh_bal <= 0 or required > fresh_bal:
-                return None
         else:
             # Existing/manual positions are intentionally excluded only from
             # hypothetical sizing. Real execution gates remain untouched.
             qty = engine.risk.size(sig.symbol, sig.entry, engine.instruments, open_positions={})
         if qty <= 0:
+            return None
+
+        collateral_ok, required = balance_semantics.collateral_allows(
+            qty, sig.entry, available, cfg.LEVERAGE, TAKER_FEE
+        )
+        if not collateral_ok:
+            log.info(
+                "[SHADOW_LIVE] %s blocked: collateral required=%.4f available=%.4f "
+                "capital_equity=%.4f execution_effect=NONE",
+                sig.symbol, required, available, equity,
+            )
             return None
 
         kl = engine.client.get_cached_klines(sig.symbol, "15", 50)
