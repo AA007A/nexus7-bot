@@ -95,6 +95,13 @@ def install(log):
             return None
         TradingEngine._guard_naked_positions = _guard_locked
 
+    # Observability-only wrapper around the NEXUS call. It records latency and
+    # guarantees a terminal Telegram result while leaving approval criteria and
+    # exchange execution untouched.
+    from bot import nexus_latency_telegram
+    from bot import notifier
+    nexus_latency_telegram.install(TradingEngine, notifier, log)
+
     TradingEngine._validation_safety_lock_patched = True
     log.warning(
         "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE mutations blocked; "
