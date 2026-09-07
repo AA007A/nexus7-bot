@@ -1,6 +1,7 @@
 import json
 import time
 import unittest
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ from bot import database as db
 from bot import durable_execution as durable
 from bot.engine import Position
 from bot.order_state import OrderRegistry, OrderState
+from bot.stagnation_time_hardening import STAGNATION_BARS, bars_since_open
 from bot.strategy import Signal
 
 
@@ -99,6 +101,32 @@ class DurableExecutionRestartTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(restored.qty, 0.25)
         self.assertAlmostEqual(restored.qty_original, 0.5)
         self.assertAlmostEqual(restored.sl, 100.0)
+
+    async def test_opened_at_and_stagnation_age_survive_paper_restart(self):
+        first = _engine()
+        pos = _position()
+        original_opened_at = datetime.utcnow() - timedelta(hours=4, minutes=5)
+        pos.opened_at = original_opened_at
+        first.positions["BTCUSDT"] = pos
+        first._trade_ids["BTCUSDT"] = 88
+        first._paper_balance = 18.0
+        first.risk.peak_balance = 20.0
+        first._durable_order_lock = __import__("asyncio").Lock()
+        first._durable_paper_lock = __import__("asyncio").Lock()
+        first._durable_state_errors = set()
+        first._durable_state_ok = True
+        first._paper_last_snapshot = None
+
+        self.assertTrue(await durable.persist_paper_runtime(first, "before_restart_age"))
+
+        restarted = _engine()
+        self.assertTrue(await durable.restore_engine_state(restarted))
+        restored = restarted.positions["BTCUSDT"]
+
+        self.assertAlmostEqual(
+            restored.opened_at.timestamp(), original_opened_at.timestamp(), delta=0.001
+        )
+        self.assertGreaterEqual(bars_since_open(restored.opened_at), STAGNATION_BARS)
 
     async def test_invalid_position_snapshot_fails_closed(self):
         self.store[durable.PAPER_STATE_KEY] = json.dumps({
