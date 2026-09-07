@@ -3,13 +3,18 @@ import time
 import unittest
 from unittest.mock import patch
 from tests.test_ai_gate import EngineFixture
+from bot.pilot import PILOT_RELEASE_TOKEN
 
 
 class PilotFixture(EngineFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.replace('bot.pilot.PILOT_ENABLED', True)
-        self.account = patch.dict('os.environ', PILOT_ACCOUNT_CONFIRMED='true')
+        self.account = patch.dict(
+            'os.environ',
+            PILOT_ACCOUNT_CONFIRMED='true',
+            PILOT_RELEASE_APPROVED=PILOT_RELEASE_TOKEN,
+        )
         self.account.start()
         self.client._last_ws_update = time.time()
         self.client._order_registry = self.engine.orders  # empty but initialized
