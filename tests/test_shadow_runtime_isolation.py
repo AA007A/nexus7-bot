@@ -1,6 +1,7 @@
 import logging
 import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def _blocked_issue(code):
@@ -60,25 +61,25 @@ def test_isolation_does_not_apply_without_validation_lock():
     assert guard.can_open_new() is False
 
 
-def test_startup_banner_is_rewritten_for_nonpaper(monkeypatch):
+def test_startup_banner_is_rewritten_for_nonpaper():
     from bot import shadow_startup_logging as mod
 
     old_factory = logging.getLogRecordFactory()
     old_installed = mod._INSTALLED
     old_original = mod._ORIGINAL_FACTORY
     try:
-        monkeypatch.setenv("PAPER_TRADE", "false")
-        mod._INSTALLED = False
-        mod._ORIGINAL_FACTORY = None
-        mod.install_preimport()
-        record = logging.getLogRecordFactory()(
-            "test", logging.CRITICAL, __file__, 1,
-            "🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin",
-            (), None,
-        )
-        assert "SHADOW LIVE ATIVO" in record.getMessage()
-        assert "OPERAÇÃO REAL ATIVA" not in record.getMessage()
-        assert record.levelno == logging.WARNING
+        with patch.dict(os.environ, {"PAPER_TRADE": "false"}, clear=False):
+            mod._INSTALLED = False
+            mod._ORIGINAL_FACTORY = None
+            mod.install_preimport()
+            record = logging.getLogRecordFactory()(
+                "test", logging.CRITICAL, __file__, 1,
+                "🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin",
+                (), None,
+            )
+            assert "SHADOW LIVE ATIVO" in record.getMessage()
+            assert "OPERAÇÃO REAL ATIVA" not in record.getMessage()
+            assert record.levelno == logging.WARNING
     finally:
         logging.setLogRecordFactory(old_factory)
         mod._INSTALLED = old_installed
