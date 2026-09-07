@@ -5,6 +5,8 @@ market/account data and exercise the decision pipeline, but it must fail closed
 before any exchange mutation. PAPER mode is unchanged.
 """
 
+SHADOW_MIN_ENTRY_SCORE = 55
+
 
 def install(log):
     from bot.engine import TradingEngine
@@ -16,6 +18,7 @@ def install(log):
     original_open = TradingEngine._open
     original_sync = TradingEngine._sync_positions
     original_update_balance = TradingEngine._update_balance
+    original_effective_score = TradingEngine._effective_score
     original_reconcile = getattr(TradingEngine, "_reconcile_exchange_positions", None)
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
 
@@ -65,10 +68,18 @@ def install(log):
         )
         return state
 
+    def _effective_score_locked(self):
+        if getattr(self, "paper_trade", False):
+            return original_effective_score(self)
+        if getattr(self, "_validation_safety_lock_active", False):
+            return SHADOW_MIN_ENTRY_SCORE
+        return original_effective_score(self)
+
     TradingEngine._connect = _connect_locked
     TradingEngine._open = _open_locked
     TradingEngine._sync_positions = _sync_locked
     TradingEngine._update_balance = _update_balance_locked
+    TradingEngine._effective_score = _effective_score_locked
 
     if original_reconcile is not None:
         async def _reconcile_locked(self, *args, **kwargs):
@@ -87,5 +98,6 @@ def install(log):
     TradingEngine._validation_safety_lock_patched = True
     log.warning(
         "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE mutations blocked; "
-        "SHADOW LIVE read-only analysis enabled"
+        "SHADOW LIVE read-only analysis enabled; shadow_min_entry_score=%s",
+        SHADOW_MIN_ENTRY_SCORE,
     )
