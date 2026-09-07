@@ -1,7 +1,5 @@
 import asyncio
 import inspect
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 from bot import validation_safety_lock
 from bot.engine import TradingEngine
@@ -69,9 +67,8 @@ def test_nonpaper_without_validation_lock_fails_closed():
     assert engine.risk.balance == before
 
 
-def test_paper_delegates_to_original_update(monkeypatch=None):
-    # Static invariant: the wrapper explicitly delegates PAPER to the original
-    # method rather than applying SHADOW-only account-equity semantics.
+def test_paper_delegates_to_original_update():
+    # Static invariant: PAPER continues through the original periodic updater.
     source = inspect.getsource(validation_safety_lock)
     assert 'if getattr(self, "paper_trade", False):' in source
     assert 'return await original_update_balance(self, *args, **kwargs)' in source
