@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from bot import daily_stop_runtime_hardening as daily_runtime
 from bot import selfcheck_entrypoint_hardening as selfcheck_hardening
+from bot.config import cfg
 
 
 class _Log:
@@ -27,11 +28,12 @@ class _Stats:
 
 class _FakeEngine:
     def __init__(self):
-        self.daily_target = 1.0
-        self.daily_stop_loss = 0.60
+        self.daily_target = 0.0
+        self.daily_stop_loss = 0.0
         self.daily_stopped = False
         self.daily_tracker = _Tracker()
         self.stats = _Stats()
+        self.risk = SimpleNamespace(balance=20.0)
         self.positions = {
             "ETHUSDT": SimpleNamespace(pnl=-0.45),
             "SOLUSDT": SimpleNamespace(pnl=0.05),
@@ -43,8 +45,8 @@ class _FakeEngine:
         return "connected"
 
     async def _update_balance(self):
-        self.daily_target = 1.25
-        self.daily_stop_loss = 0.75
+        self.risk.balance = 25.0
+        self.daily_stop_loss = 0.0
         return "updated"
 
     def _check_daily_reset(self):
@@ -54,29 +56,46 @@ class _FakeEngine:
     def _update_daily_pnl(self):
         self.seen_pnl = self.daily_tracker.daily_pnl
         self.seen_stop = self.daily_tracker.daily_stop_loss
-        if self.daily_tracker.daily_pnl <= -self.daily_tracker.daily_stop_loss:
+        if (
+            self.daily_tracker.daily_stop_loss > 0
+            and self.daily_tracker.daily_pnl <= -self.daily_tracker.daily_stop_loss
+        ):
             self.daily_tracker.daily_stopped = True
             self.daily_stopped = True
         return "checked"
 
 
 class DailyStopRuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tracker_receives_engine_limits_and_current_total_pnl(self):
+    async def test_tracker_derives_nonzero_stop_from_current_balance(self):
         daily_runtime.install(_FakeEngine, _Log())
         engine = _FakeEngine()
 
         self.assertEqual(await engine._connect(), "connected")
-        self.assertEqual(engine.daily_tracker.daily_stop_loss, 0.60)
+        expected = round(20.0 * cfg.DAILY_STOP_LOSS_PCT, 2)
+        self.assertGreater(expected, 0.0)
+        self.assertEqual(engine.daily_stop_loss, expected)
+        self.assertEqual(engine.daily_tracker.daily_stop_loss, expected)
 
         self.assertEqual(await engine._update_balance(), "updated")
-        self.assertEqual(engine.daily_tracker.daily_target, 1.25)
-        self.assertEqual(engine.daily_tracker.daily_stop_loss, 0.75)
+        expected_updated = round(25.0 * cfg.DAILY_STOP_LOSS_PCT, 2)
+        self.assertEqual(engine.daily_stop_loss, expected_updated)
+        self.assertEqual(engine.daily_tracker.daily_stop_loss, expected_updated)
+
+    async def test_tracker_receives_realized_plus_unrealized_daily_pnl(self):
+        if getattr(_FakeEngine, "_daily_stop_runtime_hardened", False):
+            engine = _FakeEngine()
+        else:
+            daily_runtime.install(_FakeEngine, _Log())
+            engine = _FakeEngine()
+
+        await engine._connect()
+        engine.risk.balance = 20.0
+        expected_stop = round(20.0 * cfg.DAILY_STOP_LOSS_PCT, 2)
 
         # realized=-0.20, unrealized=-0.40 => current daily PnL=-0.60
-        engine.daily_stop_loss = 0.50
         self.assertEqual(engine._update_daily_pnl(), "checked")
         self.assertAlmostEqual(engine.seen_pnl, -0.60, places=7)
-        self.assertAlmostEqual(engine.seen_stop, 0.50, places=7)
+        self.assertAlmostEqual(engine.seen_stop, expected_stop, places=7)
         self.assertTrue(engine.daily_stopped)
 
 

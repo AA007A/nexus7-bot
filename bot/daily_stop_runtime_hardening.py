@@ -17,11 +17,32 @@ def install(TradingEngine, log):
     orig_update_daily_pnl = TradingEngine._update_daily_pnl
 
     def _sync_limits(engine):
+        from bot.config import cfg
+
         tracker = getattr(engine, "daily_tracker", None)
         if tracker is None:
             return
-        tracker.daily_target = float(getattr(engine, "daily_target", 0.0) or 0.0)
-        tracker.daily_stop_loss = float(getattr(engine, "daily_stop_loss", 0.0) or 0.0)
+
+        balance = float(getattr(getattr(engine, "risk", None), "balance", 0.0) or 0.0)
+        target = float(getattr(engine, "daily_target", 0.0) or 0.0)
+        stop = float(getattr(engine, "daily_stop_loss", 0.0) or 0.0)
+
+        if balance > 0:
+            if float(getattr(cfg, "DAILY_TARGET", 0.0) or 0.0) > 0:
+                target = float(cfg.DAILY_TARGET)
+            else:
+                target = round(balance * float(cfg.DAILY_TARGET_PCT), 2)
+
+            if float(getattr(cfg, "DAILY_STOP_LOSS", 0.0) or 0.0) > 0:
+                stop = float(cfg.DAILY_STOP_LOSS)
+            else:
+                stop = round(balance * float(cfg.DAILY_STOP_LOSS_PCT), 2)
+
+            engine.daily_target = target
+            engine.daily_stop_loss = stop
+
+        tracker.daily_target = target
+        tracker.daily_stop_loss = stop
         tracker.daily_stopped = bool(getattr(engine, "daily_stopped", False))
 
     async def _connect_hardened(self, *args, **kwargs):
