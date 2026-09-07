@@ -19,6 +19,27 @@ from bot.quantity import minimum_base_quantity, validate_base_quantity
 from bot.nexus_types import decision_validation_error
 
 
+def _shadow_ai_reason(nx_dec, validation_reason, approved):
+    """Return an accurate, bounded observability reason without changing decisions."""
+    if approved:
+        return "approved"
+    if validation_reason:
+        return str(validation_reason)
+    if nx_dec is None:
+        return "no_decision"
+    reasoning = getattr(nx_dec, "reasoning", None)
+    if isinstance(reasoning, list):
+        for item in reasoning:
+            if isinstance(item, str) and item.strip():
+                return item.strip()[:240]
+    warnings = getattr(nx_dec, "warnings", None)
+    if isinstance(warnings, list):
+        for item in warnings:
+            if isinstance(item, str) and item.strip():
+                return item.strip()[:240]
+    return "nexus_ai_veto"
+
+
 async def connect_readonly(engine) -> bool:
     try:
         ping_ok = await engine.client.ping()
@@ -79,7 +100,8 @@ async def evaluate_candidate(engine, sig):
             except Exception as exc:
                 decision_source, reason = "exception", type(exc).__name__
         approved = bool(reason is None and nx_dec is not None and nx_dec.execution_allowed is True)
-        log.info("[SHADOW_AI] symbol=%s side=%s decision=%s approved=%s source=%s reason=%s execution_effect=NONE", sig.symbol, sig.direction, "APPROVE" if approved else "REJECT", approved, decision_source, reason or "approved")
+        observed_reason = _shadow_ai_reason(nx_dec, reason, approved)
+        log.info("[SHADOW_AI] symbol=%s side=%s decision=%s approved=%s source=%s reason=%s execution_effect=NONE", sig.symbol, sig.direction, "APPROVE" if approved else "REJECT", approved, decision_source, observed_reason)
         if not approved:
             return None
 
