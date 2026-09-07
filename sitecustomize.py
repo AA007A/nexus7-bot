@@ -35,6 +35,9 @@ try:
     from bot import nexus_grade_display as _nexus_grade_display
     from bot import nexus_zero_observability as _nexus_zero_observability
     from bot import daily_stop_observability as _daily_stop_observability
+    from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
+    from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
+    from bot import selfcheck as _selfcheck
     from bot import news_context_hardening as _news_context_hardening
     from bot import balance_observability as _balance_observability
     from bot import stagnation_time_hardening as _stagnation_time_hardening
@@ -48,6 +51,8 @@ try:
     _rr_precision_hardening.install(_log)
     _scan_summary_hardening.install(_log)
     _daily_stop_observability.install(_log)
+    _daily_stop_runtime_hardening.install(TradingEngine, _log)
+    _selfcheck_entrypoint_hardening.install(_selfcheck, _log)
     _paper_e2e.install(_log)
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
