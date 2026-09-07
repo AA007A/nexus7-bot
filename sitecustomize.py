@@ -40,6 +40,7 @@ try:
     from bot import selfcheck as _selfcheck
     from bot import news_context_hardening as _news_context_hardening
     from bot import balance_observability as _balance_observability
+    from bot import account_balance_observability as _account_balance_observability
     from bot import stagnation_time_hardening as _stagnation_time_hardening
     from bot import pilot_readiness_observability as _pilot_readiness_observability
     from bot import notifier as _notifier
@@ -63,6 +64,7 @@ try:
     _instrument_readiness_guard.install(_log)
     _news_context_hardening.install(_log)
     _balance_observability.install(_log)
+    _account_balance_observability.install(_log)
     _stagnation_time_hardening.install(TradingEngine, _log)
     _pilot_readiness_observability.install(_log)
     _silent_except_audit.audit_silent_excepts(_log)
