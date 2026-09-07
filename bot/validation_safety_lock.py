@@ -21,6 +21,7 @@ def install(log):
     async def _connect_locked(self, *args, **kwargs):
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
+        self._validation_safety_lock_active = True
         from bot import shadow_live
         log.warning(
             "[VALIDATION_LOCK] LIVE mutation blocked; starting read-only SHADOW LIVE pipeline"
@@ -30,6 +31,7 @@ def install(log):
     async def _open_locked(self, sig, *args, **kwargs):
         if getattr(self, "paper_trade", False):
             return await original_open(self, sig, *args, **kwargs)
+        self._validation_safety_lock_active = True
         from bot import shadow_live
         return await shadow_live.evaluate_candidate(self, sig)
 
