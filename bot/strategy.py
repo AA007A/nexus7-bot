@@ -126,6 +126,14 @@ FUNDING_FEE = 0.00010
 TOTAL_COST  = (TAKER_FEE + SLIPPAGE) * 2 + FUNDING_FEE
 
 
+def _rr_from_unrounded_levels(entry: float, raw_sl: float, raw_tp: float) -> float:
+    """Compute R:R before exchange-price rounding can distort the ratio."""
+    risk = abs(raw_sl - entry)
+    if risk <= 0:
+        return 0.0
+    return abs(raw_tp - entry) / risk
+
+
 @dataclass
 class Signal:
     symbol:       str
@@ -664,16 +672,22 @@ class Analyzer:
         # com um floor de 0.5× atr_1h para evitar stops muito apertados.
         sl_atr = max(atr_15, atr_1h * 0.5)
         if direction == "LONG":
-            sl = round(price - sl_atr * sl_mult, 6)
-            tp = round(price + sl_atr * tp_mult, 6)
+            raw_sl = price - sl_atr * sl_mult
+            raw_tp = price + sl_atr * tp_mult
         else:
-            sl = round(price + sl_atr * sl_mult, 6)
-            tp = round(price - sl_atr * tp_mult, 6)
+            raw_sl = price + sl_atr * sl_mult
+            raw_tp = price - sl_atr * tp_mult
 
-        rr = abs(tp - price) / abs(sl - price) if abs(sl - price) > 0 else 0
+        # Gate R:R against the intended, unrounded geometry. Exchange price
+        # precision is applied only after the quality gate so a true 1:2
+        # setup cannot become 1.9998... solely because SL/TP were rounded.
+        rr = _rr_from_unrounded_levels(price, raw_sl, raw_tp)
         if rr < cfg.MIN_RR_RATIO:
-            log.debug(f"[{symbol}] R:R {rr:.2f} < {cfg.MIN_RR_RATIO} → HOLD")
+            log.debug(f"[{symbol}] R:R {rr:.6f} < {cfg.MIN_RR_RATIO} → HOLD")
             return None
+
+        sl = round(raw_sl, 6)
+        tp = round(raw_tp, 6)
 
         # ── PASSO 7: Validação de taxas ─────────────────────────
         cost_pct   = TOTAL_COST * 100
