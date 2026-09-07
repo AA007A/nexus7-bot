@@ -57,7 +57,7 @@ class LivePilotReleaseGateTests(unittest.TestCase):
         ):
             reasons = guard.evaluate(engine, client, "ETHUSDT", ai)
             self.assertTrue(any(x.startswith("2B_RELEASE:") for x in reasons))
-            self.assertFalse(guard.reserve_submission("ETHUSDT"))
+            self.assertFalse(guard.can_open_pilot(engine, client, "ETHUSDT", ai))
             self.assertEqual(guard.state.new_order_submissions_this_session, 0)
 
     def test_exact_release_token_allows_reservation_once(self):
