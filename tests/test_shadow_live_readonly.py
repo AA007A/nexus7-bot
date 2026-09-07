@@ -9,8 +9,11 @@ from bot import shadow_live
 class _Risk:
     def __init__(self):
         self.balance = 0.0
+        self.drawdown = 0.0
+        self._ready = False
     def init(self, balance):
         self.balance = balance
+        self._ready = True
     def update(self, balance):
         self.balance = balance
 
@@ -21,8 +24,21 @@ class _Client:
         self._instruments = {"ETHUSDT": {"minQty": 1, "multiplier": 0.01}}
     async def ping(self):
         return True
+    async def _get(self, path, params=None, auth=False):
+        if path != "/api/v1/account-overview" or auth is not True:
+            raise AssertionError("shadow balance path must be authenticated read-only account overview")
+        return {
+            "currency": "USDT",
+            "accountEquity": "20.0",
+            "marginBalance": "19.5",
+            "availableBalance": "0.4",
+            "unrealisedPNL": "0.5",
+            "positionMargin": "19.6",
+            "orderMargin": "0",
+            "frozenFunds": "0",
+        }
     async def get_balance(self):
-        return 20.0
+        raise AssertionError("legacy availableBalance-only path must not drive SHADOW risk")
     async def load_instruments(self):
         return self._instruments
     def get_instruments(self):
@@ -71,12 +87,13 @@ class ShadowLiveReadOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine.connected)
         self.assertTrue(engine.active)
         self.assertEqual(engine.risk.balance, 20.0)
+        self.assertEqual(engine._shadow_available_balance, 0.4)
         self.assertEqual(client.ws_symbols, ["ETHUSDT"])
         self.assertFalse(client.start_private_websocket_called)
 
     async def test_failed_balance_read_fails_closed(self):
         client = _Client()
-        client.get_balance = AsyncMock(return_value=-1.0)
+        client._get = AsyncMock(side_effect=RuntimeError("account overview unavailable"))
         engine = SimpleNamespace(
             client=client,
             risk=_Risk(),
