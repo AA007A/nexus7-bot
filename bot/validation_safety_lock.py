@@ -15,6 +15,7 @@ def install(log):
     original_connect = TradingEngine._connect
     original_open = TradingEngine._open
     original_sync = TradingEngine._sync_positions
+    original_update_balance = TradingEngine._update_balance
     original_reconcile = getattr(TradingEngine, "_reconcile_exchange_positions", None)
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
 
@@ -42,9 +43,32 @@ def install(log):
             return await original_sync(self, *args, **kwargs)
         return None
 
+    async def _update_balance_locked(self, *args, **kwargs):
+        if getattr(self, "paper_trade", False):
+            return await original_update_balance(self, *args, **kwargs)
+        if not getattr(self, "_validation_safety_lock_active", False):
+            # Independent fail-closed guard: non-PAPER execution is never
+            # allowed to silently inherit SHADOW-only balance semantics.
+            log.critical(
+                "[VALIDATION_LOCK] non-PAPER periodic balance refresh blocked: "
+                "validation lock is not active"
+            )
+            return None
+        from bot import shadow_balance_semantics
+        state = await shadow_balance_semantics.refresh_shadow_risk(self)
+        log.info(
+            "[SHADOW_PERIODIC_BALANCE] equity=%.4f available=%.4f "
+            "drawdown=%.2f%% execution_effect=NONE",
+            float(state["equity"]),
+            float(state["available"]),
+            self.risk.drawdown * 100.0,
+        )
+        return state
+
     TradingEngine._connect = _connect_locked
     TradingEngine._open = _open_locked
     TradingEngine._sync_positions = _sync_locked
+    TradingEngine._update_balance = _update_balance_locked
 
     if original_reconcile is not None:
         async def _reconcile_locked(self, *args, **kwargs):
