@@ -80,6 +80,25 @@ def _rewrite_hold_diagnostic(msg):
     )
 
 
+def _rewrite_shadow_score_threshold(msg):
+    """Align SCORE_STAGE telemetry with the active SHADOW-only threshold.
+
+    The engine's aggregate summary is rendered from cfg.MIN_ENTRY_SCORE, which
+    intentionally remains the production/LIVE default. During validation-held
+    non-PAPER SHADOW execution the effective score is overridden by
+    validation_safety_lock. Rewrite only the displayed threshold so telemetry
+    matches the actual read-only SHADOW gate; trading logic is untouched.
+    """
+    if os.environ.get("PAPER_TRADE", "").strip().lower() != "false":
+        return msg
+    try:
+        from bot.validation_safety_lock import SHADOW_MIN_ENTRY_SCORE
+        shadow_min = int(SHADOW_MIN_ENTRY_SCORE)
+    except Exception:
+        return msg
+    return re.sub(r"\(mín=\d+\)", f"(mín={shadow_min})", msg, count=1)
+
+
 class _ScanSummaryLabelFilter(logging.Filter):
     """Make validation telemetry explicit without altering scan logic."""
 
@@ -101,6 +120,7 @@ class _ScanSummaryLabelFilter(logging.Filter):
                     r"\1 em faixa ≥(mín-5), incluindo ≥mín",
                     msg,
                 )
+                msg = _rewrite_shadow_score_threshold(msg)
             record.msg = msg
             record.args = ()
         except Exception as exc:
