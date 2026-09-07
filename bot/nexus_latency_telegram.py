@@ -65,7 +65,11 @@ def install(TradingEngine, notifier, log):
             elapsed = time.monotonic() - started
             try:
                 data = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
-            except Exception:
+            except Exception as serialization_exc:
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s decision_serialization_failed=%s",
+                    symbol, type(serialization_exc).__name__,
+                )
                 data = {"symbol": symbol}
             data.setdefault("symbol", symbol)
             approved = getattr(decision, "execution_allowed", False) is True
@@ -93,8 +97,11 @@ def install(TradingEngine, notifier, log):
             )
             try:
                 await notifier.notify(_failure_message(symbol, "timeout/cancelled", elapsed))
-            except Exception:
-                pass
+            except Exception as notify_exc:
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false stage=cancelled error=%s",
+                    symbol, type(notify_exc).__name__,
+                )
             raise
         except Exception as exc:
             elapsed = time.monotonic() - started
@@ -106,8 +113,11 @@ def install(TradingEngine, notifier, log):
                 await notifier.notify(
                     _failure_message(symbol, type(exc).__name__, elapsed)
                 )
-            except Exception:
-                pass
+            except Exception as notify_exc:
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false stage=failed error=%s",
+                    symbol, type(notify_exc).__name__,
+                )
             raise
 
     TradingEngine._nexus_validate = _validate_with_latency
