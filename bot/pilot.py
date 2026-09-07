@@ -11,14 +11,23 @@ ORDEM DAS BARREIRAS (todas precisam passar):
     3. viable_symbols não vazio                    (bot/engine.py)
     4. RiskManager.can_open()                      (bot/risk.py)
     5. NEXUS AI approval                           (bot/engine.py)
-    6. ESTE MÓDULO — 14 pré-condições do piloto
+    6. ESTE MÓDULO — pré-condições do piloto
 
 ATIVAÇÃO: REAL_TRADING_PILOT=true, efetivo somente fora de PAPER.
+Além disso, uma abertura real no piloto exige uma autorização de release
+separada da confirmação da conta:
 
-Sem essa variável o módulo fica inerte: não bloqueia nem libera nada,
-o comportamento é exatamente o de antes. Em PAPER ele também fica
-inerte, porque as 14 pré-condições pertencem exclusivamente ao piloto
-real (por exemplo private order WS e confirmação humana da conta).
+    PILOT_RELEASE_APPROVED=I_APPROVE_ONE_LIVE_PILOT_ORDER
+
+A ausência ou divergência desse token bloqueia a abertura real no gate
+`can_open_pilot()`, que o engine executa antes de sizing e dispatch. Esta
+camada permanece fail-closed mesmo depois da remoção futura do
+VALIDATION_LOCK.
+
+Sem REAL_TRADING_PILOT o módulo fica inerte: não bloqueia nem libera nada,
+o comportamento é exatamente o de antes. Em PAPER ele também fica inerte,
+porque as pré-condições pertencem exclusivamente ao piloto real (por exemplo
+private order WS e confirmação humana da conta).
 Com piloto real efetivo, aplica limites mais restritivos que o normal
 (1 posição, 1 ordem por sessão).
 
@@ -35,11 +44,17 @@ from bot.logger import log
 
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
+PILOT_RELEASE_TOKEN = "I_APPROVE_ONE_LIVE_PILOT_ORDER"
 
 
 def _paper_trade_enabled() -> bool:
     """Read PAPER_TRADE at decision time so runtime/test patches stay authoritative."""
     return os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
+
+
+def _release_approved() -> bool:
+    """A distinct, explicit release authorization for exactly one pilot session."""
+    return os.environ.get("PILOT_RELEASE_APPROVED", "").strip() == PILOT_RELEASE_TOKEN
 
 
 # Limites do piloto — deliberadamente mais restritivos que a config normal
@@ -63,7 +78,7 @@ class PilotState:
 
 
 class PilotGuard:
-    """Aplica as 14 pré-condições somente ao piloto de dinheiro real."""
+    """Aplica pré-condições adicionais somente ao piloto de dinheiro real."""
 
     def __init__(self):
         self.state = PilotState()
@@ -79,7 +94,13 @@ class PilotGuard:
         return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Consume the real-pilot session BEFORE sending; never refunded."""
+        """Consume the real-pilot session BEFORE sending; never refunded.
+
+        The release authorization is enforced earlier by can_open_pilot(),
+        which is the mandatory engine entry path. Keeping reservation focused
+        on atomic session consumption preserves its low-level idempotency
+        contract and existing direct unit tests.
+        """
         if not self.enabled:
             return True
         with self._submission_lock:
@@ -121,6 +142,15 @@ class PilotGuard:
                     "2_ACCOUNT: conta real não confirmada — defina "
                     "PILOT_ACCOUNT_CONFIRMED=true após verificar que as "
                     "credenciais pertencem à conta pretendida"
+                )
+
+            # 2B. Release explícito e separado da confirmação da conta.
+            # Isto impede que variáveis antigas deixadas no Railway sejam
+            # suficientes para liberar uma nova sessão piloto por acidente.
+            if not _release_approved():
+                r.append(
+                    "2B_RELEASE: autorização explícita do piloto ausente; "
+                    "PILOT_RELEASE_APPROVED deve corresponder ao token de release"
                 )
 
             # 3. Saldo Futures USDT > 0
@@ -222,7 +252,7 @@ class PilotGuard:
         return r
 
     def can_open_pilot(self, engine, client, symbol: str, ai_decision=None) -> bool:
-        """True outside an effective real pilot; otherwise all 14 gates must pass."""
+        """True outside an effective real pilot; otherwise all gates must pass."""
         if not self.enabled:
             # Clear stale real-pilot diagnostics so PAPER status cannot claim it
             # is blocked by a gate that is intentionally inapplicable.
@@ -253,6 +283,7 @@ class PilotGuard:
             "pilot_configured": PILOT_ENABLED,
             "pilot_enabled": self.enabled,
             "paper_trade": _paper_trade_enabled(),
+            "release_approved": _release_approved(),
             "max_concurrent_positions": PILOT_MAX_CONCURRENT_POSITIONS,
             "max_new_order_submissions_session": MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
             "new_order_submissions_this_session": self.state.new_order_submissions_this_session,
