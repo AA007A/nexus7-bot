@@ -13,6 +13,9 @@ import time
 builtins._nexus_sitecustomize_status = "installing"
 
 try:
+    from bot import shadow_startup_logging as _shadow_startup_logging
+    _shadow_startup_logging.install_preimport()
+
     from bot.engine import TradingEngine
     from bot.strategy import Analyzer
     from bot import nexus_persistence as _np
