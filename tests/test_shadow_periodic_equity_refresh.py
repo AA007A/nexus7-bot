@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 from bot import validation_safety_lock
 from bot.engine import TradingEngine
@@ -32,6 +33,17 @@ class _Client:
         }
 
 
+class _Log:
+    def info(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def critical(self, *args, **kwargs):
+        pass
+
+
 def _engine_for_update(paper_trade=False, locked=True):
     obj = object.__new__(TradingEngine)
     obj.paper_trade = paper_trade
@@ -39,6 +51,14 @@ def _engine_for_update(paper_trade=False, locked=True):
     obj.risk = _Risk()
     obj.client = _Client()
     return obj
+
+
+def _install_patch_once():
+    # In the offline suite sitecustomize may already have installed the patch.
+    # If not, install it explicitly so this test validates the runtime wrapper,
+    # not the unpatched engine implementation.
+    if not getattr(TradingEngine, "_validation_safety_lock_patched", False):
+        validation_safety_lock.install(_Log())
 
 
 def test_patch_source_contains_no_exchange_mutation_calls():
@@ -52,14 +72,18 @@ def test_patch_source_contains_no_exchange_mutation_calls():
 
 
 def test_nonpaper_periodic_refresh_uses_equity_not_available():
+    _install_patch_once()
     engine = _engine_for_update(False, True)
-    asyncio.run(TradingEngine._update_balance(engine))
+    state = asyncio.run(TradingEngine._update_balance(engine))
+    assert state["equity"] == 20.0
+    assert state["available"] == 0.4
     assert engine.risk.balance == 20.0
     assert engine.risk.drawdown == 0.0
     assert engine._shadow_available_balance == 0.4
 
 
 def test_nonpaper_without_validation_lock_fails_closed():
+    _install_patch_once()
     engine = _engine_for_update(False, False)
     before = engine.risk.balance
     result = asyncio.run(TradingEngine._update_balance(engine))
@@ -68,7 +92,8 @@ def test_nonpaper_without_validation_lock_fails_closed():
 
 
 def test_paper_delegates_to_original_update():
-    # Static invariant: PAPER continues through the original periodic updater.
+    # Static invariant: the wrapper explicitly delegates PAPER to the original
+    # method rather than applying SHADOW-only account-equity semantics.
     source = inspect.getsource(validation_safety_lock)
     assert 'if getattr(self, "paper_trade", False):' in source
     assert 'return await original_update_balance(self, *args, **kwargs)' in source
