@@ -26,18 +26,15 @@ def install_preimport():
 
     def _factory(*args, **kwargs):
         record = _ORIGINAL_FACTORY(*args, **kwargs)
-        try:
-            msg = record.getMessage()
-            if "OPERAÇÃO REAL ATIVA" in msg:
-                record.msg = (
-                    "🟣 SHADOW LIVE ATIVO — leitura/análise real; "
-                    "mutações de exchange bloqueadas pelo VALIDATION_LOCK"
-                )
-                record.args = ()
-                record.levelno = logging.WARNING
-                record.levelname = "WARNING"
-        except Exception:
-            pass
+        msg = record.getMessage()
+        if "OPERAÇÃO REAL ATIVA" in msg:
+            record.msg = (
+                "🟣 SHADOW LIVE ATIVO — leitura/análise real; "
+                "mutações de exchange bloqueadas pelo VALIDATION_LOCK"
+            )
+            record.args = ()
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
         return record
 
     logging.setLogRecordFactory(_factory)
