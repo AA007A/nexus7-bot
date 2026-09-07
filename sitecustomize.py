@@ -37,6 +37,7 @@ try:
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import news_context_hardening as _news_context_hardening
     from bot import balance_observability as _balance_observability
+    from bot import stagnation_time_hardening as _stagnation_time_hardening
     from bot import notifier as _notifier
     from bot.logger import log as _log
 
@@ -56,6 +57,7 @@ try:
     _instrument_readiness_guard.install(_log)
     _news_context_hardening.install(_log)
     _balance_observability.install(_log)
+    _stagnation_time_hardening.install(TradingEngine, _log)
     _silent_except_audit.audit_silent_excepts(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
