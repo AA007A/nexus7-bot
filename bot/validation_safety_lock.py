@@ -1,11 +1,8 @@
-"""Temporary validation safety lock.
+"""Validation safety lock with read-only SHADOW LIVE support.
 
-While NEXUS-7 is undergoing PAPER validation, any runtime that starts with
-PAPER_TRADE disabled must fail closed before exchange-facing engine activity.
-This does not change Railway variables and does not affect PAPER mode.
-
-Remove this module from sitecustomize only after validation is complete and a
-separate, explicit live-readiness decision is made.
+When PAPER_TRADE is disabled during validation, the runtime may consume live
+market/account data and exercise the decision pipeline, but it must fail closed
+before any exchange mutation. PAPER mode is unchanged.
 """
 
 
@@ -24,19 +21,17 @@ def install(log):
     async def _connect_locked(self, *args, **kwargs):
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
-        self.active = False
-        self.connected = False
-        log.critical(
-            "[VALIDATION_LOCK] LIVE runtime blocked: PAPER validation is not complete; "
-            "no exchange-facing engine connection will be started"
+        from bot import shadow_live
+        log.warning(
+            "[VALIDATION_LOCK] LIVE mutation blocked; starting read-only SHADOW LIVE pipeline"
         )
-        return False
+        return await shadow_live.connect_readonly(self)
 
-    async def _open_locked(self, *args, **kwargs):
+    async def _open_locked(self, sig, *args, **kwargs):
         if getattr(self, "paper_trade", False):
-            return await original_open(self, *args, **kwargs)
-        log.critical("[VALIDATION_LOCK] real order opening blocked")
-        return None
+            return await original_open(self, sig, *args, **kwargs)
+        from bot import shadow_live
+        return await shadow_live.evaluate_candidate(self, sig)
 
     async def _sync_locked(self, *args, **kwargs):
         if getattr(self, "paper_trade", False):
@@ -63,5 +58,6 @@ def install(log):
 
     TradingEngine._validation_safety_lock_patched = True
     log.warning(
-        "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE engine activity blocked"
+        "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE mutations blocked; "
+        "SHADOW LIVE read-only analysis enabled"
     )
