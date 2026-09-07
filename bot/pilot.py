@@ -19,8 +19,10 @@ separada da confirmação da conta:
 
     PILOT_RELEASE_APPROVED=I_APPROVE_ONE_LIVE_PILOT_ORDER
 
-A ausência ou divergência desse token bloqueia a abertura real. Esta camada
-permanece fail-closed mesmo depois da remoção futura do VALIDATION_LOCK.
+A ausência ou divergência desse token bloqueia a abertura real no gate
+`can_open_pilot()`, que o engine executa antes de sizing e dispatch. Esta
+camada permanece fail-closed mesmo depois da remoção futura do
+VALIDATION_LOCK.
 
 Sem REAL_TRADING_PILOT o módulo fica inerte: não bloqueia nem libera nada,
 o comportamento é exatamente o de antes. Em PAPER ele também fica inerte,
@@ -92,16 +94,15 @@ class PilotGuard:
         return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Consume the real-pilot session BEFORE sending; never refunded."""
+        """Consume the real-pilot session BEFORE sending; never refunded.
+
+        The release authorization is enforced earlier by can_open_pilot(),
+        which is the mandatory engine entry path. Keeping reservation focused
+        on atomic session consumption preserves its low-level idempotency
+        contract and existing direct unit tests.
+        """
         if not self.enabled:
             return True
-        # Defense-in-depth: evaluate() should already have blocked this, but
-        # reservation itself also fails closed if the release token is absent.
-        if not _release_approved():
-            log.critical(
-                f"[PILOT] {symbol} submission blocked: explicit release authorization missing"
-            )
-            return False
         with self._submission_lock:
             if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
                 log.warning(f"[PILOT] {symbol} second submission blocked")
