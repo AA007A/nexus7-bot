@@ -1,64 +1,25 @@
 """SHADOW-only account balance semantics.
 
-Separates capital-health equity from free collateral while validation lock keeps
-all exchange mutations disabled. This module performs authenticated read-only
-account-overview reads only.
+Delegates validated read-only account parsing and collateral math to the shared
+account balance semantics module, while keeping SHADOW-specific engine state and
+observability here.
 """
-import math
-
 from bot.logger import log
-
-
-_FIELDS = (
-    "accountEquity",
-    "marginBalance",
-    "availableBalance",
-    "unrealisedPNL",
-    "positionMargin",
-    "orderMargin",
-    "frozenFunds",
-)
-
-
-def _finite_number(value, name):
-    if isinstance(value, bool):
-        raise ValueError(f"{name} boolean")
-    out = float(value)
-    if not math.isfinite(out):
-        raise ValueError(f"{name} nonfinite")
-    return out
+from bot import account_balance_semantics as account_semantics
 
 
 async def read_account_state(client):
-    """Return validated account equity and available collateral, read-only."""
-    data = await client._get(
-        "/api/v1/account-overview", {"currency": "USDT"}, auth=True
-    )
-    if not isinstance(data, dict):
-        raise RuntimeError("account overview unavailable")
-
-    equity = _finite_number(data.get("accountEquity"), "accountEquity")
-    available = _finite_number(data.get("availableBalance"), "availableBalance")
-    if equity < 0 or available < 0:
-        raise RuntimeError("negative account balance")
-
-    state = {key: data.get(key) for key in _FIELDS}
-    state["equity"] = equity
-    state["available"] = available
-    state["currency"] = data.get("currency") or "USDT"
-    return state
+    """Compatibility wrapper for SHADOW callers/tests."""
+    return await account_semantics.read_account_state(client)
 
 
 async def refresh_shadow_risk(engine):
     """Update RiskManager capital health from equity, not free collateral."""
-    state = await read_account_state(engine.client)
+    state = await account_semantics.read_account_state(engine.client)
     equity = state["equity"]
     available = state["available"]
 
-    if not getattr(engine.risk, "_ready", False):
-        engine.risk.init(equity)
-    else:
-        engine.risk.update(equity)
+    account_semantics.update_risk_from_equity(engine.risk, equity)
 
     engine._shadow_available_balance = available
     engine._shadow_account_equity = equity
@@ -76,8 +37,7 @@ async def refresh_shadow_risk(engine):
 
 
 def collateral_allows(qty, entry, available, leverage, fee_rate):
-    """Conservative collateral sufficiency check for a hypothetical order."""
-    if qty <= 0 or entry <= 0 or available <= 0 or leverage <= 0:
-        return False, float("inf")
-    required = qty * entry * (1.0 / leverage + fee_rate)
-    return required <= available, required
+    """Compatibility wrapper for SHADOW hypothetical-order collateral checks."""
+    return account_semantics.collateral_allows(
+        qty, entry, available, leverage, fee_rate
+    )
