@@ -1,0 +1,1 @@
+This file intentionally contains no operational instructions and does not authorize live trading. It documents the final read-only diagnostic scope only.
