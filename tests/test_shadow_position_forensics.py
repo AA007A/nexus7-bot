@@ -16,27 +16,33 @@ class _Log:
         self.messages.append(("error", args))
 
 
-class _Client:
-    async def get_positions(self):
-        return [{
-            "symbol": "ADAUSDT", "side": "Buy", "size": 10,
-            "entryPrice": 0.40, "markPrice": 0.35,
-            "liquidationPrice": 0.30, "leverage": 10,
-            "unrealisedPnl": -0.5, "posMargin": 2.0,
-            "stopLoss": 0.0, "takeProfit": 0.0,
-        }]
+def _client_class():
+    class Client:
+        async def get_positions(self):
+            return [{
+                "symbol": "ADAUSDT", "side": "Buy", "size": 10,
+                "entryPrice": 0.40, "markPrice": 0.35,
+                "liquidationPrice": 0.30, "leverage": 10,
+                "unrealisedPnl": -0.5, "posMargin": 2.0,
+                "stopLoss": 0.0, "takeProfit": 0.0,
+            }]
+    return Client
 
 
 class ShadowPositionForensicsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        if hasattr(_Client, "_shadow_position_forensics_installed"):
-            delattr(_Client, "_shadow_position_forensics_installed")
         self.log = _Log()
-        shadow_position_forensics.install(SimpleNamespace(KuCoinClient=_Client), self.log)
+        self.Client = _client_class()
+        shadow_position_forensics.install(
+            SimpleNamespace(KuCoinClient=self.Client), self.log
+        )
+
+    async def asyncTearDown(self):
+        builtins._validation_safety_lock_active = False
 
     async def test_shadow_logs_normalized_forensics(self):
         builtins._validation_safety_lock_active = True
-        c = _Client()
+        c = self.Client()
         rows = await c.get_positions()
         self.assertEqual(rows[0]["symbol"], "ADAUSDT")
         warnings = [m for level, m in self.log.messages if level == "warning"]
@@ -44,7 +50,7 @@ class ShadowPositionForensicsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_outside_shadow_is_passthrough(self):
         builtins._validation_safety_lock_active = False
-        c = _Client()
+        c = self.Client()
         rows = await c.get_positions()
         self.assertEqual(len(rows), 1)
         warnings = [m for level, m in self.log.messages if level == "warning"]
