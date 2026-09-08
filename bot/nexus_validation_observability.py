@@ -1,0 +1,54 @@
+"""Post-decision observability for TradingEngine._nexus_validate.
+
+The canonical NEXUS validation method always runs first. This decorator then
+records decision history / zero-veto diagnostics and schedules rejected-decision
+notification as best-effort telemetry. It always returns the exact decision
+object produced by the canonical method.
+
+No strategy threshold, execution permission, exchange mutation, release state,
+or risk rule is changed here.
+"""
+from __future__ import annotations
+
+import asyncio
+from functools import wraps
+
+from bot import nexus_persistence
+from bot import nexus_zero_observability
+from bot import notifier
+from bot.logger import log
+
+
+def observe_nexus_validation(method):
+    """Decorate a canonical async NEXUS validator without changing its result."""
+    @wraps(method)
+    async def wrapped(self, sig, *args, **kwargs):
+        decision = await method(self, sig, *args, **kwargs)
+
+        nexus_zero_observability.observe(decision, log)
+
+        try:
+            await nexus_persistence.record_decision(sig, decision)
+            asyncio.create_task(nexus_persistence.evaluate_pending(self.client))
+        except Exception as exc:
+            log.debug(
+                "[NEXUS_PERSISTENCE] best_effort_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
+        try:
+            if getattr(decision, "execution_allowed", False) is not True:
+                asyncio.create_task(
+                    notifier.notify_nexus(decision.to_dict(), approved=False)
+                )
+        except Exception as exc:
+            log.debug(
+                "[NEXUS_NOTIFY] best_effort_schedule_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
+        return decision
+
+    return wrapped
