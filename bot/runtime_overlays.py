@@ -17,7 +17,6 @@ def install(TradingEngine, Analyzer, log) -> None:
     """Install legacy-compatible overlays exactly once per owning component."""
     from bot import funnel_metrics as fm
     from bot import mtf_shadow as ms
-    from bot import nexus_decision_dedupe
     from bot import nexus_persistence as np
     from bot import nexus_zero_observability
     from bot import notifier
@@ -71,7 +70,6 @@ def install(TradingEngine, Analyzer, log) -> None:
 
     if not getattr(TradingEngine, "_nexus_persistence_patched", False):
         orig_validate = TradingEngine._nexus_validate
-        orig_status = getattr(TradingEngine, "get_status", None)
 
         async def validate_with_history(self, sig):
             dec = await orig_validate(self, sig)
@@ -99,45 +97,6 @@ def install(TradingEngine, Analyzer, log) -> None:
             return dec
 
         TradingEngine._nexus_validate = validate_with_history
-
-        if orig_status is not None:
-            def status_with_nexus_metrics(self, *args, **kwargs):
-                out = orig_status(self, *args, **kwargs)
-                try:
-                    if isinstance(out, dict):
-                        out = dict(out)
-                        out["nexus_persistent_metrics"] = np.get_cached_metrics()
-                        out["funnel_metrics"] = fm.get_funnel_metrics()
-                        out["mtf_shadow_metrics"] = ms.snapshot()
-                        out["nexus_dedupe_metrics"] = nexus_decision_dedupe.snapshot()
-                        if getattr(self, "paper_trade", False):
-                            out["paper_wallet"] = {
-                                "balance": round(
-                                    float(
-                                        getattr(
-                                            self,
-                                            "_paper_balance",
-                                            self.risk.balance,
-                                        ) or 0.0
-                                    ),
-                                    4,
-                                ),
-                                "drawdown_pct": round(
-                                    float(self.risk.drawdown) * 100.0,
-                                    2,
-                                ),
-                                "isolated_from_exchange": True,
-                            }
-                except Exception as exc:
-                    log.debug(
-                        "[STATUS_OBSERVABILITY] best_effort_failed error=%s "
-                        "decision_effect=NONE execution_effect=NONE",
-                        type(exc).__name__,
-                    )
-                return out
-
-            TradingEngine.get_status = status_with_nexus_metrics
-
         TradingEngine._nexus_persistence_patched = True
 
     log.info(
