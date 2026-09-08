@@ -13,60 +13,16 @@ from __future__ import annotations
 import asyncio
 
 
-def install(TradingEngine, Analyzer, log) -> None:
-    """Install legacy-compatible overlays exactly once per owning component."""
+def install(TradingEngine, log) -> None:
+    """Install the remaining legacy-compatible engine overlay exactly once."""
     from bot import funnel_metrics as fm
-    from bot import mtf_shadow as ms
     from bot import nexus_persistence as np
     from bot import nexus_zero_observability
     from bot import notifier
 
     # NEXUS persistence I/O serialization now lives in nexus_persistence core.
-    # This overlay no longer replaces np._execute or np._fetchall.
+    # MTF shadow observation now lives at the Analyzer method definition.
     fm.install(log)
-
-    if not getattr(Analyzer, "_mtf_shadow_patched", False):
-        orig_analyze_mtf = Analyzer.analyze_mtf
-
-        def analyze_mtf_with_shadow(self, symbol, k15, k1h, k4h,
-                                    min_score=60, fee_mult=2.0, vol_mult=1.0):
-            result = orig_analyze_mtf(
-                self, symbol, k15, k1h, k4h,
-                min_score=min_score,
-                fee_mult=fee_mult,
-                vol_mult=vol_mult,
-            )
-            try:
-                before = ms.snapshot().get("unique_states", 0)
-                ms.observe(
-                    symbol, k15, k1h, k4h,
-                    production_result=result,
-                    min_score=min_score,
-                    fee_mult=fee_mult,
-                    vol_mult=vol_mult,
-                )
-                snap = ms.snapshot()
-                unique = snap.get("unique_states", 0)
-                if unique != before and (unique == 1 or unique % 25 == 0):
-                    log.info(
-                        "[MTF_SHADOW] unique=%s eligible=%s survivors=%s "
-                        "nexus_approved=%s nexus_vetoed=%s execution_effect=NONE",
-                        unique,
-                        snap.get("eligible_4h_dir_1h_neutral", 0),
-                        snap.get("shadow_pre_ai_survivors", 0),
-                        snap.get("shadow_nexus_approved", 0),
-                        snap.get("shadow_nexus_vetoed", 0),
-                    )
-            except Exception as exc:
-                log.debug(
-                    "[MTF_SHADOW] observability_failed error=%s "
-                    "decision_effect=NONE execution_effect=NONE",
-                    type(exc).__name__,
-                )
-            return result
-
-        Analyzer.analyze_mtf = analyze_mtf_with_shadow
-        Analyzer._mtf_shadow_patched = True
 
     if not getattr(TradingEngine, "_nexus_persistence_patched", False):
         orig_validate = TradingEngine._nexus_validate

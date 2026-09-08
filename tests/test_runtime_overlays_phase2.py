@@ -7,21 +7,21 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_runtime_bootstrap_delegates_transitional_overlays():
     text = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
     assert "from bot import runtime_overlays as _runtime_overlays" in text
-    assert "_runtime_overlays.install(TradingEngine, Analyzer, _log)" in text
+    assert "_runtime_overlays.install(TradingEngine, _log)" in text
+    assert "from bot.strategy import Analyzer" not in text
     assert "TradingEngine._nexus_validate =" not in text
     assert "Analyzer.analyze_mtf =" not in text
     assert "_np._execute" not in text
     assert "asyncio.Lock" not in text
 
 
-def test_runtime_overlays_preserve_remaining_idempotency_boundaries():
+def test_runtime_overlays_preserve_only_remaining_engine_patch_boundary():
     text = (ROOT / "bot" / "runtime_overlays.py").read_text(encoding="utf-8")
-    for marker in (
-        "_mtf_shadow_patched",
-        "_nexus_persistence_patched",
-        "[RUNTIME_OVERLAYS] installed transitional overlays",
-    ):
-        assert marker in text
+    assert "_nexus_persistence_patched" in text
+    assert "[RUNTIME_OVERLAYS] installed transitional overlays" in text
+    assert "_mtf_shadow_patched" not in text
+    assert "Analyzer.analyze_mtf =" not in text
+    assert "from bot import mtf_shadow" not in text
 
 
 def test_persistence_serialization_is_not_monkey_patched_by_overlay():

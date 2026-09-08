@@ -20,7 +20,6 @@ def install() -> None:
     _shadow_startup_logging.install_preimport()
 
     from bot.engine import TradingEngine
-    from bot.strategy import Analyzer
     from bot import runtime_hardening as _rh
     from bot import runtime_overlays as _runtime_overlays
     from bot import paper_e2e as _paper_e2e
@@ -78,7 +77,7 @@ def install() -> None:
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
 
-    _runtime_overlays.install(TradingEngine, Analyzer, _log)
+    _runtime_overlays.install(TradingEngine, _log)
 
     builtins._nexus_runtime_bootstrap_installed = True
     _log.info(
