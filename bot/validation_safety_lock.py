@@ -26,6 +26,7 @@ def install(log):
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
         self._validation_safety_lock_active = True
+        self._shadow_prelive_readonly_ready = False
         from bot import shadow_live
         from bot import shadow_integrity_isolation
         shadow_integrity_isolation.install_for_engine(self, log)
@@ -35,13 +36,32 @@ def install(log):
         connected = await shadow_live.connect_readonly(self)
         if connected:
             from bot import private_ws_readonly_observability
-            await private_ws_readonly_observability.run(self.client, self.instruments, log)
+            self._shadow_prelive_readonly_ready = bool(
+                await private_ws_readonly_observability.run(
+                    self.client, self.instruments, log
+                )
+            )
+            log.warning(
+                "[SHADOW_PRELIVE_READINESS] result=%s exposure_verified=%s "
+                "exposure_clear=%s private_ws=%s execution_effect=NONE",
+                "PASS" if self._shadow_prelive_readonly_ready else "BLOCKED",
+                getattr(self.client, "_prelive_account_exposure_verified", False),
+                getattr(self.client, "_prelive_account_exposure_clear", False),
+                getattr(self.client, "_prelive_private_ws_probe_ok", False),
+            )
         return connected
 
     async def _open_locked(self, sig, *args, **kwargs):
         if getattr(self, "paper_trade", False):
             return await original_open(self, sig, *args, **kwargs)
         self._validation_safety_lock_active = True
+        if not getattr(self, "_shadow_prelive_readonly_ready", False):
+            log.warning(
+                "[SHADOW_GATE] symbol=%s stage=ACCOUNT_EXPOSURE result=BLOCK "
+                "reason=prelive_readonly_not_clear execution_effect=NONE",
+                getattr(sig, "symbol", "?"),
+            )
+            return None
         from bot import shadow_live
         return await shadow_live.evaluate_candidate(self, sig)
 
