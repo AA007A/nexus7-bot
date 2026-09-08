@@ -17,6 +17,7 @@ from bot.indicators import (
 )
 from bot.logger import log
 from bot.config import cfg
+from bot.mtf_strategy_observability import observe_analyze_mtf
 
 
 
@@ -516,6 +517,7 @@ def score_tf(closes, highs, lows, opens, volumes, direction,
 
 # ─── Analyzer Principal ───────────────────────────────────────────
 class Analyzer:
+    @observe_analyze_mtf
     def analyze_mtf(self, symbol, k15, k1h, k4h,
                     min_score=60, fee_mult=2.0, vol_mult=1.0) -> Optional[Signal]:
         if len(k4h) < 10 or len(k1h) < 15 or len(k15) < 20:
