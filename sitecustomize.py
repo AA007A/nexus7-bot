@@ -7,8 +7,6 @@ changing live trading mode or bypassing the mandatory NEXUS gate.
 import asyncio
 import builtins
 import sys
-import threading
-import time
 
 builtins._nexus_sitecustomize_status = "installing"
 
@@ -21,7 +19,6 @@ try:
     from bot import nexus_persistence as _np
     from bot import funnel_metrics as _fm
     from bot import mtf_shadow as _ms
-    from bot import logger as _logger
     from bot import runtime_hardening as _rh
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
@@ -95,23 +92,6 @@ try:
         _np._execute = _np_execute_serialized
         _np._fetchall = _np_fetchall_serialized
         _np._single_conn_serialized = True
-
-    if not getattr(_logger, "_audit_pacing_patched", False):
-        _orig_enqueue = _logger._enqueue
-        _audit_lock = threading.Lock()
-        _audit_last = [0.0]
-        _audit_min_interval = 1.5
-
-        def _paced_enqueue(text):
-            now = time.monotonic()
-            with _audit_lock:
-                if now - _audit_last[0] < _audit_min_interval:
-                    return
-                _audit_last[0] = now
-            return _orig_enqueue(text)
-
-        _logger._enqueue = _paced_enqueue
-        _logger._audit_pacing_patched = True
 
     _fm.install(_log)
 

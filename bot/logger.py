@@ -18,6 +18,13 @@ _AI_METRICS = {"started_at": time.time(), "total": 0, "approved": 0, "rejected":
 _AI_METRICS_EVERY = max(1, int(os.environ.get("NEXUS_METRICS_EVERY", "10")))
 _FUNNEL_METRICS_EVERY = max(10, int(os.environ.get("NEXUS_FUNNEL_METRICS_EVERY", "50")))
 
+# Core observability pacing. This used to be injected by sitecustomize by
+# replacing _enqueue at runtime. Keeping it here preserves the exact 1.5s
+# delivery pacing while removing one monkey patch from application startup.
+_AUDIT_PACING_LOCK = threading.Lock()
+_AUDIT_LAST_ENQUEUE = 0.0
+_AUDIT_MIN_INTERVAL = 1.5
+
 _AI_DECISION_RE = re.compile(r"^\[AI_DECISION\]\s+symbol=(?P<symbol>\S+)\s+side=(?P<side>\S+)\s+decision=(?P<decision>\S+)\s+approved=(?P<approved>\S+)\s+decision_source=(?P<source>\S+)\s+score=(?P<score>\S+)\s+confidence=(?P<confidence>\S+)\s+ts=(?P<ts>\S+)\s+reason=(?P<reason>.*)$")
 _FUNNEL_SESSION_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO no ajuste de sessão: (?P<score_before>[-+\d.]+)→(?P<score>[-+\d.]+) < (?P<minimum>[-+\d.]+) \(sessão (?P<session>[^)]+)\)$")
 _FUNNEL_REGIME_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO pelo regime: (?P<side>\S+) não permitido em (?P<regime>\S+) \(score era (?P<score>[-+\d.]+)\)$")
@@ -136,6 +143,12 @@ def _ensure_tg_worker():
         threading.Thread(target=_tg_worker,name="nexus-decision-telegram-audit",daemon=True).start(); _AI_TG_WORKER_STARTED=True
 
 def _enqueue(text):
+    global _AUDIT_LAST_ENQUEUE
+    now = time.monotonic()
+    with _AUDIT_PACING_LOCK:
+        if now - _AUDIT_LAST_ENQUEUE < _AUDIT_MIN_INTERVAL:
+            return
+        _AUDIT_LAST_ENQUEUE = now
     _ensure_tg_worker()
     try: _AI_TG_QUEUE.put_nowait(text)
     except queue.Full: _diag("Telegram observability queue full; message dropped")
