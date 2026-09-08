@@ -1,0 +1,1 @@
+PR scope note: read-only forensic observability only. No execution permission, exchange mutation, strategy threshold, sizing, risk limit, Railway variable, or release token change.
