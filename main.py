@@ -19,7 +19,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON
 # ─────────────────────────────────────────────────────────────────
 
-from bot.engine import TradingEngine
+from bot.nexus_runtime_engine import TradingEngine
 from bot.config import cfg
 from bot.logger import log
 from bot import database as db
@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
     # servidor, consumindo slots do pool.
     engine.stop()
     for t in ("bootstrap_task", "engine_task"):
-        task = getattr(app.state, t, None)
+        task=getattr(app.state,t,None)
         if task and not task.done():
             task.cancel()
     await asyncio.sleep(1.0)
