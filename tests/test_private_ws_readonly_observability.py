@@ -79,8 +79,19 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client._prelive_account_exposure_clear)
         self.assertEqual(client._prelive_active_positions, 1)
 
-    async def test_active_order_blocks_readiness(self):
-        client = _Client(orders=[{"id": "o1"}])
+    async def test_active_order_blocks_readiness_and_logs_forensics(self):
+        client = _Client(orders=[{
+            "id": "o1",
+            "clientOid": "manual-123",
+            "symbol": "ADAUSDTM",
+            "side": "buy",
+            "type": "limit",
+            "status": "active",
+            "price": "0.41",
+            "size": "12",
+            "dealSize": "0",
+            "createdAt": 1788890000000,
+        }])
         log = _Log()
         with patch(
             "bot.prelive_readonly_probe._private_ws_probe",
@@ -90,6 +101,14 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertFalse(client._prelive_account_exposure_clear)
         self.assertEqual(client._prelive_active_orders, 1)
+        forensic = [args for level, args in log.records if "[PRELIVE_ACTIVE_ORDER]" in str(args)]
+        self.assertEqual(len(forensic), 1)
+        rendered = str(forensic[0])
+        self.assertIn("ADAUSDTM", rendered)
+        self.assertIn("manual-123", rendered)
+        self.assertIn("o1", rendered)
+        self.assertIn("read_only=true", rendered)
+        self.assertIn("execution_effect=NONE", rendered)
 
     def test_validation_lock_blocks_shadow_candidate_until_readonly_ready(self):
         src = inspect.getsource(validation_safety_lock.install)
