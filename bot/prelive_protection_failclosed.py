@@ -122,8 +122,11 @@ def install(TradingEngine, kucoin_mod, log):
                     from bot import durable_execution as durable
                     if getattr(self, "_durable_state_enforced", False):
                         durable._block(self, "orders")
-                except Exception:
-                    pass
+                except Exception as block_exc:
+                    log.error(
+                        "[PROTECTION_POSTCONDITION] %s durable block failed: %s",
+                        getattr(sig, "symbol", "?"), type(block_exc).__name__,
+                    )
                 return result
 
             if live is not None and float(live.get("stopLoss", 0) or 0) <= 0:
@@ -139,8 +142,11 @@ def install(TradingEngine, kucoin_mod, log):
                     from bot import durable_execution as durable
                     if getattr(self, "_durable_state_enforced", False):
                         durable._block(self, "orders")
-                except Exception:
-                    pass
+                except Exception as block_exc:
+                    log.error(
+                        "[PROTECTION_POSTCONDITION] %s durable block failed: %s",
+                        sig.symbol, type(block_exc).__name__,
+                    )
 
             return result
 
