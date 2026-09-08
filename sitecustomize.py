@@ -33,7 +33,6 @@ try:
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import instrument_readiness_guard as _instrument_readiness_guard
-    from bot import silent_except_audit as _silent_except_audit
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
     from bot import nexus_zero_observability as _nexus_zero_observability
@@ -77,7 +76,6 @@ try:
     _stagnation_time_hardening.install(TradingEngine, _log)
     _pilot_readiness_observability.install(_log)
     _shadow_mode_observability.install(_log)
-    _silent_except_audit.audit_silent_excepts(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
 
