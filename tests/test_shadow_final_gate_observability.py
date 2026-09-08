@@ -24,29 +24,33 @@ class ShadowFinalGateObservabilityTests(unittest.TestCase):
         stages = (
             '"NEXUS_AI"',
             '"CAPITAL_HEALTH"',
-            '"SIZING"',
+            '"SIZING_V3"',
             '"COLLATERAL"',
+            '"MICROSTRUCTURE"',
             '"PRETRADE_DATA"',
             '"PRETRADE_SCORE"',
             '"QUANTITY_VALIDATION"',
             '"PROTECTIVE_LEVELS"',
             '"LIQUIDATION_GUARD"',
+            '"FINAL_ACCOUNT_EXPOSURE"',
             '"PILOT_OBSERVABILITY"',
         )
         for stage in stages:
             self.assertIn(stage, source)
         self.assertIn("WOULD_SUBMIT", source)
-        self.assertIn('"execution_effect":"NONE"', source)
+        self.assertIn('"execution_effect": "NONE"', source)
 
-    def test_drawdown_gate_precedes_sizing(self):
+    def test_drawdown_gate_precedes_v3_sizing(self):
         source = inspect.getsource(shadow_live.evaluate_candidate)
-        drawdown = source.index("engine.risk.drawdown >= cfg.MAX_DRAWDOWN")
-        sizing = source.index("engine.risk.size(")
-        collateral = source.index("balance_semantics.collateral_allows(")
+        drawdown = source.index("risk_snapshot.drawdown >= cfg.MAX_DRAWDOWN")
+        sizing = source.index("risk_v3.size_for_stop(")
+        microstructure = source.index("evaluate_microstructure(")
+        final_exposure = source.index("final_read_only_dispatch_recheck(")
         would_submit = source.index("WOULD_SUBMIT")
         self.assertLess(drawdown, sizing)
-        self.assertLess(sizing, collateral)
-        self.assertLess(collateral, would_submit)
+        self.assertLess(sizing, microstructure)
+        self.assertLess(microstructure, final_exposure)
+        self.assertLess(final_exposure, would_submit)
 
     def test_gate_logs_are_read_only_marked(self):
         source = inspect.getsource(shadow_live)
