@@ -121,8 +121,12 @@ def install() -> None:
                         snap.get("shadow_pre_ai_survivors", 0),
                         snap.get("shadow_nexus_approved", 0), snap.get("shadow_nexus_vetoed", 0),
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.debug(
+                    "[MTF_SHADOW] observability_failed symbol=%s error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    symbol, type(exc).__name__,
+                )
             return result
 
         Analyzer.analyze_mtf = _analyze_mtf_with_shadow
@@ -138,13 +142,21 @@ def install() -> None:
             try:
                 await _np.record_decision(sig, dec)
                 asyncio.create_task(_np.evaluate_pending(self.client))
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.debug(
+                    "[NEXUS_PERSISTENCE] best_effort_failed symbol=%s error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    getattr(sig, "symbol", "?"), type(exc).__name__,
+                )
             try:
                 if getattr(dec, "execution_allowed", False) is not True:
                     asyncio.create_task(_notifier.notify_nexus(dec.to_dict(), approved=False))
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.debug(
+                    "[NEXUS_NOTIFY] best_effort_schedule_failed symbol=%s error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    getattr(sig, "symbol", "?"), type(exc).__name__,
+                )
             return dec
 
         TradingEngine._nexus_validate = _validate_with_history
@@ -165,8 +177,12 @@ def install() -> None:
                                 "drawdown_pct": round(float(self.risk.drawdown) * 100.0, 2),
                                 "isolated_from_exchange": True,
                             }
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log.debug(
+                        "[STATUS_OBSERVABILITY] best_effort_failed error=%s "
+                        "decision_effect=NONE execution_effect=NONE",
+                        type(exc).__name__,
+                    )
                 return out
             TradingEngine.get_status = _status_with_nexus_metrics
 
