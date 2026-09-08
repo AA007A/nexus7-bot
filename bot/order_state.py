@@ -36,9 +36,15 @@ TERMINAIS = {OrderState.FILLED, OrderState.REJECTED,
              OrderState.CANCELLED, OrderState.FAILED}
 
 # Transições permitidas. Tudo que não estiver aqui é inválido.
+#
+# Private-WS hardening: eventos autoritativos da exchange podem chegar antes
+# do ACK REST/open do pedido. Portanto SUBMITTING pode avançar diretamente
+# para PARTIALLY_FILLED ou FILLED. Isso preserva monotonicidade sem inventar
+# um estado intermediário que a aplicação ainda não observou.
 TRANSICOES = {
     OrderState.CREATED:          {OrderState.SUBMITTING, OrderState.FAILED},
-    OrderState.SUBMITTING:       {OrderState.SUBMITTED, OrderState.REJECTED,
+    OrderState.SUBMITTING:       {OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED,
+                                  OrderState.FILLED, OrderState.REJECTED,
                                   OrderState.FAILED},
     OrderState.SUBMITTED:        {OrderState.PARTIALLY_FILLED, OrderState.FILLED,
                                   OrderState.REJECTED, OrderState.CANCELLED},
