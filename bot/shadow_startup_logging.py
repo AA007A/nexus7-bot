@@ -35,6 +35,13 @@ def install_preimport():
             record.args = ()
             record.levelno = logging.WARNING
             record.levelname = "WARNING"
+        elif record.levelno >= logging.CRITICAL and msg.strip() and set(msg.strip()) == {"="}:
+            # The production startup banner surrounds the LIVE-mode message with
+            # CRITICAL-level separator lines. Under validation-held SHADOW these
+            # separators are presentation only, not incidents. Demote only pure
+            # separator records; genuine CRITICAL messages remain untouched.
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
         return record
 
     logging.setLogRecordFactory(_factory)
