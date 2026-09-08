@@ -38,9 +38,9 @@ def test_decorator_returns_exact_decision_object():
             patch.object(nexus_persistence, "record_decision", return_value=None),
             patch.object(nexus_persistence, "evaluate_pending", return_value=None),
             patch.object(notifier, "notify_nexus", return_value=None),
-            patch("asyncio.create_task", return_value=None),
         ):
             out = await wrapped(_Engine(), _Sig())
+            await asyncio.sleep(0)
         assert out is decision
 
     asyncio.run(run())
@@ -61,9 +61,10 @@ def test_persistence_failure_cannot_change_decision_result():
         with (
             patch.object(nexus_zero_observability, "observe"),
             patch.object(nexus_persistence, "record_decision", side_effect=fail_record),
-            patch("asyncio.create_task", return_value=None),
+            patch.object(notifier, "notify_nexus", return_value=None),
         ):
             out = await wrapped(_Engine(), _Sig())
+            await asyncio.sleep(0)
         assert out is decision
 
     asyncio.run(run())
