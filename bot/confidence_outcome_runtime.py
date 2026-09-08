@@ -100,16 +100,23 @@ def install(db, log) -> None:
             strategy=strategy, score_features=score_features, sl=sl,
             direction=direction,
         )
-        await _link_paper_open(
-            db,
-            trade_id=trade_id,
-            symbol=symbol,
-            side=side,
-            entry=entry,
-            stop_loss=sl,
-            direction=direction,
-            log=log,
-        )
+        try:
+            await _link_paper_open(
+                db,
+                trade_id=trade_id,
+                symbol=symbol,
+                side=side,
+                entry=entry,
+                stop_loss=sl,
+                direction=direction,
+                log=log,
+            )
+        except Exception as exc:
+            log.warning(
+                "[CONFIDENCE_OUTCOME_LINK] mode=PAPER open_hook_failed trade_id=%s error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                trade_id, type(exc).__name__,
+            )
         return trade_id
 
     async def save_paper_close_atomic_wrapped(
@@ -120,7 +127,14 @@ def install(db, log) -> None:
             trade_id, exit_price, pnl, fees, duration_min, exit_reason,
             state_key, state_value,
         )
-        await _record_paper_close(db, trade_id=trade_id, log=log)
+        try:
+            await _record_paper_close(db, trade_id=trade_id, log=log)
+        except Exception as exc:
+            log.warning(
+                "[CONFIDENCE_OUTCOME_LINK] mode=PAPER close_hook_failed trade_id=%s error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                trade_id, type(exc).__name__,
+            )
         return result
 
     db.save_paper_open_atomic = save_paper_open_atomic_wrapped
