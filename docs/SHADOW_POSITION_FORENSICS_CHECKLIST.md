@@ -1,0 +1,1 @@
+Acceptance: Quality Check green; Railway deploy green; `VALIDATION_LOCK` active; `release_approved=false`; forensic log present; no `execution_effect=SUBMIT`; no `execution_effect=MUTATE`.
