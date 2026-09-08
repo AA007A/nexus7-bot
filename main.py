@@ -24,11 +24,11 @@ from bot.config import cfg
 from bot.logger import log
 from bot import database as db
 from bot.startup_block import classify_startup_block, telegram_block_message
+from bot.status_observability import enrich_status
 
 
 # ── Autenticação ──────────────────────────────────────────────────
 _bearer = HTTPBearer(auto_error=False)
-
 def _require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     secret = cfg.BOT_API_SECRET
     if not secret:
@@ -42,7 +42,6 @@ def _require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
 
 # ── Rate Limiting ─────────────────────────────────────────────────
 _rate_counters: dict = defaultdict(list)
-
 def _rate_limit(request: Request):
     ip  = request.client.host if request.client else "unknown"
     now = time.time()
@@ -249,7 +248,7 @@ async def root():
 # ── Status / Saldo / Posições ─────────────────────────────────────
 @app.get("/api/status", dependencies=[Depends(_require_auth)])
 async def status():
-    return app.state.engine.get_status()
+    return enrich_status(app.state.engine, app.state.engine.get_status())
 
 @app.get("/api/balance", dependencies=[Depends(_require_auth)])
 async def balance():
