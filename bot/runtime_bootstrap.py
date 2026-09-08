@@ -1,12 +1,14 @@
 """Explicit runtime bootstrap for the NEXUS-7 hardening stack.
 
-Phase 1 of sitecustomize consolidation: preserve the current installation order
-while moving it out of Python's implicit startup hook. No strategy threshold,
-release state, exchange behavior, or execution permission is changed here.
+Phase 2 of sitecustomize consolidation: startup remains fail-closed and the
+hardening installation order stays explicit, while transitional observability
+wrappers live in ``bot.runtime_overlays`` instead of inline here.
+
+No strategy threshold, release state, exchange behavior, or execution
+permission is changed here.
 """
 from __future__ import annotations
 
-import asyncio
 import builtins
 
 
@@ -19,10 +21,8 @@ def install() -> None:
 
     from bot.engine import TradingEngine
     from bot.strategy import Analyzer
-    from bot import nexus_persistence as _np
-    from bot import funnel_metrics as _fm
-    from bot import mtf_shadow as _ms
     from bot import runtime_hardening as _rh
+    from bot import runtime_overlays as _runtime_overlays
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
     from bot import paper_wallet as _paper_wallet
@@ -35,7 +35,6 @@ def install() -> None:
     from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
-    from bot import nexus_zero_observability as _nexus_zero_observability
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
     from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
@@ -79,96 +78,10 @@ def install() -> None:
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
 
-    if not getattr(_np, "_single_conn_serialized", False):
-        _orig_execute = _np._execute
-        _orig_fetchall = _np._fetchall
-        _io_lock = asyncio.Lock()
-
-        async def _execute_serialized(sql, params=()):
-            async with _io_lock:
-                return await _orig_execute(sql, params)
-
-        async def _fetchall_serialized(sql, params=()):
-            async with _io_lock:
-                return await _orig_fetchall(sql, params)
-
-        _np._execute = _execute_serialized
-        _np._fetchall = _fetchall_serialized
-        _np._single_conn_serialized = True
-
-    _fm.install(_log)
-
-    if not getattr(Analyzer, "_mtf_shadow_patched", False):
-        _orig_analyze_mtf = Analyzer.analyze_mtf
-
-        def _analyze_mtf_with_shadow(self, symbol, k15, k1h, k4h,
-                                     min_score=60, fee_mult=2.0, vol_mult=1.0):
-            result = _orig_analyze_mtf(self, symbol, k15, k1h, k4h,
-                                       min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult)
-            try:
-                before = _ms.snapshot().get("unique_states", 0)
-                _ms.observe(symbol, k15, k1h, k4h, production_result=result,
-                            min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult)
-                snap = _ms.snapshot()
-                unique = snap.get("unique_states", 0)
-                if unique != before and (unique == 1 or unique % 25 == 0):
-                    _log.info(
-                        "[MTF_SHADOW] unique=%s eligible=%s survivors=%s nexus_approved=%s "
-                        "nexus_vetoed=%s execution_effect=NONE",
-                        unique, snap.get("eligible_4h_dir_1h_neutral", 0),
-                        snap.get("shadow_pre_ai_survivors", 0),
-                        snap.get("shadow_nexus_approved", 0), snap.get("shadow_nexus_vetoed", 0),
-                    )
-            except Exception as exc:
-                _log.debug("[MTF_SHADOW] observability_failed error=%s execution_effect=NONE", type(exc).__name__)
-            return result
-
-        Analyzer.analyze_mtf = _analyze_mtf_with_shadow
-        Analyzer._mtf_shadow_patched = True
-
-    if not getattr(TradingEngine, "_nexus_persistence_patched", False):
-        _orig_validate = TradingEngine._nexus_validate
-        _orig_status = getattr(TradingEngine, "get_status", None)
-
-        async def _validate_with_history(self, sig):
-            dec = await _orig_validate(self, sig)
-            _nexus_zero_observability.observe(dec, _log)
-            try:
-                await _np.record_decision(sig, dec)
-                asyncio.create_task(_np.evaluate_pending(self.client))
-            except Exception as exc:
-                _log.debug("[NEXUS_PERSISTENCE] best_effort_failed error=%s execution_effect=NONE", type(exc).__name__)
-            try:
-                if getattr(dec, "execution_allowed", False) is not True:
-                    asyncio.create_task(_notifier.notify_nexus(dec.to_dict(), approved=False))
-            except Exception as exc:
-                _log.debug("[NEXUS_NOTIFY] best_effort_schedule_failed error=%s execution_effect=NONE", type(exc).__name__)
-            return dec
-
-        TradingEngine._nexus_validate = _validate_with_history
-
-        if _orig_status is not None:
-            def _status_with_nexus_metrics(self, *args, **kwargs):
-                out = _orig_status(self, *args, **kwargs)
-                try:
-                    if isinstance(out, dict):
-                        out = dict(out)
-                        out["nexus_persistent_metrics"] = _np.get_cached_metrics()
-                        out["funnel_metrics"] = _fm.get_funnel_metrics()
-                        out["mtf_shadow_metrics"] = _ms.snapshot()
-                        out["nexus_dedupe_metrics"] = _nexus_decision_dedupe.snapshot()
-                        if getattr(self, "paper_trade", False):
-                            out["paper_wallet"] = {
-                                "balance": round(float(getattr(self, "_paper_balance", self.risk.balance) or 0.0), 4),
-                                "drawdown_pct": round(float(self.risk.drawdown) * 100.0, 2),
-                                "isolated_from_exchange": True,
-                            }
-                except Exception as exc:
-                    _log.debug("[STATUS_OBSERVABILITY] best_effort_failed error=%s execution_effect=NONE", type(exc).__name__)
-                return out
-            TradingEngine.get_status = _status_with_nexus_metrics
-
-        TradingEngine._nexus_persistence_patched = True
+    _runtime_overlays.install(TradingEngine, Analyzer, _log)
 
     builtins._nexus_runtime_bootstrap_installed = True
-    _log.info("[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap; execution_effect=NONE")
+    _log.info(
+        "[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap; "
+        "execution_effect=NONE"
+    )
