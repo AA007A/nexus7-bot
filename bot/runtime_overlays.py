@@ -1,22 +1,20 @@
 """Explicit transitional runtime overlays for NEXUS-7.
 
-This module centralizes the two legacy class/function monkey patches that used to
-live inline in ``sitecustomize.py``.  It is intentionally behavior-preserving:
-no score, threshold, risk, release, exchange, or execution semantics change.
-
-The long-term migration target is native engine/analyzer composition. Keeping
-these overlays behind one explicit installer makes that migration testable and
-keeps Python's implicit site hook limited to bootstrap orchestration.
+Centralizes legacy monkey patches previously implemented inline by
+``sitecustomize.py``. This extraction is behavior-preserving: it changes no
+score, threshold, risk, release, exchange, or execution semantics.
 """
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 
 def install(*, TradingEngine, Analyzer, nexus_persistence, funnel_metrics,
             mtf_shadow, nexus_zero_observability, nexus_decision_dedupe,
-            notifier, log) -> None:
-    """Install behavior-equivalent legacy observability overlays once."""
+            notifier, logger_module, log) -> None:
+    """Install behavior-equivalent legacy infrastructure/observability overlays."""
     np = nexus_persistence
     fm = funnel_metrics
     ms = mtf_shadow
@@ -38,6 +36,23 @@ def install(*, TradingEngine, Analyzer, nexus_persistence, funnel_metrics,
         np._fetchall = fetchall_serialized
         np._single_conn_serialized = True
 
+    if not getattr(logger_module, "_audit_pacing_patched", False):
+        orig_enqueue = logger_module._enqueue
+        audit_lock = threading.Lock()
+        audit_last = [0.0]
+        audit_min_interval = 1.5
+
+        def paced_enqueue(text):
+            now = time.monotonic()
+            with audit_lock:
+                if now - audit_last[0] < audit_min_interval:
+                    return
+                audit_last[0] = now
+            return orig_enqueue(text)
+
+        logger_module._enqueue = paced_enqueue
+        logger_module._audit_pacing_patched = True
+
     fm.install(log)
 
     if not getattr(Analyzer, "_mtf_shadow_patched", False):
@@ -51,21 +66,15 @@ def install(*, TradingEngine, Analyzer, nexus_persistence, funnel_metrics,
             )
             try:
                 before = ms.snapshot().get("unique_states", 0)
-                ms.observe(
-                    symbol, k15, k1h, k4h,
-                    production_result=result,
-                    min_score=min_score,
-                    fee_mult=fee_mult,
-                    vol_mult=vol_mult,
-                )
+                ms.observe(symbol, k15, k1h, k4h, production_result=result,
+                           min_score=min_score, fee_mult=fee_mult, vol_mult=vol_mult)
                 snap = ms.snapshot()
                 unique = snap.get("unique_states", 0)
                 if unique != before and (unique == 1 or unique % 25 == 0):
                     log.info(
                         "[MTF_SHADOW] unique=%s eligible=%s survivors=%s "
                         "nexus_approved=%s nexus_vetoed=%s execution_effect=NONE",
-                        unique,
-                        snap.get("eligible_4h_dir_1h_neutral", 0),
+                        unique, snap.get("eligible_4h_dir_1h_neutral", 0),
                         snap.get("shadow_pre_ai_survivors", 0),
                         snap.get("shadow_nexus_approved", 0),
                         snap.get("shadow_nexus_vetoed", 0),
@@ -89,7 +98,6 @@ def install(*, TradingEngine, Analyzer, nexus_persistence, funnel_metrics,
                 asyncio.create_task(np.evaluate_pending(self.client))
             except Exception as exc:
                 log.debug("[NEXUS_PERSISTENCE] record_failed error=%s", type(exc).__name__)
-
             try:
                 if getattr(dec, "execution_allowed", False) is not True:
                     asyncio.create_task(notifier.notify_nexus(dec.to_dict(), approved=False))
@@ -118,12 +126,8 @@ def install(*, TradingEngine, Analyzer, nexus_persistence, funnel_metrics,
                 except Exception as exc:
                     log.debug("[NEXUS_STATUS] metrics_failed error=%s", type(exc).__name__)
                 return out
-
             TradingEngine.get_status = status_with_nexus_metrics
 
         TradingEngine._nexus_persistence_patched = True
 
-    log.info(
-        "[RUNTIME_OVERLAYS] installed transitional overlays; "
-        "decision_effect=NONE execution_effect=NONE"
-    )
+    log.info("[RUNTIME_OVERLAYS] installed transitional overlays; decision_effect=NONE execution_effect=NONE")
