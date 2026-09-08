@@ -19,7 +19,7 @@ def install() -> None:
     from bot import shadow_startup_logging as _shadow_startup_logging
     _shadow_startup_logging.install_preimport()
 
-    from bot.engine import TradingEngine
+    from bot.nexus_runtime_engine import TradingEngine
     from bot import runtime_hardening as _rh
     from bot import runtime_overlays as _runtime_overlays
     from bot import paper_e2e as _paper_e2e
