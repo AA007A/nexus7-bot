@@ -2,9 +2,17 @@
 
 This module adds observability only. It does not alter AI approval criteria,
 execution gates, risk limits, sizing, exchange state, or order dispatch.
+
+Terminal Telegram delivery is intentionally detached from the NEXUS validation
+coroutine. This guarantees that notifier latency cannot consume the caller's
+AI timeout budget and cannot turn an already-finished PASS/VETO into a later
+``timeout/cancelled`` outcome for the same analysis.
 """
 import asyncio
 import time
+
+
+_NOTIFY_TIMEOUT_S = 5.0
 
 
 def _reason_from_decision(data: dict) -> str:
@@ -49,8 +57,46 @@ def _failure_message(symbol: str, kind: str, elapsed_s: float) -> str:
     )
 
 
+def _spawn_notice(coro, *, symbol: str, stage: str, log):
+    """Run notifier delivery outside the caller's validation timeout budget."""
+    async def _runner():
+        try:
+            await asyncio.wait_for(coro, timeout=_NOTIFY_TIMEOUT_S)
+            log.info(
+                "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=true",
+                symbol, stage,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=false error=notify_timeout",
+                symbol, stage,
+            )
+        except asyncio.CancelledError:
+            # Process shutdown is not a second AI terminal outcome.
+            log.debug(
+                "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s delivery_cancelled",
+                symbol, stage,
+            )
+            raise
+        except Exception as exc:
+            log.warning(
+                "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=false error=%s",
+                symbol, stage, type(exc).__name__,
+            )
+
+    task = asyncio.create_task(_runner())
+    # Keep a strong reference until completion; otherwise fire-and-forget tasks
+    # can be collected before they run on some event-loop lifecycles.
+    pending = getattr(_spawn_notice, "_pending", None)
+    if pending is None:
+        pending = set()
+        _spawn_notice._pending = pending
+    pending.add(task)
+    task.add_done_callback(pending.discard)
+
+
 def install(TradingEngine, notifier, log):
-    """Instrument ``_nexus_validate`` and guarantee a terminal SHADOW message."""
+    """Instrument ``_nexus_validate`` and guarantee one AI terminal outcome."""
     if getattr(TradingEngine, "_nexus_latency_telegram_patched", False):
         return
 
@@ -62,46 +108,18 @@ def install(TradingEngine, notifier, log):
         log.info("[NEXUS_LATENCY] symbol=%s stage=started", symbol)
         try:
             decision = await original_validate(self, sig, *args, **kwargs)
-            elapsed = time.monotonic() - started
-            try:
-                data = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
-            except Exception as serialization_exc:
-                log.warning(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s decision_serialization_failed=%s",
-                    symbol, type(serialization_exc).__name__,
-                )
-                data = {"symbol": symbol}
-            data.setdefault("symbol", symbol)
-            approved = getattr(decision, "execution_allowed", False) is True
-            log.info(
-                "[NEXUS_LATENCY] symbol=%s stage=finished approved=%s elapsed_ms=%d",
-                symbol, approved, int(elapsed * 1000),
-            )
-            try:
-                await notifier.notify(_terminal_message(data, approved, elapsed))
-                log.info(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s approved=%s elapsed_ms=%d sent=true",
-                    symbol, approved, int(elapsed * 1000),
-                )
-            except Exception as exc:
-                log.warning(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s sent=false error=%s",
-                    symbol, type(exc).__name__,
-                )
-            return decision
         except asyncio.CancelledError:
             elapsed = time.monotonic() - started
             log.warning(
                 "[NEXUS_LATENCY] symbol=%s stage=cancelled elapsed_ms=%d",
                 symbol, int(elapsed * 1000),
             )
-            try:
-                await notifier.notify(_failure_message(symbol, "timeout/cancelled", elapsed))
-            except Exception as notify_exc:
-                log.warning(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false stage=cancelled error=%s",
-                    symbol, type(notify_exc).__name__,
-                )
+            _spawn_notice(
+                notifier.notify(_failure_message(symbol, "timeout/cancelled", elapsed)),
+                symbol=symbol,
+                stage="cancelled",
+                log=log,
+            )
             raise
         except Exception as exc:
             elapsed = time.monotonic() - started
@@ -109,19 +127,43 @@ def install(TradingEngine, notifier, log):
                 "[NEXUS_LATENCY] symbol=%s stage=failed error=%s elapsed_ms=%d",
                 symbol, type(exc).__name__, int(elapsed * 1000),
             )
-            try:
-                await notifier.notify(
-                    _failure_message(symbol, type(exc).__name__, elapsed)
-                )
-            except Exception as notify_exc:
-                log.warning(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false stage=failed error=%s",
-                    symbol, type(notify_exc).__name__,
-                )
+            _spawn_notice(
+                notifier.notify(_failure_message(symbol, type(exc).__name__, elapsed)),
+                symbol=symbol,
+                stage="failed",
+                log=log,
+            )
             raise
+
+        # From this point forward the NEXUS decision is terminal and must be
+        # returned immediately. Telegram serialization/delivery is observability
+        # only and therefore cannot be allowed to reclassify the AI outcome.
+        elapsed = time.monotonic() - started
+        try:
+            data = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
+        except Exception as serialization_exc:
+            log.warning(
+                "[NEXUS_TELEGRAM_TERMINAL] symbol=%s decision_serialization_failed=%s",
+                symbol, type(serialization_exc).__name__,
+            )
+            data = {"symbol": symbol}
+        data.setdefault("symbol", symbol)
+        approved = getattr(decision, "execution_allowed", False) is True
+        log.info(
+            "[NEXUS_LATENCY] symbol=%s stage=finished approved=%s elapsed_ms=%d",
+            symbol, approved, int(elapsed * 1000),
+        )
+        _spawn_notice(
+            notifier.notify(_terminal_message(data, approved, elapsed)),
+            symbol=symbol,
+            stage="finished",
+            log=log,
+        )
+        return decision
 
     TradingEngine._nexus_validate = _validate_with_latency
     TradingEngine._nexus_latency_telegram_patched = True
     log.info(
-        "[NEXUS_LATENCY] terminal Telegram observability installed; trading logic unchanged"
+        "[NEXUS_LATENCY] terminal Telegram observability installed; "
+        "delivery detached from AI timeout budget; trading logic unchanged"
     )
