@@ -89,7 +89,10 @@ def test_startup_banner_is_rewritten_for_nonpaper():
 def test_sitecustomize_installs_banner_rewrite_before_engine_import():
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1] / "sitecustomize.py").read_text()
+    root = Path(__file__).resolve().parents[1]
+    entrypoint = (root / "sitecustomize.py").read_text()
+    src = (root / "bot" / "runtime_bootstrap.py").read_text()
+    assert "from bot.runtime_bootstrap import install" in entrypoint
     install_idx = src.index("_shadow_startup_logging.install_preimport()")
     engine_idx = src.index("from bot.engine import TradingEngine")
     assert install_idx < engine_idx
