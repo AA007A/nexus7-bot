@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from bot import funnel_metrics, mtf_shadow, nexus_decision_dedupe, nexus_persistence
 from bot.status_observability import enrich_status
@@ -18,14 +19,15 @@ class _Engine:
     risk = _Risk()
 
 
-def test_status_enrichment_preserves_base_and_adds_metrics(monkeypatch):
-    monkeypatch.setattr(nexus_persistence, "get_cached_metrics", lambda: {"total": 7})
-    monkeypatch.setattr(funnel_metrics, "get_funnel_metrics", lambda: {"candidates": 3})
-    monkeypatch.setattr(mtf_shadow, "snapshot", lambda: {"unique_states": 2})
-    monkeypatch.setattr(nexus_decision_dedupe, "snapshot", lambda: {"deduped": 1})
-
-    base = {"connected": True, "balance": 20.0}
-    out = enrich_status(_Engine(), base)
+def test_status_enrichment_preserves_base_and_adds_metrics():
+    with (
+        patch.object(nexus_persistence, "get_cached_metrics", return_value={"total": 7}),
+        patch.object(funnel_metrics, "get_funnel_metrics", return_value={"candidates": 3}),
+        patch.object(mtf_shadow, "snapshot", return_value={"unique_states": 2}),
+        patch.object(nexus_decision_dedupe, "snapshot", return_value={"deduped": 1}),
+    ):
+        base = {"connected": True, "balance": 20.0}
+        out = enrich_status(_Engine(), base)
 
     assert base == {"connected": True, "balance": 20.0}
     assert out is not base
