@@ -137,6 +137,11 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
         self.assertNotIn("RESULTADO APROVADO", notifier.messages[0])
 
+    def test_notify_timeout_budget_covers_notifier_expected_wait(self):
+        # notifier.notify can spend ~3s rate-limiting plus up to 10s on HTTP.
+        # The terminal wrapper must not classify that expected path as timeout.
+        self.assertGreaterEqual(nlt._NOTIFY_TIMEOUT_S, 13.0)
+
     def test_no_exchange_mutation_calls_added(self):
         src = inspect.getsource(nlt)
         forbidden = (

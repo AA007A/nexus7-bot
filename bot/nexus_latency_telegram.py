@@ -12,7 +12,10 @@ import asyncio
 import time
 
 
-_NOTIFY_TIMEOUT_S = 5.0
+# notifier.notify may legitimately spend up to ~3s in global rate limiting and
+# up to 10s in one HTTP request. Keep this wrapper budget above that combined
+# path so it reports genuine delivery stalls instead of expected notifier wait.
+_NOTIFY_TIMEOUT_S = 15.0
 
 
 def _reason_from_decision(data: dict) -> str:
