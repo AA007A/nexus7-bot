@@ -50,8 +50,6 @@ def install(log):
         if getattr(self, "paper_trade", False):
             return await original_update_balance(self, *args, **kwargs)
         if not getattr(self, "_validation_safety_lock_active", False):
-            # Independent fail-closed guard: non-PAPER execution is never
-            # allowed to silently inherit SHADOW-only balance semantics.
             log.critical(
                 "[VALIDATION_LOCK] non-PAPER periodic balance refresh blocked: "
                 "validation lock is not active"
@@ -95,11 +93,17 @@ def install(log):
             return None
         TradingEngine._guard_naked_positions = _guard_locked
 
+    # Install one transport lane for every Telegram message before NEXUS
+    # terminal telemetry. This prevents unrelated Telegram callers from racing
+    # the notifier's shared global rate-limit timestamp/hash state.
+    from bot import notifier
+    from bot import telegram_serialization_hardening
+    telegram_serialization_hardening.install(notifier, log)
+
     # Observability-only wrapper around the NEXUS call. It records latency and
     # guarantees a terminal Telegram result while leaving approval criteria and
     # exchange execution untouched.
     from bot import nexus_latency_telegram
-    from bot import notifier
     nexus_latency_telegram.install(TradingEngine, notifier, log)
 
     TradingEngine._validation_safety_lock_patched = True
