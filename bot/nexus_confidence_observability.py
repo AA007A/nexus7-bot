@@ -46,6 +46,19 @@ def install(TradingEngine, log):
                 "decision_effect=NONE execution_effect=NONE",
                 getattr(sig, "symbol", "?"), type(exc).__name__,
             )
+
+        # Read-only PAPER outcome calibration report, throttled independently of
+        # decision capture. It never feeds back into NEXUS or runtime thresholds.
+        try:
+            from bot import database as db
+            from bot.oos_calibration_readiness import maybe_log_readiness
+            await maybe_log_readiness(db, log)
+        except Exception as exc:
+            log.warning(
+                "[NEXUS_OOS_CALIBRATION] observability_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
         return nx_dec
 
     TradingEngine._nexus_validate = wrapped
