@@ -23,7 +23,9 @@ def test_shadow_mode_reports_no_execution_effect():
 
 def test_shadow_mode_observability_is_loaded_by_startup_entrypoint():
     root = Path(__file__).resolve().parents[1]
-    startup = (root / "sitecustomize.py").read_text()
-    assert "from bot import shadow_mode_observability as _shadow_mode_observability" in startup
-    assert "_shadow_mode_observability.install(_log)" in startup
-    assert startup.index("_validation_safety_lock.install(_log)") < startup.index("_shadow_mode_observability.install(_log)")
+    site = (root / "sitecustomize.py").read_text()
+    bootstrap = (root / "bot" / "runtime_bootstrap.py").read_text()
+    assert "bot.runtime_bootstrap" in site
+    assert "from bot import shadow_mode_observability as _shadow_mode_observability" in bootstrap
+    assert "_shadow_mode_observability.install(_log)" in bootstrap
+    assert bootstrap.index("_validation_safety_lock.install(_log)") < bootstrap.index("_shadow_mode_observability.install(_log)")
