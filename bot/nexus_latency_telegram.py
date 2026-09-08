@@ -93,8 +93,11 @@ def install(TradingEngine, notifier, log):
             )
             try:
                 await notifier.notify(_failure_message(symbol, "timeout/cancelled", elapsed))
-            except Exception:
-                pass
+            except Exception as notify_exc:
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false error=%s",
+                    symbol, type(notify_exc).__name__,
+                )
             raise
         except Exception as exc:
             elapsed = time.monotonic() - started
@@ -106,8 +109,11 @@ def install(TradingEngine, notifier, log):
                 await notifier.notify(
                     _failure_message(symbol, type(exc).__name__, elapsed)
                 )
-            except Exception:
-                pass
+            except Exception as notify_exc:
+                log.warning(
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s failure_notice=false error=%s",
+                    symbol, type(notify_exc).__name__,
+                )
             raise
 
     TradingEngine._nexus_validate = _validate_with_latency
