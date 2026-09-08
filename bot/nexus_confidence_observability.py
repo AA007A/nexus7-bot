@@ -50,6 +50,21 @@ def install(TradingEngine, log):
 
     TradingEngine._nexus_validate = wrapped
     TradingEngine._nexus_confidence_observability_installed = True
+
+    # Install outcome linkage only for PAPER persistence. LIVE/SHADOW remain
+    # untouched because real fills may shift entry/stop geometry after the
+    # decision; LIVE linkage should later propagate an explicit evidence_id.
+    try:
+        from bot import database as db
+        from bot import confidence_outcome_runtime
+        confidence_outcome_runtime.install(db, log)
+    except Exception as exc:
+        log.warning(
+            "[CONFIDENCE_OUTCOME_LINK] PAPER hook install failed error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
     log.info(
         "[NEXUS_CONFIDENCE_EVIDENCE] installed observational-only; "
         "decision_effect=NONE execution_effect=NONE"
