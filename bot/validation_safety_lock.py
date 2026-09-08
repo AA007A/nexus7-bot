@@ -124,6 +124,12 @@ def install(log):
     from bot import nexus_latency_telegram
     nexus_latency_telegram.install(TradingEngine, notifier, log)
 
+    # Transitional observability only: capture returned NEXUS decisions for
+    # calibration evidence. The wrapper passes the decision object through
+    # unchanged and has no exchange authority.
+    from bot import nexus_confidence_observability
+    nexus_confidence_observability.install(TradingEngine, log)
+
     TradingEngine._validation_safety_lock_patched = True
     log.warning(
         "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE mutations blocked; "
