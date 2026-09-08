@@ -23,13 +23,13 @@ class ShadowRiskV3IntegrationTests(unittest.TestCase):
         self.assertEqual(ob["asks"][0], [10.01, 12.0])
 
     def test_normalized_depth_can_drive_base_quantity_gate(self):
-        raw = {"b": [["9.99", "100"]], "a": [["10.01", "120"]]}
+        raw = {"b": [["9.995", "100"]], "a": [["10.005", "120"]]}
         ob = shadow_live._normalize_orderbook_base_units(_Engine(), "ATOMUSDT", raw)
         result = evaluate_microstructure(
             signal_entry=10.0,
             side="BUY",
             qty=2.0,
-            ticker={"bid": 9.99, "ask": 10.01, "lastPrice": 10.0},
+            ticker={"bid": 9.995, "ask": 10.005, "lastPrice": 10.0},
             orderbook=ob,
         )
         self.assertTrue(result.allowed)
