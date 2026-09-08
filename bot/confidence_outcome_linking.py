@@ -93,17 +93,20 @@ def outcome_label_from_r(r_multiple: float) -> int:
 
 
 async def ensure_outcome_columns(db) -> None:
-    """Best-effort additive schema migration for previously created evidence tables."""
+    """Best-effort additive schema migration for previously created evidence tables.
+
+    The database adapter already converts DDL failures (for example duplicate
+    columns on an idempotent restart) into a False return value and logs the
+    error. Keeping that behavior here avoids a silent broad exception while
+    preserving restart-safe, observational migration semantics.
+    """
     statements = (
         "ALTER TABLE nexus_confidence_evidence ADD COLUMN trade_id INTEGER",
         "ALTER TABLE nexus_confidence_evidence ADD COLUMN linked_at TEXT",
         "ALTER TABLE nexus_confidence_evidence ADD COLUMN outcome_at TEXT",
     )
     for sql in statements:
-        try:
-            await db._exec(sql)
-        except Exception:
-            pass
+        await db._exec(sql)
 
 
 async def link_trade(db, *, trade_id: int, symbol: str, side: str, entry: float,
