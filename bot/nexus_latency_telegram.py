@@ -60,15 +60,35 @@ def _failure_message(symbol: str, kind: str, elapsed_s: float) -> str:
     )
 
 
-def _spawn_notice(coro, *, symbol: str, stage: str, log):
-    """Run notifier delivery outside validation and coalesce overlaps.
+def _get_delivery_lock() -> asyncio.Lock:
+    """Return an event-loop-local lock that serializes terminal delivery.
 
-    A fast scan loop can finish a second NEXUS evaluation for the same symbol
-    while the previous Telegram request is still rate-limited or in flight.
-    Starting another delivery in that situation only creates notifier backlog
-    and increases the chance of HTTP 429 / wrapper timeouts. Observability is
-    best-effort, so keep at most one terminal delivery per (symbol, stage) in
-    flight. This does not alter, delay, or reclassify the NEXUS decision itself.
+    The previous implementation coalesced only identical (symbol, stage) work,
+    but terminal messages for different symbols could still enter notifier.notify
+    concurrently. notifier.notify itself applies a 3s global interval, so those
+    concurrent calls could wake together, race the shared timestamp, trigger 429
+    backoff, and then exhaust the 15s wrapper budget. Serializing here creates
+    explicit backpressure. Critically, queue wait happens *outside* the per-send
+    timeout budget; only the active delivery is timed.
+    """
+    loop = asyncio.get_running_loop()
+    lock = getattr(_spawn_notice, "_delivery_lock", None)
+    lock_loop = getattr(_spawn_notice, "_delivery_lock_loop", None)
+    if lock is None or lock_loop is not loop:
+        lock = asyncio.Lock()
+        _spawn_notice._delivery_lock = lock
+        _spawn_notice._delivery_lock_loop = loop
+    return lock
+
+
+def _spawn_notice(coro, *, symbol: str, stage: str, log):
+    """Run notifier delivery outside validation with dedupe and backpressure.
+
+    At most one terminal delivery per (symbol, stage) is kept in flight. Across
+    different symbols, terminal deliveries are serialized to match notifier's
+    global rate-limit semantics. Waiting for the terminal lane does not consume
+    ``_NOTIFY_TIMEOUT_S``; that budget begins only when this message owns the
+    lane and is actively executing ``notifier.notify``.
     """
     key = (str(symbol), str(stage))
     inflight = getattr(_spawn_notice, "_inflight", None)
@@ -78,8 +98,6 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
 
     existing = inflight.get(key)
     if existing is not None and not existing.done():
-        # The coroutine object was created by the caller; close it explicitly
-        # because this best-effort duplicate will not be awaited or scheduled.
         close = getattr(coro, "close", None)
         if close is not None:
             close()
@@ -91,7 +109,9 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
 
     async def _runner():
         try:
-            await asyncio.wait_for(coro, timeout=_NOTIFY_TIMEOUT_S)
+            lock = _get_delivery_lock()
+            async with lock:
+                await asyncio.wait_for(coro, timeout=_NOTIFY_TIMEOUT_S)
             log.info(
                 "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=true",
                 symbol, stage,
@@ -102,7 +122,6 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
                 symbol, stage,
             )
         except asyncio.CancelledError:
-            # Process shutdown is not a second AI terminal outcome.
             log.debug(
                 "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s delivery_cancelled",
                 symbol, stage,
@@ -115,8 +134,6 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
             )
 
     task = asyncio.create_task(_runner())
-    # Keep a strong reference until completion; otherwise fire-and-forget tasks
-    # can be collected before they run on some event-loop lifecycles.
     pending = getattr(_spawn_notice, "_pending", None)
     if pending is None:
         pending = set()
@@ -173,9 +190,6 @@ def install(TradingEngine, notifier, log):
             )
             raise
 
-        # From this point forward the NEXUS decision is terminal and must be
-        # returned immediately. Telegram serialization/delivery is observability
-        # only and therefore cannot be allowed to reclassify the AI outcome.
         elapsed = time.monotonic() - started
         try:
             data = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
@@ -203,5 +217,6 @@ def install(TradingEngine, notifier, log):
     TradingEngine._nexus_latency_telegram_patched = True
     log.info(
         "[NEXUS_LATENCY] terminal Telegram observability installed; "
-        "delivery detached/coalesced outside AI timeout budget; trading logic unchanged"
+        "delivery detached/coalesced/serialized outside AI timeout budget; "
+        "trading logic unchanged"
     )
