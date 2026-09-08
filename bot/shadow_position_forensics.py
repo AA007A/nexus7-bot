@@ -1,0 +1,76 @@
+"""Read-only SHADOW position forensics.
+
+Adds structured diagnostics to KuCoinClient.get_positions() without changing
+position state or invoking any exchange mutation. Intended for pre-pilot
+forensic inspection while VALIDATION_LOCK is active.
+"""
+import builtins
+
+
+def install(kucoin_module, log):
+    cls = kucoin_module.KuCoinClient
+    if getattr(cls, "_shadow_position_forensics_installed", False):
+        return
+
+    original = cls.get_positions
+
+    async def get_positions_with_forensics(self, *args, **kwargs):
+        positions = await original(self, *args, **kwargs)
+        if not getattr(builtins, "_validation_safety_lock_active", False):
+            return positions
+
+        for p in positions or []:
+            try:
+                symbol = str(p.get("symbol", ""))
+                side = str(p.get("side", ""))
+                size = float(p.get("size", 0) or 0)
+                entry = float(p.get("entryPrice", 0) or 0)
+                mark = float(p.get("markPrice", 0) or 0)
+                liq = float(p.get("liquidationPrice", 0) or 0)
+                lev = float(p.get("leverage", 0) or 0)
+                upnl = float(p.get("unrealisedPnl", 0) or 0)
+                margin = float(p.get("posMargin", 0) or 0)
+                sl = float(p.get("stopLoss", 0) or 0)
+                tp = float(p.get("takeProfit", 0) or 0)
+
+                dist_liq_pct = None
+                if mark > 0 and liq > 0:
+                    if side == "Buy":
+                        dist_liq_pct = (mark - liq) / mark * 100.0
+                    elif side == "Sell":
+                        dist_liq_pct = (liq - mark) / mark * 100.0
+
+                key = (
+                    symbol, side, round(size, 8), round(entry, 8),
+                    round(mark, 8), round(liq, 8), round(upnl, 6),
+                    round(margin, 6), round(sl, 8), round(tp, 8),
+                )
+                cache = getattr(self, "_shadow_forensics_last", None)
+                if cache == key:
+                    continue
+                self._shadow_forensics_last = key
+
+                log.warning(
+                    "[SHADOW_POSITION_FORENSICS] symbol=%s side=%s contracts=%s "
+                    "entry=%.8f mark=%.8f liquidation=%.8f leverage=%.4fx "
+                    "unrealised_pnl=%.6f position_margin=%.6f stop_loss=%.8f "
+                    "take_profit=%.8f distance_to_liquidation_pct=%s "
+                    "read_only=true execution_effect=NONE",
+                    symbol, side, size, entry, mark, liq, lev, upnl, margin,
+                    sl, tp,
+                    "NA" if dist_liq_pct is None else f"{dist_liq_pct:.4f}",
+                )
+            except Exception as exc:
+                log.error(
+                    "[SHADOW_POSITION_FORENSICS] diagnostic failure=%s "
+                    "read_only=true execution_effect=NONE",
+                    type(exc).__name__,
+                )
+        return positions
+
+    cls.get_positions = get_positions_with_forensics
+    cls._shadow_position_forensics_installed = True
+    log.info(
+        "[SHADOW_POSITION_FORENSICS] installed: normalized position details "
+        "logged read-only under VALIDATION_LOCK"
+    )
