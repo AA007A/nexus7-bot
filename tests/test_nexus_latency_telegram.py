@@ -11,12 +11,23 @@ class _Log:
         pass
     def warning(self, *args, **kwargs):
         pass
+    def debug(self, *args, **kwargs):
+        pass
 
 
 class _Notifier:
     def __init__(self):
         self.messages = []
     async def notify(self, text):
+        self.messages.append(text)
+
+
+class _SlowNotifier(_Notifier):
+    def __init__(self, delay):
+        super().__init__()
+        self.delay = delay
+    async def notify(self, text):
+        await asyncio.sleep(self.delay)
         self.messages.append(text)
 
 
@@ -32,7 +43,26 @@ class _Decision:
         }
 
 
+class _ApprovedDecision(_Decision):
+    execution_allowed = True
+
+
 class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        pending = getattr(nlt._spawn_notice, "_pending", set())
+        for task in list(pending):
+            task.cancel()
+        if pending:
+            await asyncio.gather(*list(pending), return_exceptions=True)
+        pending.clear()
+
+    async def _drain_notices(self):
+        for _ in range(20):
+            pending = list(getattr(nlt._spawn_notice, "_pending", set()))
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def test_terminal_message_after_nexus_decision(self):
         class Engine:
             async def _nexus_validate(self, sig):
@@ -42,6 +72,7 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         nlt.install(Engine, notifier, _Log())
         decision = await Engine()._nexus_validate(SimpleNamespace(symbol="AVAXUSDT"))
         self.assertIsInstance(decision, _Decision)
+        await self._drain_notices()
         self.assertEqual(len(notifier.messages), 1)
         msg = notifier.messages[0]
         self.assertIn("NEXUS AI — RESULTADO VETO", msg)
@@ -60,9 +91,51 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         nlt.install(Engine, notifier, _Log())
         with self.assertRaises(RuntimeError):
             await Engine()._nexus_validate(SimpleNamespace(symbol="DOTUSDT"))
+        await self._drain_notices()
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
         self.assertIn("nenhuma ordem enviada", notifier.messages[0])
+
+    async def test_slow_telegram_cannot_turn_finished_pass_into_timeout(self):
+        class Engine:
+            async def _nexus_validate(self, sig):
+                await asyncio.sleep(0.01)
+                return _ApprovedDecision()
+
+        notifier = _SlowNotifier(delay=0.20)
+        nlt.install(Engine, notifier, _Log())
+
+        # The outer budget is deliberately shorter than Telegram delivery but
+        # longer than the AI decision. Before the fix, notifier latency lived
+        # inside this timeout and produced PASS followed by cancelled/timeout.
+        decision = await asyncio.wait_for(
+            Engine()._nexus_validate(SimpleNamespace(symbol="ATOMUSDT")),
+            timeout=0.05,
+        )
+        self.assertIsInstance(decision, _ApprovedDecision)
+        self.assertEqual(notifier.messages, [])
+        await self._drain_notices()
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("RESULTADO APROVADO", notifier.messages[0])
+        self.assertNotIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
+
+    async def test_actual_cancellation_emits_only_failure_terminal(self):
+        class Engine:
+            async def _nexus_validate(self, sig):
+                await asyncio.sleep(1.0)
+                return _ApprovedDecision()
+
+        notifier = _Notifier()
+        nlt.install(Engine, notifier, _Log())
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                Engine()._nexus_validate(SimpleNamespace(symbol="ATOMUSDT")),
+                timeout=0.01,
+            )
+        await self._drain_notices()
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
+        self.assertNotIn("RESULTADO APROVADO", notifier.messages[0])
 
     def test_no_exchange_mutation_calls_added(self):
         src = inspect.getsource(nlt)
