@@ -8,7 +8,10 @@ def test_runtime_bootstrap_delegates_transitional_overlays():
     text = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
     assert "from bot import runtime_overlays as _runtime_overlays" in text
     assert "_runtime_overlays.install(TradingEngine, _log)" in text
-    assert "from bot.nexus_runtime_engine import TradingEngine" in text
+    # Safety hardenings remain installed on the canonical base class; the
+    # runtime subclass in main.py inherits those patched methods.
+    assert "from bot.engine import TradingEngine" in text
+    assert "from bot.nexus_runtime_engine import TradingEngine" not in text
     assert "from bot.strategy import Analyzer" not in text
     assert "TradingEngine._nexus_validate =" not in text
     assert "Analyzer.analyze_mtf =" not in text
