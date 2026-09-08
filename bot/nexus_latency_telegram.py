@@ -61,7 +61,34 @@ def _failure_message(symbol: str, kind: str, elapsed_s: float) -> str:
 
 
 def _spawn_notice(coro, *, symbol: str, stage: str, log):
-    """Run notifier delivery outside the caller's validation timeout budget."""
+    """Run notifier delivery outside validation and coalesce overlaps.
+
+    A fast scan loop can finish a second NEXUS evaluation for the same symbol
+    while the previous Telegram request is still rate-limited or in flight.
+    Starting another delivery in that situation only creates notifier backlog
+    and increases the chance of HTTP 429 / wrapper timeouts. Observability is
+    best-effort, so keep at most one terminal delivery per (symbol, stage) in
+    flight. This does not alter, delay, or reclassify the NEXUS decision itself.
+    """
+    key = (str(symbol), str(stage))
+    inflight = getattr(_spawn_notice, "_inflight", None)
+    if inflight is None:
+        inflight = {}
+        _spawn_notice._inflight = inflight
+
+    existing = inflight.get(key)
+    if existing is not None and not existing.done():
+        # The coroutine object was created by the caller; close it explicitly
+        # because this best-effort duplicate will not be awaited or scheduled.
+        close = getattr(coro, "close", None)
+        if close is not None:
+            close()
+        log.debug(
+            "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s delivery_coalesced=true",
+            symbol, stage,
+        )
+        return existing
+
     async def _runner():
         try:
             await asyncio.wait_for(coro, timeout=_NOTIFY_TIMEOUT_S)
@@ -95,7 +122,15 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
         pending = set()
         _spawn_notice._pending = pending
     pending.add(task)
-    task.add_done_callback(pending.discard)
+    inflight[key] = task
+
+    def _done(done_task):
+        pending.discard(done_task)
+        if inflight.get(key) is done_task:
+            inflight.pop(key, None)
+
+    task.add_done_callback(_done)
+    return task
 
 
 def install(TradingEngine, notifier, log):
@@ -168,5 +203,5 @@ def install(TradingEngine, notifier, log):
     TradingEngine._nexus_latency_telegram_patched = True
     log.info(
         "[NEXUS_LATENCY] terminal Telegram observability installed; "
-        "delivery detached from AI timeout budget; trading logic unchanged"
+        "delivery detached/coalesced outside AI timeout budget; trading logic unchanged"
     )
