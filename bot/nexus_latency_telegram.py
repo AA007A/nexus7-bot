@@ -12,9 +12,6 @@ import asyncio
 import time
 
 
-# notifier.notify may legitimately spend up to ~3s in global rate limiting and
-# up to 10s in one HTTP request. Keep this wrapper budget above that combined
-# path so it reports genuine delivery stalls instead of expected notifier wait.
 _NOTIFY_TIMEOUT_S = 15.0
 
 
@@ -36,7 +33,6 @@ def _terminal_message(data: dict, approved: bool, elapsed_s: float) -> str:
     rr = data.get("risk_reward")
     ev = data.get("expected_value")
     reason = _reason_from_decision(data)
-
     rr_line = f"⚖️ R:R líquido: `{float(rr):.2f}`\n" if rr is not None else ""
     ev_line = f"📈 EV: `{float(ev):+.3f}%`\n" if ev is not None else ""
     return (
@@ -60,35 +56,13 @@ def _failure_message(symbol: str, kind: str, elapsed_s: float) -> str:
     )
 
 
-def _get_delivery_lock() -> asyncio.Lock:
-    """Return an event-loop-local lock that serializes terminal delivery.
+def _spawn_notice(factory, *, symbol: str, stage: str, log):
+    """Schedule one best-effort terminal delivery without blocking AI.
 
-    The previous implementation coalesced only identical (symbol, stage) work,
-    but terminal messages for different symbols could still enter notifier.notify
-    concurrently. notifier.notify itself applies a 3s global interval, so those
-    concurrent calls could wake together, race the shared timestamp, trigger 429
-    backoff, and then exhaust the 15s wrapper budget. Serializing here creates
-    explicit backpressure. Critically, queue wait happens *outside* the per-send
-    timeout budget; only the active delivery is timed.
-    """
-    loop = asyncio.get_running_loop()
-    lock = getattr(_spawn_notice, "_delivery_lock", None)
-    lock_loop = getattr(_spawn_notice, "_delivery_lock_loop", None)
-    if lock is None or lock_loop is not loop:
-        lock = asyncio.Lock()
-        _spawn_notice._delivery_lock = lock
-        _spawn_notice._delivery_lock_loop = loop
-    return lock
-
-
-def _spawn_notice(coro, *, symbol: str, stage: str, log):
-    """Run notifier delivery outside validation with dedupe and backpressure.
-
-    At most one terminal delivery per (symbol, stage) is kept in flight. Across
-    different symbols, terminal deliveries are serialized to match notifier's
-    global rate-limit semantics. Waiting for the terminal lane does not consume
-    ``_NOTIFY_TIMEOUT_S``; that budget begins only when this message owns the
-    lane and is actively executing ``notifier.notify``.
+    ``factory`` is called only when this task is ready to perform the active
+    send. Same-symbol duplicates are coalesced. Global Telegram serialization
+    is delegated to telegram_serialization_hardening when installed, so queue
+    wait never consumes the active-send timeout budget.
     """
     key = (str(symbol), str(stage))
     inflight = getattr(_spawn_notice, "_inflight", None)
@@ -98,9 +72,6 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
 
     existing = inflight.get(key)
     if existing is not None and not existing.done():
-        close = getattr(coro, "close", None)
-        if close is not None:
-            close()
         log.debug(
             "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s delivery_coalesced=true",
             symbol, stage,
@@ -109,9 +80,7 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
 
     async def _runner():
         try:
-            lock = _get_delivery_lock()
-            async with lock:
-                await asyncio.wait_for(coro, timeout=_NOTIFY_TIMEOUT_S)
+            await factory()
             log.info(
                 "[NEXUS_TELEGRAM_TERMINAL] symbol=%s stage=%s sent=true",
                 symbol, stage,
@@ -150,6 +119,22 @@ def _spawn_notice(coro, *, symbol: str, stage: str, log):
     return task
 
 
+def _terminal_delivery_factory(notifier, text: str):
+    """Build a delivery factory using the global lane when available."""
+    run_serialized = getattr(notifier, "_bgx_run_serialized", None)
+    original_notify = getattr(notifier, "_bgx_original_notify", None)
+    if callable(run_serialized) and callable(original_notify):
+        async def _deliver():
+            return await run_serialized(
+                lambda: original_notify(text), timeout=_NOTIFY_TIMEOUT_S
+            )
+        return _deliver
+
+    async def _fallback():
+        return await asyncio.wait_for(notifier.notify(text), timeout=_NOTIFY_TIMEOUT_S)
+    return _fallback
+
+
 def install(TradingEngine, notifier, log):
     """Instrument ``_nexus_validate`` and guarantee one AI terminal outcome."""
     if getattr(TradingEngine, "_nexus_latency_telegram_patched", False):
@@ -169,11 +154,10 @@ def install(TradingEngine, notifier, log):
                 "[NEXUS_LATENCY] symbol=%s stage=cancelled elapsed_ms=%d",
                 symbol, int(elapsed * 1000),
             )
+            text = _failure_message(symbol, "timeout/cancelled", elapsed)
             _spawn_notice(
-                notifier.notify(_failure_message(symbol, "timeout/cancelled", elapsed)),
-                symbol=symbol,
-                stage="cancelled",
-                log=log,
+                _terminal_delivery_factory(notifier, text),
+                symbol=symbol, stage="cancelled", log=log,
             )
             raise
         except Exception as exc:
@@ -182,11 +166,10 @@ def install(TradingEngine, notifier, log):
                 "[NEXUS_LATENCY] symbol=%s stage=failed error=%s elapsed_ms=%d",
                 symbol, type(exc).__name__, int(elapsed * 1000),
             )
+            text = _failure_message(symbol, type(exc).__name__, elapsed)
             _spawn_notice(
-                notifier.notify(_failure_message(symbol, type(exc).__name__, elapsed)),
-                symbol=symbol,
-                stage="failed",
-                log=log,
+                _terminal_delivery_factory(notifier, text),
+                symbol=symbol, stage="failed", log=log,
             )
             raise
 
@@ -205,11 +188,10 @@ def install(TradingEngine, notifier, log):
             "[NEXUS_LATENCY] symbol=%s stage=finished approved=%s elapsed_ms=%d",
             symbol, approved, int(elapsed * 1000),
         )
+        text = _terminal_message(data, approved, elapsed)
         _spawn_notice(
-            notifier.notify(_terminal_message(data, approved, elapsed)),
-            symbol=symbol,
-            stage="finished",
-            log=log,
+            _terminal_delivery_factory(notifier, text),
+            symbol=symbol, stage="finished", log=log,
         )
         return decision
 
@@ -217,6 +199,6 @@ def install(TradingEngine, notifier, log):
     TradingEngine._nexus_latency_telegram_patched = True
     log.info(
         "[NEXUS_LATENCY] terminal Telegram observability installed; "
-        "delivery detached/coalesced/serialized outside AI timeout budget; "
-        "trading logic unchanged"
+        "delivery detached/coalesced on global serialized lane; "
+        "queue wait excluded from active timeout; trading logic unchanged"
     )
