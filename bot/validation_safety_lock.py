@@ -32,7 +32,11 @@ def install(log):
         log.warning(
             "[VALIDATION_LOCK] LIVE mutation blocked; starting read-only SHADOW LIVE pipeline"
         )
-        return await shadow_live.connect_readonly(self)
+        connected = await shadow_live.connect_readonly(self)
+        if connected:
+            from bot import private_ws_readonly_observability
+            await private_ws_readonly_observability.run(self.client, self.instruments, log)
+        return connected
 
     async def _open_locked(self, sig, *args, **kwargs):
         if getattr(self, "paper_trade", False):
@@ -93,16 +97,10 @@ def install(log):
             return None
         TradingEngine._guard_naked_positions = _guard_locked
 
-    # Install one transport lane for every Telegram message before NEXUS
-    # terminal telemetry. This prevents unrelated Telegram callers from racing
-    # the notifier's shared global rate-limit timestamp/hash state.
     from bot import notifier
     from bot import telegram_serialization_hardening
     telegram_serialization_hardening.install(notifier, log)
 
-    # Observability-only wrapper around the NEXUS call. It records latency and
-    # guarantees a terminal Telegram result while leaving approval criteria and
-    # exchange execution untouched.
     from bot import nexus_latency_telegram
     nexus_latency_telegram.install(TradingEngine, notifier, log)
 
