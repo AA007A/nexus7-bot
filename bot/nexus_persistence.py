@@ -19,6 +19,10 @@ _SQLITE = os.environ.get("NEXUS_DB_PATH", "/tmp/nexus_ai_history.db")
 _conn = None
 _is_pg = False
 _lock = asyncio.Lock()
+# Separate from the initialization lock. _init() calls refresh_metrics(), which
+# calls _fetchall(); sharing the same lock would deadlock that bootstrap path.
+# This lock serializes all operations on the module's single DB connection.
+_io_lock = asyncio.Lock()
 _metrics_cache = {
     "storage": "uninitialized",
     "total": 0,
@@ -129,28 +133,30 @@ async def _execute(sql, params=()):
     await _init()
     if _conn is None:
         return
-    try:
-        if _is_pg:
-            await _conn.execute(_pg_sql(sql), *params)
-        else:
-            await _conn.execute(sql, params)
-            await _conn.commit()
-    except Exception as exc:
-        log.warning(f"NEXUS history write: {type(exc).__name__}: {exc}")
+    async with _io_lock:
+        try:
+            if _is_pg:
+                await _conn.execute(_pg_sql(sql), *params)
+            else:
+                await _conn.execute(sql, params)
+                await _conn.commit()
+        except Exception as exc:
+            log.warning(f"NEXUS history write: {type(exc).__name__}: {exc}")
 
 
 async def _fetchall(sql, params=()):
     await _init()
     if _conn is None:
         return []
-    try:
-        if _is_pg:
-            return [tuple(r) for r in await _conn.fetch(_pg_sql(sql), *params)]
-        async with _conn.execute(sql, params) as cur:
-            return await cur.fetchall()
-    except Exception as exc:
-        log.warning(f"NEXUS history read: {type(exc).__name__}: {exc}")
-        return []
+    async with _io_lock:
+        try:
+            if _is_pg:
+                return [tuple(r) for r in await _conn.fetch(_pg_sql(sql), *params)]
+            async with _conn.execute(sql, params) as cur:
+                return await cur.fetchall()
+        except Exception as exc:
+            log.warning(f"NEXUS history read: {type(exc).__name__}: {exc}")
+            return []
 
 
 async def record_decision(sig, decision):
@@ -192,7 +198,8 @@ def _candle_ts(c):
         if k in c and c[k] is not None:
             try:
                 x = float(c[k])
-                if x > 1e12: x /= 1000.0
+                if x > 1e12:
+                    x /= 1000.0
                 return x
             except (TypeError, ValueError):
                 # A malformed timestamp candidate is skipped; other known keys
@@ -286,10 +293,14 @@ async def refresh_metrics():
     approved = vetoed = pending = ambiguous = 0
     ar, vr = [], []
     for a, status, r in rows:
-        if int(a or 0): approved += 1
-        else: vetoed += 1
-        if status == "PENDING": pending += 1
-        if status == "AMBIGUOUS": ambiguous += 1
+        if int(a or 0):
+            approved += 1
+        else:
+            vetoed += 1
+        if status == "PENDING":
+            pending += 1
+        if status == "AMBIGUOUS":
+            ambiguous += 1
         if r is not None and status not in ("PENDING", "AMBIGUOUS", "INVALID"):
             (ar if int(a or 0) else vr).append(float(r))
     aexp = sum(ar)/len(ar) if ar else None
