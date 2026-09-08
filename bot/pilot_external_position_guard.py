@@ -24,6 +24,13 @@ def install(TradingEngine, log):
     if getattr(TradingEngine, "_pilot_external_position_guard_patched", False):
         return
 
+    # Read-only forensic logging is installed through this already-loaded
+    # hardening module so SHADOW can expose normalized position details without
+    # adding any exchange mutation capability.
+    from bot import kucoin as _kucoin
+    from bot import shadow_position_forensics as _shadow_position_forensics
+    _shadow_position_forensics.install(_kucoin, log)
+
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
     original_sync = getattr(TradingEngine, "_sync_positions", None)
     original_reconcile = getattr(TradingEngine, "_reconcile_exchange_positions", None)
