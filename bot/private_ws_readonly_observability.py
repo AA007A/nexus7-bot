@@ -9,6 +9,42 @@ diagnostic state on the client instance.
 import asyncio
 
 
+def _first(order, *keys, default=""):
+    """Return the first non-empty value across KuCoin field-name variants."""
+    for key in keys:
+        value = order.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _log_active_order_forensics(orders, log):
+    """Emit normalized, non-secret details for active orders in SHADOW only."""
+    for idx, order in enumerate(orders or [], start=1):
+        if not isinstance(order, dict):
+            log.warning(
+                "[PRELIVE_ACTIVE_ORDER] index=%s result=UNPARSEABLE execution_effect=NONE",
+                idx,
+            )
+            continue
+        log.warning(
+            "[PRELIVE_ACTIVE_ORDER] index=%s symbol=%s side=%s type=%s status=%s "
+            "price=%s size=%s filled=%s orderId=%s clientOid=%s createdAt=%s "
+            "source=KuCoin read_only=true execution_effect=NONE",
+            idx,
+            _first(order, "symbol", "contract", default="?"),
+            _first(order, "side", default="?"),
+            _first(order, "type", "orderType", default="?"),
+            _first(order, "status", default="active"),
+            _first(order, "price", "orderPrice", default="0"),
+            _first(order, "size", "orderSize", "qty", default="0"),
+            _first(order, "filledSize", "dealSize", "filledQty", default="0"),
+            _first(order, "orderId", "id", default="?"),
+            _first(order, "clientOid", "clientOrderId", default="?"),
+            _first(order, "createdAt", "createdTime", "ts", default="?"),
+        )
+
+
 async def run(client, instruments, log) -> bool:
     from bot.prelive_readonly_probe import _active_orders, _private_ws_probe
 
@@ -53,6 +89,8 @@ async def run(client, instruments, log) -> bool:
             len(orders),
             len(unprotected),
         )
+        if orders:
+            _log_active_order_forensics(orders, log)
     except Exception as exc:
         exposure_clear = False
         setattr(client, "_prelive_active_positions", None)
