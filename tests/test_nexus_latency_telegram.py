@@ -55,6 +55,8 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         if pending:
             await asyncio.gather(*list(pending), return_exceptions=True)
         pending.clear()
+        inflight = getattr(nlt._spawn_notice, "_inflight", {})
+        inflight.clear()
 
     async def _drain_notices(self):
         for _ in range(20):
@@ -118,6 +120,33 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("RESULTADO APROVADO", notifier.messages[0])
         self.assertNotIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
+
+    async def test_overlapping_terminal_delivery_for_same_symbol_is_coalesced(self):
+        notifier = _SlowNotifier(delay=0.05)
+        log = _Log()
+        first = nlt._spawn_notice(
+            notifier.notify("first"), symbol="DOTUSDT", stage="finished", log=log
+        )
+        second = nlt._spawn_notice(
+            notifier.notify("second"), symbol="DOTUSDT", stage="finished", log=log
+        )
+        self.assertIs(first, second)
+        await self._drain_notices()
+        self.assertEqual(notifier.messages, ["first"])
+        self.assertEqual(getattr(nlt._spawn_notice, "_inflight", {}), {})
+
+    async def test_different_symbols_can_deliver_independently(self):
+        notifier = _SlowNotifier(delay=0.01)
+        log = _Log()
+        first = nlt._spawn_notice(
+            notifier.notify("dot"), symbol="DOTUSDT", stage="finished", log=log
+        )
+        second = nlt._spawn_notice(
+            notifier.notify("atom"), symbol="ATOMUSDT", stage="finished", log=log
+        )
+        self.assertIsNot(first, second)
+        await self._drain_notices()
+        self.assertCountEqual(notifier.messages, ["dot", "atom"])
 
     async def test_actual_cancellation_emits_only_failure_terminal(self):
         class Engine:
