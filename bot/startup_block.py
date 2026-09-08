@@ -1,6 +1,9 @@
-"""Startup integrity block classification and Telegram-safe diagnostics.
+"""Startup integrity block classification and startup diagnostics.
 
-Pure helpers only: no exchange, network, credentials, or trading side effects.
+This module contains the fail-closed startup classifier plus a one-shot,
+observational static diagnostic. The diagnostic has no exchange/network access
+and cannot grant or revoke trading permission; classification remains driven
+only by the explicit inputs passed to ``classify_startup_block``.
 """
 from __future__ import annotations
 
@@ -14,6 +17,42 @@ class StartupBlock:
     detail: str
 
 
+_startup_diagnostics_done = False
+
+
+def run_startup_diagnostics_once() -> bool:
+    """Run static observability once from the explicit application startup path.
+
+    Failures are diagnostic-only and never alter startup classification. This
+    deliberately replaces the previous implicit invocation from sitecustomize.
+    """
+    global _startup_diagnostics_done
+    if _startup_diagnostics_done:
+        return True
+    _startup_diagnostics_done = True
+    try:
+        from bot.logger import log
+        from bot.silent_except_audit import audit_silent_excepts
+
+        audit_silent_excepts(log)
+        log.info(
+            "[STARTUP_DIAGNOSTICS] silent-except audit source=explicit_startup "
+            "decision_effect=NONE execution_effect=NONE"
+        )
+        return True
+    except Exception as exc:
+        try:
+            from bot.logger import log
+            log.warning(
+                "[STARTUP_DIAGNOSTICS] silent-except audit failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+        except Exception:
+            return False
+        return False
+
+
 def classify_startup_block(
     *,
     sitecustomize_status: str,
@@ -24,8 +63,12 @@ def classify_startup_block(
 
     Priority is deterministic: hardening confirmation, self-check execution,
     then structural critical findings. Warnings are deliberately absent from
-    this API and therefore cannot block startup.
+    this API and therefore cannot block startup. Static diagnostics are invoked
+    here for observability but their result is intentionally not an input to the
+    classifier.
     """
+    run_startup_diagnostics_once()
+
     if sitecustomize_status != "ok":
         return StartupBlock(
             "SITECUSTOMIZE_NOT_CONFIRMED",
