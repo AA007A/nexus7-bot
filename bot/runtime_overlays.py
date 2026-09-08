@@ -22,23 +22,8 @@ def install(TradingEngine, Analyzer, log) -> None:
     from bot import nexus_zero_observability
     from bot import notifier
 
-    if not getattr(np, "_single_conn_serialized", False):
-        orig_execute = np._execute
-        orig_fetchall = np._fetchall
-        io_lock = asyncio.Lock()
-
-        async def execute_serialized(sql, params=()):
-            async with io_lock:
-                return await orig_execute(sql, params)
-
-        async def fetchall_serialized(sql, params=()):
-            async with io_lock:
-                return await orig_fetchall(sql, params)
-
-        np._execute = execute_serialized
-        np._fetchall = fetchall_serialized
-        np._single_conn_serialized = True
-
+    # NEXUS persistence I/O serialization now lives in nexus_persistence core.
+    # This overlay no longer replaces np._execute or np._fetchall.
     fm.install(log)
 
     if not getattr(Analyzer, "_mtf_shadow_patched", False):
