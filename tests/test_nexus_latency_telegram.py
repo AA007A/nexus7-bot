@@ -42,6 +42,7 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         nlt.install(Engine, notifier, _Log())
         decision = await Engine()._nexus_validate(SimpleNamespace(symbol="AVAXUSDT"))
         self.assertIsInstance(decision, _Decision)
+        await asyncio.sleep(0)
         self.assertEqual(len(notifier.messages), 1)
         msg = notifier.messages[0]
         self.assertIn("NEXUS AI — RESULTADO VETO", msg)
@@ -60,9 +61,30 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         nlt.install(Engine, notifier, _Log())
         with self.assertRaises(RuntimeError):
             await Engine()._nexus_validate(SimpleNamespace(symbol="DOTUSDT"))
+        await asyncio.sleep(0)
         self.assertEqual(len(notifier.messages), 1)
         self.assertIn("ANÁLISE NÃO CONCLUÍDA", notifier.messages[0])
         self.assertIn("nenhuma ordem enviada", notifier.messages[0])
+
+    async def test_slow_telegram_does_not_delay_nexus_result(self):
+        class Engine:
+            async def _nexus_validate(self, sig):
+                return _Decision()
+
+        release = asyncio.Event()
+
+        class SlowNotifier:
+            async def notify(self, text):
+                await release.wait()
+
+        nlt.install(Engine, SlowNotifier(), _Log())
+        decision = await asyncio.wait_for(
+            Engine()._nexus_validate(SimpleNamespace(symbol="AVAXUSDT")),
+            timeout=0.05,
+        )
+        self.assertIsInstance(decision, _Decision)
+        release.set()
+        await asyncio.sleep(0)
 
     def test_no_exchange_mutation_calls_added(self):
         src = inspect.getsource(nlt)
