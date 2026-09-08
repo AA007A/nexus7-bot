@@ -5,7 +5,8 @@ headline ingestion alive. Signed headline sentiment is added to the existing
 market sentiment score already passed by TradingEngine to ``nexus_ai.decide``.
 
 PAPER/LIVE mode, leverage, sizing, risk limits, execution gates and order
-routing are not changed here.
+routing are not changed here. Structured multi-headline event intelligence is
+observational only and never changes the decision score.
 """
 from __future__ import annotations
 
@@ -23,6 +24,13 @@ _RSS_FEEDS = (
     "https://decrypt.co/feed",
 )
 
+_RSS_SOURCE_NAMES = {
+    "https://www.coindesk.com/arc/outboundfeeds/rss/": "CoinDesk",
+    "https://cointelegraph.com/rss": "CoinTelegraph",
+    "https://www.theblock.co/rss.xml": "TheBlock",
+    "https://decrypt.co/feed": "Decrypt",
+}
+
 _NEWS_TTL_SECONDS = 1800
 _MAX_FUTURE_SKEW_SECONDS = 300
 
@@ -38,6 +46,19 @@ _RELEVANT_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bcpi\b", r"\bpce\b", r"\bnfp\b", r"\binflation\b", r"\binterest rate\b",
     r"\btreasury\b", r"\bdollar index\b", r"\bdxy\b",
 ))
+
+
+def _source_name(feed_url: str) -> str:
+    return _RSS_SOURCE_NAMES.get(str(feed_url), "PUBLIC_RSS")
+
+
+def _event_snapshot_for_fresh_headlines(log, headlines):
+    """Build and emit non-decisional structured event telemetry."""
+    from bot.news_event_observability import build_event_snapshot, compact_event_log
+
+    snapshot = build_event_snapshot(headlines)
+    log.info("%s", compact_event_log(snapshot))
+    return snapshot
 
 
 def _is_relevant_headline(title: str) -> bool:
@@ -106,6 +127,7 @@ def install(log):
                     seen = 0
                     relevant = 0
                     fresh = 0
+                    fresh_headlines = []
                     dedupe = set()
                     now = time.time()
                     for feed_url in _RSS_FEEDS:
@@ -136,6 +158,10 @@ def install(log):
                                 if not _is_fresh_published_ts(published_ts, now):
                                     continue
                                 fresh += 1
+                                fresh_headlines.append({
+                                    "title": title,
+                                    "source": _source_name(feed_url),
+                                })
                                 classification, confidence, is_fomc = scoring._classify_news(title)
                                 candidate = (
                                     float(confidence), float(published_ts), classification, is_fomc, title
@@ -189,6 +215,17 @@ def install(log):
                             "source": "PUBLIC_RSS",
                             "headline": "",
                         })
+
+                    # Multi-headline event intelligence is telemetry only. Any
+                    # failure here is isolated from the existing headline score.
+                    try:
+                        _event_snapshot_for_fresh_headlines(log, fresh_headlines)
+                    except Exception as exc:
+                        log.warning(
+                            "[NEWS_EVENT_INTELLIGENCE] telemetry_failed error=%s "
+                            "decision_effect=NONE execution_effect=NONE",
+                            type(exc).__name__,
+                        )
             except Exception as exc:
                 log.warning(
                     "[NEWS_CONTEXT] RSS refresh failed: %s: %s",
@@ -219,5 +256,6 @@ def install(log):
     scoring._rss_only_news_hardening = True
     log.info(
         "[NEWS_CONTEXT] installed: NEXUS market sentiment includes fresh relevant public RSS "
-        "headline score; CryptoPanic token removed from active news path"
+        "headline score; structured multi-headline event telemetry enabled; "
+        "CryptoPanic token removed from active news path"
     )
