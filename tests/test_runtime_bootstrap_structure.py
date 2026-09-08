@@ -1,8 +1,10 @@
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_sitecustomize_is_minimal_delegate():
-    text = Path("sitecustomize.py").read_text(encoding="utf-8")
+    text = (ROOT / "sitecustomize.py").read_text(encoding="utf-8")
     assert "bot.runtime_bootstrap" in text
     assert "_install_runtime_bootstrap()" in text
     assert "TradingEngine._nexus_validate" not in text
@@ -11,7 +13,7 @@ def test_sitecustomize_is_minimal_delegate():
 
 
 def test_runtime_bootstrap_preserves_safety_installers():
-    text = Path("bot/runtime_bootstrap.py").read_text(encoding="utf-8")
+    text = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
     for marker in (
         "_validation_safety_lock.install(_log)",
         "_prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)",
@@ -24,7 +26,7 @@ def test_runtime_bootstrap_preserves_safety_installers():
 
 
 def test_bootstrap_has_no_direct_exchange_mutation_or_release_enablement():
-    text = Path("bot/runtime_bootstrap.py").read_text(encoding="utf-8")
+    text = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
     for marker in (
         "PILOT_RELEASE_APPROVED=",
         "LIVE_TRADING_CONFIRMED=",
