@@ -1,0 +1,1 @@
+Security boundary: this diagnostic must never be used to infer execution authorization. It only observes data already returned by authenticated account reads under SHADOW. Any future real-money action remains separately gated and is not part of this change.
