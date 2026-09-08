@@ -12,7 +12,13 @@ import asyncio
 import time
 
 
-_NOTIFY_TIMEOUT_S = 15.0
+# notifier.notify can perform up to three HTTP attempts (10s each) plus
+# exponential/429 backoff. The previous 15s active-send budget was shorter than
+# that legitimate retry envelope, so a healthy retry path could be mislabeled
+# as notify_timeout. 45s still provides a hard observability bound while
+# covering the notifier's expected worst-case retry path. Queue wait is excluded
+# separately by telegram_serialization_hardening.
+_NOTIFY_TIMEOUT_S = 45.0
 
 
 def _reason_from_decision(data: dict) -> str:
