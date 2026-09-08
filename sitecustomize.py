@@ -48,6 +48,7 @@ try:
     from bot import pilot_readiness_observability as _pilot_readiness_observability
     from bot import shadow_mode_observability as _shadow_mode_observability
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
+    from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin as _kucoin
     from bot import notifier as _notifier
     from bot.logger import log as _log
@@ -66,6 +67,7 @@ try:
     _paper_lifecycle.install(_log)
     _paper_validation_reset.install(_log)
     _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
+    _pilot_external_position_guard.install(TradingEngine, _log)
     _validation_safety_lock.install(_log)
     _liquidation_override_guard.install(_log)
     _instrument_readiness_guard.install(_log)
