@@ -33,6 +33,9 @@ class _Decision:
 
 
 class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        nlt._TERMINAL_CACHE.clear()
+
     async def test_terminal_message_after_nexus_decision(self):
         class Engine:
             async def _nexus_validate(self, sig):
@@ -50,6 +53,19 @@ class NexusLatencyTelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("EV:", msg)
         self.assertIn("Análise:", msg)
         self.assertIn("execution_effect=NONE", msg)
+
+    async def test_equivalent_terminal_result_is_deduped(self):
+        class Engine:
+            async def _nexus_validate(self, sig):
+                return _Decision()
+
+        notifier = _Notifier()
+        nlt.install(Engine, notifier, _Log())
+        engine = Engine()
+        sig = SimpleNamespace(symbol="AVAXUSDT")
+        await engine._nexus_validate(sig)
+        await engine._nexus_validate(sig)
+        self.assertEqual(len(notifier.messages), 1)
 
     async def test_failure_is_fail_closed_and_reported(self):
         class Engine:

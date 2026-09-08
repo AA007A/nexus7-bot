@@ -4,7 +4,12 @@ This module adds observability only. It does not alter AI approval criteria,
 execution gates, risk limits, sizing, exchange state, or order dispatch.
 """
 import asyncio
+import os
 import time
+
+
+_TERMINAL_CACHE: dict = {}
+_TERMINAL_DEDUPE_S = int(os.environ.get("NEXUS_TERMINAL_DEDUPE_S", "60"))
 
 
 def _reason_from_decision(data: dict) -> str:
@@ -15,6 +20,45 @@ def _reason_from_decision(data: dict) -> str:
     if warnings:
         return str(warnings[0])[:180]
     return "sem motivo detalhado"
+
+
+def _terminal_key(data: dict, approved: bool):
+    """Identify an equivalent NEXUS terminal result for notification dedupe."""
+    def _num(name):
+        value = data.get(name)
+        try:
+            return round(float(value), 8) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    return (
+        str(data.get("symbol", "?")),
+        str(data.get("decision", data.get("direction", "?"))),
+        bool(approved),
+        str(data.get("market_regime", "?")),
+        _reason_from_decision(data),
+        _num("entry"),
+        _num("stop_loss"),
+        _num("take_profit"),
+    )
+
+
+def _should_send_terminal(data: dict, approved: bool, now: float | None = None) -> bool:
+    """Send changed/new outcomes immediately; suppress only exact recent repeats."""
+    if _TERMINAL_DEDUPE_S <= 0:
+        return True
+    ts = time.monotonic() if now is None else float(now)
+    key = _terminal_key(data, approved)
+    last = _TERMINAL_CACHE.get(key)
+    if last is not None and ts - last < _TERMINAL_DEDUPE_S:
+        return False
+    _TERMINAL_CACHE[key] = ts
+    if len(_TERMINAL_CACHE) > 500:
+        cutoff = ts - (_TERMINAL_DEDUPE_S * 2)
+        for old_key, old_ts in list(_TERMINAL_CACHE.items()):
+            if old_ts < cutoff:
+                _TERMINAL_CACHE.pop(old_key, None)
+    return True
 
 
 def _terminal_message(data: dict, approved: bool, elapsed_s: float) -> str:
@@ -77,16 +121,22 @@ def install(TradingEngine, notifier, log):
                 "[NEXUS_LATENCY] symbol=%s stage=finished approved=%s elapsed_ms=%d",
                 symbol, approved, int(elapsed * 1000),
             )
-            try:
-                await notifier.notify(_terminal_message(data, approved, elapsed))
+            if _should_send_terminal(data, approved):
+                try:
+                    await notifier.notify(_terminal_message(data, approved, elapsed))
+                    log.info(
+                        "[NEXUS_TELEGRAM_TERMINAL] symbol=%s approved=%s elapsed_ms=%d sent=true",
+                        symbol, approved, int(elapsed * 1000),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "[NEXUS_TELEGRAM_TERMINAL] symbol=%s sent=false error=%s",
+                        symbol, type(exc).__name__,
+                    )
+            else:
                 log.info(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s approved=%s elapsed_ms=%d sent=true",
-                    symbol, approved, int(elapsed * 1000),
-                )
-            except Exception as exc:
-                log.warning(
-                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s sent=false error=%s",
-                    symbol, type(exc).__name__,
+                    "[NEXUS_TELEGRAM_TERMINAL] symbol=%s approved=%s sent=false deduped=true cooldown_s=%d",
+                    symbol, approved, _TERMINAL_DEDUPE_S,
                 )
             return decision
         except asyncio.CancelledError:
@@ -123,5 +173,6 @@ def install(TradingEngine, notifier, log):
     TradingEngine._nexus_validate = _validate_with_latency
     TradingEngine._nexus_latency_telegram_patched = True
     log.info(
-        "[NEXUS_LATENCY] terminal Telegram observability installed; trading logic unchanged"
+        "[NEXUS_LATENCY] terminal Telegram observability installed; terminal_dedupe_s=%s; trading logic unchanged",
+        _TERMINAL_DEDUPE_S,
     )
