@@ -10,25 +10,6 @@ def _reset_runtime_state():
     runtime._previous_coinglass_oi = None
 
 
-def test_whale_alert_counts_only_attributed_exchange_flow():
-    _reset_runtime_state()
-    inflow = runtime.parse_whale_alert({
-        "type": "alert",
-        "from": "unknown wallet",
-        "to": "binance",
-        "amounts": [{"symbol": "BTC", "value_usd": 40_000_000}],
-    })
-    assert inflow == {"whale_exchange_inflow_usd": 40_000_000}
-
-    unknown = runtime.parse_whale_alert({
-        "type": "alert",
-        "from": "unknown wallet",
-        "to": "unknown wallet",
-        "amounts": [{"symbol": "BTC", "value_usd": 300_000_000}],
-    })
-    assert unknown == {}
-
-
 def test_coinglass_liquidation_uses_aggregate_row():
     _reset_runtime_state()
     out = runtime.parse_coinglass_liquidation({
@@ -70,16 +51,16 @@ def test_cryptoquant_reserve_change_is_normalized():
 def test_signal_expiry_is_independent_per_signal():
     _reset_runtime_state()
     now = time.time()
-    runtime._merge_signals({"whale_exchange_inflow_usd": 150_000_000}, now=now - 700)
+    runtime._merge_signals({"liquidation_usd_1h": 600_000_000}, now=now - 1300)
     runtime._merge_signals({"btc_exchange_reserve_change_pct": 2.5}, now=now - 100)
 
     snap = runtime.snapshot(now=now)
-    assert "whale_exchange_inflow_usd" not in snap["signals"]
+    assert "liquidation_usd_1h" not in snap["signals"]
     assert snap["signals"]["btc_exchange_reserve_change_pct"] == 2.5
     assert snap["assessment"].block_new_entries is False
 
 
-def test_combined_fresh_risk_can_block_pilot_gate():
+def test_combined_fresh_risk_can_block_pilot_gate_without_whale_alert():
     _reset_runtime_state()
 
     class DummyState:
@@ -104,9 +85,10 @@ def test_combined_fresh_risk_can_block_pilot_gate():
     runtime.install(DummyPilot, DummyScoring, DummyLog())
     now = time.time()
     runtime._merge_signals({
-        "whale_exchange_inflow_usd": 125_000_000,
         "btc_exchange_netflow_usd": 175_000_000,
+        "btc_exchange_reserve_change_pct": 3.0,
         "liquidation_usd_1h": 600_000_000,
+        "open_interest_change_pct": 15.0,
         "macro_event_severity": 90,
     }, now=now)
 
