@@ -138,6 +138,30 @@ class ConfidenceOutcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime.record_trade_outcome = original_record_outcome
             runtime.maybe_log_readiness = original_readiness
 
+    async def test_oos_failure_does_not_relabel_persisted_outcome_as_link_failure(self):
+        db = _DB()
+        log = _Log()
+        original_record_outcome = runtime.record_trade_outcome
+        original_readiness = runtime.maybe_log_readiness
+
+        async def persisted_outcome(*args, **kwargs):
+            return True
+
+        async def failing_readiness(*args, **kwargs):
+            raise RuntimeError("analytics failure")
+
+        runtime.record_trade_outcome = persisted_outcome
+        runtime.maybe_log_readiness = failing_readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            rendered = " ".join(str(args) for _, args in log.messages)
+            self.assertIn("outcome_r=%s persisted=%s", rendered)
+            self.assertIn("[NEXUS_OOS_CALIBRATION] trigger_failed", rendered)
+            self.assertNotIn("close_link_failed", rendered)
+        finally:
+            runtime.record_trade_outcome = original_record_outcome
+            runtime.maybe_log_readiness = original_readiness
+
     async def test_install_is_idempotent(self):
         db = _DB()
         log = _Log()
