@@ -4,6 +4,7 @@ from bot import market_risk_runtime as runtime
 
 
 def _reset_runtime_state():
+    """Reset only the runtime state used by the free-provider test suite."""
     runtime._state["signals"] = {}
     runtime._state["signal_updated_at"] = {}
     runtime._state["providers"] = {}
