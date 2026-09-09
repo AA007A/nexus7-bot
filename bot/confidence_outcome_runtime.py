@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 
 from bot.confidence_outcome_linking import link_trade, record_trade_outcome
+from bot.oos_calibration_readiness import maybe_log_readiness
 
 
 def _direction(side: str, direction: str = "") -> str:
@@ -83,6 +84,18 @@ async def _record_paper_close(db, *, trade_id: int, log) -> None:
         )
 
 
+async def _report_oos_readiness(db, *, log) -> None:
+    """Emit throttled PAPER OOS readiness after durable outcome persistence."""
+    try:
+        await maybe_log_readiness(db, log)
+    except Exception as exc:
+        log.warning(
+            "[NEXUS_OOS_CALIBRATION] hook_failed error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
+
 def install(db, log) -> None:
     """Install PAPER-only post-persistence hooks exactly once."""
     if getattr(db, "_confidence_outcome_runtime_installed", False):
@@ -132,6 +145,14 @@ def install(db, log) -> None:
         except Exception as exc:
             log.warning(
                 "[CONFIDENCE_OUTCOME_LINK] mode=PAPER close_hook_failed trade_id=%s error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                trade_id, type(exc).__name__,
+            )
+        try:
+            await _report_oos_readiness(db, log=log)
+        except Exception as exc:
+            log.warning(
+                "[NEXUS_OOS_CALIBRATION] close_hook_failed trade_id=%s error=%s "
                 "decision_effect=NONE execution_effect=NONE",
                 trade_id, type(exc).__name__,
             )
