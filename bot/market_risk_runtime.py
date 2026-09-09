@@ -16,25 +16,44 @@ import aiohttp
 
 from bot.market_risk_intelligence import assess_market_risk, compact_risk_log
 
-_SNAPSHOT_TTL_S = 1800.0
+_SIGNAL_TTL_S = {
+    "whale_exchange_inflow_usd": 600.0,
+    "whale_exchange_outflow_usd": 600.0,
+    "liquidation_usd_1h": 1200.0,
+    "open_interest_change_pct": 1800.0,
+    "funding_rate_pct": 1800.0,
+    "btc_exchange_netflow_usd": 21600.0,
+    "btc_exchange_reserve_change_pct": 21600.0,
+    "spx_change_pct": 900.0,
+    "vix_change_pct": 900.0,
+    "macro_event_severity": 1800.0,
+}
 _state: dict[str, Any] = {
     "signals": {},
+    "signal_updated_at": {},
     "providers": {},
-    "updated_at": 0.0,
 }
 _previous_coinglass_oi: tuple[float, float] | None = None
 
 
 def snapshot(now: float | None = None) -> dict[str, Any]:
     current = time.time() if now is None else float(now)
-    updated = float(_state.get("updated_at", 0) or 0)
-    fresh = updated > 0 and current - updated <= _SNAPSHOT_TTL_S
-    signals = dict(_state.get("signals", {}) or {}) if fresh else {}
+    raw = dict(_state.get("signals", {}) or {})
+    timestamps = dict(_state.get("signal_updated_at", {}) or {})
+    signals: dict[str, Any] = {}
+    ages: dict[str, float] = {}
+    for key, value in raw.items():
+        ts = float(timestamps.get(key, 0) or 0)
+        ttl = float(_SIGNAL_TTL_S.get(key, 1800.0))
+        age = current - ts if ts > 0 else float("inf")
+        if ts > 0 and -5.0 <= age <= ttl:
+            signals[key] = value
+            ages[key] = max(0.0, age)
     assessment = assess_market_risk(signals)
     return {
-        "fresh": fresh,
-        "age_s": max(0.0, current - updated) if updated else None,
+        "fresh": bool(signals),
         "signals": signals,
+        "signal_ages_s": ages,
         "providers": dict(_state.get("providers", {}) or {}),
         "assessment": assessment,
     }
@@ -44,12 +63,15 @@ def _mark_provider(name: str, status: str) -> None:
     _state.setdefault("providers", {})[name] = status
 
 
-def _merge_signals(values: dict[str, Any]) -> None:
+def _merge_signals(values: dict[str, Any], now: float | None = None) -> None:
     clean = {k: v for k, v in values.items() if v is not None}
     if not clean:
         return
+    ts = time.time() if now is None else float(now)
     _state.setdefault("signals", {}).update(clean)
-    _state["updated_at"] = time.time()
+    signal_ts = _state.setdefault("signal_updated_at", {})
+    for key in clean:
+        signal_ts[key] = ts
 
 
 def _is_exchange_owner(owner: Any) -> bool:
@@ -152,14 +174,17 @@ async def _coinglass_loop(log) -> None:
     )
     while True:
         try:
+            statuses: list[int] = []
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(urls[0], timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    statuses.append(r.status)
                     if r.status == 200:
                         _merge_signals(parse_coinglass_liquidation(await r.json(content_type=None)))
                 async with session.get(urls[1], timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    statuses.append(r.status)
                     if r.status == 200:
                         _merge_signals(parse_coinglass_markets(await r.json(content_type=None)))
-            _mark_provider("coinglass", "ok")
+            _mark_provider("coinglass", "ok" if all(s == 200 for s in statuses) else f"http_{statuses}_fail_neutral")
         except Exception as exc:
             _mark_provider("coinglass", f"unavailable:{type(exc).__name__}")
             log.warning("[MARKET_RISK_SOURCE] provider=coinglass unavailable=%s fail_neutral=true", type(exc).__name__)
@@ -215,8 +240,6 @@ async def _whale_alert_loop(log) -> None:
                         msg = json.loads(raw)
                         values = parse_whale_alert(msg)
                         if values:
-                            # Alert contribution is intentionally short-lived;
-                            # each new alert replaces same-direction magnitude.
                             _merge_signals(values)
                     except Exception:
                         continue
@@ -239,7 +262,12 @@ async def market_risk_reader_loop(log) -> None:
     try:
         while True:
             snap = snapshot()
-            log.info("%s providers=%s execution_effect=NONE", compact_risk_log(snap["assessment"]), snap["providers"])
+            log.info(
+                "%s providers=%s fresh_signals=%s execution_effect=NONE",
+                compact_risk_log(snap["assessment"]),
+                snap["providers"],
+                sorted(snap["signals"]),
+            )
             await asyncio.sleep(120)
     finally:
         for task in tasks:
@@ -274,5 +302,5 @@ def install(PilotGuard, scoring, log) -> None:
     PilotGuard._market_risk_intelligence_installed = True
     log.warning(
         "[MARKET_RISK_INTELLIGENCE] installed: extreme combined whale/derivatives/on-chain risk "
-        "blocks pilot entries; provider absence is fail-neutral; sizing unchanged"
+        "blocks pilot entries; per-signal freshness enforced; provider absence fail-neutral; sizing unchanged"
     )
