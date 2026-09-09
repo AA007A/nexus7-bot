@@ -26,6 +26,7 @@ def install(log):
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
         self._validation_safety_lock_active = True
+        self.client._shadow_readonly_active = True
         self._shadow_prelive_readonly_ready = False
         from bot import shadow_live
         from bot import shadow_integrity_isolation
