@@ -1,9 +1,7 @@
 """Deterministic market-risk intelligence for NEXUS-7.
 
-This module normalizes whale/on-chain/derivatives/macro observations into a
-conservative risk score. It never authorizes an order. Missing providers are
-fail-neutral; malformed provider data is ignored rather than converted into a
-fabricated signal.
+Normalizes derivatives, cross-asset and macro observations into a conservative
+risk score. It never authorizes an order. Missing data is fail-neutral.
 """
 from __future__ import annotations
 
@@ -34,87 +32,71 @@ def _num(data: Mapping[str, Any], key: str) -> float | None:
 
 
 def assess_market_risk(signals: Mapping[str, Any] | None) -> MarketRiskAssessment:
-    """Return a conservative 0..100 risk assessment.
+    """Return 0..100 dislocation risk; never an entry authorization.
 
-    Supported normalized inputs are intentionally provider-agnostic:
-      whale_exchange_inflow_usd, whale_exchange_outflow_usd,
-      btc_exchange_netflow_usd, btc_exchange_reserve_change_pct,
-      liquidation_usd_1h, open_interest_change_pct, funding_rate_pct,
-      spx_change_pct, vix_change_pct, macro_event_severity.
-
-    The score estimates *market manipulation / dislocation risk*. It does not
-    claim that manipulation has occurred.
+    Cross-asset inputs use percentage changes over the collector window:
+    SPX, Nasdaq-100, VIX, DXY, US 2Y and US 10Y yields. Macro-event severity
+    covers FOMC/rates, CPI/PCE/PPI, jobs/unemployment, GDP/recession and other
+    structured US macro news. Signals are combined conservatively.
     """
     data = signals or {}
     score = 0
     reasons: list[str] = []
 
-    whale_in = _num(data, "whale_exchange_inflow_usd")
-    whale_out = _num(data, "whale_exchange_outflow_usd")
-    if whale_in is not None and whale_in >= 100_000_000:
-        score += 30
-        reasons.append("WHALE_EXCHANGE_INFLOW_EXTREME")
-    elif whale_in is not None and whale_in >= 25_000_000:
-        score += 18
-        reasons.append("WHALE_EXCHANGE_INFLOW_HIGH")
-    if whale_out is not None and whale_out >= 100_000_000:
-        score = max(0, score - 8)
-        reasons.append("WHALE_EXCHANGE_OUTFLOW_HIGH")
-
-    netflow = _num(data, "btc_exchange_netflow_usd")
-    if netflow is not None and netflow >= 150_000_000:
-        score += 25
-        reasons.append("BTC_NETFLOW_TO_EXCHANGES_EXTREME")
-    elif netflow is not None and netflow >= 50_000_000:
-        score += 15
-        reasons.append("BTC_NETFLOW_TO_EXCHANGES_HIGH")
-
-    reserve_delta = _num(data, "btc_exchange_reserve_change_pct")
-    if reserve_delta is not None and reserve_delta >= 2.0:
-        score += 12
-        reasons.append("BTC_EXCHANGE_RESERVES_RISING")
-
     liq = _num(data, "liquidation_usd_1h")
     if liq is not None and liq >= 500_000_000:
-        score += 30
-        reasons.append("LIQUIDATION_CASCADE_EXTREME")
+        score += 30; reasons.append("LIQUIDATION_CASCADE_EXTREME")
     elif liq is not None and liq >= 150_000_000:
-        score += 18
-        reasons.append("LIQUIDATION_CASCADE_HIGH")
+        score += 18; reasons.append("LIQUIDATION_CASCADE_HIGH")
 
     oi = _num(data, "open_interest_change_pct")
     funding = _num(data, "funding_rate_pct")
     if oi is not None and abs(oi) >= 12.0:
-        score += 15
-        reasons.append("OPEN_INTEREST_DISLOCATION")
+        score += 15; reasons.append("OPEN_INTEREST_DISLOCATION")
     elif oi is not None and abs(oi) >= 7.0:
-        score += 8
-        reasons.append("OPEN_INTEREST_ELEVATED")
+        score += 8; reasons.append("OPEN_INTEREST_ELEVATED")
     if funding is not None and abs(funding) >= 0.08:
-        score += 12
-        reasons.append("FUNDING_EXTREME")
+        score += 12; reasons.append("FUNDING_EXTREME")
 
     spx = _num(data, "spx_change_pct")
+    ndx = _num(data, "ndx_change_pct")
     vix = _num(data, "vix_change_pct")
+    dxy = _num(data, "dxy_change_pct")
+    us2y = _num(data, "us2y_yield_change_bps")
+    us10y = _num(data, "us10y_yield_change_bps")
+
     if spx is not None and spx <= -2.0:
-        score += 18
-        reasons.append("US_EQUITY_RISK_OFF")
+        score += 15; reasons.append("SPX_RISK_OFF")
     elif spx is not None and spx <= -1.0:
-        score += 9
-        reasons.append("US_EQUITY_WEAKNESS")
+        score += 7; reasons.append("SPX_WEAKNESS")
+    if ndx is not None and ndx <= -2.5:
+        score += 15; reasons.append("NDX_RISK_OFF")
+    elif ndx is not None and ndx <= -1.25:
+        score += 7; reasons.append("NDX_WEAKNESS")
     if vix is not None and vix >= 12.0:
-        score += 15
-        reasons.append("VIX_SPIKE")
+        score += 15; reasons.append("VIX_SPIKE")
+    elif vix is not None and vix >= 7.0:
+        score += 7; reasons.append("VIX_RISING")
+    if dxy is not None and dxy >= 1.0:
+        score += 12; reasons.append("DXY_SURGE")
+    elif dxy is not None and dxy >= 0.5:
+        score += 6; reasons.append("DXY_RISING")
+    if us2y is not None and us2y >= 15.0:
+        score += 10; reasons.append("US2Y_YIELD_SHOCK")
+    elif us2y is not None and us2y >= 8.0:
+        score += 5; reasons.append("US2Y_YIELD_RISING")
+    if us10y is not None and us10y >= 15.0:
+        score += 10; reasons.append("US10Y_YIELD_SHOCK")
+    elif us10y is not None and us10y >= 8.0:
+        score += 5; reasons.append("US10Y_YIELD_RISING")
 
     macro = _num(data, "macro_event_severity")
     if macro is not None:
         macro = max(0.0, min(100.0, macro))
         if macro >= 85:
-            score += 25
-            reasons.append("MACRO_EVENT_EXTREME")
+            score += 25; reasons.append("MACRO_EVENT_EXTREME")
         elif macro >= 70:
-            score += 15
-            reasons.append("MACRO_EVENT_HIGH")
+            score += 15; reasons.append("MACRO_EVENT_HIGH")
 
     score = max(0, min(100, int(round(score))))
     if score >= 85:
