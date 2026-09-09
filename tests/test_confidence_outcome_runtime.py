@@ -4,10 +4,15 @@ from bot import confidence_outcome_runtime as runtime
 
 
 class _Log:
+    def __init__(self):
+        self.messages = []
+
     def info(self, *args, **kwargs):
+        self.messages.append(("info", args))
         return None
 
     def warning(self, *args, **kwargs):
+        self.messages.append(("warning", args))
         return None
 
 
@@ -81,6 +86,57 @@ class ConfidenceOutcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.close_calls, 1)
         finally:
             runtime._record_paper_close = original_record
+
+    async def test_successful_outcome_triggers_readonly_oos_readiness(self):
+        db = _DB()
+        log = _Log()
+        original_record_outcome = runtime.record_trade_outcome
+        original_readiness = runtime.maybe_log_readiness
+        calls = []
+
+        async def persisted_outcome(*args, **kwargs):
+            return True
+
+        async def readiness(db_arg, log_arg, **kwargs):
+            calls.append((db_arg, log_arg, kwargs))
+            return {
+                "ready": False,
+                "decision_effect": "NONE",
+                "execution_effect": "NONE",
+            }
+
+        runtime.record_trade_outcome = persisted_outcome
+        runtime.maybe_log_readiness = readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            self.assertEqual(len(calls), 1)
+            self.assertIs(calls[0][0], db)
+            self.assertIs(calls[0][1], log)
+        finally:
+            runtime.record_trade_outcome = original_record_outcome
+            runtime.maybe_log_readiness = original_readiness
+
+    async def test_failed_outcome_persistence_does_not_trigger_oos_readiness(self):
+        db = _DB()
+        log = _Log()
+        original_record_outcome = runtime.record_trade_outcome
+        original_readiness = runtime.maybe_log_readiness
+        calls = []
+
+        async def rejected_outcome(*args, **kwargs):
+            return False
+
+        async def readiness(*args, **kwargs):
+            calls.append(True)
+
+        runtime.record_trade_outcome = rejected_outcome
+        runtime.maybe_log_readiness = readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            self.assertEqual(calls, [])
+        finally:
+            runtime.record_trade_outcome = original_record_outcome
+            runtime.maybe_log_readiness = original_readiness
 
     async def test_install_is_idempotent(self):
         db = _DB()

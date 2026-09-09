@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 
 from bot.confidence_outcome_linking import link_trade, record_trade_outcome
+from bot.oos_calibration_readiness import maybe_log_readiness
 
 
 def _direction(side: str, direction: str = "") -> str:
@@ -75,6 +76,11 @@ async def _record_paper_close(db, *, trade_id: int, log) -> None:
             "decision_effect=NONE execution_effect=NONE",
             trade_id, float(row[0]), ok,
         )
+        if ok:
+            # Analytical telemetry only. This reads completed PAPER evidence,
+            # emits a throttled OOS readiness snapshot, and never mutates any
+            # NEXUS threshold, score, risk rule, release state or exchange state.
+            await maybe_log_readiness(db, log)
     except Exception as exc:
         log.warning(
             "[CONFIDENCE_OUTCOME_LINK] mode=PAPER close_link_failed trade_id=%s error=%s "
