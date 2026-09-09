@@ -52,6 +52,18 @@ async def _link_paper_open(db, *, trade_id: int, symbol: str, side: str,
         )
 
 
+async def _maybe_report_oos(db, *, log) -> None:
+    """Run throttled OOS analytics without affecting persistence or trading."""
+    try:
+        await maybe_log_readiness(db, log)
+    except Exception as exc:
+        log.warning(
+            "[NEXUS_OOS_CALIBRATION] trigger_failed error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
+
 async def _record_paper_close(db, *, trade_id: int, log) -> None:
     try:
         row = await db._fetchone(
@@ -76,16 +88,17 @@ async def _record_paper_close(db, *, trade_id: int, log) -> None:
             "decision_effect=NONE execution_effect=NONE",
             trade_id, float(row[0]), ok,
         )
-        # The OOS report runs only after the realized R outcome has been
-        # persisted. It is throttled and analytical-only; it never mutates
-        # confidence, thresholds, risk, release state or exchange behavior.
-        await maybe_log_readiness(db, log)
     except Exception as exc:
         log.warning(
             "[CONFIDENCE_OUTCOME_LINK] mode=PAPER close_link_failed trade_id=%s error=%s "
             "decision_effect=NONE execution_effect=NONE",
             trade_id, type(exc).__name__,
         )
+        return
+
+    # Run only after the realized R outcome persistence path completed. The
+    # reporter is independently fail-safe and has no decision/execution effect.
+    await _maybe_report_oos(db, log=log)
 
 
 def install(db, log) -> None:
