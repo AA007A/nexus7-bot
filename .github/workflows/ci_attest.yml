@@ -1,0 +1,67 @@
+# Publish an exact-SHA success marker only after the main Quality Check
+# workflow has fully completed successfully. Railway consumes the marker via
+# raw.githubusercontent.com, avoiding unauthenticated GitHub REST rate limits.
+
+name: Publish CI Attestation
+
+on:
+  workflow_run:
+    workflows: ["Quality Check"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish exact-SHA success attestation
+        env:
+          ATTEST_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$ATTEST_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid workflow_run head SHA: $ATTEST_SHA"
+            exit 1
+          fi
+
+          git fetch --no-tags origin ci-attestations
+          rm -rf /tmp/nexus-ci-attestation
+          git worktree add --detach /tmp/nexus-ci-attestation FETCH_HEAD
+          cd /tmp/nexus-ci-attestation
+
+          mkdir -p passed
+          printf '%s\n' "${ATTEST_SHA,,}" > "passed/${ATTEST_SHA,,}.txt"
+          git add "passed/${ATTEST_SHA,,}.txt"
+
+          if git diff --cached --quiet; then
+            echo "Attestation already exists for ${ATTEST_SHA,,}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "CI passed ${ATTEST_SHA,,}"
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:ci-attestations; then
+              echo "Published exact-SHA attestation for ${ATTEST_SHA,,}"
+              exit 0
+            fi
+            echo "Attestation push raced; rebasing attempt ${attempt}/3"
+            git fetch --no-tags origin ci-attestations
+            git rebase FETCH_HEAD
+          done
+
+          echo "::error::Unable to publish exact-SHA CI attestation"
+          exit 1
