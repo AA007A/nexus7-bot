@@ -3,7 +3,7 @@ import time
 from bot import market_risk_runtime as runtime
 
 
-def setup_function():
+def _reset_runtime_state():
     runtime._state["signals"] = {}
     runtime._state["signal_updated_at"] = {}
     runtime._state["providers"] = {}
@@ -11,6 +11,7 @@ def setup_function():
 
 
 def test_whale_alert_counts_only_attributed_exchange_flow():
+    _reset_runtime_state()
     inflow = runtime.parse_whale_alert({
         "type": "alert",
         "from": "unknown wallet",
@@ -29,6 +30,7 @@ def test_whale_alert_counts_only_attributed_exchange_flow():
 
 
 def test_coinglass_liquidation_uses_aggregate_row():
+    _reset_runtime_state()
     out = runtime.parse_coinglass_liquidation({
         "code": "0",
         "data": [
@@ -40,6 +42,7 @@ def test_coinglass_liquidation_uses_aggregate_row():
 
 
 def test_coinglass_open_interest_change_requires_two_samples():
+    _reset_runtime_state()
     first = runtime.parse_coinglass_markets({
         "code": "0",
         "data": [{"symbol": "BTC", "open_interest_usd": 10_000_000_000, "avg_funding_rate_by_oi": 0.01}],
@@ -54,6 +57,7 @@ def test_coinglass_open_interest_change_requires_two_samples():
 
 
 def test_cryptoquant_reserve_change_is_normalized():
+    _reset_runtime_state()
     out = runtime.parse_cryptoquant_reserve({
         "result": {"data": [
             {"reserve_usd": 100_000_000_000},
@@ -64,6 +68,7 @@ def test_cryptoquant_reserve_change_is_normalized():
 
 
 def test_signal_expiry_is_independent_per_signal():
+    _reset_runtime_state()
     now = time.time()
     runtime._merge_signals({"whale_exchange_inflow_usd": 150_000_000}, now=now - 700)
     runtime._merge_signals({"btc_exchange_reserve_change_pct": 2.5}, now=now - 100)
@@ -75,6 +80,8 @@ def test_signal_expiry_is_independent_per_signal():
 
 
 def test_combined_fresh_risk_can_block_pilot_gate():
+    _reset_runtime_state()
+
     class DummyState:
         blocked_reasons = []
 
@@ -92,7 +99,7 @@ def test_combined_fresh_risk_can_block_pilot_gate():
 
     class DummyLog:
         def warning(self, *args, **kwargs):
-            pass
+            return None
 
     runtime.install(DummyPilot, DummyScoring, DummyLog())
     now = time.time()
