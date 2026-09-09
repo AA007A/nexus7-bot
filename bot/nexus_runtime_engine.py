@@ -10,7 +10,9 @@ No exchange mutation, release state, or execution permission is changed here.
 from __future__ import annotations
 
 from bot.account_capital_reader import read_account_capital
+from bot.core_execution_risk import final_read_only_dispatch_recheck
 from bot.engine import TradingEngine as CoreTradingEngine
+from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
@@ -23,6 +25,7 @@ class TradingEngine(CoreTradingEngine):
         super().__init__(*args, **kwargs)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
+        self._professional_risk_candidate_symbol = ""
 
     async def _prepare_professional_risk(self, sig, decision) -> None:
         """Prepare one fail-closed sizing plan after an AI approval.
@@ -43,6 +46,7 @@ class TradingEngine(CoreTradingEngine):
             stop=float(sig.sl),
             risk_pct=risk_pct,
         )
+        self._professional_risk_candidate_symbol = str(sig.symbol)
 
         if getattr(self, "paper_trade", False):
             balance = float(getattr(self.risk, "balance", 0.0) or 0.0)
@@ -61,6 +65,51 @@ class TradingEngine(CoreTradingEngine):
         except Exception:
             self.risk.invalidate_capital()
             raise
+
+    async def _refresh_entry_balance(self) -> bool:
+        """Refresh funds, then fail closed on last-moment exchange exposure.
+
+        The canonical ``_open`` calls this immediately before it creates the
+        OrderRegistry intent and persists ``before_dispatch``. PAPER keeps the
+        canonical balance-only path. SHADOW LIVE never uses the executable core
+        dispatch path and therefore keeps its existing dedicated read-only gate.
+        """
+        refreshed = await super()._refresh_entry_balance()
+        if not refreshed:
+            return False
+        if getattr(self, "paper_trade", False):
+            return True
+        if getattr(self, "_validation_safety_lock_active", False):
+            return True
+
+        symbol = str(getattr(self, "_professional_risk_candidate_symbol", ""))
+        if not symbol:
+            log.critical(
+                "[CORE_FINAL_EXPOSURE] result=BLOCK reason=CANDIDATE_SYMBOL_MISSING"
+            )
+            return False
+
+        result = await final_read_only_dispatch_recheck(self.client, symbol)
+        blockers = tuple(result.blockers or ())
+        if not result.allowed:
+            log.critical(
+                "[CORE_FINAL_EXPOSURE] symbol=%s result=BLOCK blockers=%s "
+                "positions=%s active_orders=%s",
+                symbol,
+                ",".join(blockers) or "UNKNOWN",
+                result.metrics.get("active_positions", "NA"),
+                result.metrics.get("active_orders", "NA"),
+            )
+            return False
+
+        log.info(
+            "[CORE_FINAL_EXPOSURE] symbol=%s result=PASS positions=%s "
+            "active_orders=%s decision_effect=NONE",
+            symbol,
+            result.metrics.get("active_positions", 0.0),
+            result.metrics.get("active_orders", 0.0),
+        )
+        return True
 
     @observe_nexus_validation
     async def _nexus_validate(self, sig):
