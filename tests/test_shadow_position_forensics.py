@@ -101,12 +101,13 @@ class ShadowPositionForensicsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ATOMUSDT", rendered)
         self.assertIn("BTCUSDT", rendered)
 
-    async def test_market_tick_alone_does_not_spam_structural_snapshot(self):
+    async def test_dynamic_market_fields_do_not_spam_structural_snapshot(self):
         c = self.Client()
         c._shadow_readonly_active = True
         await c.get_positions()
         c.rows[0]["markPrice"] = 0.36
         c.rows[0]["unrealisedPnl"] = -0.4
+        c.rows[0]["leverage"] = 10.25
         await c.get_positions()
         self.assertEqual(len(self._forensic_warnings()), 1)
 
