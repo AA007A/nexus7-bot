@@ -91,7 +91,8 @@ def test_runtime_engine_uses_declarative_override_and_main_uses_runtime_class():
     runtime_text = (ROOT / "bot" / "nexus_runtime_engine.py").read_text(encoding="utf-8")
     main_text = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "@observe_nexus_validation" in runtime_text
-    assert "return await super()._nexus_validate(sig)" in runtime_text
+    assert "decision = await super()._nexus_validate(sig)" in runtime_text
+    assert "return decision" in runtime_text
     assert "from bot.nexus_runtime_engine import TradingEngine" in main_text
 
 
