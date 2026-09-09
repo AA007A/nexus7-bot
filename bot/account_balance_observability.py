@@ -4,6 +4,7 @@ Logs the full account-overview balance decomposition without changing sizing,
 risk, trading mode, exchange mutations, or release gates.
 """
 import math
+import time
 
 
 def _num(data, key):
@@ -34,6 +35,7 @@ def install(log):
             "/api/v1/account-overview", {"currency": "USDT"}, auth=True
         )
         if not isinstance(data, dict):
+            self._last_account_overview_snapshot = None
             return {}
 
         keys = (
@@ -47,6 +49,8 @@ def install(log):
         )
         snap = {key: _num(data, key) for key in keys}
         snap["currency"] = data.get("currency") or "USDT"
+        snap["_observed_at"] = time.time()
+        self._last_account_overview_snapshot = dict(snap)
         return snap
 
     async def _get_balance_with_observability(self):
@@ -81,6 +85,7 @@ def install(log):
                             _fmt(equity),
                         )
         except Exception as exc:
+            self._last_account_overview_snapshot = None
             log.warning(
                 "[ACCOUNT_OVERVIEW] diagnostic read failed: %s; primary balance path unchanged",
                 type(exc).__name__,
