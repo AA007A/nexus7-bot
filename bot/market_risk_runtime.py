@@ -7,7 +7,6 @@ is fabricated and existing execution gates are never weakened.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from typing import Any
@@ -17,8 +16,6 @@ import aiohttp
 from bot.market_risk_intelligence import assess_market_risk, compact_risk_log
 
 _SIGNAL_TTL_S = {
-    "whale_exchange_inflow_usd": 600.0,
-    "whale_exchange_outflow_usd": 600.0,
     "liquidation_usd_1h": 1200.0,
     "open_interest_change_pct": 1800.0,
     "funding_rate_pct": 1800.0,
@@ -72,40 +69,6 @@ def _merge_signals(values: dict[str, Any], now: float | None = None) -> None:
     signal_ts = _state.setdefault("signal_updated_at", {})
     for key in clean:
         signal_ts[key] = ts
-
-
-def _is_exchange_owner(owner: Any) -> bool:
-    text = str(owner or "").strip().casefold()
-    if not text or "unknown" in text:
-        return False
-    known = (
-        "binance", "coinbase", "kraken", "kucoin", "okx", "bybit", "bitfinex",
-        "bitstamp", "gemini", "gate.io", "gateio", "crypto.com", "htx", "huobi",
-    )
-    return any(name in text for name in known)
-
-
-def parse_whale_alert(message: dict[str, Any]) -> dict[str, float]:
-    if str(message.get("type", "")) != "alert":
-        return {}
-    amounts = message.get("amounts") or []
-    btc_usd = 0.0
-    for row in amounts:
-        if str((row or {}).get("symbol", "")).upper() != "BTC":
-            continue
-        try:
-            btc_usd += max(0.0, float((row or {}).get("value_usd", 0) or 0))
-        except (TypeError, ValueError, OverflowError):
-            continue
-    if btc_usd <= 0:
-        return {}
-    to_exchange = _is_exchange_owner(message.get("to"))
-    from_exchange = _is_exchange_owner(message.get("from"))
-    if to_exchange and not from_exchange:
-        return {"whale_exchange_inflow_usd": btc_usd}
-    if from_exchange and not to_exchange:
-        return {"whale_exchange_outflow_usd": btc_usd}
-    return {}
 
 
 def parse_coinglass_liquidation(payload: dict[str, Any]) -> dict[str, float]:
@@ -214,48 +177,12 @@ async def _cryptoquant_loop(log) -> None:
         await asyncio.sleep(poll_s)
 
 
-async def _whale_alert_loop(log) -> None:
-    key = os.environ.get("WHALE_ALERT_API_KEY", "").strip()
-    if not key:
-        _mark_provider("whale_alert", "disabled_no_key")
-        return
-    import websockets
-
-    url = f"wss://leviathan.whale-alert.io/ws?api_key={key}"
-    sub = {
-        "type": "subscribe_alerts",
-        "id": "nexus7-btc-risk",
-        "blockchains": ["bitcoin"],
-        "symbols": ["btc"],
-        "tx_types": ["transfer"],
-        "min_value_usd": 5_000_000,
-    }
-    while True:
-        try:
-            async with websockets.connect(url, open_timeout=10, ping_interval=20, ping_timeout=20) as ws:
-                await ws.send(json.dumps(sub))
-                _mark_provider("whale_alert", "connected")
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        values = parse_whale_alert(msg)
-                        if values:
-                            _merge_signals(values)
-                    except Exception:
-                        continue
-        except Exception as exc:
-            _mark_provider("whale_alert", f"unavailable:{type(exc).__name__}")
-            log.warning("[MARKET_RISK_SOURCE] provider=whale_alert unavailable=%s fail_neutral=true", type(exc).__name__)
-            await asyncio.sleep(15)
-
-
 async def market_risk_reader_loop(log) -> None:
     log.info(
-        "[MARKET_RISK_SOURCES] enabled optional providers=WhaleAlert,CoinGlass,CryptoQuant; "
+        "[MARKET_RISK_SOURCES] enabled optional providers=CoinGlass,CryptoQuant; "
         "missing_keys=fail_neutral execution_effect=NONE"
     )
     tasks = [
-        asyncio.create_task(_whale_alert_loop(log)),
         asyncio.create_task(_coinglass_loop(log)),
         asyncio.create_task(_cryptoquant_loop(log)),
     ]
@@ -301,6 +228,6 @@ def install(PilotGuard, scoring, log) -> None:
     PilotGuard.evaluate = evaluate_with_market_risk
     PilotGuard._market_risk_intelligence_installed = True
     log.warning(
-        "[MARKET_RISK_INTELLIGENCE] installed: extreme combined whale/derivatives/on-chain risk "
+        "[MARKET_RISK_INTELLIGENCE] installed: extreme combined derivatives/on-chain/macro risk "
         "blocks pilot entries; per-signal freshness enforced; provider absence fail-neutral; sizing unchanged"
     )
