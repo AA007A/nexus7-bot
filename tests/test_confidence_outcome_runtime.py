@@ -4,10 +4,15 @@ from bot import confidence_outcome_runtime as runtime
 
 
 class _Log:
+    def __init__(self):
+        self.messages = []
+
     def info(self, *args, **kwargs):
+        self.messages.append(("info", args))
         return None
 
     def warning(self, *args, **kwargs):
+        self.messages.append(("warning", args))
         return None
 
 
@@ -81,6 +86,71 @@ class ConfidenceOutcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.close_calls, 1)
         finally:
             runtime._record_paper_close = original_record
+
+    async def test_realized_outcome_triggers_oos_report_after_persistence(self):
+        db = _DB()
+        log = _Log()
+        order = []
+        original_record_outcome = runtime.record_trade_outcome
+        original_readiness = runtime.maybe_log_readiness
+
+        async def record_outcome(*args, **kwargs):
+            order.append("outcome")
+            return True
+
+        async def report_readiness(*args, **kwargs):
+            order.append("oos")
+            return {"ready": False, "execution_effect": "NONE"}
+
+        runtime.record_trade_outcome = record_outcome
+        runtime.maybe_log_readiness = report_readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            self.assertEqual(order, ["outcome", "oos"])
+        finally:
+            runtime.record_trade_outcome = original_record_outcome
+            runtime.maybe_log_readiness = original_readiness
+
+    async def test_oos_failure_is_isolated_from_outcome_link(self):
+        db = _DB()
+        log = _Log()
+        original_record_outcome = runtime.record_trade_outcome
+        original_readiness = runtime.maybe_log_readiness
+
+        async def record_outcome(*args, **kwargs):
+            return True
+
+        async def failing_readiness(*args, **kwargs):
+            raise RuntimeError("analytics failure")
+
+        runtime.record_trade_outcome = record_outcome
+        runtime.maybe_log_readiness = failing_readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            rendered = " ".join(str(args) for _, args in log.messages)
+            self.assertIn("outcome_r=%s persisted=%s", rendered)
+            self.assertIn("[NEXUS_OOS_CALIBRATION] trigger_failed", rendered)
+            self.assertNotIn("close_link_failed", rendered)
+        finally:
+            runtime.record_trade_outcome = original_record_outcome
+            runtime.maybe_log_readiness = original_readiness
+
+    async def test_no_outcome_skips_oos_report(self):
+        db = _DB()
+        db.rows = {}
+        log = _Log()
+        original_readiness = runtime.maybe_log_readiness
+        calls = []
+
+        async def report_readiness(*args, **kwargs):
+            calls.append(True)
+
+        runtime.maybe_log_readiness = report_readiness
+        try:
+            await runtime._record_paper_close(db, trade_id=7, log=log)
+            self.assertEqual(calls, [])
+        finally:
+            runtime.maybe_log_readiness = original_readiness
 
     async def test_install_is_idempotent(self):
         db = _DB()
