@@ -45,16 +45,16 @@ def install(kucoin_module, log):
                     elif side == "Sell":
                         dist_liq_pct = (liq - mark) / mark * 100.0
 
-                # Cache structural risk state per symbol. Mark price and uPnL
-                # are intentionally excluded so normal market ticks do not
-                # flood the log; a size/entry/liquidation/leverage/margin/
-                # protection change produces a fresh forensic snapshot.
+                # Cache structural risk state per symbol. Mark price, uPnL and
+                # the exchange-reported leverage are intentionally excluded:
+                # production evidence shows leverage can fluctuate with account
+                # state even when size/entry/liquidation/protection are unchanged.
+                # Those dynamic fields remain visible in each emitted snapshot.
                 key = (
                     side,
                     round(size, 8),
                     round(entry, 8),
                     round(liq, 8),
-                    round(lev, 4),
                     round(margin, 6),
                     round(sl, 8),
                     round(tp, 8),
