@@ -1,0 +1,2 @@
+This branch stores exact-SHA CI success attestations generated only after the main Quality Check job succeeds.
+It is not trading configuration and does not grant execution permission.
