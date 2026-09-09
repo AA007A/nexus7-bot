@@ -19,8 +19,6 @@ _SIGNAL_TTL_S = {
     "liquidation_usd_1h": 1200.0,
     "open_interest_change_pct": 1800.0,
     "funding_rate_pct": 1800.0,
-    "btc_exchange_netflow_usd": 21600.0,
-    "btc_exchange_reserve_change_pct": 21600.0,
     "spx_change_pct": 900.0,
     "vix_change_pct": 900.0,
     "macro_event_severity": 1800.0,
