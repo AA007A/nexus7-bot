@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
+from bot.config import cfg
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
 from bot.nexus_runtime_engine import TradingEngine as RuntimeTradingEngine
@@ -78,7 +79,10 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.capital.equity, 1000.0)
         self.assertEqual(snapshot.capital.available_collateral, 10.0)
         max_margin = 10.0 * 0.80
-        self.assertLessEqual((qty * 100.0) / 50.0, max_margin + 1e-9)
+        self.assertLessEqual(
+            (qty * 100.0) / float(cfg.LEVERAGE),
+            max_margin + 1e-9,
+        )
 
     def test_entry_mismatch_fails_closed(self):
         adapter = self._adapter()
