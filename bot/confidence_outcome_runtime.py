@@ -52,6 +52,18 @@ async def _link_paper_open(db, *, trade_id: int, symbol: str, side: str,
         )
 
 
+async def _maybe_report_oos(db, *, log) -> None:
+    """Run throttled OOS analytics in an independent best-effort error domain."""
+    try:
+        await maybe_log_readiness(db, log)
+    except Exception as exc:
+        log.warning(
+            "[NEXUS_OOS_CALIBRATION] trigger_failed error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
+
 async def _record_paper_close(db, *, trade_id: int, log) -> None:
     try:
         row = await db._fetchone(
@@ -76,17 +88,19 @@ async def _record_paper_close(db, *, trade_id: int, log) -> None:
             "decision_effect=NONE execution_effect=NONE",
             trade_id, float(row[0]), ok,
         )
-        if ok:
-            # Analytical telemetry only. This reads completed PAPER evidence,
-            # emits a throttled OOS readiness snapshot, and never mutates any
-            # NEXUS threshold, score, risk rule, release state or exchange state.
-            await maybe_log_readiness(db, log)
     except Exception as exc:
         log.warning(
             "[CONFIDENCE_OUTCOME_LINK] mode=PAPER close_link_failed trade_id=%s error=%s "
             "decision_effect=NONE execution_effect=NONE",
             trade_id, type(exc).__name__,
         )
+        return
+
+    if ok:
+        # Analytical telemetry only. This reads completed PAPER evidence,
+        # emits a throttled OOS readiness snapshot, and never mutates any
+        # NEXUS threshold, score, risk rule, release state or exchange state.
+        await _maybe_report_oos(db, log=log)
 
 
 def install(db, log) -> None:
