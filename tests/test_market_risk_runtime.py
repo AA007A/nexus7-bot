@@ -2,7 +2,7 @@ import time
 
 from bot import market_risk_runtime as runtime
 
-# Collector tests cover CoinGlass, the retained derivatives provider.
+# Collector tests cover CoinGlass (retained derivatives provider).
 # Macro/news signals continue to enter through the existing public-news bridge.
 
 
