@@ -129,4 +129,4 @@ def test_attestation_workflow_requires_completed_successful_main_push():
     assert "github.event.workflow_run.event == 'push'" in text
     assert "contents: write" in text
     assert "ci-attestations" in text
-    assert 'passed/$ATTEST_SHA.txt' in text
+    assert 'passed/${ATTEST_SHA,,}.txt' in text
