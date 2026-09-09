@@ -1,8 +1,8 @@
 """Optional live collectors for NEXUS market-risk intelligence.
 
-Commercial providers are opt-in through environment API keys. Provider outage,
-plan restriction, rate limit or malformed data is fail-neutral: no risk signal
-is fabricated and existing execution gates are never weakened.
+CoinGlass is opt-in through an environment API key. Provider outage, plan
+restriction, rate limit or malformed data is fail-neutral: no risk signal is
+fabricated and existing execution gates are never weakened.
 """
 from __future__ import annotations
 
@@ -108,22 +108,6 @@ def parse_coinglass_markets(payload: dict[str, Any], now: float | None = None) -
     return out
 
 
-def parse_cryptoquant_reserve(payload: dict[str, Any]) -> dict[str, float]:
-    try:
-        rows = list(((payload.get("result") or {}).get("data") or []))
-        if len(rows) < 2:
-            return {}
-        if all(isinstance(row, dict) and row.get("date") for row in rows):
-            rows.sort(key=lambda row: str(row.get("date")))
-        latest = float(rows[-1].get("reserve_usd", 0) or 0)
-        previous = float(rows[-2].get("reserve_usd", 0) or 0)
-        if latest <= 0 or previous <= 0:
-            return {}
-        return {"btc_exchange_reserve_change_pct": ((latest / previous) - 1.0) * 100.0}
-    except (TypeError, ValueError, OverflowError, AttributeError):
-        return {}
-
-
 async def _coinglass_loop(log) -> None:
     key = os.environ.get("COINGLASS_API_KEY", "").strip()
     if not key:
@@ -154,38 +138,12 @@ async def _coinglass_loop(log) -> None:
         await asyncio.sleep(poll_s)
 
 
-async def _cryptoquant_loop(log) -> None:
-    key = os.environ.get("CRYPTOQUANT_API_KEY", "").strip()
-    if not key:
-        _mark_provider("cryptoquant", "disabled_no_key")
-        return
-    poll_s = max(300.0, float(os.environ.get("CRYPTOQUANT_POLL_SECONDS", "900") or 900))
-    url = "https://api.cryptoquant.com/v1/btc/exchange-flows/reserve?exchange=all_exchange&window=day&limit=2"
-    headers = {"Authorization": f"Bearer {key}", "accept": "application/json"}
-    while True:
-        try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    if r.status == 200:
-                        _merge_signals(parse_cryptoquant_reserve(await r.json(content_type=None)))
-                        _mark_provider("cryptoquant", "ok")
-                    else:
-                        _mark_provider("cryptoquant", f"http_{r.status}_fail_neutral")
-        except Exception as exc:
-            _mark_provider("cryptoquant", f"unavailable:{type(exc).__name__}")
-            log.warning("[MARKET_RISK_SOURCE] provider=cryptoquant unavailable=%s fail_neutral=true", type(exc).__name__)
-        await asyncio.sleep(poll_s)
-
-
 async def market_risk_reader_loop(log) -> None:
     log.info(
-        "[MARKET_RISK_SOURCES] enabled optional providers=CoinGlass,CryptoQuant; "
+        "[MARKET_RISK_SOURCES] enabled optional providers=CoinGlass; "
         "missing_keys=fail_neutral execution_effect=NONE"
     )
-    tasks = [
-        asyncio.create_task(_coinglass_loop(log)),
-        asyncio.create_task(_cryptoquant_loop(log)),
-    ]
+    tasks = [asyncio.create_task(_coinglass_loop(log))]
     try:
         while True:
             snap = snapshot()
@@ -228,6 +186,6 @@ def install(PilotGuard, scoring, log) -> None:
     PilotGuard.evaluate = evaluate_with_market_risk
     PilotGuard._market_risk_intelligence_installed = True
     log.warning(
-        "[MARKET_RISK_INTELLIGENCE] installed: extreme combined derivatives/on-chain/macro risk "
+        "[MARKET_RISK_INTELLIGENCE] installed: extreme combined derivatives/macro risk "
         "blocks pilot entries; per-signal freshness enforced; provider absence fail-neutral; sizing unchanged"
     )
