@@ -131,7 +131,7 @@ def parse_coinglass_markets(payload: dict[str, Any], now: float | None = None) -
     try:
         out["funding_rate_pct"] = float(btc.get("avg_funding_rate_by_oi", 0) or 0)
     except (TypeError, ValueError, OverflowError):
-        pass
+        out.pop("funding_rate_pct", None)
     try:
         oi = float(btc.get("open_interest_usd", 0) or 0)
         ts = time.time() if now is None else float(now)
@@ -141,15 +141,17 @@ def parse_coinglass_markets(payload: dict[str, Any], now: float | None = None) -
         if oi > 0:
             _previous_coinglass_oi = (oi, ts)
     except (TypeError, ValueError, OverflowError):
-        pass
+        out.pop("open_interest_change_pct", None)
     return out
 
 
 def parse_cryptoquant_reserve(payload: dict[str, Any]) -> dict[str, float]:
     try:
-        rows = ((payload.get("result") or {}).get("data") or [])
+        rows = list(((payload.get("result") or {}).get("data") or []))
         if len(rows) < 2:
             return {}
+        if all(isinstance(row, dict) and row.get("date") for row in rows):
+            rows.sort(key=lambda row: str(row.get("date")))
         latest = float(rows[-1].get("reserve_usd", 0) or 0)
         previous = float(rows[-2].get("reserve_usd", 0) or 0)
         if latest <= 0 or previous <= 0:
@@ -164,8 +166,6 @@ async def _coinglass_loop(log) -> None:
     if not key:
         _mark_provider("coinglass", "disabled_no_key")
         return
-    # 4h default respects the documented Hobbyist minimum interval. Users on
-    # higher plans may lower this explicitly without a code change.
     poll_s = max(60.0, float(os.environ.get("COINGLASS_POLL_SECONDS", "14400") or 14400))
     headers = {"CG-API-KEY": key, "accept": "application/json"}
     urls = (
