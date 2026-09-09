@@ -44,7 +44,7 @@ class ExternalPositionIntegrityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guard._reconcile(engine, ex_positions), [])
         self.assertEqual(guard._external_positions(engine, ex_positions), ["XRPUSDT"])
 
-    async def test_external_position_is_explicit_and_fail_closed(self):
+    async def test_external_protected_position_is_explicit_and_fail_closed(self):
         guard = IntegrityGuard()
         engine = _Engine()
         client = _Client([
@@ -60,12 +60,14 @@ class ExternalPositionIntegrityTests(unittest.IsolatedAsyncioTestCase):
         state = await guard.assess(client, engine)
         codes = state.codes()
 
-        self.assertIn("EXTERNAL_POSITION", codes)
+        self.assertIn("EXTERNAL_POSITION_PROTECTED", codes)
+        self.assertNotIn("EXTERNAL_POSITION_UNPROTECTED", codes)
+        self.assertNotIn("POSITION_WITHOUT_STOP", codes)
         self.assertNotIn("STATE_DIVERGENCE", codes)
         self.assertEqual(state.severity, Severity.BLOCKED)
         self.assertFalse(guard.can_open_new())
 
-    async def test_external_position_without_stop_keeps_stop_invariant(self):
+    async def test_external_unprotected_position_keeps_stop_invariant(self):
         guard = IntegrityGuard()
         engine = _Engine()
         client = _Client([
@@ -81,8 +83,9 @@ class ExternalPositionIntegrityTests(unittest.IsolatedAsyncioTestCase):
         state = await guard.assess(client, engine)
         codes = state.codes()
 
-        self.assertIn("EXTERNAL_POSITION", codes)
+        self.assertIn("EXTERNAL_POSITION_UNPROTECTED", codes)
         self.assertIn("POSITION_WITHOUT_STOP", codes)
+        self.assertNotIn("EXTERNAL_POSITION_PROTECTED", codes)
         self.assertNotIn("STATE_DIVERGENCE", codes)
         self.assertFalse(guard.can_open_new())
 

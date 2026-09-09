@@ -9,10 +9,12 @@ Qualquer divergência entre estado local e exchange bloqueia NOVAS
 ENTRADAS — nunca abandona o gerenciamento de posições existentes.
 
 Posições abertas manualmente/externamente na exchange são classificadas
-explicitamente como EXTERNAL_POSITION. Elas NÃO são tratadas como
-STATE_DIVERGENCE, mas bloqueiam novas entradas por padrão porque não são
-gerenciadas pelo NEXUS-7 e, portanto, não podem ser incorporadas ao risco
-local sem uma política explícita de adoção/coexistência.
+explicitamente como EXTERNAL_POSITION_PROTECTED ou
+EXTERNAL_POSITION_UNPROTECTED. Elas NÃO são tratadas como
+STATE_DIVERGENCE. Ambas continuam bloqueando novas entradas por padrão
+porque não são gerenciadas pelo NEXUS-7; a proteção por stop melhora a
+classificação, mas não autoriza empilhar risco sem uma política explícita
+de coexistência e validação de exposição/margem.
 
 FAIL-CLOSED: na dúvida, bloqueia. A ausência de informação nunca é
 tratada como "está tudo bem".
@@ -38,9 +40,6 @@ class Severity(str, Enum):
     BLOCKED  = "BLOCKED"    # não abre novas posições
 
 
-# ── TTL máximo por tipo de dado (P1 — dados stale) ────────────────
-# Valores proporcionais à natureza de cada dado. Preço muda a cada
-# segundo; funding, a cada 8 horas.
 TTL = {
     "balance":    float(os.environ.get("TTL_BALANCE",    "120")),
     "positions":  float(os.environ.get("TTL_POSITIONS",  "120")),
@@ -50,7 +49,6 @@ TTL = {
     "clock":      float(os.environ.get("TTL_CLOCK",     "3600")),
 }
 
-# Desvio máximo tolerado entre relógio local e o da exchange
 MAX_CLOCK_SKEW_MS = float(os.environ.get("MAX_CLOCK_SKEW_MS", "5000"))
 
 
@@ -79,31 +77,20 @@ class IntegrityState:
 
 
 class IntegrityGuard:
-    """
-    Avalia a integridade do estado e decide se novas entradas são
-    permitidas. Não executa ordens nem altera posições.
-    """
+    """Avalia integridade e decide se novas entradas são permitidas."""
 
     def __init__(self):
         self.state = IntegrityState()
         self._last_block_log = 0.0
         self._consec_failures = 0
 
-    # ── Avaliação ────────────────────────────────────────────────
     async def assess(self, client, engine) -> IntegrityState:
-        """
-        Executa todas as verificações e atualiza self.state.
-
-        NUNCA levanta exceção: uma falha na própria verificação é, ela
-        mesma, motivo para bloquear (fail-closed).
-        """
         issues: List[IntegrityIssue] = []
         exchange_known = True
 
         def add(code, sev, detail):
             issues.append(IntegrityIssue(code, sev, detail))
 
-        # 1. REST disponível + saldo confirmado
         try:
             bal = await client.get_balance()
             if bal is None or bal < 0:
@@ -117,7 +104,6 @@ class IntegrityGuard:
                 f"REST indisponível: {type(e).__name__}: {e}")
             exchange_known = False
 
-        # 2. Posições confirmadas na exchange
         ex_positions = None
         try:
             ex_positions = await client.get_positions()
@@ -130,39 +116,38 @@ class IntegrityGuard:
                 f"posições não confirmadas: {type(e).__name__}: {e}")
             exchange_known = False
 
-        # 3. Reconciliação local ↔ exchange (EXCHANGE = SOURCE OF TRUTH)
         if ex_positions is not None:
             div = self._reconcile(engine, ex_positions)
             for d in div:
                 add("STATE_DIVERGENCE", Severity.BLOCKED, d)
 
-            # Posições que existem somente na exchange são externas/manuais.
-            # Não são divergência de estado do bot, porém permanecem BLOCKED
-            # por padrão: o NEXUS-7 não deve empilhar risco sobre exposição
-            # que ele não criou nem gerencia.
-            for sym in self._external_positions(engine, ex_positions):
-                add(
-                    "EXTERNAL_POSITION",
-                    Severity.BLOCKED,
-                    f"{sym}: posição existente na exchange não gerenciada pelo NEXUS-7",
-                )
+            for sym, position in self._external_position_map(engine, ex_positions).items():
+                if self._position_has_confirmed_stop(position):
+                    add(
+                        "EXTERNAL_POSITION_PROTECTED",
+                        Severity.BLOCKED,
+                        f"{sym}: posição externa protegida por stop confirmado, "
+                        "mas não gerenciada pelo NEXUS-7; exposição continua ativa",
+                    )
+                else:
+                    add(
+                        "EXTERNAL_POSITION_UNPROTECTED",
+                        Severity.BLOCKED,
+                        f"{sym}: posição externa sem stop confirmado e não gerenciada pelo NEXUS-7",
+                    )
 
-        # 4. INVARIANTE DE STOP LOSS:
-        #    POSITION_OPEN → PROTECTIVE_STOP_CONFIRMED
         if ex_positions:
             for p in ex_positions:
                 try:
                     if abs(float(p.get("size", 0) or 0)) <= 0:
                         continue
-                    sl = float(p.get("stopLoss", 0) or 0)
-                    if sl <= 0:
+                    if not self._position_has_confirmed_stop(p):
                         add("POSITION_WITHOUT_STOP", Severity.BLOCKED,
                             f"{p.get('symbol')} aberta SEM stop confirmado "
                             f"na exchange")
                 except Exception as e:
                     add("POSITION_UNREADABLE", Severity.BLOCKED, str(e))
 
-        # 5. Instrumentos sincronizados
         try:
             inst = client.get_instruments()
             if not inst:
@@ -173,7 +158,6 @@ class IntegrityGuard:
             add("INSTRUMENTS_MISSING", Severity.BLOCKED, str(e))
             exchange_known = False
 
-        # 6. Relógio sincronizado com a exchange
         skew = getattr(client, "_time_offset_ms", None)
         if skew is None:
             add("CLOCK_UNSYNCED", Severity.DEGRADED,
@@ -182,7 +166,6 @@ class IntegrityGuard:
             add("CLOCK_SKEW", Severity.BLOCKED,
                 f"desvio de relógio {skew:.0f}ms > {MAX_CLOCK_SKEW_MS:.0f}ms")
 
-        # 7. WebSocket / frescor dos dados de mercado
         try:
             last_ws = getattr(client, "_last_ws_update", 0) or 0
             if last_ws:
@@ -194,13 +177,11 @@ class IntegrityGuard:
                     add("WS_LAGGING", Severity.DEGRADED,
                         f"WS atrasado {age:.0f}s")
             else:
-                # Sem WS, o bot ainda opera por REST — degradado, não bloqueado
                 add("WS_NEVER_CONNECTED", Severity.DEGRADED,
                     "WebSocket nunca entregou dados")
         except Exception as e:
             add("WS_UNKNOWN", Severity.DEGRADED, str(e))
 
-        # 8. Risk Engine disponível e inicializado
         try:
             risk = getattr(engine, "risk", None)
             if risk is None or not getattr(risk, "_ready", False):
@@ -209,13 +190,11 @@ class IntegrityGuard:
         except Exception as e:
             add("RISK_ENGINE_UNAVAILABLE", Severity.BLOCKED, str(e))
 
-        # 9. Rate limit persistente
         n429 = getattr(client, "_rate_limit_hits", 0)
         if n429 >= int(os.environ.get("RATE_LIMIT_BLOCK_AFTER", "5")):
             add("RATE_LIMITED", Severity.BLOCKED,
                 f"{n429} respostas 429 recentes")
 
-        # ── Consolidação ─────────────────────────────────────────
         if any(i.severity == Severity.BLOCKED for i in issues):
             sev = Severity.BLOCKED
         elif any(i.severity == Severity.DEGRADED for i in issues):
@@ -230,7 +209,6 @@ class IntegrityGuard:
         self._log_state()
         return self.state
 
-    # ── Reconciliação ────────────────────────────────────────────
     def _exchange_position_map(self, ex_positions: list) -> dict:
         """Normaliza apenas posições efetivamente abertas na exchange."""
         ex = {}
@@ -241,35 +219,37 @@ class IntegrityGuard:
                 ex[sym] = p
         return ex
 
-    def _external_positions(self, engine, ex_positions: list) -> List[str]:
-        """
-        Retorna símbolos abertos na exchange que não pertencem ao estado
-        gerenciado pelo NEXUS-7. Esses símbolos são considerados posições
-        externas/manuais, não STATE_DIVERGENCE.
-        """
+    @staticmethod
+    def _position_has_confirmed_stop(position: dict) -> bool:
+        """True somente quando a exchange devolve stopLoss numérico e positivo."""
+        try:
+            return float(position.get("stopLoss", 0) or 0) > 0
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def _external_position_map(self, engine, ex_positions: list) -> dict:
+        """Mapeia posições abertas na exchange que não pertencem ao NEXUS-7."""
         try:
             ex = self._exchange_position_map(ex_positions)
             local = dict(getattr(engine, "positions", {}) or {})
-            return sorted(sym for sym in ex if sym not in local)
+            return {sym: ex[sym] for sym in sorted(ex) if sym not in local}
         except Exception:
-            # Falha de classificação não deve esconder risco; a reconciliação
-            # principal continua fail-closed e reportará a exceção.
-            return []
+            return {}
+
+    def _external_positions(self, engine, ex_positions: list) -> List[str]:
+        """Compatibilidade: retorna apenas os símbolos das posições externas."""
+        return list(self._external_position_map(engine, ex_positions))
 
     def _reconcile(self, engine, ex_positions: list) -> List[str]:
         """
         Compara estado local gerenciado pelo NEXUS-7 com a exchange.
-        A exchange é a autoridade.
-
-        Posição aberta na exchange e ausente localmente é classificada
-        separadamente como EXTERNAL_POSITION; não é STATE_DIVERGENCE.
+        Posição apenas na exchange é externa, não STATE_DIVERGENCE.
         """
         div = []
         try:
             ex = self._exchange_position_map(ex_positions)
             local = dict(getattr(engine, "positions", {}) or {})
 
-            # Local tem, exchange não → posição fantasma
             for sym in local:
                 if sym not in ex:
                     div.append(
@@ -277,36 +257,15 @@ class IntegrityGuard:
                         f"exchange (posição fantasma)"
                     )
 
-            # Exchange tem, local não → posição externa/manual.
-            # A classificação e o bloqueio correspondente são feitos em
-            # _external_positions()/assess(), evitando falso STATE_DIVERGENCE.
-
-            # Ambos têm → comparar quantidade e entrada
             _tol_qty   = float(os.environ.get("RECON_QTY_TOL",   "0.02"))
             _tol_price = float(os.environ.get("RECON_PRICE_TOL", "0.01"))
             for sym in set(local) & set(ex):
                 lp, xp = local[sym], ex[sym]
-                # ══════════════════════════════════════════════════════
-                # EXEC-01 — COMPARAÇÃO DE UNIDADES
-                #
-                # Position.qty está em UNIDADE BASE; get_positions()["size"]
-                # está em CONTRATOS (currentQty da KuCoin). Comparar os dois
-                # diretamente reportava STATE_DIVERGENCE falso em todo
-                # símbolo com multiplier != 1 (ex: DOGEUSDT mult=100 →
-                # "qty local 2600.0 ≠ exchange 26.0"), bloqueando novas
-                # entradas indefinidamente.
-                #
-                # Converte o lado da exchange para unidade base antes de
-                # comparar, usando o mesmo helper do engine (fonte única).
-                # ══════════════════════════════════════════════════════
                 lq = abs(float(getattr(lp, "qty", 0) or 0))
                 xq_contratos = abs(float(xp.get("size", 0) or 0))
                 try:
                     xq = engine._contracts_to_base_qty(sym, xq_contratos)
                 except Exception:
-                    # Sem multiplier confiável não dá para comparar
-                    # quantidades — registra e segue (não inventa
-                    # equivalência que não pode ser verificada).
                     div.append(
                         f"{sym}: multiplier indisponível — impossível "
                         f"comparar qty local ({lq}) com exchange "
@@ -320,10 +279,6 @@ class IntegrityGuard:
                         f"({xq_contratos} contratos × multiplier)"
                     )
 
-                # EXEC-04: divergência de LADO nunca era detectada.
-                # Local LONG + exchange SHORT passava despercebido e
-                # can_open_new() continuava True — PnL invertido e SL
-                # no lado errado, sem nenhum bloqueio.
                 _side_ex = "LONG" if xp.get("side", "Buy") == "Buy" else "SHORT"
                 _side_local = getattr(lp, "direction", "")
                 if _side_local and _side_ex != _side_local:
@@ -342,13 +297,7 @@ class IntegrityGuard:
             div.append(f"falha ao reconciliar: {type(e).__name__}: {e}")
         return div
 
-    # ── Decisão ──────────────────────────────────────────────────
     def can_open_new(self) -> bool:
-        """
-        Única fonte de verdade sobre permissão de NOVAS ENTRADAS.
-        Gerenciamento de posições existentes NÃO passa por aqui.
-        """
-        # Fail-closed: sem avaliação recente, bloqueia.
         if self.state.checked_at <= 0:
             return False
         idade = time.time() - self.state.checked_at
