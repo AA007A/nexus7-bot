@@ -4,7 +4,6 @@ Adds structured diagnostics to KuCoinClient.get_positions() without changing
 position state or invoking any exchange mutation. Intended for pre-pilot
 forensic inspection while VALIDATION_LOCK is active.
 """
-import builtins
 
 
 def install(kucoin_module, log):
@@ -16,8 +15,13 @@ def install(kucoin_module, log):
 
     async def get_positions_with_forensics(self, *args, **kwargs):
         positions = await original(self, *args, **kwargs)
-        if not getattr(builtins, "_validation_safety_lock_active", False):
+        if not getattr(self, "_shadow_readonly_active", False):
             return positions
+
+        cache = getattr(self, "_shadow_forensics_last_by_symbol", {})
+        if not isinstance(cache, dict):
+            cache = {}
+        seen_symbols = set()
 
         for p in positions or []:
             try:
@@ -32,6 +36,7 @@ def install(kucoin_module, log):
                 margin = float(p.get("posMargin", 0) or 0)
                 sl = float(p.get("stopLoss", 0) or 0)
                 tp = float(p.get("takeProfit", 0) or 0)
+                seen_symbols.add(symbol)
 
                 dist_liq_pct = None
                 if mark > 0 and liq > 0:
@@ -40,15 +45,23 @@ def install(kucoin_module, log):
                     elif side == "Sell":
                         dist_liq_pct = (liq - mark) / mark * 100.0
 
+                # Cache structural risk state per symbol. Mark price and uPnL
+                # are intentionally excluded so normal market ticks do not
+                # flood the log; a size/entry/liquidation/leverage/margin/
+                # protection change produces a fresh forensic snapshot.
                 key = (
-                    symbol, side, round(size, 8), round(entry, 8),
-                    round(mark, 8), round(liq, 8), round(upnl, 6),
-                    round(margin, 6), round(sl, 8), round(tp, 8),
+                    side,
+                    round(size, 8),
+                    round(entry, 8),
+                    round(liq, 8),
+                    round(lev, 4),
+                    round(margin, 6),
+                    round(sl, 8),
+                    round(tp, 8),
                 )
-                cache = getattr(self, "_shadow_forensics_last", None)
-                if cache == key:
+                if cache.get(symbol) == key:
                     continue
-                self._shadow_forensics_last = key
+                cache[symbol] = key
 
                 log.warning(
                     "[SHADOW_POSITION_FORENSICS] symbol=%s side=%s contracts=%s "
@@ -66,6 +79,13 @@ def install(kucoin_module, log):
                     "read_only=true execution_effect=NONE",
                     type(exc).__name__,
                 )
+
+        # Closed symbols must not leave stale cache entries; if a position is
+        # opened again later, its first read must produce a fresh snapshot.
+        for symbol in list(cache):
+            if symbol not in seen_symbols:
+                cache.pop(symbol, None)
+        self._shadow_forensics_last_by_symbol = cache
         return positions
 
     cls.get_positions = get_positions_with_forensics
