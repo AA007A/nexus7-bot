@@ -39,6 +39,7 @@ def install() -> None:
     from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
     from bot import selfcheck as _selfcheck
     from bot import news_context_hardening as _news_context_hardening
+    from bot import market_risk_runtime as _market_risk_runtime
     from bot import balance_observability as _balance_observability
     from bot import account_balance_observability as _account_balance_observability
     from bot import stagnation_time_hardening as _stagnation_time_hardening
@@ -48,6 +49,7 @@ def install() -> None:
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import pilot as _pilot
+    from bot import score as _score
     from bot import kucoin as _kucoin
     from bot import notifier as _notifier
     from bot.logger import log as _log
@@ -71,6 +73,7 @@ def install() -> None:
     _liquidation_override_guard.install(_log)
     _instrument_readiness_guard.install(_log)
     _news_context_hardening.install(_log)
+    _market_risk_runtime.install(_pilot.PilotGuard, _score, _log)
     _balance_observability.install(_log)
     _account_balance_observability.install(_log)
     _pilot_exposure_capacity.install(_pilot.PilotGuard, _log)
