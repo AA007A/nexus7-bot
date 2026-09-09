@@ -108,6 +108,7 @@ class ShadowPositionForensicsTests(unittest.IsolatedAsyncioTestCase):
         c.rows[0]["markPrice"] = 0.36
         c.rows[0]["unrealisedPnl"] = -0.4
         c.rows[0]["leverage"] = 10.25
+        c.rows[0]["posMargin"] = 2.15
         await c.get_positions()
         self.assertEqual(len(self._forensic_warnings()), 1)
 
