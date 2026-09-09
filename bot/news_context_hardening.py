@@ -22,6 +22,10 @@ _RSS_FEEDS = (
     "https://cointelegraph.com/rss",
     "https://www.theblock.co/rss.xml",
     "https://decrypt.co/feed",
+    "https://www.federalreserve.gov/feeds/press_monetary.xml",
+    "https://www.bls.gov/feed/empsit.rss",
+    "https://www.bls.gov/feed/cpi.rss",
+    "https://www.bls.gov/feed/ppi.rss",
 )
 
 _RSS_SOURCE_NAMES = {
@@ -29,6 +33,10 @@ _RSS_SOURCE_NAMES = {
     "https://cointelegraph.com/rss": "CoinTelegraph",
     "https://www.theblock.co/rss.xml": "TheBlock",
     "https://decrypt.co/feed": "Decrypt",
+    "https://www.federalreserve.gov/feeds/press_monetary.xml": "FederalReserve",
+    "https://www.bls.gov/feed/empsit.rss": "BLS-Employment",
+    "https://www.bls.gov/feed/cpi.rss": "BLS-CPI",
+    "https://www.bls.gov/feed/ppi.rss": "BLS-PPI",
 }
 
 _NEWS_TTL_SECONDS = 1800
@@ -43,8 +51,12 @@ _RELEVANT_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bcrypto(?:currency|currencies)?\b", r"\bblockchain\b", r"\bstablecoin\b",
     r"\bdefi\b", r"\btoken\b", r"\betf\b", r"\bsec\b", r"\bcftc\b",
     r"\bfomc\b", r"\bfederal reserve\b", r"\bfed\b", r"\bpowell\b",
-    r"\bcpi\b", r"\bpce\b", r"\bnfp\b", r"\binflation\b", r"\binterest rate\b",
-    r"\btreasury\b", r"\bdollar index\b", r"\bdxy\b",
+    r"\bcpi\b", r"\bpce\b", r"\bppi\b", r"\bnfp\b", r"\bnonfarm payrolls?\b",
+    r"\bjobs report\b", r"\bemployment situation\b", r"\bunemployment\b",
+    r"\binflation\b", r"\binterest rate\b", r"\bgdp\b", r"\brecession\b",
+    r"\btreasury\b", r"\btreasury yields?\b", r"\bdollar index\b", r"\bdxy\b",
+    r"\bs&p ?500\b", r"\bspx\b", r"\bnasdaq\b", r"\bdow jones\b",
+    r"\bvix\b", r"\bwall street\b", r"\bus equities\b", r"\bstock market\b",
 ))
 
 
@@ -118,7 +130,7 @@ def install(log):
         """Refresh fresh, public, market-relevant headline sentiment every two minutes."""
         log.info(
             "[NEWS_CONTEXT] public RSS enabled; no CryptoPanic token required; "
-            "sources=CoinDesk,CoinTelegraph,TheBlock,Decrypt"
+            "sources=CoinDesk,CoinTelegraph,TheBlock,Decrypt,FederalReserve,BLS"
         )
         while True:
             try:
@@ -255,7 +267,6 @@ def install(log):
     mdata.get_market_sentiment = market_sentiment_with_headlines
     scoring._rss_only_news_hardening = True
     log.info(
-        "[NEWS_CONTEXT] installed: NEXUS market sentiment includes fresh relevant public RSS "
-        "headline score; structured multi-headline event telemetry enabled; "
-        "CryptoPanic token removed from active news path"
+        "[NEWS_CONTEXT] installed: crypto + official US macro RSS feeds feed NEXUS market sentiment; "
+        "structured multi-headline event telemetry enabled; CryptoPanic token removed from active path"
     )
