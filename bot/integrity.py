@@ -8,6 +8,12 @@ PRINCÍPIO: EXCHANGE = SOURCE OF TRUTH.
 Qualquer divergência entre estado local e exchange bloqueia NOVAS
 ENTRADAS — nunca abandona o gerenciamento de posições existentes.
 
+Posições abertas manualmente/externamente na exchange são classificadas
+explicitamente como EXTERNAL_POSITION. Elas NÃO são tratadas como
+STATE_DIVERGENCE, mas bloqueiam novas entradas por padrão porque não são
+gerenciadas pelo NEXUS-7 e, portanto, não podem ser incorporadas ao risco
+local sem uma política explícita de adoção/coexistência.
+
 FAIL-CLOSED: na dúvida, bloqueia. A ausência de informação nunca é
 tratada como "está tudo bem".
 
@@ -130,6 +136,17 @@ class IntegrityGuard:
             for d in div:
                 add("STATE_DIVERGENCE", Severity.BLOCKED, d)
 
+            # Posições que existem somente na exchange são externas/manuais.
+            # Não são divergência de estado do bot, porém permanecem BLOCKED
+            # por padrão: o NEXUS-7 não deve empilhar risco sobre exposição
+            # que ele não criou nem gerencia.
+            for sym in self._external_positions(engine, ex_positions):
+                add(
+                    "EXTERNAL_POSITION",
+                    Severity.BLOCKED,
+                    f"{sym}: posição existente na exchange não gerenciada pelo NEXUS-7",
+                )
+
         # 4. INVARIANTE DE STOP LOSS:
         #    POSITION_OPEN → PROTECTIVE_STOP_CONFIRMED
         if ex_positions:
@@ -214,20 +231,42 @@ class IntegrityGuard:
         return self.state
 
     # ── Reconciliação ────────────────────────────────────────────
+    def _exchange_position_map(self, ex_positions: list) -> dict:
+        """Normaliza apenas posições efetivamente abertas na exchange."""
+        ex = {}
+        for p in ex_positions:
+            sym = p.get("symbol")
+            sz = abs(float(p.get("size", 0) or 0))
+            if sym and sz > 0:
+                ex[sym] = p
+        return ex
+
+    def _external_positions(self, engine, ex_positions: list) -> List[str]:
+        """
+        Retorna símbolos abertos na exchange que não pertencem ao estado
+        gerenciado pelo NEXUS-7. Esses símbolos são considerados posições
+        externas/manuais, não STATE_DIVERGENCE.
+        """
+        try:
+            ex = self._exchange_position_map(ex_positions)
+            local = dict(getattr(engine, "positions", {}) or {})
+            return sorted(sym for sym in ex if sym not in local)
+        except Exception:
+            # Falha de classificação não deve esconder risco; a reconciliação
+            # principal continua fail-closed e reportará a exceção.
+            return []
+
     def _reconcile(self, engine, ex_positions: list) -> List[str]:
         """
-        Compara estado local com a exchange. A exchange é a autoridade.
-        Retorna a lista de divergências encontradas.
+        Compara estado local gerenciado pelo NEXUS-7 com a exchange.
+        A exchange é a autoridade.
+
+        Posição aberta na exchange e ausente localmente é classificada
+        separadamente como EXTERNAL_POSITION; não é STATE_DIVERGENCE.
         """
         div = []
         try:
-            ex = {}
-            for p in ex_positions:
-                sym = p.get("symbol")
-                sz  = abs(float(p.get("size", 0) or 0))
-                if sym and sz > 0:
-                    ex[sym] = p
-
+            ex = self._exchange_position_map(ex_positions)
             local = dict(getattr(engine, "positions", {}) or {})
 
             # Local tem, exchange não → posição fantasma
@@ -238,13 +277,9 @@ class IntegrityGuard:
                         f"exchange (posição fantasma)"
                     )
 
-            # Exchange tem, local não → posição órfã
-            for sym in ex:
-                if sym not in local:
-                    div.append(
-                        f"{sym}: existe na exchange mas NÃO rastreada "
-                        f"localmente (posição órfã)"
-                    )
+            # Exchange tem, local não → posição externa/manual.
+            # A classificação e o bloqueio correspondente são feitos em
+            # _external_positions()/assess(), evitando falso STATE_DIVERGENCE.
 
             # Ambos têm → comparar quantidade e entrada
             _tol_qty   = float(os.environ.get("RECON_QTY_TOL",   "0.02"))
