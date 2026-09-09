@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from bot.account_capital_reader import read_account_capital
 from bot.engine import TradingEngine as CoreTradingEngine
-from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
