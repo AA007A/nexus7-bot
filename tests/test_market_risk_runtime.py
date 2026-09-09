@@ -2,7 +2,7 @@ import time
 
 from bot import market_risk_runtime as runtime
 
-# Collector tests cover CoinGlass only; paid on-chain/whale providers are absent.
+# Collector tests cover CoinGlass only; paid on-chain/whale providers are removed.
 # Macro/news signals continue to enter through the existing public-news bridge.
 
 
