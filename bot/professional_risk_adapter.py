@@ -49,9 +49,11 @@ class ProfessionalRiskAdapter:
     __slots__ = ("_legacy", "_v3", "_plans")
 
     def __init__(self, legacy: Any) -> None:
-        object.__setattr__(self, "_legacy", legacy)
-        object.__setattr__(self, "_v3", RiskManagerV3())
-        object.__setattr__(self, "_plans", {})
+        # Keep ordinary self assignments so the repository's static startup
+        # self-check can prove these required attributes are initialized.
+        self._legacy = legacy
+        self._v3 = RiskManagerV3()
+        self._plans = {}
 
     def __getattr__(self, name: str):
         return getattr(self._legacy, name)
