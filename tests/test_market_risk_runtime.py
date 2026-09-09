@@ -2,12 +2,12 @@ import time
 
 from bot import market_risk_runtime as runtime
 
-# Runtime collector tests intentionally cover only the retained CoinGlass source.
+# Runtime collector tests cover the retained CoinGlass source only.
 # Macro/news signals continue to enter through the existing public-news bridge.
 
 
 def _reset_runtime_state():
-    """Reset only the runtime state used by the retained-provider test suite."""
+    """Reset runtime state used by the retained-provider test suite."""
     runtime._state["signals"] = {}
     runtime._state["signal_updated_at"] = {}
     runtime._state["providers"] = {}
