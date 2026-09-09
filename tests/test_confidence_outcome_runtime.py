@@ -63,15 +63,47 @@ class ConfidenceOutcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             runtime._link_paper_open = original_link
 
-    async def test_paper_close_returns_original_result(self):
+    async def test_paper_close_returns_original_result_and_runs_oos_readiness(self):
         db = _DB()
         log = _Log()
         original_record = runtime._record_paper_close
+        original_report = runtime._report_oos_readiness
+        calls = []
+
+        async def no_op_record(*args, **kwargs):
+            calls.append("outcome")
+
+        async def no_op_report(*args, **kwargs):
+            calls.append("oos")
+
+        runtime._record_paper_close = no_op_record
+        runtime._report_oos_readiness = no_op_report
+        try:
+            runtime.install(db, log)
+            result = await db.save_paper_close_atomic(
+                7, 101.0, 1.0, 0.1, 5.0, "TP", "state", "value"
+            )
+            self.assertTrue(result)
+            self.assertEqual(db.close_calls, 1)
+            self.assertEqual(calls, ["outcome", "oos"])
+        finally:
+            runtime._record_paper_close = original_record
+            runtime._report_oos_readiness = original_report
+
+    async def test_oos_readiness_failure_never_changes_paper_close_result(self):
+        db = _DB()
+        log = _Log()
+        original_record = runtime._record_paper_close
+        original_report = runtime._report_oos_readiness
 
         async def no_op_record(*args, **kwargs):
             return None
 
+        async def failing_report(*args, **kwargs):
+            raise RuntimeError("analytics failure")
+
         runtime._record_paper_close = no_op_record
+        runtime._report_oos_readiness = failing_report
         try:
             runtime.install(db, log)
             result = await db.save_paper_close_atomic(
@@ -81,6 +113,7 @@ class ConfidenceOutcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.close_calls, 1)
         finally:
             runtime._record_paper_close = original_record
+            runtime._report_oos_readiness = original_report
 
     async def test_install_is_idempotent(self):
         db = _DB()
