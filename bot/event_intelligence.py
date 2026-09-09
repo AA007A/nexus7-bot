@@ -15,7 +15,10 @@ from typing import Iterable
 class EventType(str, Enum):
     MACRO_CPI = "MACRO_CPI"
     MACRO_FOMC = "MACRO_FOMC"
+    MACRO_LABOR = "MACRO_LABOR"
+    MACRO_GROWTH = "MACRO_GROWTH"
     RATES = "RATES"
+    US_EQUITY_STRESS = "US_EQUITY_STRESS"
     ETF = "ETF"
     HACK_EXPLOIT = "HACK_EXPLOIT"
     REGULATION = "REGULATION"
@@ -36,9 +39,12 @@ class HeadlineEvent:
 
 
 _PATTERNS = [
-    (EventType.MACRO_CPI, re.compile(r"\b(cpi|consumer price|inflation data)\b", re.I)),
+    (EventType.MACRO_CPI, re.compile(r"\b(cpi|consumer price|inflation data|pce|ppi|producer price)\b", re.I)),
     (EventType.MACRO_FOMC, re.compile(r"\b(fomc|federal reserve|\bfed\b|powell)\b", re.I)),
-    (EventType.RATES, re.compile(r"\b(rate hike|rate cut|interest rate|yield)\b", re.I)),
+    (EventType.MACRO_LABOR, re.compile(r"\b(nonfarm payrolls?|\bnfp\b|jobs report|employment situation|unemployment|jobless claims?)\b", re.I)),
+    (EventType.MACRO_GROWTH, re.compile(r"\b(gdp|gross domestic product|recession|economic growth|industrial production)\b", re.I)),
+    (EventType.RATES, re.compile(r"\b(rate hike|rate cut|interest rate|treasury yield|bond yield|yields?)\b", re.I)),
+    (EventType.US_EQUITY_STRESS, re.compile(r"\b(s&p ?500|spx|nasdaq|dow jones|wall street|\bvix\b|stock market|us equities)\b", re.I)),
     (EventType.ETF, re.compile(r"\b(etf|exchange-traded fund|blackrock|fidelity)\b", re.I)),
     (EventType.HACK_EXPLOIT, re.compile(r"\b(hack|exploit|breach|drain|stolen funds)\b", re.I)),
     (EventType.REGULATION, re.compile(r"\b(sec|cftc|regulation|ban|lawsuit|enforcement)\b", re.I)),
@@ -46,8 +52,14 @@ _PATTERNS = [
     (EventType.WAR_GEOPOLITICS, re.compile(r"\b(war|missile|invasion|sanction|geopolit)\b", re.I)),
 ]
 
-_BULL = re.compile(r"\b(approve|approved|cut rates|inflow|adoption|launch|surge|record high)\b", re.I)
-_BEAR = re.compile(r"\b(reject|rejected|hack|exploit|ban|lawsuit|hike rates|outflow|default|bankrupt|war)\b", re.I)
+_BULL = re.compile(
+    r"\b(approve|approved|cut rates|rate cut|inflow|adoption|launch|surge|record high|rally|beats? expectations|cooler inflation|jobs beat)\b",
+    re.I,
+)
+_BEAR = re.compile(
+    r"\b(reject|rejected|hack|exploit|ban|lawsuit|hike rates|rate hike|outflow|default|bankrupt|war|crash|plunge|selloff|sell-off|tumble|hot inflation|jobs miss|recession)\b",
+    re.I,
+)
 _ASSETS = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX", "DOT", "LTC", "NEAR", "ATOM")
 
 
@@ -72,7 +84,10 @@ def classify_event(title: str, source: str) -> HeadlineEvent:
         EventType.WAR_GEOPOLITICS: 85,
         EventType.MACRO_FOMC: 80,
         EventType.MACRO_CPI: 80,
+        EventType.MACRO_LABOR: 80,
+        EventType.MACRO_GROWTH: 75,
         EventType.RATES: 75,
+        EventType.US_EQUITY_STRESS: 70,
         EventType.REGULATION: 70,
         EventType.ETF: 65,
         EventType.TOKEN_SPECIFIC: 55,
