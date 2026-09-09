@@ -2,11 +2,20 @@
 
 This module validates evidence produced by a future controlled run. It never
 places, cancels, amends or closes an exchange order itself.
+
+It is also an explicit read-only CLI entrypoint:
+
+    python -m bot.e2e_validation_contract --required
+    python -m bot.e2e_validation_contract EVENT1 EVENT2 ...
+
+The CLI only validates supplied evidence strings and returns an exit status.
 """
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 
 _REQUIRED = (
@@ -46,3 +55,43 @@ def validate_e2e_evidence(events: Iterable[str]) -> E2EValidationResult:
 
 def required_evidence() -> tuple[str, ...]:
     return _REQUIRED
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate supplied evidence without any exchange or runtime mutation."""
+    parser = argparse.ArgumentParser(
+        description="Validate NEXUS-7 controlled E2E evidence ordering."
+    )
+    parser.add_argument(
+        "events",
+        nargs="*",
+        help="Observed evidence event names in chronological order.",
+    )
+    parser.add_argument(
+        "--required",
+        action="store_true",
+        help="Print the required evidence sequence and exit successfully.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.required:
+        print(json.dumps({
+            "required": list(required_evidence()),
+            "decision_effect": "NONE",
+            "execution_effect": "NONE",
+        }, sort_keys=True))
+        return 0
+
+    result = validate_e2e_evidence(args.events)
+    print(json.dumps({
+        "passed": result.passed,
+        "missing": list(result.missing),
+        "out_of_order": list(result.out_of_order),
+        "decision_effect": "NONE",
+        "execution_effect": "NONE",
+    }, sort_keys=True))
+    return 0 if result.passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
