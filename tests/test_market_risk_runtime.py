@@ -37,30 +37,19 @@ def test_coinglass_open_interest_change_requires_two_samples():
     assert round(second["open_interest_change_pct"], 2) == 12.0
 
 
-def test_cryptoquant_reserve_change_is_normalized():
-    _reset_runtime_state()
-    out = runtime.parse_cryptoquant_reserve({
-        "result": {"data": [
-            {"reserve_usd": 100_000_000_000},
-            {"reserve_usd": 102_500_000_000},
-        ]}
-    })
-    assert round(out["btc_exchange_reserve_change_pct"], 2) == 2.5
-
-
 def test_signal_expiry_is_independent_per_signal():
     _reset_runtime_state()
     now = time.time()
     runtime._merge_signals({"liquidation_usd_1h": 600_000_000}, now=now - 1300)
-    runtime._merge_signals({"btc_exchange_reserve_change_pct": 2.5}, now=now - 100)
+    runtime._merge_signals({"macro_event_severity": 60}, now=now - 100)
 
     snap = runtime.snapshot(now=now)
     assert "liquidation_usd_1h" not in snap["signals"]
-    assert snap["signals"]["btc_exchange_reserve_change_pct"] == 2.5
+    assert snap["signals"]["macro_event_severity"] == 60
     assert snap["assessment"].block_new_entries is False
 
 
-def test_combined_fresh_risk_can_block_pilot_gate_without_whale_alert():
+def test_combined_fresh_risk_can_block_pilot_gate_with_coinglass_and_macro():
     _reset_runtime_state()
 
     class DummyState:
@@ -85,11 +74,11 @@ def test_combined_fresh_risk_can_block_pilot_gate_without_whale_alert():
     runtime.install(DummyPilot, DummyScoring, DummyLog())
     now = time.time()
     runtime._merge_signals({
-        "btc_exchange_netflow_usd": 175_000_000,
-        "btc_exchange_reserve_change_pct": 3.0,
         "liquidation_usd_1h": 600_000_000,
         "open_interest_change_pct": 15.0,
+        "funding_rate_pct": 0.15,
         "macro_event_severity": 90,
+        "vix_change_pct": 15.0,
     }, now=now)
 
     guard = DummyPilot()
