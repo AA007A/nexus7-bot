@@ -63,11 +63,16 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             live.account_semantics, "read_account_state", AsyncMock(return_value=state)
         ), patch.object(
+            live.capital_flows,
+            "reconcile_external_capital_flows",
+            AsyncMock(return_value={"applied": 0, "bootstrap": False}),
+        ) as reconcile, patch.object(
             live, "restore_update_real_account_peak", AsyncMock(return_value=None)
         ):
             out = await live._refresh_account(engine, _Log())
 
         self.assertIs(out, state)
+        reconcile.assert_awaited_once_with(engine.client, engine.risk, 100.0, strict=True)
         self.assertEqual(engine.risk.balance, 100.0)
         self.assertEqual(engine._pilot_account_equity, 100.0)
         self.assertEqual(engine._pilot_available_balance, 25.0)
