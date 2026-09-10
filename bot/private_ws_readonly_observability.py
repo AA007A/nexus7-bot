@@ -50,23 +50,16 @@ def _log_active_order_forensics(orders, log):
         )
 
 
-async def run(client, instruments, log) -> bool:
-    from bot.prelive_readonly_probe import _active_orders, _private_ws_probe
+async def refresh_account_exposure(client, log) -> bool:
+    """Refresh SHADOW pre-live exposure from current KuCoin read-only state.
+
+    This is intentionally safe to call again after startup. It allows a manual
+    stop added later to be recognized, and it also fails closed again if a
+    protective stop disappears or account exposure becomes unverifiable.
+    """
+    from bot.prelive_readonly_probe import _active_orders
     from bot.conditional_stop_protection import conditional_stop_confirmed
 
-    symbol = "ETHUSDT" if "ETHUSDT" in instruments else next(iter(instruments), "")
-    if not symbol:
-        setattr(client, "_prelive_private_ws_probe_ok", False)
-        setattr(client, "_prelive_account_exposure_verified", False)
-        setattr(client, "_prelive_account_exposure_clear", False)
-        log.warning(
-            "[PRIVATE_WS_READONLY_PROBE] result=FAIL reason=no_instrument execution_effect=NONE"
-        )
-        return False
-
-    # Verify account exposure independently from the WS transport check. Any
-    # read/protection verification failure is fail-closed: unknown account state
-    # must never be presented as WOULD_SUBMIT-ready.
     try:
         positions_raw = await client.get_positions()
         positions = []
@@ -93,9 +86,6 @@ async def run(client, instruments, log) -> bool:
             else:
                 unprotected.append(item)
 
-        # "exposure_clear" means compatible with SHADOW/pilot coexistence, not
-        # literally zero positions. Protected external/manual positions are
-        # allowed here and are counted against pilot capacity by PilotGuard.
         exposure_clear = not orders and not unprotected
         setattr(client, "_prelive_active_positions", len(positions))
         setattr(client, "_prelive_active_orders", len(orders))
@@ -121,8 +111,8 @@ async def run(client, instruments, log) -> bool:
             )
         if orders:
             _log_active_order_forensics(orders, log)
+        return exposure_clear
     except Exception as exc:
-        exposure_clear = False
         setattr(client, "_prelive_active_positions", None)
         setattr(client, "_prelive_active_orders", None)
         setattr(client, "_prelive_protected_positions", None)
@@ -133,6 +123,23 @@ async def run(client, instruments, log) -> bool:
             "[PRELIVE_ACCOUNT_EXPOSURE] result=FAIL reason=%s execution_effect=NONE",
             type(exc).__name__,
         )
+        return False
+
+
+async def run(client, instruments, log) -> bool:
+    from bot.prelive_readonly_probe import _private_ws_probe
+
+    symbol = "ETHUSDT" if "ETHUSDT" in instruments else next(iter(instruments), "")
+    if not symbol:
+        setattr(client, "_prelive_private_ws_probe_ok", False)
+        setattr(client, "_prelive_account_exposure_verified", False)
+        setattr(client, "_prelive_account_exposure_clear", False)
+        log.warning(
+            "[PRIVATE_WS_READONLY_PROBE] result=FAIL reason=no_instrument execution_effect=NONE"
+        )
+        return False
+
+    exposure_clear = await refresh_account_exposure(client, log)
 
     try:
         ws_ok = bool(
