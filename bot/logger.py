@@ -25,6 +25,19 @@ _AUDIT_PACING_LOCK = threading.Lock()
 _AUDIT_LAST_ENQUEUE = 0.0
 _AUDIT_MIN_INTERVAL = 1.5
 
+# Main-loop integrity blockers can remain unchanged for minutes (for example an
+# external/manual position without a confirmed stop). The engine evaluates the
+# gate every few seconds, so logging the same warning every cycle creates noise
+# that can hide genuinely new faults. This filter affects only the duplicate
+# log line; it never changes IntegrityGuard state, scan gating, retries, or
+# exchange behavior. A changed reason is emitted immediately and an identical
+# reason is re-emitted periodically as proof of life.
+_BLOCK_LOG_LOCK = threading.Lock()
+_BLOCK_LOG_LAST_KEY = ""
+_BLOCK_LOG_LAST_TS = 0.0
+_BLOCK_LOG_INTERVAL = 60.0
+_BLOCK_LOG_PREFIX = "🚫 ENTRADAS BLOQUEADAS:"
+
 _AI_DECISION_RE = re.compile(r"^\[AI_DECISION\]\s+symbol=(?P<symbol>\S+)\s+side=(?P<side>\S+)\s+decision=(?P<decision>\S+)\s+approved=(?P<approved>\S+)\s+decision_source=(?P<source>\S+)\s+score=(?P<score>\S+)\s+confidence=(?P<confidence>\S+)\s+ts=(?P<ts>\S+)\s+reason=(?P<reason>.*)$")
 _FUNNEL_SESSION_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO no ajuste de sessão: (?P<score_before>[-+\d.]+)→(?P<score>[-+\d.]+) < (?P<minimum>[-+\d.]+) \(sessão (?P<session>[^)]+)\)$")
 _FUNNEL_REGIME_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO pelo regime: (?P<side>\S+) não permitido em (?P<regime>\S+) \(score era (?P<score>[-+\d.]+)\)$")
@@ -170,10 +183,32 @@ class _DecisionTelegramHandler(logging.Handler):
         except Exception as exc:
             _diag("Decision telemetry handler failed", exc)
 
+class _RepeatedBlockFilter(logging.Filter):
+    """Throttle only identical main-loop integrity-block warnings."""
+    def filter(self, record):
+        global _BLOCK_LOG_LAST_KEY, _BLOCK_LOG_LAST_TS
+        try:
+            msg = record.getMessage()
+            if not msg.startswith(_BLOCK_LOG_PREFIX):
+                return True
+            now = time.monotonic()
+            with _BLOCK_LOG_LOCK:
+                changed = msg != _BLOCK_LOG_LAST_KEY
+                due = now - _BLOCK_LOG_LAST_TS >= _BLOCK_LOG_INTERVAL
+                if changed or due:
+                    _BLOCK_LOG_LAST_KEY = msg
+                    _BLOCK_LOG_LAST_TS = now
+                    return True
+                return False
+        except Exception:
+            # Observability must fail open: never hide a log if filtering itself
+            # malfunctions, and never affect trading/risk state.
+            return True
+
 def _make(name):
     lvl=getattr(logging,os.environ.get("LOG_LEVEL","INFO").upper(),logging.INFO); lg=logging.getLogger(name)
     if not lg.handlers:
-        lg.setLevel(lvl); h=logging.StreamHandler(sys.stdout); h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",datefmt="%H:%M:%S")); lg.addHandler(h); lg.addHandler(_DecisionTelegramHandler()); lg.propagate=False
+        lg.setLevel(lvl); h=logging.StreamHandler(sys.stdout); h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",datefmt="%H:%M:%S")); h.addFilter(_RepeatedBlockFilter()); lg.addHandler(h); lg.addHandler(_DecisionTelegramHandler()); lg.propagate=False
     return lg
 
 log=_make("kakazito-trade")
