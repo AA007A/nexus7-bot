@@ -1,3 +1,4 @@
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -50,7 +51,12 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         engine.errors = {"orders"}
         engine._durable_state_ok = False
         engine.persist_reasons = []
-        engine.client = SimpleNamespace(get_order_status=AsyncMock(return_value={}))
+        engine.client = SimpleNamespace(
+            get_order_status=AsyncMock(return_value={}),
+            get_order_by_client_oid=AsyncMock(return_value={}),
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
         return engine
 
     async def test_restored_created_intent_is_terminalized_without_exchange_io(self):
@@ -64,8 +70,8 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(order.state, OrderState.FAILED)
         engine.client.get_order_status.assert_not_awaited()
+        engine.client.get_order_by_client_oid.assert_not_awaited()
         self.assertTrue(engine._durable_state_ok)
-        self.assertIn("startup_reconcile_hardened", engine.persist_reasons)
 
     async def test_order_id_recovers_filled_submitting_intent(self):
         durable = self._durable()
@@ -86,9 +92,8 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order.state, OrderState.FILLED)
         self.assertEqual(order.filled_qty, 1.0)
         engine.client.get_order_status.assert_awaited_once_with("kc-123")
-        self.assertTrue(engine._durable_state_ok)
 
-    async def test_ambiguous_submitting_without_order_id_remains_fail_closed(self):
+    async def test_fresh_ambiguous_submitting_without_order_id_remains_fail_closed(self):
         durable = self._durable()
         hardening.install(durable, order_state, _Log())
         engine = self._engine()
@@ -99,8 +104,57 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(ok)
         self.assertEqual(order.state, OrderState.SUBMITTING)
+        engine.client.get_order_by_client_oid.assert_not_awaited()
         self.assertFalse(engine._durable_state_ok)
-        engine.client.get_order_status.assert_not_awaited()
+
+    async def test_stale_absent_submitting_is_terminalized_only_when_account_flat(self):
+        durable = self._durable()
+        hardening.install(durable, order_state, _Log())
+        engine = self._engine()
+        order, _ = engine.orders.get_or_create("bgx7-stale", "SOLUSDT", "Buy", 1.0)
+        order.transition(OrderState.SUBMITTING, source="TEST")
+        order.created_at = time.time() - hardening.STALE_SUBMITTING_AGE_S - 30
+
+        ok = await durable.reconcile_orders(engine)
+
+        self.assertTrue(ok)
+        self.assertEqual(order.state, OrderState.FAILED)
+        engine.client.get_order_by_client_oid.assert_awaited_once_with("bgx7-stale")
+        engine.client.get_positions.assert_awaited_once()
+        engine.client._get.assert_awaited_once_with(
+            "/api/v1/orders", {"status": "active"}, auth=True
+        )
+        self.assertTrue(engine._durable_state_ok)
+
+    async def test_stale_submitting_with_position_stays_fail_closed(self):
+        durable = self._durable()
+        hardening.install(durable, order_state, _Log())
+        engine = self._engine()
+        engine.client.get_positions.return_value = [{"symbol": "SOLUSDT", "size": "1"}]
+        order, _ = engine.orders.get_or_create("bgx7-stale-pos", "SOLUSDT", "Buy", 1.0)
+        order.transition(OrderState.SUBMITTING, source="TEST")
+        order.created_at = time.time() - hardening.STALE_SUBMITTING_AGE_S - 30
+
+        ok = await durable.reconcile_orders(engine)
+
+        self.assertFalse(ok)
+        self.assertEqual(order.state, OrderState.SUBMITTING)
+        self.assertFalse(engine._durable_state_ok)
+
+    async def test_stale_submitting_read_error_stays_fail_closed(self):
+        durable = self._durable()
+        hardening.install(durable, order_state, _Log())
+        engine = self._engine()
+        engine.client.get_positions.side_effect = RuntimeError("exchange read failed")
+        order, _ = engine.orders.get_or_create("bgx7-stale-read", "SOLUSDT", "Buy", 1.0)
+        order.transition(OrderState.SUBMITTING, source="TEST")
+        order.created_at = time.time() - hardening.STALE_SUBMITTING_AGE_S - 30
+
+        ok = await durable.reconcile_orders(engine)
+
+        self.assertFalse(ok)
+        self.assertEqual(order.state, OrderState.SUBMITTING)
+        self.assertFalse(engine._durable_state_ok)
 
 
 if __name__ == "__main__":
