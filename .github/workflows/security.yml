@@ -1,0 +1,45 @@
+name: Supply Chain Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Dependency, source and SBOM audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and audit tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit cyclonedx-bom bandit
+      - name: Audit Python dependency vulnerabilities
+        run: pip-audit -r requirements.txt
+      - name: Static security scan — HIGH severity gate
+        # B324 is intentionally excluded: the two MD5 uses in this repository
+        # are deterministic non-security identifiers (clientOid/news dedupe),
+        # not cryptographic authentication, signatures, passwords or secrets.
+        # Dependency CVEs remain zero-tolerance through pip-audit above.
+        run: bandit -r bot main.py main_hardened.py -lll -s B324
+      - name: Generate CycloneDX SBOM
+        run: cyclonedx-py requirements requirements.txt --output-format JSON --output-file sbom.cdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus7-sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
