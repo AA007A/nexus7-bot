@@ -29,8 +29,9 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import List
 
+from bot.conditional_stop_protection import conditional_stop_confirmed, inline_stop_confirmed
 from bot.logger import log
 
 
@@ -116,18 +117,58 @@ class IntegrityGuard:
                 f"posições não confirmadas: {type(e).__name__}: {e}")
             exchange_known = False
 
+        # KuCoin can keep a manually-created stop as a separate conditional
+        # order rather than embedding it in the position payload. Resolve that
+        # protection through a READ-ONLY /stopOrders query. Failure to read or
+        # ambiguous/partial coverage remains unprotected (fail closed).
+        protection: dict[str, tuple[bool, str]] = {}
+        if ex_positions:
+            for position in ex_positions:
+                try:
+                    if abs(float(position.get("size", 0) or 0)) <= 0:
+                        continue
+                    sym = str(position.get("symbol", "") or "")
+                    if not sym:
+                        continue
+                    if inline_stop_confirmed(position):
+                        protection[sym] = (True, "inline_stop")
+                        continue
+                    protected, evidence = await conditional_stop_confirmed(client, position)
+                    protection[sym] = (protected, evidence)
+                    log.info(
+                        "[CONDITIONAL_STOP_READONLY] symbol=%s confirmed=%s "
+                        "evidence=%s action=read_only execution_effect=NONE",
+                        sym, str(bool(protected)).lower(), evidence,
+                    )
+                except Exception as e:
+                    sym = str(position.get("symbol", "?") or "?") if isinstance(position, dict) else "?"
+                    protection[sym] = (False, "validation_exception")
+                    log.warning(
+                        "[CONDITIONAL_STOP_READONLY] symbol=%s confirmed=false "
+                        "evidence=validation_exception error=%s action=read_only "
+                        "execution_effect=NONE",
+                        sym, type(e).__name__,
+                    )
+
+        def has_confirmed_stop(position: dict) -> bool:
+            if self._position_has_confirmed_stop(position):
+                return True
+            sym = str(position.get("symbol", "") or "") if isinstance(position, dict) else ""
+            return bool(protection.get(sym, (False, ""))[0])
+
         if ex_positions is not None:
             div = self._reconcile(engine, ex_positions)
             for d in div:
                 add("STATE_DIVERGENCE", Severity.BLOCKED, d)
 
             for sym, position in self._external_position_map(engine, ex_positions).items():
-                if self._position_has_confirmed_stop(position):
+                if has_confirmed_stop(position):
+                    evidence = protection.get(sym, (True, "inline_stop"))[1]
                     add(
                         "EXTERNAL_POSITION_PROTECTED",
                         Severity.BLOCKED,
-                        f"{sym}: posição externa protegida por stop confirmado, "
-                        "mas não gerenciada pelo NEXUS-7; exposição continua ativa",
+                        f"{sym}: posição externa protegida por stop confirmado "
+                        f"({evidence}), mas não gerenciada pelo NEXUS-7; exposição continua ativa",
                     )
                 else:
                     add(
@@ -141,7 +182,7 @@ class IntegrityGuard:
                 try:
                     if abs(float(p.get("size", 0) or 0)) <= 0:
                         continue
-                    if not self._position_has_confirmed_stop(p):
+                    if not has_confirmed_stop(p):
                         add("POSITION_WITHOUT_STOP", Severity.BLOCKED,
                             f"{p.get('symbol')} aberta SEM stop confirmado "
                             f"na exchange")
@@ -221,11 +262,8 @@ class IntegrityGuard:
 
     @staticmethod
     def _position_has_confirmed_stop(position: dict) -> bool:
-        """True somente quando a exchange devolve stopLoss numérico e positivo."""
-        try:
-            return float(position.get("stopLoss", 0) or 0) > 0
-        except (TypeError, ValueError, AttributeError):
-            return False
+        """True quando o payload da posição traz stopLoss explícito positivo."""
+        return inline_stop_confirmed(position)
 
     def _external_position_map(self, engine, ex_positions: list) -> dict:
         """Mapeia posições abertas na exchange que não pertencem ao NEXUS-7."""
