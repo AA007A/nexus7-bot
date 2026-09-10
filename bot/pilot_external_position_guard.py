@@ -1,24 +1,20 @@
-"""Fail-closed guard for unexpected exchange positions during REAL pilot mode.
+"""Fail-closed guard for unexpected/manual exchange positions.
 
-Purpose
--------
-A position that exists on the exchange but is not present in ``engine.positions``
-was historically eligible for automatic adoption by ``_sync_positions`` /
-``_reconcile_exchange_positions``. In pilot mode that is unsafe: an external or
-manual position must never become bot-managed implicitly.
+Invariant
+---------
+Any position that exists on the real exchange but is not present in
+``engine.positions`` is external/manual and therefore read-only to NEXUS-7.
+The bot may observe it, verify protection and count it toward exposure, but it
+must never auto-adopt, modify stops, reduce, or close it.
 
-This hardening is intentionally restrictive:
-- PAPER is unchanged.
-- SHADOW / VALIDATION_LOCK is unchanged and remains mutation-free.
-- non-pilot LIVE behavior is unchanged.
-- pilot LIVE never auto-adopts, modifies, closes or protects unexpected exchange
-  positions.
-- an UNPROTECTED unexpected position blocks new pilot entries fail-closed.
-- a PROTECTED unexpected position does not globally block the pilot; it remains
-  external/read-only and consumes one concurrency slot through
-  ``pilot_exposure_capacity``.
-- symbol-specific reconciliation after an ambiguous bot submission remains
-  allowed because that path is tied to the bot's own in-flight order.
+This invariant applies to every non-PAPER real-exchange mode, including SHADOW,
+pilot LIVE and any future non-pilot LIVE path. An unprotected external position
+blocks new entries fail-closed; a protected one may coexist only under the
+existing exposure-capacity policy.
+
+The only reconciliation exception is a symbol-scoped recovery immediately after
+an ambiguous submission made by NEXUS itself. That path belongs to the bot's own
+in-flight order, not to unsolicited/manual-position management.
 
 No execution permission is granted by this module.
 """
@@ -30,9 +26,6 @@ def install(TradingEngine, log):
     if getattr(TradingEngine, "_pilot_external_position_guard_patched", False):
         return
 
-    # Read-only forensic logging is installed through this already-loaded
-    # hardening module so SHADOW can expose normalized position details without
-    # adding any exchange mutation capability.
     from bot import kucoin as _kucoin
     from bot import shadow_position_forensics as _shadow_position_forensics
     _shadow_position_forensics.install(_kucoin, log)
@@ -41,22 +34,16 @@ def install(TradingEngine, log):
     original_sync = getattr(TradingEngine, "_sync_positions", None)
     original_reconcile = getattr(TradingEngine, "_reconcile_exchange_positions", None)
 
-    def _pilot_live(engine):
-        pilot = getattr(engine, "pilot", None)
-        return bool(
-            pilot is not None
-            and getattr(pilot, "enabled", False)
-            and not getattr(engine, "paper_trade", False)
-            and not getattr(engine, "_validation_safety_lock_active", False)
-        )
+    def _real_exchange_mode(engine):
+        return not getattr(engine, "paper_trade", False)
 
     async def _unexpected_positions(engine):
         try:
             rows = await engine.client.get_positions()
         except Exception as exc:
             log.critical(
-                "[PILOT_EXTERNAL_POSITION_GUARD] result=BLOCKED "
-                "reason=position_read_failed error=%s",
+                "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED "
+                "reason=position_read_failed error=%s action=no_mutation",
                 type(exc).__name__,
             )
             setattr(engine, "_pilot_external_position_guard_blocked", True)
@@ -85,9 +72,6 @@ def install(TradingEngine, log):
         unprotected_set = getattr(engine, "_unprotected_symbols", None)
         if isinstance(unprotected_set, set):
             unprotected_set.update(unprotected)
-            # Clear stale guard-only state once the same external position has
-            # an exchange-confirmed stop. IntegrityGuard remains the source of
-            # truth and can re-add a symbol if another protection fault exists.
             for sym in protected:
                 unprotected_set.discard(sym)
 
@@ -96,16 +80,19 @@ def install(TradingEngine, log):
 
         if unprotected:
             log.critical(
-                "[PILOT_EXTERNAL_POSITION_GUARD] result=BLOCKED "
+                "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED "
                 "reason=unexpected_unprotected_position symbols=%s "
-                "action=no_adopt_no_mutation",
+                "action=read_only_no_adopt_no_stop_change_no_reduce_no_close",
                 ",".join(unprotected),
             )
         if protected:
-            evidence_text = ",".join(f"{sym}:{evidence.get(sym, 'unknown')}" for sym in protected)
+            evidence_text = ",".join(
+                f"{sym}:{evidence.get(sym, 'unknown')}" for sym in protected
+            )
             log.warning(
-                "[PILOT_EXTERNAL_POSITION_GUARD] result=PASS_WITH_EXTERNAL_PROTECTED "
-                "symbols=%s protection=%s action=no_adopt_no_mutation "
+                "[EXTERNAL_POSITION_IMMUTABLE] result=PASS_WITH_EXTERNAL_PROTECTED "
+                "symbols=%s protection=%s "
+                "action=read_only_no_adopt_no_stop_change_no_reduce_no_close "
                 "capacity_effect=count_slot",
                 ",".join(protected),
                 evidence_text,
@@ -119,21 +106,19 @@ def install(TradingEngine, log):
 
     if original_guard is not None:
         async def _guard_failclosed(self, *args, **kwargs):
-            if not _pilot_live(self):
+            if not _real_exchange_mode(self):
                 return await original_guard(self, *args, **kwargs)
             state = await _unexpected_positions(self)
             if state is None:
                 return None
             if state["all"]:
-                # Never let the legacy guard auto-adopt/protect a manual
-                # position. Protected externals may coexist, but stay external.
                 return None
             return await original_guard(self, *args, **kwargs)
         TradingEngine._guard_naked_positions = _guard_failclosed
 
     if original_sync is not None:
         async def _sync_failclosed(self, *args, **kwargs):
-            if not _pilot_live(self):
+            if not _real_exchange_mode(self):
                 return await original_sync(self, *args, **kwargs)
             state = await _unexpected_positions(self)
             if state is None or state["all"]:
@@ -143,14 +128,14 @@ def install(TradingEngine, log):
 
     if original_reconcile is not None:
         async def _reconcile_failclosed(self, only_symbol=None, *args, **kwargs):
-            if not _pilot_live(self):
+            if not _real_exchange_mode(self):
                 return await original_reconcile(
                     self, only_symbol=only_symbol, *args, **kwargs
                 )
 
-            # A symbol-scoped reconciliation is only used by the ambiguous-fill
-            # recovery path for a submission the bot itself just attempted.
-            # Preserve that safety-critical path; block broad orphan adoption.
+            # Reserved for the bot's own ambiguous-fill recovery immediately
+            # following a NEXUS submission. External-position discovery never
+            # invokes the scoped form.
             if only_symbol:
                 return await original_reconcile(
                     self, only_symbol=only_symbol, *args, **kwargs
@@ -161,9 +146,6 @@ def install(TradingEngine, log):
                 current = getattr(self, "_unprotected_symbols", set())
                 return list(current) if isinstance(current, set) else []
             if state["all"]:
-                # Report only unsafe externals to callers that use this result
-                # as a protection blocker. Protected externals remain visible
-                # via IntegrityGuard/capacity accounting but are not adopted.
                 return list(state["unprotected"])
             return await original_reconcile(
                 self, only_symbol=only_symbol, *args, **kwargs
@@ -172,7 +154,7 @@ def install(TradingEngine, log):
 
     TradingEngine._pilot_external_position_guard_patched = True
     log.warning(
-        "[PILOT_EXTERNAL_POSITION_GUARD] installed: unexpected exchange "
-        "positions are never auto-adopted; unprotected externals block; "
-        "protected externals remain read-only and consume pilot capacity"
+        "[EXTERNAL_POSITION_IMMUTABLE] installed: every non-PAPER unexpected "
+        "exchange position is read-only; no auto-adopt/stop-change/reduce/close; "
+        "unprotected externals block and protected externals consume capacity"
     )
