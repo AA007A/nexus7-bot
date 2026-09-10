@@ -15,6 +15,7 @@ on:
 
 jobs:
   check:
+    name: Quality Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
