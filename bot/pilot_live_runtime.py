@@ -1,10 +1,10 @@
 """Runtime hardening used only after explicit controlled-pilot release.
 
 The release gate is evaluated elsewhere. This module does not itself authorize
-LIVE execution. When installed, it keeps account-equity drawdown durable,
-tracks free collateral separately, performs authenticated read-only exposure
-and private-WS preflight, and refreshes those checks immediately before each
-candidate reaches the normal _open pipeline.
+LIVE execution. When installed, it keeps account-equity drawdown durable and
+cash-flow aware, tracks free collateral separately, performs authenticated
+read-only exposure and private-WS preflight, and refreshes those checks
+immediately before each candidate reaches the normal _open pipeline.
 
 External/manual positions remain governed by pilot_external_position_guard and
 pilot_exposure_capacity; this module never adopts, amends, reduces or closes
@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 
 from bot import account_balance_semantics as account_semantics
+from bot import capital_flow_reconciliation as capital_flows
 from bot.drawdown_persistence import restore_update_real_account_peak
 
 
@@ -24,6 +25,27 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     available = float(state["available"])
 
     account_semantics.update_risk_from_equity(engine.risk, equity)
+
+    # KuCoin accountEquity includes external deposits/withdrawals/transfers.
+    # Before enforcing the durable HWM, reconcile completed ledger cash flows
+    # so a user moving capital cannot be misclassified as trading PnL.
+    now = time.time()
+    previous_equity = getattr(engine, "_pilot_prev_account_equity", None)
+    last_flow_check = float(getattr(engine, "_pilot_last_capital_flow_check", 0.0) or 0.0)
+    material_change = (
+        previous_equity is None
+        or abs(equity - float(previous_equity)) >= max(0.02, abs(float(previous_equity)) * 0.01)
+    )
+    if material_change or (now - last_flow_check) >= 300.0:
+        await capital_flows.reconcile_external_capital_flows(
+            engine.client,
+            engine.risk,
+            equity,
+            strict=True,
+        )
+        engine._pilot_last_capital_flow_check = now
+
+    engine._pilot_prev_account_equity = equity
     await restore_update_real_account_peak(engine.risk, equity, strict=True)
 
     engine._pilot_account_equity = equity
@@ -198,6 +220,7 @@ def install(TradingEngine, log) -> None:
     TradingEngine._pilot_live_runtime_patched = True
 
     log.critical(
-        "[PILOT_LIVE_RUNTIME] installed: durable equity drawdown + free-collateral "
-        "sizing + read-only exposure/private-WS preflight; external positions immutable"
+        "[PILOT_LIVE_RUNTIME] installed: cash-flow-aware durable equity drawdown + "
+        "free-collateral sizing + read-only exposure/private-WS preflight; "
+        "external positions immutable"
     )
