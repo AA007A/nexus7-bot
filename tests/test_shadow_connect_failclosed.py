@@ -60,6 +60,25 @@ class ShadowConnectFailClosedTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine.active)
         self.assertEqual(engine.viable_symbols, ["BTCUSDT"])
 
+    async def test_core_ready_does_not_claim_private_ws_ready(self):
+        engine = _Engine()
+        with patch.object(
+            shadow_connect.balance_semantics,
+            "refresh_shadow_risk",
+            AsyncMock(return_value={"equity": 100.0, "available": 50.0}),
+        ), patch.object(
+            shadow_connect,
+            "read_account_capital",
+            AsyncMock(return_value=_CapitalSnapshot()),
+        ), patch.object(shadow_connect.log, "warning") as warning:
+            ok = await shadow_connect.connect_readonly(engine)
+
+        self.assertTrue(ok)
+        messages = [str(call.args[0]) for call in warning.call_args_list if call.args]
+        self.assertTrue(any("[SHADOW_LIVE] CORE_READY" in msg for msg in messages))
+        self.assertFalse(any("[SHADOW_LIVE] READY" in msg for msg in messages))
+        self.assertTrue(any("private_ws=pending" in msg for msg in messages))
+
     async def test_capital_error_blocks_without_ws(self):
         engine = _Engine()
         with patch.object(

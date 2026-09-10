@@ -85,7 +85,7 @@ async def connect_readonly(engine) -> bool:
         return False
 
     try:
-        instruments = await engine.client.load_instruments()
+        await engine.client.load_instruments()
         engine.instruments = engine.client.get_instruments()
         if not isinstance(engine.instruments, dict) or not engine.instruments:
             raise ValueError("instrument metadata unavailable")
@@ -141,8 +141,8 @@ async def connect_readonly(engine) -> bool:
     engine.connected = True
     engine.active = True
     log.warning(
-        "[SHADOW_LIVE] READY balance_read=true capital_v3=true viable_symbols=%s "
-        "private_ws=false execution_effect=NONE",
+        "[SHADOW_LIVE] CORE_READY balance_read=true capital_v3=true viable_symbols=%s "
+        "private_ws=pending execution_effect=NONE",
         len(engine.viable_symbols),
     )
     return True
