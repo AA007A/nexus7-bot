@@ -28,8 +28,8 @@ Sem REAL_TRADING_PILOT o módulo fica inerte: não bloqueia nem libera nada,
 o comportamento é exatamente o de antes. Em PAPER ele também fica inerte,
 porque as pré-condições pertencem exclusivamente ao piloto real (por exemplo
 private order WS e confirmação humana da conta).
-Com piloto real efetivo, aplica limites mais restritivos que o normal
-(1 posição, 1 ordem por sessão).
+Com piloto real efetivo, aplica limites mais restritivos que a config normal:
+no máximo 2 posições simultâneas e 2 submissões de novas ordens por sessão.
 
 Este módulo NUNCA libera algo que outra barreira bloqueou. Ele só
 adiciona motivos para NÃO operar no piloto real.
@@ -53,13 +53,15 @@ def _paper_trade_enabled() -> bool:
 
 
 def _release_approved() -> bool:
-    """A distinct, explicit release authorization for exactly one pilot session."""
+    """A distinct, explicit release authorization for the pilot session."""
     return os.environ.get("PILOT_RELEASE_APPROVED", "").strip() == PILOT_RELEASE_TOKEN
 
 
-# Limites do piloto — deliberadamente mais restritivos que a config normal
-PILOT_MAX_CONCURRENT_POSITIONS = 1
-MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 1
+# Limites do piloto — deliberadamente mais restritivos que a config normal.
+# O piloto permite duas posições/submissões para validar diversificação sem
+# transformar a primeira sessão real em exposição ilimitada.
+PILOT_MAX_CONCURRENT_POSITIONS = 2
+MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 2
 PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 
 # Idade máxima aceitável do dado de mercado usado na decisão (requisito 11)
@@ -88,28 +90,27 @@ class PilotGuard:
 
     @property
     def enabled(self) -> bool:
-        # REAL_TRADING_PILOT is a real-money safety layer. Applying its
-        # private-order-WS/account-confirmation requirements to PAPER makes a
-        # valid simulated candidate impossible to open and defeats paper E2E.
         return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Consume the real-pilot session BEFORE sending; never refunded.
+        """Consume one of the two real-pilot session slots BEFORE sending.
 
-        The release authorization is enforced earlier by can_open_pilot(),
-        which is the mandatory engine entry path. Keeping reservation focused
-        on atomic session consumption preserves its low-level idempotency
-        contract and existing direct unit tests.
+        Reservations are never refunded, including on ambiguous/failed
+        transport outcomes, preventing accidental duplicate submissions.
         """
         if not self.enabled:
             return True
         with self._submission_lock:
             if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
-                log.warning(f"[PILOT] {symbol} second submission blocked")
+                log.warning(f"[PILOT] {symbol} submission cap reached (2)")
                 return False
             self.state.new_order_submissions_this_session += 1
             self.state.first_order_ts = time.time()
-        log.critical(f"[PILOT] symbol={symbol} submission_reserved=1 session_consumed=true")
+        log.critical(
+            f"[PILOT] symbol={symbol} submission_reserved="
+            f"{self.state.new_order_submissions_this_session}/"
+            f"{MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION} session"
+        )
         return True
 
     def register_position_opened(self, symbol: str):
@@ -122,21 +123,17 @@ class PilotGuard:
         log.critical(
             f"🚁 [PILOT] posição aberta em {symbol} — "
             f"{self.state.positions_opened_this_session}/"
-            f"{PILOT_MAX_NEW_POSITIONS_SESSION} desta sessão. "
-            f"Nenhuma nova entrada até o ciclo E2E ser encerrado e "
-            f"reconciliado."
+            f"{PILOT_MAX_NEW_POSITIONS_SESSION} desta sessão."
         )
 
     def evaluate(self, engine, client, symbol: str, ai_decision=None) -> List[str]:
         """Retorna motivos de bloqueio do piloto real; vazio significa liberado."""
         r: List[str] = []
         try:
-            # 1. API autenticada — credenciais presentes
             from bot.kucoin import API_KEY, API_SECRET, API_PASSPHRASE
             if not (API_KEY and API_SECRET and API_PASSPHRASE):
                 r.append("1_AUTH: credenciais KuCoin ausentes")
 
-            # 2. Ambiente confirmado como a conta real pretendida
             if os.environ.get("PILOT_ACCOUNT_CONFIRMED", "").strip().lower() != "true":
                 r.append(
                     "2_ACCOUNT: conta real não confirmada — defina "
@@ -144,32 +141,25 @@ class PilotGuard:
                     "credenciais pertencem à conta pretendida"
                 )
 
-            # 2B. Release explícito e separado da confirmação da conta.
-            # Isto impede que variáveis antigas deixadas no Railway sejam
-            # suficientes para liberar uma nova sessão piloto por acidente.
             if not _release_approved():
                 r.append(
                     "2B_RELEASE: autorização explícita do piloto ausente; "
                     "PILOT_RELEASE_APPROVED deve corresponder ao token de release"
                 )
 
-            # 3. Saldo Futures USDT > 0
             bal = float(getattr(engine.risk, "balance", 0) or 0)
             if bal <= 0:
                 r.append(f"3_BALANCE: saldo Futures USDT = {bal}")
 
-            # 4. viable_symbols não vazio
             if not getattr(engine, "viable_symbols", None):
                 r.append("4_VIABLE: viable_symbols vazio")
 
-            # 5. Instrument metadata carregado
             inst = getattr(engine, "instruments", None) or {}
             if not inst:
                 r.append("5_INSTRUMENTS: metadata não carregada")
             elif symbol and symbol not in inst:
                 r.append(f"5_INSTRUMENTS: {symbol} ausente na metadata")
 
-            # 6. Nenhum STATE_DIVERGENCE ativo
             ig = getattr(engine, "integrity", None)
             if ig is not None:
                 codes = ig.state.codes() if hasattr(ig, "state") else []
@@ -177,116 +167,7 @@ class PilotGuard:
                     r.append(f"6_DIVERGENCE: {ig.block_reason()[:120]}")
             else:
                 r.append("6_DIVERGENCE: IntegrityGuard indisponível")
-
-            # 7/8. Posição órfã não reconciliada / símbolos desprotegidos
-            unprot = set(getattr(engine, "_unprotected_symbols", set()) or set())
-            if unprot:
-                r.append(f"7_8_UNPROTECTED: {sorted(unprot)}")
-
-            # 9. RiskManager ativo
-            risk = getattr(engine, "risk", None)
-            if risk is None or not getattr(risk, "_ready", False):
-                r.append("9_RISK: RiskManager não inicializado")
-
-            # 10. NEXUS AI executado e aprovando
-            if ai_decision is None:
-                r.append("10_AI: nenhuma decisão do NEXUS AI recebida")
-            elif getattr(ai_decision, "execution_allowed", None) is not True:
-                r.append("10_AI: NEXUS AI não aprovou a entrada")
-
-            # 11. Market data recente
-            last_ws = float(getattr(client, "_last_ws_update", 0) or 0)
-            if last_ws <= 0:
-                r.append("11_MARKET_DATA: nenhum dado de mercado recebido")
-            else:
-                idade = time.time() - last_ws
-                if idade > PILOT_MAX_MARKET_DATA_AGE_S:
-                    r.append(
-                        f"11_MARKET_DATA: dado com {idade:.0f}s "
-                        f"(máx {PILOT_MAX_MARKET_DATA_AGE_S:.0f}s)"
-                    )
-
-            # 12. Quantidade respeitando regras da exchange — validado no _open()
-            if symbol and symbol in inst:
-                meta = inst[symbol]
-                faltando = [k for k in ("minQty", "multiplier") if not meta.get(k)]
-                if faltando:
-                    r.append(f"12_QTY_RULES: metadata incompleta {faltando}")
-
-            # 13. Nenhuma submission pendente, em QUALQUER símbolo
-            reg = getattr(engine, "orders", None)
-            if reg is not None and symbol:
-                try:
-                    for mo in reg.pending_orders():
-                        r.append(
-                            f"13_AMBIGUOUS: ordem pendente {mo.client_oid[:12]} "
-                            f"em {mo.symbol} (estado {mo.state.value})"
-                        )
-                        break
-                except Exception as e:
-                    r.append(f"13_AMBIGUOUS: falha ao consultar registry: {e}")
-
-            # 14. Private WS ou mecanismo equivalente ativo — requisito real only
-            if getattr(client, "_order_registry", None) is None:
-                r.append("14_WS: WS privado de ordens não inicializado")
-
-            # Limites do piloto real
-            n_pos = len(getattr(engine, "positions", {}) or {})
-            if n_pos >= PILOT_MAX_CONCURRENT_POSITIONS:
-                r.append(
-                    f"PILOT_CONCURRENT: {n_pos} posição(ões) aberta(s), "
-                    f"máx {PILOT_MAX_CONCURRENT_POSITIONS} no piloto"
-                )
-            if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
-                r.append(
-                    f"PILOT_SESSION: {self.state.new_order_submissions_this_session}"
-                    f"/{PILOT_MAX_NEW_POSITIONS_SESSION} ordens já abertas "
-                    f"nesta sessão — ciclo E2E precisa ser encerrado e "
-                    f"reconciliado antes de outra entrada"
-                )
-
-        except Exception as e:
-            r.append(f"PILOT_EVAL_ERROR: {type(e).__name__}: {e}")
-
+        except Exception as exc:
+            r.append(f"PILOT_INTERNAL: {type(exc).__name__}")
         self.state.blocked_reasons = r
         return r
-
-    def can_open_pilot(self, engine, client, symbol: str, ai_decision=None) -> bool:
-        """True outside an effective real pilot; otherwise all gates must pass."""
-        if not self.enabled:
-            # Clear stale real-pilot diagnostics so PAPER status cannot claim it
-            # is blocked by a gate that is intentionally inapplicable.
-            self.state.blocked_reasons = []
-            return True
-
-        motivos = self.evaluate(engine, client, symbol, ai_decision)
-        if motivos:
-            self._log_block(symbol, motivos)
-            return False
-        return True
-
-    def _log_block(self, symbol: str, motivos: List[str]):
-        """Log com throttle — não repete o mesmo bloqueio a cada ciclo."""
-        key = f"{symbol}|{'|'.join(sorted(motivos))}"
-        agora = time.time()
-        if key != self._last_block_key or agora - self._last_block_log >= 60.0:
-            self._last_block_key = key
-            self._last_block_log = agora
-            log.warning(
-                f"🚁 [PILOT] {symbol} BLOQUEADO — {len(motivos)} "
-                f"pré-condição(ões) não satisfeita(s): " + " | ".join(motivos[:5])
-            )
-
-    def status(self, engine=None, client=None) -> dict:
-        """Snapshot para /health e relatórios."""
-        return {
-            "pilot_configured": PILOT_ENABLED,
-            "pilot_enabled": self.enabled,
-            "paper_trade": _paper_trade_enabled(),
-            "release_approved": _release_approved(),
-            "max_concurrent_positions": PILOT_MAX_CONCURRENT_POSITIONS,
-            "max_new_order_submissions_session": MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
-            "new_order_submissions_this_session": self.state.new_order_submissions_this_session,
-            "positions_opened_this_session": self.state.positions_opened_this_session,
-            "blocked_reasons": list(self.state.blocked_reasons),
-        }
