@@ -47,6 +47,7 @@ def install() -> None:
     from bot import stagnation_time_hardening as _stagnation_time_hardening
     from bot import pilot_readiness_observability as _pilot_readiness_observability
     from bot import pilot_exposure_capacity as _pilot_exposure_capacity
+    from bot import pilot_submission_counter as _pilot_submission_counter
     from bot import shadow_mode_observability as _shadow_mode_observability
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
@@ -73,6 +74,7 @@ def install() -> None:
     _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
     _pilot_external_position_guard.install(TradingEngine, _log)
     _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
+    _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
     _validation_safety_lock.install(_log)
     _liquidation_override_guard.install(_log)
     _instrument_readiness_guard.install(_log)
