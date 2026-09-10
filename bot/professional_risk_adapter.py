@@ -42,7 +42,8 @@ class ProfessionalRiskAdapter:
     """Delegate legacy risk APIs while making new-entry sizing stop-aware.
 
     Existing engine code continues to read/update ``balance``, ``drawdown`` and
-    other legacy attributes through delegation. Only ``size`` is replaced.
+    other legacy attributes through delegation. Only new-entry sizing and its
+    operator-facing initialization telemetry are specialized here.
     ``RiskManagerV3`` remains side-effect-free and uses a full ``CapitalState``.
     """
 
@@ -63,6 +64,29 @@ class ProfessionalRiskAdapter:
             object.__setattr__(self, name, value)
         else:
             setattr(self._legacy, name, value)
+
+    def init(self, bal: float):
+        """Initialize delegated balance state without legacy risk mislabeling.
+
+        The old ``RiskManager.init`` log called ``LEVERAGE * MAX_RISK_PCT``
+        "risk per trade". That number is a notional/buying-power allocation,
+        not the maximum loss at the protective stop. Executable NEXUS sizing is
+        stop-aware in ``RiskManagerV3``; reporting the legacy quantity as loss
+        risk can therefore overstate or understate the real planned exposure.
+
+        State transitions remain equivalent to the legacy initializer: the
+        first valid balance initializes peak/drawdown/confirmed state and sets
+        ``_ready``. Only the telemetry wording/source is corrected.
+        """
+        if not bool(getattr(self._legacy, "_ready", False)):
+            self._legacy.update(bal)
+            self._legacy._ready = True
+            log.info(
+                "[RISK_V3_CORE] initialized balance=$%.2f leverage=%sx "
+                "configured_stop_risk_pct=%.3f%%; actual projected stop loss "
+                "is calculated from entry/stop geometry before dispatch",
+                float(bal), cfg.LEVERAGE, float(cfg.MAX_RISK_PCT) * 100.0,
+            )
 
     @property
     def professional_snapshot(self):
