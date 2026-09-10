@@ -105,6 +105,9 @@ jobs:
       - name: LIVE adapter chaos safety pack
         run: python -m unittest tests.test_live_adapter_chaos -v
 
+      - name: KuCoin native TPSL protected-entry safety pack
+        run: python -m unittest tests.test_kucoin_native_tpsl -v
+
       - name: Hardened entrypoint imports with unified thresholds
         env:
           PAPER_TRADE: "true"
