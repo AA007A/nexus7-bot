@@ -4,6 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from bot.integrity import IntegrityGuard, Severity
+from bot import integrity_external_coexistence_runtime
+
+
+integrity_external_coexistence_runtime.install(
+    IntegrityGuard,
+    SimpleNamespace(info=lambda *args, **kwargs: None),
+)
 
 
 class _Client:
