@@ -1,21 +1,26 @@
-"""Disambiguate exchange balance from the isolated PAPER wallet.
+"""Disambiguate exchange balance from PAPER and SHADOW read-only modes.
 
-Observability-only hardening. In PAPER mode the KuCoin available balance is
-still queried for connectivity/account visibility, but it is explicitly
-labelled read-only and is never presented as the balance used for PAPER sizing.
+Observability-only hardening. In PAPER or validation-held SHADOW mode the
+KuCoin available balance may be queried for connectivity/account visibility,
+but it must never be presented as an actively executable LIVE balance.
 """
 from __future__ import annotations
 
 import math
 
 
-def exchange_metadata(balance, paper_trade: bool) -> dict:
+def exchange_metadata(balance, paper_trade: bool, shadow_readonly: bool = False) -> dict:
+    read_only = bool(paper_trade or shadow_readonly)
+    mode = "PAPER_READ_ONLY" if paper_trade else (
+        "SHADOW_READ_ONLY" if shadow_readonly else "LIVE"
+    )
     return {
         "available_usdt": (
             round(float(balance), 4) if balance is not None else None
         ),
         "source": "KuCoin",
-        "read_only": bool(paper_trade),
+        "read_only": read_only,
+        "mode": mode,
         "used_for_paper_sizing": False,
     }
 
@@ -49,18 +54,19 @@ def install(log) -> None:
             raise RuntimeError("Futures availableBalance invalid") from exc
 
         self._last_exchange_balance = balance
+        shadow_readonly = bool(getattr(self, "_shadow_readonly_active", False))
         if PAPER_TRADE:
-            log.info(
-                "💰 [EXCHANGE_BALANCE] USDT=$%.4f source=KuCoin "
-                "mode=READ_ONLY paper_sizing=FALSE",
-                balance,
-            )
+            mode = "PAPER_READ_ONLY"
+        elif shadow_readonly:
+            mode = "SHADOW_READ_ONLY"
         else:
-            log.info(
-                "💰 [EXCHANGE_BALANCE] USDT=$%.4f source=KuCoin "
-                "mode=LIVE paper_sizing=FALSE",
-                balance,
-            )
+            mode = "LIVE"
+        log.info(
+            "💰 [EXCHANGE_BALANCE] USDT=$%.4f source=KuCoin "
+            "mode=%s paper_sizing=FALSE",
+            balance,
+            mode,
+        )
         return balance
 
     original_status = getattr(TradingEngine, "get_status", None)
@@ -73,9 +79,15 @@ def install(log) -> None:
                 return out
             result = dict(out)
             paper_trade = bool(getattr(self, "paper_trade", PAPER_TRADE))
+            shadow_readonly = bool(
+                getattr(self.client, "_shadow_readonly_active", False)
+                or getattr(self, "_validation_safety_lock_active", False)
+            )
             exchange_balance = getattr(self.client, "_last_exchange_balance", None)
             result["exchange_balance"] = exchange_metadata(
-                exchange_balance, paper_trade
+                exchange_balance,
+                paper_trade,
+                shadow_readonly,
             )
             if paper_trade:
                 result["paper_balance_source"] = paper_metadata(
@@ -93,6 +105,6 @@ def install(log) -> None:
     KuCoinClient.get_balance = get_balance_with_clear_source
     KuCoinClient._balance_observability_patched = True
     log.info(
-        "[BALANCE_OBSERVABILITY] installed: exchange and PAPER balances are "
-        "explicitly separated; sizing/risk behavior unchanged"
+        "[BALANCE_OBSERVABILITY] installed: exchange/PAPER/SHADOW balance modes "
+        "are explicit; sizing/risk behavior unchanged"
     )
