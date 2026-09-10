@@ -15,12 +15,12 @@ class ShadowScoreSummaryObservabilityTests(unittest.TestCase):
         self.assertTrue(_ScanSummaryLabelFilter().filter(record))
         return record.getMessage()
 
-    def test_nonpaper_shadow_summary_displays_55(self):
+    def test_nonpaper_shadow_summary_displays_60(self):
         original = "🔎 SCAN: 3 pares | máx=54 (mín=65) | 0 a ≤5pts | 0 aprovados"
         with patch.dict(os.environ, {"PAPER_TRADE": "false"}, clear=False):
             rendered = self._render(original)
         self.assertIn("🔎 SCORE_STAGE:", rendered)
-        self.assertIn("(mín=55)", rendered)
+        self.assertIn("(mín=60)", rendered)
         self.assertNotIn("(mín=65)", rendered)
         self.assertIn("em faixa ≥(mín-5), incluindo ≥mín", rendered)
 
@@ -29,7 +29,7 @@ class ShadowScoreSummaryObservabilityTests(unittest.TestCase):
         with patch.dict(os.environ, {"PAPER_TRADE": "true"}, clear=False):
             rendered = self._render(original)
         self.assertIn("(mín=65)", rendered)
-        self.assertNotIn("(mín=55)", rendered)
+        self.assertNotIn("(mín=60)", rendered)
 
     def test_module_contains_no_exchange_mutation_calls(self):
         import inspect
