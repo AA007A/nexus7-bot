@@ -1,7 +1,9 @@
 """Read-only KuCoin account balance semantics shared by SHADOW and future LIVE paths.
 
-Capital health is based on accountEquity. New-order affordability is based on
-availableBalance. This module performs no exchange mutations.
+Capital health is based on accountEquity. New-order affordability prefers
+availableMargin when KuCoin exposes it (the current cross-margin buying-power
+field) and falls back to availableBalance for legacy/isolated responses. This
+module performs no exchange mutations.
 """
 import math
 
@@ -9,6 +11,7 @@ _FIELDS = (
     "accountEquity",
     "marginBalance",
     "availableBalance",
+    "availableMargin",
     "unrealisedPNL",
     "positionMargin",
     "orderMargin",
@@ -26,7 +29,13 @@ def _finite_number(value, name):
 
 
 async def read_account_state(client):
-    """Return validated equity/collateral state from KuCoin, read-only."""
+    """Return validated equity/collateral state from KuCoin, read-only.
+
+    ``accountEquity`` remains the capital/drawdown basis. For collateral,
+    KuCoin's current Futures API uses ``availableMargin`` for cross-margin
+    buying power. ``availableBalance`` is retained as a compatibility fallback
+    for legacy/isolated responses where ``availableMargin`` is absent.
+    """
     data = await client._get(
         "/api/v1/account-overview", {"currency": "USDT"}, auth=True
     )
@@ -34,13 +43,21 @@ async def read_account_state(client):
         raise RuntimeError("account overview unavailable")
 
     equity = _finite_number(data.get("accountEquity"), "accountEquity")
-    available = _finite_number(data.get("availableBalance"), "availableBalance")
+
+    if data.get("availableMargin") not in (None, ""):
+        available = _finite_number(data.get("availableMargin"), "availableMargin")
+        available_source = "availableMargin"
+    else:
+        available = _finite_number(data.get("availableBalance"), "availableBalance")
+        available_source = "availableBalance"
+
     if equity < 0 or available < 0:
         raise RuntimeError("negative account balance")
 
     state = {key: data.get(key) for key in _FIELDS}
     state["equity"] = equity
     state["available"] = available
+    state["available_source"] = available_source
     state["currency"] = data.get("currency") or "USDT"
     return state
 
