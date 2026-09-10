@@ -46,7 +46,7 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
     def test_probe_is_diagnostic_only(self):
         src = inspect.getsource(obs.run)
         self.assertIn("_prelive_private_ws_probe_ok", src)
-        self.assertIn("_prelive_account_exposure_clear", src)
+        self.assertIn("refresh_account_exposure", src)
         self.assertIn("execution_effect=NONE", src)
         self.assertNotIn("can_open_pilot", src)
         self.assertNotIn("release_approved", src)
@@ -81,6 +81,43 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._prelive_protected_positions, 1)
         self.assertEqual(client._prelive_unprotected_positions, 0)
 
+    async def test_refresh_recognizes_manual_stop_added_after_startup(self):
+        client = _Client(positions=[{"symbol": "NEARUSDT", "size": "1", "stopLoss": "0"}])
+        log = _Log()
+        with patch(
+            "bot.conditional_stop_protection.conditional_stop_confirmed",
+            new=AsyncMock(return_value=(False, "no_full_protective_stop")),
+        ):
+            first = await obs.refresh_account_exposure(client, log)
+        self.assertFalse(first)
+        self.assertFalse(client._prelive_account_exposure_clear)
+
+        with patch(
+            "bot.conditional_stop_protection.conditional_stop_confirmed",
+            new=AsyncMock(return_value=(True, "conditional_close_order")),
+        ):
+            second = await obs.refresh_account_exposure(client, log)
+        self.assertTrue(second)
+        self.assertTrue(client._prelive_account_exposure_clear)
+        self.assertEqual(client._prelive_protected_positions, 1)
+        self.assertEqual(client._prelive_unprotected_positions, 0)
+
+    async def test_refresh_fails_closed_if_protection_disappears(self):
+        client = _Client(positions=[{"symbol": "NEARUSDT", "size": "1", "stopLoss": "0"}])
+        log = _Log()
+        with patch(
+            "bot.conditional_stop_protection.conditional_stop_confirmed",
+            new=AsyncMock(return_value=(True, "conditional_close_order")),
+        ):
+            self.assertTrue(await obs.refresh_account_exposure(client, log))
+        with patch(
+            "bot.conditional_stop_protection.conditional_stop_confirmed",
+            new=AsyncMock(return_value=(False, "no_full_protective_stop")),
+        ):
+            self.assertFalse(await obs.refresh_account_exposure(client, log))
+        self.assertFalse(client._prelive_account_exposure_clear)
+        self.assertEqual(client._prelive_unprotected_positions, 1)
+
     async def test_active_order_blocks_readiness_and_logs_forensics(self):
         client = _Client(orders=[{
             "id": "o1",
@@ -112,10 +149,12 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_only=true", rendered)
         self.assertIn("execution_effect=NONE", rendered)
 
-    def test_validation_lock_blocks_shadow_candidate_until_readonly_ready(self):
+    def test_validation_lock_refreshes_shadow_exposure_before_each_candidate(self):
         src = inspect.getsource(validation_safety_lock.install)
+        self.assertIn("refresh_account_exposure", src)
         self.assertIn("_shadow_prelive_readonly_ready", src)
         self.assertIn("stage=ACCOUNT_EXPOSURE", src)
+        self.assertIn("[SHADOW_PRELIVE_REFRESH]", src)
         self.assertIn("execution_effect=NONE", src)
 
 
