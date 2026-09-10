@@ -32,11 +32,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compilação (erros de sintaxe)
-        run: python -m compileall -q bot/ main.py
+        run: python -m compileall -q bot/ main.py main_hardened.py
 
       - name: Pyflakes — nomes indefinidos
         run: |
-          OUT=$(python -m pyflakes bot/ main.py 2>&1 || true)
+          OUT=$(python -m pyflakes bot/ main.py main_hardened.py 2>&1 || true)
           echo "$OUT"
           UNDEF=$(echo "$OUT" | grep -c "undefined name" || true)
           if [ "$UNDEF" -gt 0 ]; then
@@ -101,6 +101,27 @@ jobs:
 
       - name: Atomic PAPER database state
         run: python -m unittest tests.test_database_atomic_paper -v
+
+      - name: LIVE adapter chaos safety pack
+        run: python -m unittest tests.test_live_adapter_chaos -v
+
+      - name: Hardened entrypoint imports with unified thresholds
+        env:
+          PAPER_TRADE: "true"
+          MIN_ENTRY_SCORE: "65"
+          NEXUS_MIN_SCORE: "65"
+        run: python -c "import main_hardened; print('hardened entrypoint ok')"
+
+      - name: Hardened entrypoint fails closed on score drift
+        env:
+          PAPER_TRADE: "true"
+          MIN_ENTRY_SCORE: "65"
+          NEXUS_MIN_SCORE: "55"
+        run: |
+          if python -c "import main_hardened"; then
+            echo "::error::score threshold drift was not blocked"
+            exit 1
+          fi
 
       - name: Imports em runtime
         run: |
