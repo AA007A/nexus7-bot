@@ -1,39 +1,4 @@
-"""
-NEXUS-7 — MODO PILOTO CONTROLADO (REAL_TRADING_PILOT)
-
-Camada de gate ADICIONAL para a primeira validação real contra a
-KuCoin Futures. Não substitui nem enfraquece nenhuma barreira
-existente — soma-se a elas.
-
-ORDEM DAS BARREIRAS (todas precisam passar):
-    1. PAPER_TRADE=false + LIVE_TRADING_CONFIRMED  (bot/kucoin.py)
-    2. IntegrityGuard.can_open_new()               (bot/integrity.py)
-    3. viable_symbols não vazio                    (bot/engine.py)
-    4. RiskManager.can_open()                      (bot/risk.py)
-    5. NEXUS AI approval                           (bot/engine.py)
-    6. ESTE MÓDULO — pré-condições do piloto
-
-ATIVAÇÃO: REAL_TRADING_PILOT=true, efetivo somente fora de PAPER.
-Além disso, uma abertura real no piloto exige uma autorização de release
-separada da confirmação da conta:
-
-    PILOT_RELEASE_APPROVED=I_APPROVE_ONE_LIVE_PILOT_ORDER
-
-A ausência ou divergência desse token bloqueia a abertura real no gate
-`can_open_pilot()`, que o engine executa antes de sizing e dispatch. Esta
-camada permanece fail-closed mesmo depois da remoção futura do
-VALIDATION_LOCK.
-
-Sem REAL_TRADING_PILOT o módulo fica inerte: não bloqueia nem libera nada,
-o comportamento é exatamente o de antes. Em PAPER ele também fica inerte,
-porque as pré-condições pertencem exclusivamente ao piloto real (por exemplo
-private order WS e confirmação humana da conta).
-Com piloto real efetivo, aplica limites mais restritivos que a config normal:
-no máximo 2 posições simultâneas e 2 submissões de novas ordens por sessão.
-
-Este módulo NUNCA libera algo que outra barreira bloqueou. Ele só
-adiciona motivos para NÃO operar no piloto real.
-"""
+"""Fail-closed gate for the controlled real-money pilot."""
 import os
 import time
 import threading
@@ -42,37 +7,27 @@ from typing import List
 
 from bot.logger import log
 
-
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 PILOT_RELEASE_TOKEN = "I_APPROVE_ONE_LIVE_PILOT_ORDER"
 
 
 def _paper_trade_enabled() -> bool:
-    """Read PAPER_TRADE at decision time so runtime/test patches stay authoritative."""
     return os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
 
 
 def _release_approved() -> bool:
-    """A distinct, explicit release authorization for the pilot session."""
     return os.environ.get("PILOT_RELEASE_APPROVED", "").strip() == PILOT_RELEASE_TOKEN
 
 
-# Limites do piloto — deliberadamente mais restritivos que a config normal.
-# O piloto permite duas posições/submissões para validar diversificação sem
-# transformar a primeira sessão real em exposição ilimitada.
+# Controlled pilot: two concurrent positions and two new-order submissions per session.
 PILOT_MAX_CONCURRENT_POSITIONS = 2
 MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 2
 PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
-
-# Idade máxima aceitável do dado de mercado usado na decisão (requisito 11)
-PILOT_MAX_MARKET_DATA_AGE_S = float(
-    os.environ.get("PILOT_MAX_MARKET_DATA_AGE_S", "120")
-)
+PILOT_MAX_MARKET_DATA_AGE_S = float(os.environ.get("PILOT_MAX_MARKET_DATA_AGE_S", "120"))
 
 
 @dataclass
 class PilotState:
-    """Estado do piloto — quantas ordens já foram abertas nesta sessão."""
     new_order_submissions_this_session: int = 0
     positions_opened_this_session: int = 0
     first_order_ts: float = 0.0
@@ -80,7 +35,7 @@ class PilotState:
 
 
 class PilotGuard:
-    """Aplica pré-condições adicionais somente ao piloto de dinheiro real."""
+    """Additional fail-closed gates for real pilot execution."""
 
     def __init__(self):
         self.state = PilotState()
@@ -93,11 +48,7 @@ class PilotGuard:
         return PILOT_ENABLED and not _paper_trade_enabled()
 
     def reserve_submission(self, symbol: str) -> bool:
-        """Consume one of the two real-pilot session slots BEFORE sending.
-
-        Reservations are never refunded, including on ambiguous/failed
-        transport outcomes, preventing accidental duplicate submissions.
-        """
+        """Atomically reserve one of two session submission slots before dispatch."""
         if not self.enabled:
             return True
         with self._submission_lock:
@@ -106,15 +57,14 @@ class PilotGuard:
                 return False
             self.state.new_order_submissions_this_session += 1
             self.state.first_order_ts = time.time()
+            reserved = self.state.new_order_submissions_this_session
         log.critical(
-            f"[PILOT] symbol={symbol} submission_reserved="
-            f"{self.state.new_order_submissions_this_session}/"
+            f"[PILOT] symbol={symbol} submission_reserved={reserved}/"
             f"{MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION} session"
         )
         return True
 
     def register_position_opened(self, symbol: str):
-        """Chamado após uma abertura confirmada no piloto real."""
         if not self.enabled:
             return
         self.state.positions_opened_this_session += 1
@@ -127,7 +77,7 @@ class PilotGuard:
         )
 
     def evaluate(self, engine, client, symbol: str, ai_decision=None) -> List[str]:
-        """Retorna motivos de bloqueio do piloto real; vazio significa liberado."""
+        """Return pilot blockers; an empty list means the pilot gate passes."""
         r: List[str] = []
         try:
             from bot.kucoin import API_KEY, API_SECRET, API_PASSPHRASE
@@ -137,8 +87,8 @@ class PilotGuard:
             if os.environ.get("PILOT_ACCOUNT_CONFIRMED", "").strip().lower() != "true":
                 r.append(
                     "2_ACCOUNT: conta real não confirmada — defina "
-                    "PILOT_ACCOUNT_CONFIRMED=true após verificar que as "
-                    "credenciais pertencem à conta pretendida"
+                    "PILOT_ACCOUNT_CONFIRMED=true após verificar que as credenciais "
+                    "pertencem à conta pretendida"
                 )
 
             if not _release_approved():
@@ -167,7 +117,99 @@ class PilotGuard:
                     r.append(f"6_DIVERGENCE: {ig.block_reason()[:120]}")
             else:
                 r.append("6_DIVERGENCE: IntegrityGuard indisponível")
+
+            unprot = set(getattr(engine, "_unprotected_symbols", set()) or set())
+            if unprot:
+                r.append(f"7_8_UNPROTECTED: {sorted(unprot)}")
+
+            risk = getattr(engine, "risk", None)
+            if risk is None or not getattr(risk, "_ready", False):
+                r.append("9_RISK: RiskManager não inicializado")
+
+            if ai_decision is None:
+                r.append("10_AI: nenhuma decisão do NEXUS AI recebida")
+            elif getattr(ai_decision, "execution_allowed", None) is not True:
+                r.append("10_AI: NEXUS AI não aprovou a entrada")
+
+            last_ws = float(getattr(client, "_last_ws_update", 0) or 0)
+            if last_ws <= 0:
+                r.append("11_MARKET_DATA: nenhum dado de mercado recebido")
+            else:
+                age = time.time() - last_ws
+                if age > PILOT_MAX_MARKET_DATA_AGE_S:
+                    r.append(
+                        f"11_MARKET_DATA: dado com {age:.0f}s "
+                        f"(máx {PILOT_MAX_MARKET_DATA_AGE_S:.0f}s)"
+                    )
+
+            if symbol and symbol in inst:
+                meta = inst[symbol]
+                missing = [k for k in ("minQty", "multiplier") if not meta.get(k)]
+                if missing:
+                    r.append(f"12_QTY_RULES: metadata incompleta {missing}")
+
+            reg = getattr(engine, "orders", None)
+            if reg is not None:
+                try:
+                    for mo in reg.pending_orders():
+                        r.append(
+                            f"13_AMBIGUOUS: ordem pendente {mo.client_oid[:12]} "
+                            f"em {mo.symbol} (estado {mo.state.value})"
+                        )
+                        break
+                except Exception as exc:
+                    r.append(f"13_AMBIGUOUS: falha ao consultar registry: {exc}")
+
+            if getattr(client, "_order_registry", None) is None:
+                r.append("14_WS: WS privado de ordens não inicializado")
+
+            n_pos = len(getattr(engine, "positions", {}) or {})
+            if n_pos >= PILOT_MAX_CONCURRENT_POSITIONS:
+                r.append(
+                    f"PILOT_CONCURRENT: {n_pos} posição(ões) aberta(s), "
+                    f"máx {PILOT_MAX_CONCURRENT_POSITIONS} no piloto"
+                )
+            if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
+                r.append(
+                    f"PILOT_SESSION: {self.state.new_order_submissions_this_session}/"
+                    f"{PILOT_MAX_NEW_POSITIONS_SESSION} ordens já abertas nesta sessão"
+                )
         except Exception as exc:
-            r.append(f"PILOT_INTERNAL: {type(exc).__name__}")
+            r.append(f"PILOT_EVAL_ERROR: {type(exc).__name__}: {exc}")
+
         self.state.blocked_reasons = r
         return r
+
+    def can_open_pilot(self, engine, client, symbol: str, ai_decision=None) -> bool:
+        if not self.enabled:
+            self.state.blocked_reasons = []
+            return True
+        motivos = self.evaluate(engine, client, symbol, ai_decision)
+        if motivos:
+            self._log_block(symbol, motivos)
+            return False
+        return True
+
+    def _log_block(self, symbol: str, motivos: List[str]):
+        key = f"{symbol}|{'|'.join(sorted(motivos))}"
+        now = time.time()
+        if key != self._last_block_key or now - self._last_block_log >= 60.0:
+            self._last_block_key = key
+            self._last_block_log = now
+            log.warning(
+                f"🚁 [PILOT] {symbol} BLOQUEADO — {len(motivos)} "
+                f"pré-condição(ões) não satisfeita(s): " + " | ".join(motivos[:5])
+            )
+
+    def status(self, engine=None, client=None) -> dict:
+        return {
+            "pilot_configured": PILOT_ENABLED,
+            "pilot_enabled": self.enabled,
+            "paper_trade": _paper_trade_enabled(),
+            "release_approved": _release_approved(),
+            "max_concurrent_positions": PILOT_MAX_CONCURRENT_POSITIONS,
+            "max_new_order_submissions_session": MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
+            "new_order_submissions_this_session": self.state.new_order_submissions_this_session,
+            "positions_opened_this_session": self.state.positions_opened_this_session,
+            "blocked_reasons": list(self.state.blocked_reasons),
+        }
