@@ -62,7 +62,7 @@ async def _run_readonly_preflight(engine, log, *, probe_private_ws: bool) -> boo
 
     engine._pilot_live_prelive_ready = ready
     log.warning(
-        "[PILOT_LIVE_PRELIGHT] result=%s exposure_verified=%s exposure_clear=%s "
+        "[PILOT_LIVE_PREFLIGHT] result=%s exposure_verified=%s exposure_clear=%s "
         "private_ws=%s",
         "PASS" if ready else "BLOCKED",
         getattr(engine.client, "_prelive_account_exposure_verified", False),
@@ -98,7 +98,7 @@ def install(TradingEngine, log) -> None:
             self._pilot_live_prelive_ready = False
             self.risk.balance_confirmed = False
             log.critical(
-                "[PILOT_LIVE_PRELIGHT] result=BLOCKED reason=%s action=no_new_entry",
+                "[PILOT_LIVE_PREFLIGHT] result=BLOCKED reason=%s action=no_new_entry",
                 type(exc).__name__,
             )
         return result
