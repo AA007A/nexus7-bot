@@ -4,8 +4,9 @@ Phase 2 of sitecustomize consolidation: startup remains fail-closed and the
 hardening installation order stays explicit, while transitional observability
 wrappers live in ``bot.runtime_overlays`` instead of inline here.
 
-No strategy threshold, release state, exchange behavior, or execution
-permission is changed here.
+Strategy thresholds are unchanged. Leaving validation-held SHADOW mode requires
+all explicit controlled-pilot acknowledgements and installs a separate LIVE
+preflight runtime before any candidate can reach the normal execution path.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ def install() -> None:
     if getattr(builtins, "_nexus_runtime_bootstrap_installed", False):
         return
 
+    from bot import pilot_release_control as _pilot_release_control
     from bot import shadow_startup_logging as _shadow_startup_logging
     _shadow_startup_logging.install_preimport()
 
@@ -31,6 +33,7 @@ def install() -> None:
     from bot import rr_precision_hardening as _rr_precision_hardening
     from bot import scan_summary_hardening as _scan_summary_hardening
     from bot import validation_safety_lock as _validation_safety_lock
+    from bot import pilot_live_runtime as _pilot_live_runtime
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
@@ -77,7 +80,22 @@ def install() -> None:
     _pilot_external_position_guard.install(TradingEngine, _log)
     _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
     _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
-    _validation_safety_lock.install(_log)
+
+    if _pilot_release_control.live_pilot_release_authorized():
+        _pilot_live_runtime.install(TradingEngine, _log)
+        _log.critical(
+            "[CONTROLLED_PILOT_RELEASE] authorized=true validation_lock=false "
+            "scope=pilot_only max_positions=2 external_positions=count_and_read_only"
+        )
+    else:
+        _validation_safety_lock.install(_log)
+        _missing = ",".join(_pilot_release_control.missing_release_checks()) or "unknown"
+        _log.warning(
+            "[CONTROLLED_PILOT_RELEASE] authorized=false validation_lock=true "
+            "missing=%s execution_effect=NONE",
+            _missing,
+        )
+
     _liquidation_override_guard.install(_log)
     _instrument_readiness_guard.install(_log)
     _viability_fail_closed_hardening.install(TradingEngine, _log)
@@ -98,6 +116,5 @@ def install() -> None:
 
     builtins._nexus_runtime_bootstrap_installed = True
     _log.info(
-        "[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap; "
-        "execution_effect=NONE"
+        "[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap"
     )
