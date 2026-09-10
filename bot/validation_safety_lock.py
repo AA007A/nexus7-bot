@@ -28,13 +28,13 @@ def install(log):
         self._validation_safety_lock_active = True
         self.client._shadow_readonly_active = True
         self._shadow_prelive_readonly_ready = False
-        from bot import shadow_live
+        from bot import shadow_connect
         from bot import shadow_integrity_isolation
         shadow_integrity_isolation.install_for_engine(self, log)
         log.warning(
             "[VALIDATION_LOCK] LIVE mutation blocked; starting read-only SHADOW LIVE pipeline"
         )
-        connected = await shadow_live.connect_readonly(self)
+        connected = await shadow_connect.connect_readonly(self)
         if connected:
             from bot import private_ws_readonly_observability
             self._shadow_prelive_readonly_ready = bool(
