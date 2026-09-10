@@ -5,7 +5,7 @@ market/account data and exercise the decision pipeline, but it must fail closed
 before any exchange mutation. PAPER mode is unchanged.
 """
 
-SHADOW_MIN_ENTRY_SCORE = 55
+SHADOW_MIN_ENTRY_SCORE = 60
 
 
 def install(log):
