@@ -62,6 +62,15 @@ jobs:
       - name: Full offline test suite
         run: python -m tests.run_offline
 
+      - name: Deterministic PAPER and SHADOW E2E safety pack
+        run: |
+          python -m unittest -v \
+            tests.test_shadow_post_ai_chain \
+            tests.test_paper_mutations \
+            tests.test_paper_signal_exit_idempotency \
+            tests.test_paper_wallet_restart \
+            tests.test_e2e_validation_contract
+
       - name: Critical safety regressions execute non-zero tests
         run: |
           python -m tests.run_offline \
