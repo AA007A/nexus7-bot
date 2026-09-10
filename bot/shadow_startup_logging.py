@@ -16,9 +16,16 @@ def install_preimport():
     if _INSTALLED:
         return
 
-    # Only relevant when the process is configured non-PAPER. The independent
-    # validation safety lock remains the authority that blocks mutations.
-    if os.environ.get("PAPER_TRADE", "").strip().lower() != "false":
+    # Only relevant when the process is configured non-PAPER and the controlled
+    # LIVE pilot has NOT been explicitly released. A fully authorized pilot
+    # must keep the genuine LIVE startup banner instead of rewriting it as
+    # SHADOW. Importing this pure env-check module has no exchange side effects.
+    from bot.pilot_release_control import live_pilot_release_authorized
+
+    if (
+        os.environ.get("PAPER_TRADE", "").strip().lower() != "false"
+        or live_pilot_release_authorized()
+    ):
         _INSTALLED = True
         return
 
