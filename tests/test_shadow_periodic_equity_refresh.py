@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from bot import validation_safety_lock
 from bot.engine import TradingEngine
@@ -74,7 +75,9 @@ def test_patch_source_contains_no_exchange_mutation_calls():
 def test_nonpaper_periodic_refresh_uses_equity_not_available():
     _install_patch_once()
     engine = _engine_for_update(False, True)
-    state = asyncio.run(TradingEngine._update_balance(engine))
+    with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)), \
+         patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+        state = asyncio.run(TradingEngine._update_balance(engine))
     assert state["equity"] == 20.0
     assert state["available"] == 0.4
     assert engine.risk.balance == 20.0
