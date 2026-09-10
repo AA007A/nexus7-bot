@@ -12,7 +12,10 @@ from bot import database as db
 from bot.drawdown_persistence import rebase_real_account_peak_for_external_flow
 from bot.logger import log
 
-LAST_FLOW_OFFSET_KEY = "risk:external_capital_flow:last_offset:v1"
+# v2 intentionally supersedes the first bootstrap cursor. The v1 bootstrap
+# assumed positive transfer amounts and could checkpoint past a signed KuCoin
+# TransferOut without applying it. v2 rescans the bounded recent ledger once.
+LAST_FLOW_OFFSET_KEY = "risk:external_capital_flow:last_offset:v2"
 
 
 def _finite(value, label: str) -> float:
@@ -31,6 +34,14 @@ def _positive(value, label: str) -> float:
     return out
 
 
+def _transfer_amount(value) -> float:
+    """Normalize KuCoin's signed or unsigned transfer ledger amount."""
+    out = _finite(value, "ledger transfer amount")
+    if out == 0:
+        raise ValueError("ledger transfer amount must be nonzero")
+    return abs(out)
+
+
 def _offset_int(value) -> int:
     if isinstance(value, bool):
         raise ValueError("ledger offset boolean")
@@ -46,7 +57,7 @@ def _normalized_transfer(row: dict) -> dict | None:
     if str(row.get("status") or "").strip().lower() != "completed":
         return None
 
-    amount = _positive(row.get("amount"), "ledger transfer amount")
+    amount = _transfer_amount(row.get("amount"))
     post_equity = _positive(row.get("accountEquity"), "ledger accountEquity")
     offset = _offset_int(row.get("offset"))
     event_time = int(_finite(row.get("time", 0), "ledger time"))
@@ -108,11 +119,11 @@ def _equity_matches(post_equity: float, current_equity: float) -> bool:
 async def reconcile_external_capital_flows(client, risk, current_equity: float, *, strict: bool = True) -> dict:
     """Apply newly verified KuCoin external cash flows to the durable HWM.
 
-    First-install bootstrap behavior is fail-safe. Historical transfers are not
-    replayed blindly. With no stored ledger cursor, at most the newest completed
-    transfer is applied, and only when its post-transfer accountEquity matches
-    the account equity observed by the runtime. The newest offset is then
-    checkpointed so older events can never be double counted.
+    First-install bootstrap is fail-safe. Historical transfers are never
+    replayed blindly: among the bounded recent completed transfers, at most the
+    newest event whose post-transfer accountEquity matches the current account
+    equity is applied. The newest visible transfer offset is then checkpointed,
+    preventing any older event from being double counted.
     """
     current_equity = _positive(current_equity, "current equity")
     transfers = await _fetch_transfers(client)
@@ -124,30 +135,32 @@ async def reconcile_external_capital_flows(client, risk, current_equity: float, 
     newest_offset = max(item["offset"] for item in transfers)
 
     if raw_offset is None:
-        newest = max(transfers, key=lambda x: (x["offset"], x["time"]))
+        matches = [item for item in transfers if _equity_matches(item["post_equity"], current_equity)]
+        matched = max(matches, key=lambda x: (x["offset"], x["time"])) if matches else None
         applied = 0
-        if _equity_matches(newest["post_equity"], current_equity):
+        if matched is not None:
             await rebase_real_account_peak_for_external_flow(
                 risk,
                 current_equity,
-                pre_flow_equity=newest["pre_equity"],
-                post_flow_equity=newest["post_equity"],
-                flow_type=newest["type"],
-                flow_amount=newest["amount"],
-                flow_offset=str(newest["offset"]),
+                pre_flow_equity=matched["pre_equity"],
+                post_flow_equity=matched["post_equity"],
+                flow_type=matched["type"],
+                flow_amount=matched["amount"],
+                flow_offset=str(matched["offset"]),
                 strict=strict,
             )
             applied = 1
             log.warning(
                 "[CAPITAL_FLOW_LEDGER] bootstrap=matched type=%s amount=%.4f offset=%s",
-                newest["type"],
-                newest["amount"],
-                newest["offset"],
+                matched["type"],
+                matched["amount"],
+                matched["offset"],
             )
         else:
+            newest = max(transfers, key=lambda x: (x["offset"], x["time"]))
             log.warning(
                 "[CAPITAL_FLOW_LEDGER] bootstrap=cursor_only newest_post=%.4f current=%.4f "
-                "reason=equity_mismatch execution_effect=NONE",
+                "reason=no_matching_post_equity execution_effect=NONE",
                 newest["post_equity"],
                 current_equity,
             )
