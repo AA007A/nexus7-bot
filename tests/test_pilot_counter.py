@@ -10,6 +10,17 @@ from bot.order_state import OrderState
 
 
 class PilotCounterTests(PilotFixture):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.client.place_order = AsyncMock(return_value={'orderId': 'mock'})
+        self.client.wait_for_fill = AsyncMock(
+            return_value={
+                'filled': True,
+                'status': {'dealSize': 1, 'dealValue': 100},
+                'timed_out': False,
+            }
+        )
+
     async def second_symbol(self):
         sig = Signal('OTHERUSDT', 'LONG', 100., 99., 103., 80., 'offline', 90)
         self.engine._nexus_validate.return_value = approval('OTHERUSDT')
