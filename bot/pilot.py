@@ -8,7 +8,7 @@ from typing import List
 from bot.logger import log
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
-PILOT_RELEASE_TOKEN = "I_APPROVE_ONE_LIVE_PILOT_ORDER"
+PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
 
 
 def _paper_trade_enabled() -> bool:
