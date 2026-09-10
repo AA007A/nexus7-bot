@@ -2,8 +2,8 @@
 
 This module does not grant execution permission. It only adds additional
 blocking reasons to PilotGuard.evaluate() based on total account exposure,
-including external/manual positions, and on fresh KuCoin account-overview
-capital ratios.
+including external/manual positions, symbol conflicts with those external
+positions, and fresh KuCoin account-overview capital ratios.
 """
 import os
 import time
@@ -109,6 +109,19 @@ def install(PilotGuard, log):
         external_symbols = _external_symbols(engine)
         total_open = len(local_symbols | external_symbols)
 
+        # A manual/external position is immutable to NEXUS. Opening another
+        # order on the same symbol could still increase, reduce or net that
+        # exchange position depending on side/account mode, so the candidate
+        # must be rejected before dispatch even when the external position is
+        # protected and capacity remains available.
+        if symbol and symbol in external_symbols:
+            reason = (
+                f"PILOT_EXTERNAL_SYMBOL_CONFLICT: {symbol} já possui posição "
+                "externa/manual; nova entrada NEXUS no mesmo símbolo é bloqueada"
+            )
+            if reason not in reasons:
+                reasons.append(reason)
+
         if total_open >= PILOT_MAX_CONCURRENT_POSITIONS:
             reason = (
                 f"PILOT_TOTAL_CONCURRENT: total_open={total_open} "
@@ -129,6 +142,6 @@ def install(PilotGuard, log):
     PilotGuard._exposure_capacity_patched = True
     log.warning(
         "[PILOT_EXPOSURE_CAPACITY] installed: external positions count toward "
-        "pilot concurrency; fresh normalized available/equity and "
-        "committedMargin/equity gates active"
+        "pilot concurrency; same-symbol external conflicts fail closed; fresh "
+        "normalized available/equity and committedMargin/equity gates active"
     )
