@@ -9,11 +9,17 @@ No exchange mutation, release state, or execution permission is changed here.
 """
 from __future__ import annotations
 
+from bot import account_balance_semantics
 from bot.account_capital_reader import read_account_capital
+from bot.config import cfg
+from bot.drawdown_persistence import restore_update_real_account_peak
 from bot.engine import TradingEngine as CoreTradingEngine
+from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
+from bot.notifier import drawdown_msg, notify
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
+from bot.shadow_balance_semantics import refresh_shadow_risk
 
 
 class TradingEngine(CoreTradingEngine):
@@ -23,6 +29,50 @@ class TradingEngine(CoreTradingEngine):
         super().__init__(*args, **kwargs)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
+
+    async def _update_balance(self):
+        """Refresh real-account risk from equity and durable high-water mark.
+
+        The legacy core used ``get_balance()`` (free/available collateral) for
+        drawdown. That is not the same accounting concept as account equity and
+        also reset its high-water mark on restart. PAPER keeps the legacy path.
+        SHADOW remains mutation-free and uses the same authenticated read-only
+        equity semantics through ``refresh_shadow_risk``.
+        """
+        if getattr(self, "paper_trade", False):
+            return await super()._update_balance()
+
+        try:
+            if getattr(self, "_validation_safety_lock_active", False):
+                await refresh_shadow_risk(self)
+                return
+
+            state = await account_balance_semantics.read_account_state(self.client)
+            equity = float(state["equity"])
+            self.risk.update(equity)
+            await restore_update_real_account_peak(self.risk, equity, strict=True)
+
+            if equity > 0:
+                self.daily_target = round(equity * cfg.DAILY_TARGET_PCT, 2)
+                self.daily_stop_loss = round(equity * cfg.DAILY_STOP_LOSS_PCT, 2)
+
+            if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+                if not getattr(self, "_dd_alerted", False):
+                    self._dd_alerted = True
+                    self.active = False
+                    log.warning(
+                        "🚨 Drawdown %.1f%% ≥ %.0f%% → pausando entradas",
+                        self.risk.drawdown * 100.0,
+                        cfg.MAX_DRAWDOWN * 100.0,
+                    )
+                    await notify(await drawdown_msg(self.risk.drawdown, equity))
+            else:
+                self._dd_alerted = False
+        except Exception as exc:
+            self.risk.balance_confirmed = False
+            self.risk.invalidate_capital()
+            log.error("[DURABLE_DRAWDOWN] balance refresh blocked: %s", type(exc).__name__)
+            raise
 
     async def _prepare_professional_risk(self, sig, decision) -> None:
         """Prepare one fail-closed sizing plan after an AI approval.
@@ -58,6 +108,12 @@ class TradingEngine(CoreTradingEngine):
         try:
             snapshot = await read_account_capital(self.client)
             self.risk.update_capital(snapshot.capital)
+            await restore_update_real_account_peak(
+                self.risk, snapshot.capital.equity, strict=True
+            )
+            if not self.risk._v3.can_open(len(self.positions)):
+                self.risk.invalidate_capital()
+                raise RuntimeError("durable drawdown/capital gate blocked V3 sizing")
         except Exception:
             self.risk.invalidate_capital()
             raise
