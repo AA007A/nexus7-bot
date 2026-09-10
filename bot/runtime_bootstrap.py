@@ -32,6 +32,7 @@ def install() -> None:
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import instrument_readiness_guard as _instrument_readiness_guard
+    from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
     from bot import daily_stop_observability as _daily_stop_observability
@@ -73,6 +74,7 @@ def install() -> None:
     _validation_safety_lock.install(_log)
     _liquidation_override_guard.install(_log)
     _instrument_readiness_guard.install(_log)
+    _viability_fail_closed_hardening.install(TradingEngine, _log)
     _news_context_hardening.install(_log)
     _market_risk_runtime.install(_pilot.PilotGuard, _score, _log)
     _market_risk_news_bridge.install(_news_context_hardening, _market_risk_runtime, _log)
