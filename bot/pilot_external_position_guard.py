@@ -23,21 +23,7 @@ This hardening is intentionally restrictive:
 No execution permission is granted by this module.
 """
 
-import math
-
-
-def _positive_stop(row) -> bool:
-    """Return True only for an explicit, finite, positive exchange stop."""
-    if not isinstance(row, dict):
-        return False
-    raw = row.get("stopLoss", row.get("stop_loss", 0))
-    try:
-        if isinstance(raw, bool):
-            return False
-        value = float(raw or 0)
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(value) and value > 0
+from bot.conditional_stop_protection import conditional_stop_confirmed
 
 
 def install(TradingEngine, log):
@@ -78,14 +64,20 @@ def install(TradingEngine, log):
 
         local = set(getattr(engine, "positions", {}) or {})
         unexpected = {}
+        evidence = {}
         for row in rows or []:
             try:
                 size = abs(float(row.get("size", 0) or 0))
             except (AttributeError, TypeError, ValueError):
                 size = 0.0
             sym = str(row.get("symbol", "") or "") if isinstance(row, dict) else ""
-            if size > 0 and sym and sym not in local:
-                unexpected[sym] = bool(unexpected.get(sym, False) or _positive_stop(row))
+            if size <= 0 or not sym or sym in local:
+                continue
+
+            protected, source = await conditional_stop_confirmed(engine.client, row)
+            unexpected[sym] = bool(unexpected.get(sym, False) or protected)
+            if protected:
+                evidence[sym] = source
 
         unprotected = sorted(sym for sym, protected in unexpected.items() if not protected)
         protected = sorted(sym for sym, is_protected in unexpected.items() if is_protected)
@@ -110,10 +102,13 @@ def install(TradingEngine, log):
                 ",".join(unprotected),
             )
         if protected:
+            evidence_text = ",".join(f"{sym}:{evidence.get(sym, 'unknown')}" for sym in protected)
             log.warning(
                 "[PILOT_EXTERNAL_POSITION_GUARD] result=PASS_WITH_EXTERNAL_PROTECTED "
-                "symbols=%s action=no_adopt_no_mutation capacity_effect=count_slot",
+                "symbols=%s protection=%s action=no_adopt_no_mutation "
+                "capacity_effect=count_slot",
                 ",".join(protected),
+                evidence_text,
             )
 
         return {
