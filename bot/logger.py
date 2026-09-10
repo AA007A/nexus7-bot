@@ -38,6 +38,17 @@ _BLOCK_LOG_LAST_TS = 0.0
 _BLOCK_LOG_INTERVAL = 60.0
 _BLOCK_LOG_PREFIX = "🚫 ENTRADAS BLOQUEADAS:"
 
+# kucoin.py decides only whether the environment is LIVE-capable. Runtime
+# execution permission is decided later by safety gates (VALIDATION_LOCK,
+# pilot release, integrity, exposure, etc.). Rewrite two legacy pre-lock claims
+# so startup logs cannot imply an order will be sent before those gates exist.
+_EXECUTION_CLAIM_REWRITES = {
+    "🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à KuCoin":
+        "🟠 CONFIGURAÇÃO LIVE-CAPABLE selecionada — gates de runtime determinam execução",
+    "🔴 OPERAÇÃO REAL ATIVA — ordens serão executadas com CAPITAL REAL":
+        "🟠 CLIENTE LIVE-CAPABLE inicializado — nenhuma execução é autorizada por este log",
+}
+
 _AI_DECISION_RE = re.compile(r"^\[AI_DECISION\]\s+symbol=(?P<symbol>\S+)\s+side=(?P<side>\S+)\s+decision=(?P<decision>\S+)\s+approved=(?P<approved>\S+)\s+decision_source=(?P<source>\S+)\s+score=(?P<score>\S+)\s+confidence=(?P<confidence>\S+)\s+ts=(?P<ts>\S+)\s+reason=(?P<reason>.*)$")
 _FUNNEL_SESSION_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO no ajuste de sessão: (?P<score_before>[-+\d.]+)→(?P<score>[-+\d.]+) < (?P<minimum>[-+\d.]+) \(sessão (?P<session>[^)]+)\)$")
 _FUNNEL_REGIME_RE = re.compile(r"^⛔ \[(?P<symbol>[^\]]+)\] REJEITADO pelo regime: (?P<side>\S+) não permitido em (?P<regime>\S+) \(score era (?P<score>[-+\d.]+)\)$")
@@ -53,7 +64,6 @@ def _diag(message, exc=None):
         sys.stderr.write(f"[NEXUS_OBSERVABILITY] {message}{suffix}\n")
         sys.stderr.flush()
     except Exception:
-        # Last-resort stderr itself is non-critical; never affect trading/risk.
         return
 
 def _tg_enabled():
@@ -183,6 +193,19 @@ class _DecisionTelegramHandler(logging.Handler):
         except Exception as exc:
             _diag("Decision telemetry handler failed", exc)
 
+class _ExecutionClaimFilter(logging.Filter):
+    """Make legacy pre-lock LIVE-capable messages execution-neutral."""
+    def filter(self, record):
+        try:
+            rendered = record.getMessage()
+            replacement = _EXECUTION_CLAIM_REWRITES.get(rendered)
+            if replacement is not None:
+                record.msg = replacement
+                record.args = ()
+            return True
+        except Exception:
+            return True
+
 class _RepeatedBlockFilter(logging.Filter):
     """Throttle only identical main-loop integrity-block warnings."""
     def filter(self, record):
@@ -201,14 +224,12 @@ class _RepeatedBlockFilter(logging.Filter):
                     return True
                 return False
         except Exception:
-            # Observability must fail open: never hide a log if filtering itself
-            # malfunctions, and never affect trading/risk state.
             return True
 
 def _make(name):
     lvl=getattr(logging,os.environ.get("LOG_LEVEL","INFO").upper(),logging.INFO); lg=logging.getLogger(name)
     if not lg.handlers:
-        lg.setLevel(lvl); h=logging.StreamHandler(sys.stdout); h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",datefmt="%H:%M:%S")); h.addFilter(_RepeatedBlockFilter()); lg.addHandler(h); lg.addHandler(_DecisionTelegramHandler()); lg.propagate=False
+        lg.setLevel(lvl); h=logging.StreamHandler(sys.stdout); h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",datefmt="%H:%M:%S")); h.addFilter(_ExecutionClaimFilter()); h.addFilter(_RepeatedBlockFilter()); lg.addHandler(h); lg.addHandler(_DecisionTelegramHandler()); lg.propagate=False
     return lg
 
 log=_make("kakazito-trade")
