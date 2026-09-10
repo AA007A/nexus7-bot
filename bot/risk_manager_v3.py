@@ -61,7 +61,7 @@ class RiskManagerV3:
         return self._confirmed
 
     def restore_peak_equity(self, peak_equity: float) -> float:
-        """Restore a durable equity high-water mark without confirming capital.
+        """Restore a durable equity HWM without confirming capital.
 
         Restoration can only raise the in-memory peak. It intentionally does
         not mark the current capital snapshot confirmed; a fresh authenticated
@@ -73,6 +73,21 @@ class RiskManagerV3:
         if not math.isfinite(peak) or peak <= 0:
             raise ValueError("peak equity must be positive and finite")
         self._peak_equity = max(self._peak_equity, peak)
+        return self._peak_equity
+
+    def rebase_peak_equity(self, peak_equity: float) -> float:
+        """Set a cash-flow-adjusted HWM without confirming capital.
+
+        Unlike restore_peak_equity(), this method may lower the HWM. It exists
+        solely for a separately verified external deposit/withdrawal/transfer
+        reconciliation. Trading/PnL paths must continue using restore/update.
+        """
+        if isinstance(peak_equity, bool):
+            raise ValueError("peak equity boolean")
+        peak = float(peak_equity)
+        if not math.isfinite(peak) or peak <= 0:
+            raise ValueError("peak equity must be positive and finite")
+        self._peak_equity = peak
         return self._peak_equity
 
     def update_capital(self, capital: CapitalState) -> RiskSnapshot:
