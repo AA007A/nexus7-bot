@@ -3,15 +3,49 @@
 When PAPER_TRADE is disabled during validation, the runtime may consume live
 market/account data and exercise the decision pipeline, but it must fail closed
 before any exchange mutation. PAPER mode is unchanged.
+
+The lock is skipped only for an explicitly released real-money pilot. The
+release decision is fail-closed and must match the same exact token enforced by
+``bot.pilot``; a missing, partial, or stale token keeps SHADOW protection active.
 """
 
+import os
+
 SHADOW_MIN_ENTRY_SCORE = 55
+
+
+def _live_pilot_release_approved() -> bool:
+    """Return True only for the exact, current controlled-pilot release state."""
+    if os.environ.get("PAPER_TRADE", "true").strip().lower() == "true":
+        return False
+    if os.environ.get("REAL_TRADING_PILOT", "").strip().lower() != "true":
+        return False
+    if os.environ.get("PILOT_ACCOUNT_CONFIRMED", "").strip().lower() != "true":
+        return False
+    if os.environ.get("LIVE_TRADING_CONFIRMED", "").strip() != "I_UNDERSTAND_THE_RISK":
+        return False
+
+    from bot.pilot import PILOT_RELEASE_TOKEN
+
+    return os.environ.get("PILOT_RELEASE_APPROVED", "").strip() == PILOT_RELEASE_TOKEN
 
 
 def install(log):
     from bot.engine import TradingEngine
 
     if getattr(TradingEngine, "_validation_safety_lock_patched", False):
+        return
+
+    # Dedicated release boundary: do not modify any exchange state here.  An
+    # exact release only leaves the original engine methods in place so the
+    # normal PilotGuard / pre-dispatch / risk / protection gates remain
+    # authoritative. Any incomplete release state falls through to SHADOW.
+    if _live_pilot_release_approved():
+        TradingEngine._validation_safety_lock_release_bypassed = True
+        log.critical(
+            "[VALIDATION_LOCK] explicit controlled-pilot release approved; "
+            "SHADOW mutation lock not installed; normal fail-closed pilot gates remain active"
+        )
         return
 
     original_connect = TradingEngine._connect
@@ -156,6 +190,7 @@ def install(log):
     nexus_confidence_observability.install(TradingEngine, log)
 
     TradingEngine._validation_safety_lock_patched = True
+    TradingEngine._validation_safety_lock_release_bypassed = False
     log.warning(
         "[VALIDATION_LOCK] installed: PAPER unaffected; LIVE mutations blocked; "
         "SHADOW LIVE read-only analysis enabled; shadow_min_entry_score=%s",
