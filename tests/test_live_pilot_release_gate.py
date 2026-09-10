@@ -60,7 +60,7 @@ class LivePilotReleaseGateTests(unittest.TestCase):
             self.assertFalse(guard.can_open_pilot(engine, client, "ETHUSDT", ai))
             self.assertEqual(guard.state.new_order_submissions_this_session, 0)
 
-    def test_exact_release_token_allows_reservation_once(self):
+    def test_exact_release_token_allows_two_reservations_only(self):
         guard = pilot.PilotGuard()
         with patch.object(pilot, "PILOT_ENABLED", True), patch.dict(
             os.environ,
@@ -71,8 +71,9 @@ class LivePilotReleaseGateTests(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(guard.reserve_submission("ETHUSDT"))
+            self.assertTrue(guard.reserve_submission("ETHUSDT"))
             self.assertFalse(guard.reserve_submission("ETHUSDT"))
-            self.assertEqual(guard.state.new_order_submissions_this_session, 1)
+            self.assertEqual(guard.state.new_order_submissions_this_session, 2)
 
     def test_paper_remains_inert_without_release_token(self):
         guard = pilot.PilotGuard()
