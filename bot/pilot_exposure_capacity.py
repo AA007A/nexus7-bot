@@ -9,6 +9,7 @@ import os
 import time
 
 from bot.pilot import PILOT_MAX_CONCURRENT_POSITIONS
+from bot.professional_risk import capital_state_from_account_overview
 
 
 MIN_AVAILABLE_EQUITY_RATIO = float(
@@ -55,13 +56,23 @@ def _capital_reasons(client):
             f"máx {MAX_ACCOUNT_SNAPSHOT_AGE_S:.0f}s"
         )
 
+    # Reuse the same KuCoin normalization used by RiskManagerV3. Raw
+    # positionMargin can be transiently negative in cross-margin snapshots;
+    # treating that raw value as a negative exposure would incorrectly bypass
+    # the pilot margin-capacity gate. Any invalid/non-finite capital state is
+    # fail-closed here.
     try:
-        equity = float(snap.get("accountEquity"))
-        available = float(snap.get("availableBalance"))
-        position_margin = float(snap.get("positionMargin"))
-    except (TypeError, ValueError):
-        reasons.append("PILOT_CAPITAL_VALUES: equity/available/positionMargin inválidos")
+        capital = capital_state_from_account_overview(snap)
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        reasons.append(
+            f"PILOT_CAPITAL_VALUES: account overview inválido "
+            f"({type(exc).__name__}) (fail-closed)"
+        )
         return reasons
+
+    equity = capital.equity
+    available = capital.available_collateral
+    committed_margin = capital.committed_margin
 
     if equity <= 0:
         reasons.append(f"PILOT_CAPITAL_EQUITY: equity={equity:.4f}")
@@ -74,10 +85,10 @@ def _capital_reasons(client):
             f"< mínimo {MIN_AVAILABLE_EQUITY_RATIO:.2%}"
         )
 
-    margin_ratio = position_margin / equity
+    margin_ratio = committed_margin / equity
     if margin_ratio > MAX_POSITION_MARGIN_EQUITY_RATIO:
         reasons.append(
-            f"PILOT_MARGIN_CAPACITY: positionMargin/equity={margin_ratio:.2%} "
+            f"PILOT_MARGIN_CAPACITY: committedMargin/equity={margin_ratio:.2%} "
             f"> máximo {MAX_POSITION_MARGIN_EQUITY_RATIO:.2%}"
         )
     return reasons
@@ -118,5 +129,6 @@ def install(PilotGuard, log):
     PilotGuard._exposure_capacity_patched = True
     log.warning(
         "[PILOT_EXPOSURE_CAPACITY] installed: external positions count toward "
-        "pilot concurrency; fresh available/equity and positionMargin/equity gates active"
+        "pilot concurrency; fresh normalized available/equity and "
+        "committedMargin/equity gates active"
     )
