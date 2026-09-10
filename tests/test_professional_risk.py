@@ -92,6 +92,43 @@ class ProfessionalRiskTests(unittest.TestCase):
         self.assertEqual(state.order_margin, 0.25)
         self.assertEqual(state.committed_margin, 19.75)
 
+    def test_cross_margin_prefers_available_margin(self):
+        state = capital_state_from_account_overview({
+            "accountEquity": "100",
+            "availableBalance": "12",
+            "availableMargin": "65",
+            "positionMargin": "30",
+            "orderMargin": "5",
+            "unrealisedPNL": "2",
+        })
+        self.assertEqual(state.available_collateral, 65.0)
+        self.assertEqual(state.position_margin, 30.0)
+        self.assertEqual(state.order_margin, 5.0)
+
+    def test_negative_position_margin_is_reconstructed_without_raising(self):
+        state = capital_state_from_account_overview({
+            "accountEquity": "38.28",
+            "availableMargin": "16.71",
+            "availableBalance": "10.00",
+            "positionMargin": "-1.25",
+            "orderMargin": "2.00",
+            "unrealisedPNL": "4.50",
+        })
+        self.assertEqual(state.available_collateral, 16.71)
+        self.assertGreaterEqual(state.position_margin, 0.0)
+        self.assertGreaterEqual(state.order_margin, 0.0)
+        self.assertAlmostEqual(state.committed_margin, 21.57, places=6)
+
+    def test_negative_order_margin_is_reconstructed_without_raising(self):
+        state = capital_state_from_account_overview({
+            "accountEquity": "50",
+            "availableMargin": "20",
+            "positionMargin": "12",
+            "orderMargin": "-0.5",
+        })
+        self.assertEqual(state.available_collateral, 20.0)
+        self.assertAlmostEqual(state.committed_margin, 30.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
