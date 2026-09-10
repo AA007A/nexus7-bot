@@ -23,14 +23,14 @@ class PilotCounterTests(PilotFixture):
         self.assertEqual(self.count(), 1)
         await self.second_symbol()
         self.assertEqual(self.count(), 2)
-        self.client.place_order.assert_awaited_count(2)
+        self.assertEqual(self.client.place_order.await_count, 2)
 
     async def test_PILOT04_third_submission_is_blocked(self):
         await self.engine._open(self.sig)
         await self.second_symbol()
         await self.engine._open(self.sig)
         self.assertEqual(self.count(), 2)
-        self.client.place_order.assert_awaited_count(2)
+        self.assertEqual(self.client.place_order.await_count, 2)
 
     async def test_PILOT05_lost_response_consumes_one_slot(self):
         self.client.place_order.side_effect = [TimeoutError('lost response'), {'orderId': 'mock'}]
@@ -38,7 +38,7 @@ class PilotCounterTests(PilotFixture):
         await self.engine._open(self.sig)
         await self.second_symbol()
         self.assertEqual(self.count(), 2)
-        self.client.place_order.assert_awaited_count(2)
+        self.assertEqual(self.client.place_order.await_count, 2)
 
     async def test_PILOT06_partial_fill_consumes_one_slot(self):
         self.client.place_order.side_effect = [
@@ -54,7 +54,7 @@ class PilotCounterTests(PilotFixture):
         self.engine._reconcile_exchange_positions = AsyncMock(return_value=[])
         await self.engine._open(self.sig)
         await self.second_symbol()
-        self.client.place_order.assert_awaited_count(2)
+        self.assertEqual(self.client.place_order.await_count, 2)
         self.assertEqual(self.count(), 2)
 
     async def test_PILOT07_protection_failure_consumes_one_slot(self):
@@ -104,7 +104,7 @@ class PilotCounterTests(PilotFixture):
             asyncio.gather(self.engine._open(self.sig), self.engine._open(sig)),
             1,
         )
-        self.client.place_order.assert_awaited_count(2)
+        self.assertEqual(self.client.place_order.await_count, 2)
         self.assertEqual(self.count(), 2)
 
     async def test_client_does_not_fallback_to_another_submission(self):
