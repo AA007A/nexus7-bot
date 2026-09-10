@@ -20,6 +20,7 @@ def install() -> None:
     _shadow_startup_logging.install_preimport()
 
     from bot.engine import TradingEngine
+    from bot.integrity import IntegrityGuard
     from bot import runtime_hardening as _rh
     from bot import runtime_overlays as _runtime_overlays
     from bot import paper_e2e as _paper_e2e
@@ -52,6 +53,7 @@ def install() -> None:
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
+    from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import pilot as _pilot
     from bot import score as _score
     from bot import kucoin as _kucoin
@@ -85,6 +87,7 @@ def install() -> None:
     _balance_observability.install(_log)
     _account_balance_observability.install(_log)
     _pilot_exposure_capacity.install(_pilot.PilotGuard, _log)
+    _integrity_external_coexistence_runtime.install(IntegrityGuard, _log)
     _stagnation_time_hardening.install(TradingEngine, _log)
     _pilot_readiness_observability.install(_log)
     _shadow_mode_observability.install(_log)
