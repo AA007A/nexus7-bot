@@ -35,6 +35,18 @@ _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT    = os.path.dirname(_PKG_DIR)
 
 
+def _read_text(path: str) -> str:
+    """Lê um arquivo UTF-8 garantindo o fechamento imediato do handle."""
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _line_count(path: str) -> int:
+    """Conta linhas sem deixar handles abertos durante o self-check."""
+    with open(path, encoding="utf-8") as fh:
+        return sum(1 for _ in fh)
+
+
 def _collect_scope(node: ast.AST) -> set:
     """Nomes visíveis dentro de uma função (args, atribuições, imports, etc)."""
     s = set()
@@ -86,7 +98,7 @@ def check_undefined_names(paths: List[str]) -> List[str]:
     issues = []
     for p in paths:
         try:
-            src  = open(p, encoding="utf-8").read()
+            src = _read_text(p)
             tree = ast.parse(src)
         except SyntaxError as e:
             issues.append(f"{os.path.basename(p)}:{e.lineno} ERRO DE SINTAXE: {e.msg}")
@@ -124,7 +136,7 @@ def check_duplicate_methods(paths: List[str]) -> List[str]:
     issues = []
     for p in paths:
         try:
-            tree = ast.parse(open(p, encoding="utf-8").read())
+            tree = ast.parse(_read_text(p))
         except Exception:
             continue
         for node in ast.walk(tree):
@@ -150,7 +162,7 @@ def check_silent_excepts(paths: List[str]) -> List[str]:
     issues = []
     for p in paths:
         try:
-            tree = ast.parse(open(p, encoding="utf-8").read())
+            tree = ast.parse(_read_text(p))
         except Exception:
             continue
         for node in ast.walk(tree):
@@ -168,7 +180,7 @@ def check_bare_except(paths: List[str]) -> List[str]:
     issues = []
     for p in paths:
         try:
-            tree = ast.parse(open(p, encoding="utf-8").read())
+            tree = ast.parse(_read_text(p))
         except Exception:
             continue
         for node in ast.walk(tree):
@@ -194,7 +206,7 @@ def check_missing_self_methods(paths: List[str]) -> List[str]:
     trees = {}
     for p in paths:
         try:
-            t = ast.parse(open(p, encoding="utf-8").read())
+            t = ast.parse(_read_text(p))
             trees[p] = t
         except Exception:
             continue
@@ -246,7 +258,7 @@ def check_missing_self_attrs(paths: List[str]) -> List[str]:
 
     for p in paths:
         try:
-            t = ast.parse(open(p, encoding="utf-8").read())
+            t = ast.parse(_read_text(p))
             trees[p] = t
         except Exception:
             continue
@@ -332,7 +344,7 @@ def check_orphan_modules(paths: List[str]) -> List[str]:
 
     for p in scan_paths:
         try:
-            todo_codigo += open(p, encoding="utf-8").read() + "\n"
+            todo_codigo += _read_text(p) + "\n"
         except Exception:
             continue
 
@@ -341,7 +353,7 @@ def check_orphan_modules(paths: List[str]) -> List[str]:
         ocorrencias = len(re.findall(padrao, todo_codigo))
         if ocorrencias == 0:
             try:
-                tam = sum(1 for _ in open(caminho, encoding="utf-8"))
+                tam = _line_count(caminho)
             except Exception:
                 tam = 0
             issues.append(
