@@ -10,6 +10,17 @@ from bot.order_state import OrderState
 
 
 class PilotCounterTests(PilotFixture):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.client.place_order = AsyncMock(return_value={'orderId': 'mock'})
+        self.client.wait_for_fill = AsyncMock(
+            return_value={
+                'filled': True,
+                'status': {'dealSize': 1, 'dealValue': 100},
+                'timed_out': False,
+            }
+        )
+
     async def second_symbol(self):
         sig = Signal('OTHERUSDT', 'LONG', 100., 99., 103., 80., 'offline', 90)
         self.engine._nexus_validate.return_value = approval('OTHERUSDT')
@@ -32,15 +43,17 @@ class PilotCounterTests(PilotFixture):
         self.assertEqual(self.count(), 2)
         self.assertEqual(self.client.place_order.await_count, 2)
 
-    async def test_PILOT05_lost_response_consumes_one_slot(self):
+    async def test_PILOT05_lost_response_consumes_one_slot_and_blocks_followup(self):
         self.client.place_order.side_effect = [TimeoutError('lost response'), {'orderId': 'mock'}]
         self.client._position_exists = AsyncMock(return_value=False)
         await self.engine._open(self.sig)
         await self.second_symbol()
-        self.assertEqual(self.count(), 2)
-        self.assertEqual(self.client.place_order.await_count, 2)
+        # Ambiguous/lost response fail-closed: the reservation is consumed,
+        # but no second live submission is allowed while the first outcome is unresolved.
+        self.assertEqual(self.count(), 1)
+        self.assertEqual(self.client.place_order.await_count, 1)
 
-    async def test_PILOT06_partial_fill_consumes_one_slot(self):
+    async def test_PILOT06_partial_fill_consumes_one_slot_and_blocks_followup(self):
         self.client.place_order.side_effect = [
             {'orderId': 'mock-1'},
             {'orderId': 'mock-2'},
@@ -54,10 +67,12 @@ class PilotCounterTests(PilotFixture):
         self.engine._reconcile_exchange_positions = AsyncMock(return_value=[])
         await self.engine._open(self.sig)
         await self.second_symbol()
-        self.assertEqual(self.client.place_order.await_count, 2)
-        self.assertEqual(self.count(), 2)
+        # Partial/unconfirmed fill triggers immediate reconciliation and blocks
+        # further entries until the execution state is resolved.
+        self.assertEqual(self.client.place_order.await_count, 1)
+        self.assertEqual(self.count(), 1)
 
-    async def test_PILOT07_protection_failure_consumes_one_slot(self):
+    async def test_PILOT07_protection_failure_consumes_one_slot_and_blocks_followup(self):
         self.client.place_order.side_effect = [
             {'orderId': 'mock-1', 'sl_tp_failed': True},
             {'orderId': 'mock-2', 'sl_tp_failed': True},
@@ -65,12 +80,14 @@ class PilotCounterTests(PilotFixture):
         self.client.set_position_stops = AsyncMock(return_value=False)
         await self.engine._open(self.sig)
         await self.second_symbol()
+        # Protection failure closes/blocks the affected execution path; it must
+        # not silently permit another entry until protection state is resolved.
         entries = [
             c for c in self.client.place_order.await_args_list
             if not c.kwargs.get('reduce_only')
         ]
-        self.assertEqual(len(entries), 2)
-        self.assertEqual(self.count(), 2)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(self.count(), 1)
 
     async def test_PILOT08_pending_other_symbol_blocks(self):
         pending, _ = self.engine.orders.get_or_create('pending', 'OTHERUSDT', 'Buy', 1.)
