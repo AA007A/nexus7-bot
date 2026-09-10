@@ -66,7 +66,7 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._prelive_active_orders, 0)
         self.assertTrue(client._prelive_private_ws_probe_ok)
 
-    async def test_external_position_blocks_readiness(self):
+    async def test_protected_external_position_allows_readonly_readiness(self):
         client = _Client(positions=[{"symbol": "ETHUSDT", "size": "1", "stopLoss": "100"}])
         log = _Log()
         with patch(
@@ -74,10 +74,12 @@ class PrivateWsReadonlyObservabilityTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=True),
         ):
             ok = await obs.run(client, {"ETHUSDT": {}}, log)
-        self.assertFalse(ok)
+        self.assertTrue(ok)
         self.assertTrue(client._prelive_account_exposure_verified)
-        self.assertFalse(client._prelive_account_exposure_clear)
+        self.assertTrue(client._prelive_account_exposure_clear)
         self.assertEqual(client._prelive_active_positions, 1)
+        self.assertEqual(client._prelive_protected_positions, 1)
+        self.assertEqual(client._prelive_unprotected_positions, 0)
 
     async def test_active_order_blocks_readiness_and_logs_forensics(self):
         client = _Client(orders=[{
