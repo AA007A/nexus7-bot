@@ -59,6 +59,9 @@ def install() -> None:
     from bot import kucoin_cross_margin_order as _kucoin_cross_margin_order
     from bot import kucoin_fill_normalization as _kucoin_fill_normalization
     from bot import kucoin_native_tpsl as _kucoin_native_tpsl
+    from bot import durable_reconcile_hardening as _durable_reconcile_hardening
+    from bot import durable_execution as _durable_execution
+    from bot import order_state as _order_state
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import pilot as _pilot
     from bot import score as _score
@@ -86,6 +89,7 @@ def install() -> None:
     _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
     _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
     _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
+    _durable_reconcile_hardening.install(_durable_execution, _order_state, _log)
 
     if _pilot_release_control.live_pilot_release_authorized():
         _pilot_live_runtime.install(TradingEngine, _log)
