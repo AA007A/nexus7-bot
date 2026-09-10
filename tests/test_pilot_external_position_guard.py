@@ -28,11 +28,11 @@ class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.engine._validation_safety_lock_active = False
         self.engine.client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[
-                {"symbol": "ADAUSDT", "size": 10, "side": "Buy"}
+                {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": 0}
             ])
         )
 
-    async def test_pilot_guard_does_not_touch_unexpected_position(self):
+    async def test_pilot_guard_does_not_touch_unprotected_unexpected_position(self):
         result = await self.engine._guard_naked_positions()
         self.assertIsNone(result)
         self.assertIn("ADAUSDT", self.engine._unprotected_symbols)
@@ -44,10 +44,48 @@ class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ADAUSDT", self.engine.positions)
         self.assertIn("ADAUSDT", self.engine._unprotected_symbols)
 
-    async def test_broad_reconcile_does_not_auto_adopt_external_position(self):
+    async def test_broad_reconcile_reports_unprotected_external_position(self):
         result = await self.engine._reconcile_exchange_positions()
         self.assertIn("ADAUSDT", result)
         self.assertNotIn("ADAUSDT", self.engine.positions)
+
+    async def test_protected_external_position_is_not_globally_blocked(self):
+        self.engine._unprotected_symbols.add("ADAUSDT")
+        self.engine.client.get_positions.return_value = [
+            {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": 0.55}
+        ]
+
+        result = await self.engine._guard_naked_positions()
+
+        self.assertIsNone(result)
+        self.assertFalse(self.engine._pilot_external_position_guard_blocked)
+        self.assertNotIn("ADAUSDT", self.engine._unprotected_symbols)
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+
+    async def test_protected_external_position_is_never_auto_adopted(self):
+        self.engine.client.get_positions.return_value = [
+            {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": 0.55}
+        ]
+        self.assertIsNone(await self.engine._sync_positions())
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertFalse(self.engine._pilot_external_position_guard_blocked)
+
+    async def test_broad_reconcile_does_not_report_protected_as_unprotected(self):
+        self.engine.client.get_positions.return_value = [
+            {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": 0.55}
+        ]
+        result = await self.engine._reconcile_exchange_positions()
+        self.assertEqual(result, [])
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertFalse(self.engine._pilot_external_position_guard_blocked)
+
+    async def test_invalid_stop_is_fail_closed(self):
+        self.engine.client.get_positions.return_value = [
+            {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": "nan"}
+        ]
+        await self.engine._guard_naked_positions()
+        self.assertTrue(self.engine._pilot_external_position_guard_blocked)
+        self.assertIn("ADAUSDT", self.engine._unprotected_symbols)
 
     async def test_symbol_scoped_ambiguous_fill_reconcile_is_preserved(self):
         result = await self.engine._reconcile_exchange_positions(only_symbol="ADAUSDT")
