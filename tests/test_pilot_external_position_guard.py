@@ -54,9 +54,7 @@ class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.engine.client.get_positions.return_value = [
             {"symbol": "ADAUSDT", "size": 10, "side": "Buy", "stopLoss": 0.55}
         ]
-
         result = await self.engine._guard_naked_positions()
-
         self.assertIsNone(result)
         self.assertFalse(self.engine._pilot_external_position_guard_blocked)
         self.assertNotIn("ADAUSDT", self.engine._unprotected_symbols)
@@ -102,6 +100,28 @@ class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.engine._guard_naked_positions())
         self.assertIsNone(await self.engine._sync_positions())
         self.assertTrue(self.engine._pilot_external_position_guard_blocked)
+
+    async def test_shadow_external_position_is_immutable(self):
+        self.engine._validation_safety_lock_active = True
+        self.engine.pilot = SimpleNamespace(enabled=True)
+        self.assertIsNone(await self.engine._guard_naked_positions())
+        self.assertIsNone(await self.engine._sync_positions())
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertIn("ADAUSDT", self.engine._unprotected_symbols)
+
+    async def test_nonpilot_live_external_position_is_immutable(self):
+        self.engine._validation_safety_lock_active = False
+        self.engine.pilot = SimpleNamespace(enabled=False)
+        self.assertIsNone(await self.engine._guard_naked_positions())
+        self.assertIsNone(await self.engine._sync_positions())
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertIn("ADAUSDT", self.engine._unprotected_symbols)
+
+    async def test_paper_keeps_original_lifecycle(self):
+        self.engine.paper_trade = True
+        self.assertEqual(await self.engine._guard_naked_positions(), "guard-original")
+        self.assertEqual(await self.engine._sync_positions(), "sync-original")
+        self.assertEqual(await self.engine._reconcile_exchange_positions(), ["reconcile:None"])
 
 
 if __name__ == "__main__":
