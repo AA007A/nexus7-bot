@@ -39,7 +39,6 @@ def _position_direction(position: dict) -> str:
         return "long"
     if raw in {"sell", "short"}:
         return "short"
-    # KuCoin may expose signed currentQty/size in some payload variants.
     try:
         qty = float(position.get("currentQty", position.get("size", 0)) or 0)
     except (TypeError, ValueError):
@@ -52,8 +51,6 @@ def _position_direction(position: dict) -> str:
 
 
 def _reference_price(position: dict) -> float:
-    # Prefer mark price because the stop must still be on the protective side
-    # now; fall back to entry when mark is absent from the normalized payload.
     for key in ("markPrice", "mark_price", "entryPrice", "avgEntryPrice"):
         px = _finite_positive(position.get(key))
         if px > 0:
@@ -71,8 +68,6 @@ def _order_active(order: dict) -> bool:
     status = str(order.get("status", "") or "").strip().lower()
     if status in {"done", "cancelled", "canceled", "filled", "triggered"}:
         return False
-    # /stopOrders is documented as un-triggered orders; absent status/isActive
-    # is therefore acceptable only when stopTriggered is not true.
     return True
 
 
@@ -133,8 +128,6 @@ async def read_stop_orders(client, symbol: str):
         except Exception:
             return None
     else:
-        # KuCoinClient already centralizes signing/rate limiting in _get.
-        # Calling it here is read-only and preserves the exact query in the HMAC.
         raw_get = getattr(client, "_get", None)
         if not callable(raw_get):
             return None
@@ -142,9 +135,10 @@ async def read_stop_orders(client, symbol: str):
             kc_symbol = symbol
             try:
                 from bot.kucoin import to_kucoin
+            except (ImportError, AttributeError):
+                to_kucoin = None
+            if callable(to_kucoin):
                 kc_symbol = to_kucoin(symbol)
-            except Exception:
-                pass
             endpoint = f"/api/v1/stopOrders?symbol={quote(str(kc_symbol), safe='')}"
             data = await raw_get(endpoint, auth=True)
         except Exception:
@@ -155,8 +149,6 @@ async def read_stop_orders(client, symbol: str):
     if isinstance(data, dict):
         items = data.get("items")
         if items is None:
-            # tolerate already-unwrapped single-page payload variants only when
-            # they clearly contain a list under a conventional key.
             items = data.get("data") if isinstance(data.get("data"), list) else None
         return list(items) if isinstance(items, list) else None
     if isinstance(data, list):
@@ -172,7 +164,10 @@ async def conditional_stop_confirmed(client, position: dict) -> tuple[bool, str]
         return False, "invalid_position"
 
     symbol = str(position.get("symbol", "") or "")
-    position_size = _finite_positive(abs(float(position.get("size", 0) or 0)))
+    try:
+        position_size = _finite_positive(abs(float(position.get("size", 0) or 0)))
+    except (TypeError, ValueError):
+        position_size = 0.0
     if not symbol or position_size <= 0:
         return False, "invalid_position"
 
@@ -189,7 +184,6 @@ async def conditional_stop_confirmed(client, position: dict) -> tuple[bool, str]
             return True, "conditional_close_order"
         covered += amount
 
-    # Floating tolerance only prevents tiny API representation differences.
     if covered + max(1e-12, position_size * 1e-9) >= position_size:
         return True, "conditional_reduce_only"
     return False, "no_full_protective_stop"
