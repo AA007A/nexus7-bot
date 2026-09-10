@@ -57,6 +57,7 @@ def install() -> None:
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
     from bot import kucoin_cross_margin_order as _kucoin_cross_margin_order
+    from bot import kucoin_fill_normalization as _kucoin_fill_normalization
     from bot import kucoin_native_tpsl as _kucoin_native_tpsl
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import pilot as _pilot
@@ -82,6 +83,7 @@ def install() -> None:
     _pilot_external_position_guard.install(TradingEngine, _log)
     _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
     _kucoin_cross_margin_order.install(_kucoin.KuCoinClient, _log)
+    _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
     _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
     _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
 

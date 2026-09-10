@@ -1,31 +1,115 @@
 """KuCoin Futures native TP/SL hardening for protected LIVE entries.
 
-KuCoin does not expose a `/api/v1/position/trading-stop` mutation. The
-supported Futures endpoint for an entry carrying both take-profit and
-stop-loss is `POST /api/v1/st-orders`.
+Protected opening orders use KuCoin's native ``POST /api/v1/st-orders``
+endpoint. Before dispatch, the symbol's margin mode is read and, when needed,
+changed to CROSS using KuCoin's documented margin-mode endpoint. Unknown or
+unverifiable mode fails closed before any entry order is sent.
 
-This adapter changes only opening orders that already carry an SL and/or TP.
-Reduce-only exits and unprotected/no-TP-SL calls remain on the existing client
-implementation. Existing AI, risk, EV/RR, pilot, durable-submission and
-exposure gates are untouched.
+Existing AI, risk, EV/RR, pilot, durable-submission and exposure gates remain
+unchanged. Leverage is always taken from ``cfg.LEVERAGE``.
 """
 from __future__ import annotations
 
 from bot.config import cfg
 
 TPSL_ENDPOINT = "/api/v1/st-orders"
+GET_MARGIN_MODE_ENDPOINT = "/api/v2/position/getMarginMode"
+CHANGE_MARGIN_MODE_ENDPOINT = "/api/v2/position/changeMarginMode"
+CROSS = "CROSS"
 
 
 def _trigger_prices(side: str, sl: float, tp: float) -> tuple[float, float]:
     """Return (trigger_up, trigger_down) for a one-way futures entry."""
     side_l = str(side or "").strip().lower()
     if side_l == "buy":
-        # Long: TP above, SL below.
         return float(tp or 0), float(sl or 0)
     if side_l == "sell":
-        # Short: SL above, TP below.
         return float(sl or 0), float(tp or 0)
     raise ValueError(f"unsupported KuCoin order side: {side}")
+
+
+async def _ensure_cross_margin(self, kucoin_module, symbol: str, log) -> bool:
+    """Verify/switch this symbol to CROSS before a protected LIVE entry.
+
+    Switching is attempted only after the normal NEXUS execution gates have
+    reached ``place_order``. A failed read, failed switch, or failed verify
+    blocks the entry. No order is dispatched while margin mode is uncertain.
+    """
+    kc_symbol = kucoin_module.to_kucoin(symbol)
+    try:
+        current = await self._get(
+            GET_MARGIN_MODE_ENDPOINT,
+            {"symbol": kc_symbol},
+            auth=True,
+        )
+    except Exception as exc:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=query_failed error=%s",
+            symbol, exc,
+        )
+        return False
+
+    mode = str((current or {}).get("marginMode", "") or "").upper()
+    if mode == CROSS:
+        return True
+    if not mode:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=mode_unconfirmed",
+            symbol,
+        )
+        return False
+
+    log.warning(
+        "[KUCOIN_MARGIN_MODE] symbol=%s current=%s requested=CROSS action=switch",
+        symbol, mode,
+    )
+    try:
+        changed = await self._post(
+            CHANGE_MARGIN_MODE_ENDPOINT,
+            {"symbol": kc_symbol, "marginMode": CROSS},
+            single_attempt=True,
+        )
+    except Exception as exc:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=switch_failed error=%s",
+            symbol, exc,
+        )
+        return False
+
+    if not isinstance(changed, dict) or str(changed.get("marginMode", "") or "").upper() != CROSS:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=switch_not_confirmed response=%s",
+            symbol, str(changed)[:160],
+        )
+        return False
+
+    # Independent read-back prevents trusting a mutation response blindly.
+    try:
+        verify = await self._get(
+            GET_MARGIN_MODE_ENDPOINT,
+            {"symbol": kc_symbol},
+            auth=True,
+        )
+    except Exception as exc:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=verify_failed error=%s",
+            symbol, exc,
+        )
+        return False
+
+    verified_mode = str((verify or {}).get("marginMode", "") or "").upper()
+    if verified_mode != CROSS:
+        log.error(
+            "[KUCOIN_MARGIN_MODE] BLOCK symbol=%s reason=verify_mismatch mode=%s",
+            symbol, verified_mode or "UNKNOWN",
+        )
+        return False
+
+    log.warning(
+        "[KUCOIN_MARGIN_MODE] symbol=%s result=CROSS_CONFIRMED execution_effect=CONFIG_ONLY",
+        symbol,
+    )
+    return True
 
 
 def install(KuCoinClient, kucoin_module, log) -> None:
@@ -46,7 +130,6 @@ def install(KuCoinClient, kucoin_module, log) -> None:
         idem_key: str = None,
         single_submission: bool = False,
     ) -> dict:
-        # Preserve every existing path except a protected LIVE opening order.
         if (
             kucoin_module.PAPER_TRADE
             or reduce_only
@@ -69,6 +152,11 @@ def install(KuCoinClient, kucoin_module, log) -> None:
             log.warning("place_order TPSL: KUCOIN_API_KEY não configurado")
             return {}
 
+        # Fix for production 330005: the body alone is insufficient when a
+        # symbol is still selected as ISOLATED in the account configuration.
+        if not await _ensure_cross_margin(self, kucoin_module, symbol, log):
+            return {}
+
         try:
             contracts = self._round_qty(qty, symbol)
             client_oid = self.build_client_oid(
@@ -79,17 +167,21 @@ def install(KuCoinClient, kucoin_module, log) -> None:
             log.error("[KUCOIN_NATIVE_TPSL] build failed symbol=%s error=%s", symbol, exc)
             return {}
 
+        leverage = int(cfg.LEVERAGE)
+        if leverage <= 0:
+            log.error("[KUCOIN_NATIVE_TPSL] blocked symbol=%s reason=invalid_leverage", symbol)
+            return {}
+
         body = {
             "clientOid": client_oid,
             "symbol": kucoin_module.to_kucoin(symbol),
             "side": str(side).lower(),
             "type": "market",
             "size": int(contracts),
-            "leverage": int(cfg.LEVERAGE),
+            "leverage": leverage,
             "reduceOnly": False,
-            "marginMode": "CROSS",
+            "marginMode": CROSS,
             "positionSide": "BOTH",
-            # TP = trade price trigger, matching KuCoin's documented TPSL example.
             "stopPriceType": "TP",
         }
         if trigger_up > 0:
@@ -97,22 +189,17 @@ def install(KuCoinClient, kucoin_module, log) -> None:
         if trigger_down > 0:
             body["triggerStopDownPrice"] = self._round_price(trigger_down, symbol)
 
-        # Require at least one valid protection trigger. Fail closed before network I/O.
         if "triggerStopUpPrice" not in body and "triggerStopDownPrice" not in body:
             log.error("[KUCOIN_NATIVE_TPSL] blocked symbol=%s reason=no_valid_trigger", symbol)
             return {}
 
-        post_options = {
-            "single_attempt": True
-        } if single_submission else {}
+        post_options = {"single_attempt": True} if single_submission else {}
         data = await self._post(TPSL_ENDPOINT, body, **post_options)
         if not isinstance(data, dict):
             return {}
 
         order_id = data.get("orderId", "")
         if not order_id and data.get("_ambiguous"):
-            # The normal order lookup endpoint indexes TPSL entries by clientOid too.
-            # Never blindly resubmit an ambiguous LIVE mutation.
             for attempt in range(3):
                 recovered = await self.get_order_by_client_oid(client_oid)
                 if recovered:
@@ -139,8 +226,8 @@ def install(KuCoinClient, kucoin_module, log) -> None:
         data["protection_endpoint"] = TPSL_ENDPOINT
         log.info(
             "📤 [ORDER+TPSL] clientOid=%s orderId=%s symbol=%s side=%s qty=%s "
-            "SL=%s TP=%s endpoint=%s",
-            client_oid, order_id, symbol, side, contracts,
+            "leverage=%sx marginMode=CROSS SL=%s TP=%s endpoint=%s",
+            client_oid, order_id, symbol, side, contracts, leverage,
             body.get("triggerStopDownPrice") if str(side).lower() == "buy" else body.get("triggerStopUpPrice"),
             body.get("triggerStopUpPrice") if str(side).lower() == "buy" else body.get("triggerStopDownPrice"),
             TPSL_ENDPOINT,
@@ -151,5 +238,5 @@ def install(KuCoinClient, kucoin_module, log) -> None:
     KuCoinClient._native_tpsl_entry_installed = True
     log.warning(
         "[KUCOIN_NATIVE_TPSL] installed: protected opening orders use "
-        "POST /api/v1/st-orders; legacy /api/v1/position/trading-stop is bypassed"
+        "POST /api/v1/st-orders with verified CROSS margin mode"
     )
