@@ -8,6 +8,12 @@ A protected external/manual position may be DEGRADED instead of BLOCKED only
 when the explicit pilot exposure-capacity policy is installed and enabled. Any
 unprotected external position, any other BLOCKED issue, stale integrity state,
 or missing policy remains fail-closed.
+
+Observability rule: when coexistence policy is active, defer the base guard's
+log until the final classification is known. This prevents a transient false
+"NOVAS ENTRADAS BLOQUEADAS" message for a protected external position that is
+immediately downgraded to DEGRADED by this policy. Real blocking conditions are
+still logged after the final classification is computed.
 """
 
 from bot.integrity import IntegrityIssue, Severity
@@ -21,9 +27,25 @@ def install(IntegrityGuard, log):
     original_assess = IntegrityGuard.assess
 
     async def _assess_with_protected_external_coexistence(self, client, engine):
-        state = await original_assess(self, client, engine)
+        coexistence_enabled = protected_external_coexistence_enabled(engine)
 
-        if not protected_external_coexistence_enabled(engine):
+        # The base IntegrityGuard logs before this runtime policy has a chance
+        # to rewrite EXTERNAL_POSITION_PROTECTED from BLOCKED to DEGRADED.
+        # Defer that one log pass only when the explicit coexistence policy is
+        # active, then emit the log from the final state below. No decision or
+        # exchange behavior is changed by this observability-only deferral.
+        original_log_state = None
+        if coexistence_enabled:
+            original_log_state = self._log_state
+            self._log_state = lambda: None
+
+        try:
+            state = await original_assess(self, client, engine)
+        finally:
+            if original_log_state is not None:
+                self._log_state = original_log_state
+
+        if not coexistence_enabled:
             return state
 
         changed = False
@@ -45,22 +67,25 @@ def install(IntegrityGuard, log):
             else:
                 rewritten.append(issue)
 
-        if not changed:
-            return state
+        if changed:
+            state.issues = rewritten
+            if any(i.severity == Severity.BLOCKED for i in rewritten):
+                state.severity = Severity.BLOCKED
+            elif any(i.severity == Severity.DEGRADED for i in rewritten):
+                state.severity = Severity.DEGRADED
+            else:
+                state.severity = Severity.OK
 
-        state.issues = rewritten
-        if any(i.severity == Severity.BLOCKED for i in rewritten):
-            state.severity = Severity.BLOCKED
-        elif any(i.severity == Severity.DEGRADED for i in rewritten):
-            state.severity = Severity.DEGRADED
-        else:
-            state.severity = Severity.OK
+            self.state = state
+            log.info(
+                "[PROTECTED_EXTERNAL_COEXISTENCE] enabled=true policy=pilot_exposure_capacity "
+                "manual_position=read_only execution_effect=NONE"
+            )
 
-        self.state = state
-        log.info(
-            "[PROTECTED_EXTERNAL_COEXISTENCE] enabled=true policy=pilot_exposure_capacity "
-            "manual_position=read_only execution_effect=NONE"
-        )
+        # Emit exactly one IntegrityGuard log for the FINAL classification.
+        # Protected-only coexistence becomes DEGRADED (debug); any independent
+        # BLOCKED issue remains fail-closed and still emits the blocking error.
+        self._log_state()
         return state
 
     IntegrityGuard.assess = _assess_with_protected_external_coexistence

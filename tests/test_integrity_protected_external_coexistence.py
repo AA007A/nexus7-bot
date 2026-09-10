@@ -61,6 +61,9 @@ class ProtectedExternalCoexistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("EXTERNAL_POSITION_UNPROTECTED", state.codes())
         self.assertEqual(state.severity, Severity.DEGRADED)
         self.assertTrue(guard.can_open_new())
+        # The base BLOCKED classification must never emit the transient
+        # "NOVAS ENTRADAS BLOQUEADAS" error before coexistence rewrites it.
+        self.assertEqual(guard._last_block_log, 0.0)
 
     async def test_unprotected_external_still_blocks_with_policy_active(self):
         guard = IntegrityGuard()
@@ -83,6 +86,8 @@ class ProtectedExternalCoexistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("POSITION_WITHOUT_STOP", state.codes())
         self.assertEqual(state.severity, Severity.BLOCKED)
         self.assertFalse(guard.can_open_new())
+        # Genuine blockers are still logged by the final fail-closed state.
+        self.assertGreater(guard._last_block_log, 0.0)
 
     async def test_protected_external_still_blocks_without_capacity_policy(self):
         guard = IntegrityGuard()
@@ -104,6 +109,7 @@ class ProtectedExternalCoexistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("EXTERNAL_POSITION_PROTECTED", state.codes())
         self.assertEqual(state.severity, Severity.BLOCKED)
         self.assertFalse(guard.can_open_new())
+        self.assertGreater(guard._last_block_log, 0.0)
 
 
 if __name__ == "__main__":
