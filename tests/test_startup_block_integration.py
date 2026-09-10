@@ -20,8 +20,11 @@ def test_blocked_startup_uses_exact_reason_message():
     assert "O self-check detectou bug(s) crítico(s) no código." not in text
 
 
-def test_startup_block_is_observable_without_changing_trading_mode():
+def test_startup_block_is_observable_without_falsely_claiming_live_execution():
     text = MAIN.read_text(encoding="utf-8")
     assert '"startup_block": getattr(app.state, "startup_block", None)' in text
-    assert '"trading_mode": "PAPER" if PAPER_TRADE else "LIVE"' in text
-    assert '"orders_sent_to_exchange": not PAPER_TRADE' in text
+    assert "runtime_mode.snapshot(" in text
+    assert '"trading_mode": runtime["trading_mode"]' in text
+    assert '"orders_sent_to_exchange": runtime["orders_sent_to_exchange"]' in text
+    assert '"trading_mode": "PAPER" if PAPER_TRADE else "LIVE"' not in text
+    assert '"orders_sent_to_exchange": not PAPER_TRADE' not in text

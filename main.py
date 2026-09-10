@@ -23,6 +23,7 @@ from bot.nexus_runtime_engine import TradingEngine
 from bot.config import cfg
 from bot.logger import log
 from bot import database as db
+from bot import runtime_mode_observability as runtime_mode
 from bot.startup_block import classify_startup_block, telegram_block_message
 from bot.status_observability import enrich_status
 
@@ -157,26 +158,18 @@ async def lifespan(app: FastAPI):
         app.state.engine_task = asyncio.create_task(engine.run())
         log.info("✅ BGX Capital online (KuCoin Futures)")
 
-        # Avisa no Telegram em qual modo o bot subiu — evita a situação
-        # de esperar ordens que nunca virão por falta de configuração.
+        # Mensagem de startup deriva do estado operacional real. Em especial,
+        # PAPER_TRADE=false + VALIDATION_LOCK agora é SHADOW_LIVE e nunca
+        # anuncia que ordens reais serão enviadas à exchange.
         try:
             from bot.notifier import notify as _n
-            if PAPER_TRADE:
-                await _n(
-                    f"🟡 *BOT ONLINE — MODO SIMULAÇÃO*\n"
-                    f"`{'━'*26}`\n"
-                    f"⚠️ *NENHUMA ordem será enviada à KuCoin*\n\n"
-                    f"Motivo: _{TRADING_MODE_REASON}_\n\n"
-                    f"Para operar de verdade, defina no Railway:\n"
-                    f"`PAPER_TRADE=false`\n"
-                    f"`LIVE_TRADING_CONFIRMED=I_UNDERSTAND_THE_RISK`"
-                )
-            else:
-                await _n(
-                    f"🔴 *BOT ONLINE — OPERAÇÃO REAL*\n"
-                    f"`{'━'*26}`\n"
-                    f"Ordens serão enviadas à KuCoin com capital real."
-                )
+            _mode = runtime_mode.snapshot(
+                paper_trade=PAPER_TRADE,
+                engine=engine,
+                blocked=bool(getattr(app.state, "blocked", False)),
+                mode_reason=TRADING_MODE_REASON,
+            )
+            await _n(runtime_mode.startup_message(_mode))
         except Exception as _e:
             log.debug(f"notify modo: {_e}")
 
@@ -221,23 +214,33 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     """
-    Healthcheck do Railway. NUNCA faz I/O externo — responde sempre 200
-    assim que o processo está de pé. O campo 'ready' indica se o bootstrap
-    (carregamento de instrumentos + engine) já concluiu.
+    Liveness do Railway sem I/O externo. O HTTP continua 200 enquanto o
+    processo está vivo, mas `ready` representa prontidão operacional real do
+    engine, não apenas o término do bootstrap. O modo e a capacidade de envio
+    de ordens também respeitam o VALIDATION_LOCK/SHADOW.
     """
+    eng = getattr(app.state, "engine", None)
+    runtime = runtime_mode.snapshot(
+        paper_trade=PAPER_TRADE,
+        engine=eng,
+        blocked=bool(getattr(app.state, "blocked", False)),
+        mode_reason=TRADING_MODE_REASON,
+    )
     return {
         "status":   "ok",
         "version":  "12.1.0",
         "exchange": "kucoin",
-        "ready":    bool(getattr(app.state, "ready", False)),
+        "ready":    runtime["ready"],
+        "connected": runtime["connected"],
+        "active": runtime["active"],
         "blocked":  bool(getattr(app.state, "blocked", False)),
         "startup_block": getattr(app.state, "startup_block", None),
-        # Modo de operação exposto aqui para responder rapidamente
-        # "por que o bot não abre ordens?"
         "telegram":     getattr(app.state, "telegram", {"ok": None}),
-        "trading_mode": "PAPER" if PAPER_TRADE else "LIVE",
-        "mode_reason":  TRADING_MODE_REASON,
-        "orders_sent_to_exchange": not PAPER_TRADE,
+        "trading_mode": runtime["trading_mode"],
+        "mode_reason":  runtime["mode_reason"],
+        "validation_lock": runtime["validation_lock"],
+        "shadow_readonly_ready": runtime["shadow_readonly_ready"],
+        "orders_sent_to_exchange": runtime["orders_sent_to_exchange"],
     }
 
 @app.get("/")
@@ -352,6 +355,12 @@ async def why_no_trade():
     """
     eng = app.state.engine
     mn  = cfg.MIN_ENTRY_SCORE
+    runtime = runtime_mode.snapshot(
+        paper_trade=PAPER_TRADE,
+        engine=eng,
+        blocked=bool(getattr(app.state, "blocked", False)),
+        mode_reason=TRADING_MODE_REASON,
+    )
 
     # Buffer do strategy: registra TODO score avaliado, não só os aprovados
     try:
@@ -386,8 +395,10 @@ async def why_no_trade():
              "4H": x["s4h"], "1H": x["s1h"], "15M": x["s15"]}
             for x in _log[:10]
         ],
-        "modo":            "PAPER" if PAPER_TRADE else "LIVE",
-        "ordens_reais":    not PAPER_TRADE,
+        "modo":            runtime["trading_mode"],
+        "ordens_reais":    runtime["orders_sent_to_exchange"],
+        "ready":           runtime["ready"],
+        "validation_lock": runtime["validation_lock"],
         "thresholds": {
             "score_minimo":  mn,
             "nexus_minimo":  float(os.environ.get("NEXUS_MIN_SCORE", "55")),
