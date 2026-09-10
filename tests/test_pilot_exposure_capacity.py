@@ -98,6 +98,30 @@ class PilotExposureCapacityTests(unittest.TestCase):
         guard = _PilotGuard()
         reasons = guard.evaluate(self._engine([issue]), self._client(), "ETHUSDT")
         self.assertFalse(any(r.startswith("PILOT_TOTAL_CONCURRENT:") for r in reasons))
+        self.assertFalse(any(r.startswith("PILOT_EXTERNAL_SYMBOL_CONFLICT:") for r in reasons))
+
+    def test_external_symbol_conflict_blocks_even_with_free_slot(self):
+        issue = SimpleNamespace(
+            code="EXTERNAL_POSITION_PROTECTED",
+            detail="XRPUSDT: posição externa protegida",
+        )
+        guard = _PilotGuard()
+        reasons = guard.evaluate(self._engine([issue]), self._client(), "XRPUSDT")
+        self.assertTrue(
+            any(r.startswith("PILOT_EXTERNAL_SYMBOL_CONFLICT:") for r in reasons)
+        )
+        self.assertFalse(any(r.startswith("PILOT_TOTAL_CONCURRENT:") for r in reasons))
+
+    def test_unprotected_external_symbol_conflict_also_blocks(self):
+        issue = SimpleNamespace(
+            code="EXTERNAL_POSITION_UNPROTECTED",
+            detail="XRPUSDT: posição externa sem proteção",
+        )
+        guard = _PilotGuard()
+        reasons = guard.evaluate(self._engine([issue]), self._client(), "XRPUSDT")
+        self.assertTrue(
+            any(r.startswith("PILOT_EXTERNAL_SYMBOL_CONFLICT:") for r in reasons)
+        )
 
     def test_low_available_equity_blocks(self):
         guard = _PilotGuard()
