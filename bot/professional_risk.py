@@ -107,7 +107,6 @@ def stop_risk_size(
     stop_distance_pct = stop_distance / entry
     risk_budget = capital.equity * risk_pct
 
-    # Conservative projected loss per base unit at stop.
     fee_loss_per_unit = entry * fee_rate_per_side * 2.0
     slippage_loss_per_unit = entry * expected_slippage_pct
     effective_loss_per_unit = stop_distance + fee_loss_per_unit + slippage_loss_per_unit
@@ -139,7 +138,6 @@ def stop_risk_size(
     required_margin = notional / leverage
     projected_stop_loss = qty * effective_loss_per_unit
 
-    # Rounding must never inflate loss above the configured budget.
     if projected_stop_loss > risk_budget * 1.000001:
         raise AssertionError("rounded quantity exceeds risk budget")
     if required_margin > collateral_cap * 1.000001:
@@ -157,21 +155,59 @@ def stop_risk_size(
 
 
 def capital_state_from_account_overview(data: Mapping[str, Any]) -> CapitalState:
-    """Normalize KuCoin account-overview semantics without losing distinctions."""
+    """Normalize current KuCoin Futures account-overview semantics.
+
+    KuCoin now exposes ``availableMargin`` for cross-margin availability while
+    ``availableBalance`` remains relevant to isolated/transferable balance.
+    Prefer the cross-aware field when present.
+
+    Some live account snapshots can report a transient negative legacy margin
+    component even though equity/free collateral are valid. A negative margin
+    is never trusted directly. Instead, reconstruct total committed capital as
+    ``max(equity - available_collateral, 0)`` and assign any invalid component
+    from that residual. This keeps the state non-negative without increasing
+    available collateral or risk budget.
+    """
     if not isinstance(data, Mapping):
         raise ValueError("account overview must be a mapping")
+
     def f(key: str) -> float:
         value = data.get(key, 0.0)
         if isinstance(value, bool):
             raise ValueError(f"invalid boolean account field: {key}")
-        return float(value or 0.0)
+        out = float(value or 0.0)
+        if not math.isfinite(out):
+            raise ValueError(f"non-finite account field: {key}")
+        return out
 
     equity = f("accountEquity") or f("equity") or f("marginBalance")
+    if "availableMargin" in data and data.get("availableMargin") not in (None, ""):
+        available = f("availableMargin")
+    else:
+        available = f("availableBalance")
+
+    raw_position = f("positionMargin")
+    raw_order = f("orderMargin")
+    committed_total = max(equity - available, 0.0)
+
+    if raw_position >= 0 and raw_order >= 0:
+        position_margin = raw_position
+        order_margin = raw_order
+    elif raw_position < 0 and raw_order >= 0:
+        order_margin = min(raw_order, committed_total)
+        position_margin = max(committed_total - order_margin, 0.0)
+    elif raw_order < 0 and raw_position >= 0:
+        position_margin = min(raw_position, committed_total)
+        order_margin = max(committed_total - position_margin, 0.0)
+    else:
+        position_margin = committed_total
+        order_margin = 0.0
+
     state = CapitalState(
         equity=equity,
-        available_collateral=f("availableBalance"),
-        position_margin=f("positionMargin"),
-        order_margin=f("orderMargin"),
+        available_collateral=available,
+        position_margin=position_margin,
+        order_margin=order_margin,
         unrealized_pnl=f("unrealisedPNL") or f("unrealisedPnl"),
     )
     return state.validate()
