@@ -3,8 +3,8 @@ import inspect
 from bot import validation_safety_lock as lock
 
 
-def test_shadow_threshold_is_55():
-    assert lock.SHADOW_MIN_ENTRY_SCORE == 55
+def test_shadow_threshold_is_60():
+    assert lock.SHADOW_MIN_ENTRY_SCORE == 60
 
 
 def test_shadow_threshold_is_scoped_to_validation_lock():
