@@ -56,6 +56,11 @@ def install(TradingEngine, log):
         return result
 
     def _check_daily_reset_hardened(self, *args, **kwargs):
+        # The legacy reset logs the current stop before the previous hardening
+        # wrapper had a chance to synchronize it.  Sync first so operator-facing
+        # reset telemetry reflects the same configured limit that enforcement
+        # uses, then sync again in case the core reset changes daily state.
+        _sync_limits(self)
         result = orig_check_daily_reset(self, *args, **kwargs)
         _sync_limits(self)
         return result
@@ -81,5 +86,5 @@ def install(TradingEngine, log):
     TradingEngine._update_daily_pnl = _update_daily_pnl_hardened
     TradingEngine._daily_stop_runtime_hardened = True
     log.info(
-        "[DAILY_STOP_RUNTIME] tracker synced with engine limits and current daily PnL"
+        "[DAILY_STOP_RUNTIME] tracker synced with engine limits and current daily PnL; reset telemetry pre-synced"
     )
