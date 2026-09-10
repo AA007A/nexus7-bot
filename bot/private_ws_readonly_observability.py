@@ -2,8 +2,13 @@
 
 This module never submits/cancels orders, changes leverage/stops, or grants
 execution permission. It performs authenticated read-only KuCoin checks for
-private WS subscription, live positions, and active orders, then stores only
-diagnostic state on the client instance.
+private WS subscription, live positions, active orders, and existing protective
+stops, then stores only diagnostic state on the client instance.
+
+A protected external/manual position is compatible with SHADOW pre-live
+readiness when its protection is confirmed read-only and there are no active
+normal orders. It still consumes pilot concurrency elsewhere. Any unknown or
+unprotected exposure remains fail-closed.
 """
 
 import asyncio
@@ -47,6 +52,7 @@ def _log_active_order_forensics(orders, log):
 
 async def run(client, instruments, log) -> bool:
     from bot.prelive_readonly_probe import _active_orders, _private_ws_probe
+    from bot.conditional_stop_protection import conditional_stop_confirmed
 
     symbol = "ETHUSDT" if "ETHUSDT" in instruments else next(iter(instruments), "")
     if not symbol:
@@ -59,42 +65,67 @@ async def run(client, instruments, log) -> bool:
         return False
 
     # Verify account exposure independently from the WS transport check. Any
-    # read failure is fail-closed for SHADOW pre-pilot evidence: an unknown
-    # account state must never be presented as WOULD_SUBMIT-ready.
+    # read/protection verification failure is fail-closed: unknown account state
+    # must never be presented as WOULD_SUBMIT-ready.
     try:
         positions_raw = await client.get_positions()
-        positions = [
-            p for p in (positions_raw or [])
-            if abs(float(p.get("size", 0) or 0)) > 0
-        ]
+        positions = []
+        for p in positions_raw or []:
+            try:
+                active = abs(float(p.get("size", 0) or 0)) > 0
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError("unparseable_position_size")
+            if active:
+                positions.append(p)
+
         orders_raw = await client._get(
             "/api/v1/orders", {"status": "active"}, auth=True
         )
         orders = _active_orders(orders_raw)
-        unprotected = [
-            p for p in positions
-            if float(p.get("stopLoss", 0) or 0) <= 0
-        ]
-        exposure_clear = not positions and not orders
+
+        protected = []
+        unprotected = []
+        for position in positions:
+            confirmed, evidence = await conditional_stop_confirmed(client, position)
+            item = (position, evidence)
+            if confirmed is True:
+                protected.append(item)
+            else:
+                unprotected.append(item)
+
+        # "exposure_clear" means compatible with SHADOW/pilot coexistence, not
+        # literally zero positions. Protected external/manual positions are
+        # allowed here and are counted against pilot capacity by PilotGuard.
+        exposure_clear = not orders and not unprotected
         setattr(client, "_prelive_active_positions", len(positions))
         setattr(client, "_prelive_active_orders", len(orders))
+        setattr(client, "_prelive_protected_positions", len(protected))
         setattr(client, "_prelive_unprotected_positions", len(unprotected))
         setattr(client, "_prelive_account_exposure_verified", True)
         setattr(client, "_prelive_account_exposure_clear", exposure_clear)
         log.warning(
             "[PRELIVE_ACCOUNT_EXPOSURE] result=%s positions=%s active_orders=%s "
-            "unprotected_positions=%s execution_effect=NONE",
+            "protected_positions=%s unprotected_positions=%s execution_effect=NONE",
             "PASS" if exposure_clear else "BLOCKED",
             len(positions),
             len(orders),
+            len(protected),
             len(unprotected),
         )
+        for position, evidence in protected:
+            log.info(
+                "[PRELIVE_PROTECTED_POSITION] symbol=%s evidence=%s read_only=true "
+                "capacity_effect=count_slot execution_effect=NONE",
+                _first(position, "symbol", default="?"),
+                evidence,
+            )
         if orders:
             _log_active_order_forensics(orders, log)
     except Exception as exc:
         exposure_clear = False
         setattr(client, "_prelive_active_positions", None)
         setattr(client, "_prelive_active_orders", None)
+        setattr(client, "_prelive_protected_positions", None)
         setattr(client, "_prelive_unprotected_positions", None)
         setattr(client, "_prelive_account_exposure_verified", False)
         setattr(client, "_prelive_account_exposure_clear", False)
