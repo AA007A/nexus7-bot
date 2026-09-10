@@ -65,8 +65,6 @@ jobs:
 
       - name: Deterministic PAPER and SHADOW E2E safety pack
         run: |
-          # Separate processes prevent module-level test patches from leaking
-          # between PAPER and SHADOW modes. Every command is exchange-safe.
           python -m unittest tests.test_shadow_post_ai_chain -v
           python -m unittest tests.test_paper_mutations -v
           python -m unittest tests.test_paper_signal_exit_idempotency -v
@@ -107,6 +105,9 @@ jobs:
 
       - name: KuCoin native TPSL protected-entry safety pack
         run: python -m unittest tests.test_kucoin_native_tpsl -v
+
+      - name: KuCoin fill multiplier normalization safety pack
+        run: python -m unittest tests.test_kucoin_fill_normalization -v
 
       - name: Hardened entrypoint imports with unified thresholds
         env:
