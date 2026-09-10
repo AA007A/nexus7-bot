@@ -30,7 +30,7 @@ class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "time": 2000,
                     "type": "TransferOut",
-                    "amount": 14.0,
+                    "amount": -14.0,
                     "fee": 0,
                     "accountEquity": 20.8664,
                     "status": "Completed",
@@ -60,12 +60,46 @@ class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
         )
         save.assert_awaited_once_with(LAST_FLOW_OFFSET_KEY, "11", strict=True)
 
+    async def test_bootstrap_can_match_recent_transfer_even_if_not_newest_transfer(self):
+        client = DummyClient({
+            "dataList": [
+                {
+                    "time": 2000,
+                    "type": "TransferOut",
+                    "amount": -14.0,
+                    "accountEquity": 20.8664,
+                    "status": "Completed",
+                    "offset": 11,
+                },
+                {
+                    "time": 3000,
+                    "type": "TransferIn",
+                    "amount": 5.0,
+                    "accountEquity": 84.9133,
+                    "status": "Completed",
+                    "offset": 12,
+                },
+            ]
+        })
+        risk = object()
+
+        with patch("bot.capital_flow_reconciliation.db.load_key_value", AsyncMock(return_value=None)), \
+             patch("bot.capital_flow_reconciliation.db.save_key_value", AsyncMock(return_value=True)) as save, \
+             patch("bot.capital_flow_reconciliation.rebase_real_account_peak_for_external_flow", AsyncMock(return_value=22.9)) as rebase:
+            result = await reconcile_external_capital_flows(client, risk, 20.8664, strict=True)
+
+        self.assertEqual(result["applied"], 1)
+        kwargs = rebase.await_args.kwargs
+        self.assertEqual(kwargs["flow_offset"], "11")
+        self.assertEqual(kwargs["flow_amount"], 14.0)
+        save.assert_awaited_once_with(LAST_FLOW_OFFSET_KEY, "12", strict=True)
+
     async def test_bootstrap_equity_mismatch_does_not_rebase_but_checkpoints(self):
         client = DummyClient({
             "dataList": [{
                 "time": 2000,
                 "type": "TransferOut",
-                "amount": 14.0,
+                "amount": -14.0,
                 "fee": 0,
                 "accountEquity": 20.8664,
                 "status": "Completed",
@@ -90,7 +124,7 @@ class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "time": 1000,
                     "type": "TransferOut",
-                    "amount": 2.0,
+                    "amount": -2.0,
                     "accountEquity": 98.0,
                     "status": "Completed",
                     "offset": 10,
@@ -106,7 +140,7 @@ class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "time": 3000,
                     "type": "TransferOut",
-                    "amount": 3.0,
+                    "amount": -3.0,
                     "accountEquity": 105.0,
                     "status": "Pending",
                     "offset": 12,
@@ -160,7 +194,7 @@ class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
             "dataList": [{
                 "time": 2000,
                 "type": "TransferOut",
-                "amount": 5.0,
+                "amount": -5.0,
                 "accountEquity": 95.0,
                 "status": "Completed",
                 "offset": 11,
