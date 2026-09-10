@@ -26,12 +26,14 @@ async def refresh_shadow_risk(engine):
     engine._shadow_margin_balance = state.get("marginBalance")
 
     log.info(
-        "[SHADOW_BALANCE_SEMANTICS] equity=%.4f available=%.4f "
-        "drawdown=%.2f%% capital_basis=accountEquity collateral_basis=availableBalance "
-        "execution_effect=NONE",
+        "[SHADOW_BALANCE_SEMANTICS] equity=%.4f available=%.4f peak_equity=%.4f "
+        "drawdown=%.2f%% capital_basis=accountEquity collateral_basis=%s "
+        "drawdown_basis=process_high_water_mark execution_effect=NONE",
         equity,
         available,
+        float(getattr(engine.risk, "peak_balance", 0.0) or 0.0),
         engine.risk.drawdown * 100.0,
+        state.get("available_source", "unknown"),
     )
     return state
 
