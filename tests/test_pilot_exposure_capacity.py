@@ -42,13 +42,25 @@ class PilotExposureCapacityTests(unittest.TestCase):
             integrity=_Integrity(issues or []),
         )
 
-    def _client(self, available=50.0, equity=100.0, position_margin=20.0, age=0.0):
-        return SimpleNamespace(_last_account_overview_snapshot={
+    def _client(
+        self,
+        available=50.0,
+        equity=100.0,
+        position_margin=20.0,
+        order_margin=0.0,
+        available_margin=None,
+        age=0.0,
+    ):
+        snap = {
             "accountEquity": equity,
             "availableBalance": available,
             "positionMargin": position_margin,
+            "orderMargin": order_margin,
             "_observed_at": time.time() - age,
-        })
+        }
+        if available_margin is not None:
+            snap["availableMargin"] = available_margin
+        return SimpleNamespace(_last_account_overview_snapshot=snap)
 
     def test_external_position_counts_toward_pilot_concurrency(self):
         issue = SimpleNamespace(
@@ -92,12 +104,43 @@ class PilotExposureCapacityTests(unittest.TestCase):
         reasons = guard.evaluate(self._engine(), self._client(available=10.0), "ETHUSDT")
         self.assertTrue(any(r.startswith("PILOT_AVAILABLE_CAPACITY:") for r in reasons))
 
+    def test_cross_margin_available_margin_is_preferred(self):
+        guard = _PilotGuard()
+        reasons = guard.evaluate(
+            self._engine(),
+            self._client(available=90.0, available_margin=10.0),
+            "ETHUSDT",
+        )
+        self.assertTrue(any(r.startswith("PILOT_AVAILABLE_CAPACITY:") for r in reasons))
+
     def test_high_position_margin_blocks(self):
         guard = _PilotGuard()
         reasons = guard.evaluate(
-            self._engine(), self._client(available=30.0, position_margin=90.0), "ETHUSDT"
+            self._engine(), self._client(available=10.0, position_margin=90.0), "ETHUSDT"
         )
         self.assertTrue(any(r.startswith("PILOT_MARGIN_CAPACITY:") for r in reasons))
+
+    def test_negative_legacy_position_margin_cannot_bypass_capacity_gate(self):
+        guard = _PilotGuard()
+        reasons = guard.evaluate(
+            self._engine(),
+            self._client(
+                equity=100.0,
+                available=90.0,
+                available_margin=10.0,
+                position_margin=-25.0,
+                order_margin=0.0,
+            ),
+            "ETHUSDT",
+        )
+        self.assertTrue(any(r.startswith("PILOT_MARGIN_CAPACITY:") for r in reasons))
+
+    def test_nonfinite_capital_is_fail_closed(self):
+        guard = _PilotGuard()
+        reasons = guard.evaluate(
+            self._engine(), self._client(equity=float("nan")), "ETHUSDT"
+        )
+        self.assertTrue(any(r.startswith("PILOT_CAPITAL_VALUES:") for r in reasons))
 
     def test_missing_snapshot_is_fail_closed(self):
         guard = _PilotGuard()
