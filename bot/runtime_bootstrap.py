@@ -56,6 +56,7 @@ def install() -> None:
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
+    from bot import kucoin_cross_margin_order as _kucoin_cross_margin_order
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import pilot as _pilot
     from bot import score as _score
@@ -79,6 +80,7 @@ def install() -> None:
     _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
     _pilot_external_position_guard.install(TradingEngine, _log)
     _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
+    _kucoin_cross_margin_order.install(_kucoin.KuCoinClient, _log)
     _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
 
     if _pilot_release_control.live_pilot_release_authorized():
