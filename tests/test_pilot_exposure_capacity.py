@@ -56,8 +56,36 @@ class PilotExposureCapacityTests(unittest.TestCase):
             detail="XRPUSDT: posição externa protegida",
         )
         guard = _PilotGuard()
-        reasons = guard.evaluate(self._engine([issue]), self._client(), "ETHUSDT")
+        reasons = guard.evaluate(
+            self._engine([issue], positions={"BTCUSDT": object()}),
+            self._client(),
+            "ETHUSDT",
+        )
         self.assertTrue(any(r.startswith("PILOT_TOTAL_CONCURRENT:") for r in reasons))
+
+    def test_two_external_positions_fill_pilot_capacity(self):
+        issues = [
+            SimpleNamespace(
+                code="EXTERNAL_POSITION_PROTECTED",
+                detail="XRPUSDT: posição externa protegida",
+            ),
+            SimpleNamespace(
+                code="EXTERNAL_POSITION_PROTECTED",
+                detail="BTCUSDT: posição externa protegida",
+            ),
+        ]
+        guard = _PilotGuard()
+        reasons = guard.evaluate(self._engine(issues), self._client(), "ETHUSDT")
+        self.assertTrue(any(r.startswith("PILOT_TOTAL_CONCURRENT:") for r in reasons))
+
+    def test_one_external_position_alone_leaves_one_pilot_slot(self):
+        issue = SimpleNamespace(
+            code="EXTERNAL_POSITION_PROTECTED",
+            detail="XRPUSDT: posição externa protegida",
+        )
+        guard = _PilotGuard()
+        reasons = guard.evaluate(self._engine([issue]), self._client(), "ETHUSDT")
+        self.assertFalse(any(r.startswith("PILOT_TOTAL_CONCURRENT:") for r in reasons))
 
     def test_low_available_equity_blocks(self):
         guard = _PilotGuard()
