@@ -56,7 +56,31 @@ def install(log):
         if getattr(self, "paper_trade", False):
             return await original_open(self, sig, *args, **kwargs)
         self._validation_safety_lock_active = True
-        if not getattr(self, "_shadow_prelive_readonly_ready", False):
+
+        # Re-read current exposure on every candidate. This keeps SHADOW
+        # readiness synchronized with manual stop changes made after startup,
+        # while failing closed again immediately if a stop disappears or an
+        # account read becomes unverifiable. The check is authenticated READ
+        # only and never places/cancels/amends an exchange order.
+        from bot import private_ws_readonly_observability
+        exposure_clear = bool(
+            await private_ws_readonly_observability.refresh_account_exposure(
+                self.client, log
+            )
+        )
+        private_ws_ok = bool(
+            getattr(self.client, "_prelive_private_ws_probe_ok", False)
+        )
+        self._shadow_prelive_readonly_ready = bool(exposure_clear and private_ws_ok)
+        log.info(
+            "[SHADOW_PRELIVE_REFRESH] result=%s exposure_clear=%s private_ws=%s "
+            "execution_effect=NONE",
+            "PASS" if self._shadow_prelive_readonly_ready else "BLOCKED",
+            exposure_clear,
+            private_ws_ok,
+        )
+
+        if not self._shadow_prelive_readonly_ready:
             log.warning(
                 "[SHADOW_GATE] symbol=%s stage=ACCOUNT_EXPOSURE result=BLOCK "
                 "reason=prelive_readonly_not_clear execution_effect=NONE",
