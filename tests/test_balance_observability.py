@@ -7,14 +7,24 @@ def test_exchange_balance_is_read_only_in_paper():
         "available_usdt": 0.4917,
         "source": "KuCoin",
         "read_only": True,
+        "mode": "PAPER_READ_ONLY",
         "used_for_paper_sizing": False,
     }
 
 
-def test_exchange_balance_is_not_marked_read_only_in_live():
-    meta = exchange_metadata(12.34567, False)
+def test_exchange_balance_is_read_only_in_shadow():
+    meta = exchange_metadata(12.34567, False, True)
+    assert meta["available_usdt"] == 12.3457
+    assert meta["read_only"] is True
+    assert meta["mode"] == "SHADOW_READ_ONLY"
+    assert meta["used_for_paper_sizing"] is False
+
+
+def test_exchange_balance_is_live_only_when_execution_mode_is_live():
+    meta = exchange_metadata(12.34567, False, False)
     assert meta["available_usdt"] == 12.3457
     assert meta["read_only"] is False
+    assert meta["mode"] == "LIVE"
     assert meta["used_for_paper_sizing"] is False
 
 
