@@ -53,6 +53,21 @@ def observe_analyze_mtf(func):
                 "decision_effect=NONE execution_effect=NONE",
                 type(exc).__name__,
             )
+
+        # Separate cohort for the fast-transition case that production cannot
+        # currently trade: confirmed 4H is still opposite/neutral, while the
+        # forming 4H has flipped into strong confirmed 1H+15M alignment.
+        # This is deliberately observational until its forward outcomes show
+        # positive expectancy after costs.
+        try:
+            from bot import htf_transition_shadow as transition
+            transition.observe(symbol, k15, k1h, k4h, result, log)
+        except Exception as exc:
+            log.debug(
+                "[HTF_TRANSITION_SHADOW] observability_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
         return result
 
     return wrapped
