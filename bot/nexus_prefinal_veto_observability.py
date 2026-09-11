@@ -4,8 +4,9 @@ Some NEXUS vetoes happen before ``_score_components`` (for example MTF/ensemble
 divergence). In those cases the final score is intentionally unavailable, but
 operators still need to know which ensemble models produced the opposing vote.
 
-This module logs the model snapshot already attached to ``NexusDecision``. It
-never changes the decision, threshold, score, risk state, or exchange behavior.
+This module logs the model snapshot already attached to ``NexusDecision``. The
+install hook also installs the narrow regime-transition consistency guard before
+wrapping ``decide`` so veto telemetry observes the exact decision execution sees.
 """
 from __future__ import annotations
 
@@ -56,6 +57,13 @@ def _terminal_reason(decision) -> str:
 def install(nexus_ai, log) -> None:
     if getattr(nexus_ai, "_prefinal_veto_observability_installed", False):
         return
+
+    # Keep bootstrap ordering stable: this module is already installed after
+    # live-cost calibration and immediately before final veto observability.
+    # Install the transition guard here so it is active before ``decide`` is
+    # captured below, without changing runtime thresholds or execution routing.
+    from bot import nexus_regime_transition_consistency as transition_consistency
+    transition_consistency.install(nexus_ai, log)
 
     original_decide = nexus_ai.decide
 
