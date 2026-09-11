@@ -90,11 +90,14 @@ def classify_startup_block(
 
 def telegram_block_message(block: StartupBlock, startup_id: str = "unknown") -> str:
     """Build an unambiguous operator alert without leaking exception details."""
+    def escape(value):
+        return "".join("\\" + char if char in "\\_*`[" else char for char in str(value))
+
     return (
         "🚫 *BOT BLOQUEADO NO STARTUP*\n"
         f"Código: `{block.code}`\n"
         f"Startup: `{startup_id}`\n"
-        f"Causa: {block.detail}\n"
+        f"Causa: {escape(block.detail)}\n"
         "Nenhuma ordem será enviada enquanto o bloqueio estiver ativo.\n"
         "_Verifique os logs do Railway para o mesmo Startup ID._"
     )

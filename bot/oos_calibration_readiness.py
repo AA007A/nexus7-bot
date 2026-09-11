@@ -6,6 +6,7 @@ thresholds, scores, risk, sizing, release state, or exchange behavior.
 from __future__ import annotations
 
 from dataclasses import asdict
+from bot.nexus_probability import PROBABILITY_MODEL, heuristic_win_probability
 import time
 
 from bot.oos_model_validation import (
@@ -27,7 +28,7 @@ def _row_values(row):
 
 
 def normalize_completed_rows(rows) -> tuple[list[ValidationRow], int]:
-    """Normalize DB evidence; malformed rows are counted and excluded."""
+    """Reconstruct the EV heuristic from stored confidence, excluding bad rows."""
     valid: list[ValidationRow] = []
     invalid = 0
     for raw in rows or []:
@@ -35,7 +36,7 @@ def normalize_completed_rows(rows) -> tuple[list[ValidationRow], int]:
             timestamp, confidence, outcome, r_multiple = _row_values(raw)
             item = ValidationRow(
                 timestamp=float(timestamp),
-                confidence=float(confidence) / 100.0,
+                confidence=heuristic_win_probability(confidence),
                 outcome=int(outcome),
                 r_multiple=float(r_multiple),
             ).validate()
@@ -113,7 +114,8 @@ def compact_readiness_log(snapshot: dict) -> str:
         f"brier={metric('brier')} ece={metric('ece')} "
         f"win_rate={metric('win_rate')} expectancy_r={metric('expectancy_r')} "
         f"calibration_slope={metric('calibration_slope')} blockers={blockers} "
-        "decision_effect=NONE execution_effect=NONE"
+        f"probability_model={PROBABILITY_MODEL} probability_source=reconstructed_heuristic "
+        "empirically_calibrated=False decision_effect=NONE execution_effect=NONE"
     )
 
 
