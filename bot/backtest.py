@@ -7,12 +7,14 @@ Quant-audit hardening:
 - Trade hour/day are derived from the real candle timestamp.
 - Same-bar SL/TP ambiguity is resolved conservatively (stop first).
 - Backtests never mutate shared runtime configuration.
+- MTF context is aligned by real candle close timestamps, never index ratios.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import time
+from bisect import bisect_right
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -29,6 +31,42 @@ def _interval_minutes(interval: str) -> int:
     if s == "W":
         return 10080
     return int(s)
+
+
+def _ts_ms(candle: dict) -> int:
+    """Normalize a project candle timestamp to milliseconds."""
+    ts = int(candle.get("ts", 0) or 0)
+    if ts < 1e11:
+        ts *= 1000
+    return ts
+
+
+def _timestamp_index(candles: list) -> list[int]:
+    """Build a chronological open-timestamp index for bisect-based MTF alignment."""
+    return [_ts_ms(c) for c in candles]
+
+
+def _closed_window_by_ts(
+    candles: list,
+    open_timestamps_ms: list[int],
+    decision_ts_ms: int,
+    interval_min: int,
+    lookback: int,
+) -> list:
+    """Return only candles that were fully closed at ``decision_ts_ms``.
+
+    KuCoin kline timestamps represent candle opens. A higher-timeframe candle
+    is therefore admissible only when ``open_ts + interval <= decision_ts``.
+    This prevents look-ahead and remains correct when any timeframe contains
+    missing candles/gaps, unlike positional ``i//4`` and ``i//16`` mapping.
+    """
+    if not candles or not open_timestamps_ms or lookback <= 0:
+        return []
+    interval_ms = int(interval_min) * 60 * 1000
+    latest_closed_open = int(decision_ts_ms) - interval_ms
+    end = bisect_right(open_timestamps_ms, latest_closed_open)
+    start = max(0, end - int(lookback))
+    return candles[start:end]
 
 
 def _normalize_kline(raw) -> dict | None:
@@ -191,10 +229,15 @@ def _run_strategy(
     analysis_errors = 0
     WINDOW = 60
 
+    ts15 = _timestamp_index(klines_15)
+    ts1h = _timestamp_index(klines_1h)
+    ts4h = _timestamp_index(klines_4h)
+
     for i in range(WINDOW, len(klines_15) - 1):
-        k15 = klines_15[max(0, i - WINDOW):i]
-        k1h = klines_1h[max(0, i // 4 - 20):i // 4]
-        k4h = klines_4h[max(0, i // 16 - 15):i // 16]
+        decision_ts = ts15[i]
+        k15 = _closed_window_by_ts(klines_15, ts15, decision_ts, 15, WINDOW)
+        k1h = _closed_window_by_ts(klines_1h, ts1h, decision_ts, 60, 20)
+        k4h = _closed_window_by_ts(klines_4h, ts4h, decision_ts, 240, 15)
         if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
             continue
 
@@ -303,9 +346,7 @@ def _run_strategy(
             pnl_pct = base * (0.5 if tp1_hit else 1.0)
             pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
 
-        ts_ms = int(klines_15[i].get("ts", 0) or 0)
-        if ts_ms < 1e11:
-            ts_ms *= 1000
+        ts_ms = decision_ts
         dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
         trades.append(
             {
@@ -433,14 +474,20 @@ def _walk_forward(
         if end_idx - start_idx < 120 or start_idx >= n:
             continue
         w15 = klines_15[start_idx:end_idx]
-        w1 = klines_1h[start_idx // 4:end_idx // 4]
-        w4 = klines_4h[start_idx // 16:end_idx // 16]
         split = int(len(w15) * train_ratio)
         train_15, test_15 = w15[:split], w15[split:]
-        train_1, test_1 = w1[:split // 4], w1[split // 4:]
-        train_4, test_4 = w4[:split // 16], w4[split // 16:]
-        train_trades = _run_strategy(train_15, train_1, train_4, symbol=symbol) if len(train_15) >= 60 else []
-        test_trades = _run_strategy(test_15, test_1, test_4, symbol=symbol) if len(test_15) >= 30 else []
+
+        # Keep complete HTF histories available. _run_strategy admits only
+        # candles closed at each 15m decision timestamp, so this preserves
+        # pre-window context without leaking future 1h/4h candles.
+        train_trades = (
+            _run_strategy(train_15, klines_1h, klines_4h, symbol=symbol)
+            if len(train_15) >= 60 else []
+        )
+        test_trades = (
+            _run_strategy(test_15, klines_1h, klines_4h, symbol=symbol)
+            if len(test_15) >= 30 else []
+        )
         train_m = _calc_metrics(train_trades, "train") if train_trades else {}
         test_m = _calc_metrics(test_trades, "test") if test_trades else {}
         results.append(
