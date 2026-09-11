@@ -71,6 +71,7 @@ def install() -> None:
     from bot import order_state as _order_state
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import adaptive_mtf_entry as _adaptive_mtf_entry
+    from bot import pullback_confirmation_hardening as _pullback_confirmation_hardening
     from bot import strategy as _strategy
     from bot import pilot as _pilot
     from bot import score as _score
@@ -145,6 +146,10 @@ def install() -> None:
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
+    # The adaptive wrapper resolves strict/rescue candidates first. Pullback
+    # confirmation is intentionally outermost so every PULLBACK output is
+    # checked against the same confirmed 15m reversal evidence.
+    _pullback_confirmation_hardening.install(_strategy.Analyzer, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
