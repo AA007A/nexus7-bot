@@ -29,7 +29,8 @@ class NexusTerminalNotificationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         terminal._terminal_cache.clear()
         self.sig = _Sig(
-            symbol="LINKUSDT", direction="SHORT", entry=11.49, sl=11.61, tp=11.26
+            symbol="LINKUSDT", direction="SHORT", entry=11.49, sl=11.61, tp=11.26,
+            score=72,
         )
 
     async def _drain(self):
@@ -60,8 +61,45 @@ class NexusTerminalNotificationTests(unittest.IsolatedAsyncioTestCase):
         notifier.notify.assert_awaited_once()
         text = notifier.notify.await_args.args[0]
         self.assertIn("NEXUS AI — REJEITADO", text)
-        self.assertIn("R:R líquido", text)
+        self.assertIn("Score candidato: `72.0/100`", text)
+        self.assertIn("Score NEXUS: `72.0`", text)
+        self.assertIn("R:R líquido: `1.47`", text)
+        self.assertIn("EV: `+0.120%`", text)
         self.assertIn("Nenhuma ordem foi enviada", text)
+
+    async def test_early_rr_veto_never_reports_fake_zero_metrics(self):
+        decision = SimpleNamespace(
+            execution_allowed=False,
+            setup_quality=0.0,
+            confidence=0.0,
+            risk_reward=0.0,
+            expected_value=0.0,
+            reasoning=[
+                "Regime: TRENDING_BEAR",
+                "Ensemble: SHORT conf=81.0 (HIGH) | modelos=5",
+                "R:R líquido 1.33 < mínimo líquido 1.60 (bruto exigido: 2.0)",
+            ],
+            validation_reason=None,
+        )
+
+        class Engine:
+            async def _nexus_validate(self, sig):
+                return decision
+
+        notifier = _Notifier()
+        terminal.install(Engine, notifier, _NexusTypes, _Log())
+        await Engine()._nexus_validate(self.sig)
+        await self._drain()
+
+        text = notifier.notify.await_args.args[0]
+        self.assertIn("Score candidato: `72.0/100`", text)
+        self.assertIn("Score NEXUS: `não calculado (veto anterior ao score final)`", text)
+        self.assertIn("Confiança: `81.0%`", text)
+        self.assertIn("R:R líquido: `1.33`", text)
+        self.assertIn("EV: `—`", text)
+        self.assertNotIn("Score final: `0.0/100`", text)
+        self.assertNotIn("R:R líquido: `0.00`", text)
+        self.assertNotIn("EV: `+0.000%`", text)
 
     async def test_approval_does_not_duplicate_existing_core_notification(self):
         decision = SimpleNamespace(
