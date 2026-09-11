@@ -3,11 +3,17 @@
 This module never sends, cancels or modifies an exchange order. It is designed
 for the final pre-dispatch recheck so a stale analysis cannot proceed after
 account exposure or market microstructure changes.
+
+SHADOW and LIVE consume the same microstructure evaluator. LIVE additionally
+uses ``live_microstructure_recheck`` to perform fresh REST ticker/order-book
+reads immediately before the engine's durable dispatch boundary.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import math
+import os
 from typing import Any, Iterable, Mapping
 
 
@@ -25,12 +31,68 @@ class PreDispatchResult:
     metrics: dict[str, float] = field(default_factory=dict)
 
 
+def limits_from_env() -> MicrostructureLimits:
+    """Single configuration contract for SHADOW/LIVE execution quality."""
+    return MicrostructureLimits(
+        max_spread_bps=float(os.environ.get("NEXUS_MAX_SPREAD_BPS", "12")),
+        max_signal_drift_bps=float(os.environ.get("NEXUS_MAX_SIGNAL_DRIFT_BPS", "20")),
+        min_depth_multiple=float(os.environ.get("NEXUS_MIN_DEPTH_MULTIPLE", "3")),
+    )
+
+
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         out = float(value)
     except (TypeError, ValueError):
         return default
     return out if math.isfinite(out) else default
+
+
+def normalize_orderbook_base_units(
+    instruments: Mapping[str, Mapping[str, Any]],
+    symbol: str,
+    raw: Mapping[str, Any] | None,
+) -> dict | None:
+    """Convert KuCoin Futures contract depth to base-asset quantities.
+
+    ``evaluate_microstructure`` compares visible depth with the base quantity
+    submitted by the engine, so the exchange's contract counts must never be
+    compared directly with base units.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    info = instruments.get(symbol, {}) if isinstance(instruments, Mapping) else {}
+    multiplier = _num((info or {}).get("multiplier"))
+    if multiplier <= 0:
+        return None
+
+    def _levels(*keys: str) -> list[list[float]]:
+        rows = None
+        for key in keys:
+            candidate = raw.get(key)
+            if candidate is not None:
+                rows = candidate
+                break
+        if not isinstance(rows, Iterable) or isinstance(rows, (str, bytes, Mapping)):
+            return []
+        out: list[list[float]] = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                price = _num(row.get("price"))
+                contracts = _num(row.get("size") or row.get("qty") or row.get("quantity"))
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                price = _num(row[0])
+                contracts = _num(row[1])
+            else:
+                continue
+            if price > 0 and contracts >= 0:
+                out.append([price, contracts * multiplier])
+        return out
+
+    return {
+        "bids": _levels("b", "bids"),
+        "asks": _levels("a", "asks"),
+    }
 
 
 def evaluate_microstructure(
@@ -93,6 +155,48 @@ def evaluate_microstructure(
     if last > 0:
         metrics["last_to_executable_bps"] = abs(executable - last) / last * 10000.0
     return PreDispatchResult(not blockers, blockers, metrics)
+
+
+async def live_microstructure_recheck(
+    client,
+    *,
+    instruments: Mapping[str, Mapping[str, Any]],
+    symbol: str,
+    signal_entry: float,
+    side: str,
+    qty: float,
+    limits: MicrostructureLimits | None = None,
+    timeout_s: float = 4.0,
+) -> PreDispatchResult:
+    """Fresh REST spread/depth/drift check for the LIVE dispatch boundary.
+
+    Cached quotes are deliberately not used here: this check exists precisely
+    to catch market movement that happened after signal analysis. Any timeout,
+    exchange-read error, malformed book, or missing top-of-book blocks the new
+    opening order. Reduce-only emergency/exit orders are outside this function.
+    """
+    try:
+        ticker, raw_book = await asyncio.wait_for(
+            asyncio.gather(
+                client.get_ticker(symbol),
+                client.get_orderbook(symbol, depth=20),
+            ),
+            timeout=float(timeout_s),
+        )
+    except asyncio.TimeoutError:
+        return PreDispatchResult(False, ["MICROSTRUCTURE_RECHECK_TIMEOUT"], {})
+    except Exception:
+        return PreDispatchResult(False, ["MICROSTRUCTURE_RECHECK_FAILED"], {})
+
+    book = normalize_orderbook_base_units(instruments, symbol, raw_book)
+    return evaluate_microstructure(
+        signal_entry=float(signal_entry),
+        side=side,
+        qty=float(qty),
+        ticker=ticker if isinstance(ticker, Mapping) else {},
+        orderbook=book,
+        limits=limits or limits_from_env(),
+    )
 
 
 async def recheck_exchange_exposure(client, symbol: str) -> PreDispatchResult:

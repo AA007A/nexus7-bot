@@ -45,6 +45,9 @@ class _Risk:
 
 
 class _Log:
+    def info(self, *args, **kwargs):
+        pass
+
     def critical(self, *args, **kwargs):
         pass
 
@@ -69,6 +72,9 @@ class PilotRiskCapInstallTests(unittest.TestCase):
                 self.positions = {}
                 self.observed_qty = None
 
+            async def _refresh_entry_balance(self):
+                return True
+
             async def _open(self, sig):
                 self.observed_qty = engine_module.minimum_base_quantity(
                     self.instruments["DOTUSDT"], 1.0
@@ -91,6 +97,109 @@ class PilotRiskCapInstallTests(unittest.TestCase):
             self.assertEqual(instance.risk.calls[0][0], "DOTUSDT")
         finally:
             engine_module.minimum_base_quantity = original_module_minimum
+
+
+class _MarketClient:
+    def __init__(self, ticker, book):
+        self.ticker = ticker
+        self.book = book
+        self.place_calls = 0
+        self.ticker_calls = 0
+        self.book_calls = 0
+
+    async def get_ticker(self, symbol):
+        self.ticker_calls += 1
+        return self.ticker
+
+    async def get_orderbook(self, symbol, depth=20):
+        self.book_calls += 1
+        return self.book
+
+    async def place_order(self, **kwargs):
+        self.place_calls += 1
+        return {"orderId": "should-only-exist-on-pass"}
+
+
+class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
+    async def _exercise(self, *, ticker, book):
+        from bot import engine as engine_module
+
+        original_module_minimum = engine_module.minimum_base_quantity
+
+        class FakeEngine:
+            _pilot_risk_cap_hardening_installed = False
+
+            def __init__(self):
+                self.paper_trade = False
+                self.pilot = _Pilot()
+                self.risk = _Risk(6.0)
+                self.instruments = {"DOTUSDT": {"multiplier": 1.0}}
+                self.positions = {}
+                self.client = _MarketClient(ticker, book)
+
+            async def _refresh_entry_balance(self):
+                return True
+
+            async def _open(self, sig):
+                qty = engine_module.minimum_base_quantity(
+                    self.instruments[sig.symbol], sig.entry
+                )
+                if not await self._refresh_entry_balance():
+                    return None
+                return await self.client.place_order(
+                    symbol=sig.symbol,
+                    side="Buy" if sig.direction == "LONG" else "Sell",
+                    qty=qty,
+                )
+
+        class Sig:
+            symbol = "DOTUSDT"
+            entry = 100.0
+            direction = "LONG"
+
+        try:
+            engine_module.minimum_base_quantity = lambda info, price: 10.0
+            guard.install(FakeEngine, _Log())
+            instance = FakeEngine()
+            result = await instance._open(Sig())
+            return instance, result
+        finally:
+            engine_module.minimum_base_quantity = original_module_minimum
+
+    async def test_wide_spread_blocks_before_place_order(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 99.0, "ask": 101.0, "lastPrice": 100.0},
+            book={"b": [[99.0, 100]], "a": [[101.0, 100]]},
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+        self.assertEqual(instance.client.ticker_calls, 1)
+        self.assertEqual(instance.client.book_calls, 1)
+
+    async def test_insufficient_depth_blocks_before_place_order(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+            # final qty=6, depth=1 => 0.166x, below 3x requirement
+            book={"b": [[99.98, 1]], "a": [[100.02, 1]]},
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+
+    async def test_signal_price_drift_blocks_before_place_order(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 100.95, "ask": 101.0, "lastPrice": 100.98},
+            book={"b": [[100.95, 100]], "a": [[101.0, 100]]},
+        )
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+
+    async def test_good_market_can_reach_normal_place_order_path(self):
+        instance, result = await self._exercise(
+            ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+            book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+        )
+        self.assertEqual(result["orderId"], "should-only-exist-on-pass")
+        self.assertEqual(instance.client.place_calls, 1)
 
 
 if __name__ == "__main__":
