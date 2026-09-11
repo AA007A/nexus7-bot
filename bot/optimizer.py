@@ -2,10 +2,15 @@
 
 H02/H03 hardening:
 - Optuna fits hyperparameters only on TRAIN.
-- VALIDATION is used only as a promotion gate, never as the objective.
-- TEST remains untouched until the final candidate is frozen.
-- Search space contains only parameters that are actually consumed by the
-  historical simulator, eliminating inert hyperparameters.
+- VALIDATION is a promotion gate, never the objective.
+- TEST remains untouched until the candidate is frozen.
+- Search space contains only parameters that demonstrably affect replay:
+  min_score and min_rr.
+
+The production strategy currently chooses SL/TP ATR multipliers internally by
+entry type. Therefore sl_mult/tp_mult, RSI thresholds, ADX thresholds, BOS
+lookback and momentum ATR multipliers are intentionally NOT optimized here
+until they have an explicit runtime injection path.
 """
 from __future__ import annotations
 
@@ -31,25 +36,19 @@ from bot.logger import log
 
 PARAMS_FILE = Path(__file__).parent / "params_optimized.json"
 
-# Only parameters with a verified execution path into _run_strategy belong here.
 DEFAULT_PARAMS = {
-    "sl_mult": 1.5,
-    "tp_mult": 3.0,
     "min_score": 65,
     "min_rr": 2.0,
 }
 
 
 def load_optimized_params() -> dict:
+    """Load a research candidate; this function does not mutate runtime config."""
     try:
         if PARAMS_FILE.exists():
             with open(PARAMS_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             params = data.get("best_params") or DEFAULT_PARAMS
-            log.info(
-                f"✅ Params otimizados (arquivo): score≥{params.get('min_score')} "
-                f"sl×{params.get('sl_mult')} tp×{params.get('tp_mult')} rr≥{params.get('min_rr')}"
-            )
             return dict(params)
     except Exception as exc:
         log.warning(f"load_optimized_params (arquivo): {exc}")
@@ -59,8 +58,7 @@ def load_optimized_params() -> dict:
             value = await _db.load_key_value("optimizer_params")
             if not value:
                 return None
-            data = json.loads(value)
-            return data.get("best_params")
+            return json.loads(value).get("best_params")
 
         loop = asyncio.get_event_loop()
         if not loop.is_running():
@@ -69,21 +67,21 @@ def load_optimized_params() -> dict:
                 return dict(params)
     except Exception as exc:
         log.warning(f"load_optimized_params (DB): {exc}")
-
     return DEFAULT_PARAMS.copy()
 
 
 def save_optimized_params(params: dict, metadata: dict | None = None) -> None:
+    """Persist a validated research candidate; never changes Railway variables."""
     payload = {
         "best_params": dict(params),
         "metadata": metadata or {},
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "version": "2.0-quant-audit",
+        "version": "2.1-quant-audit",
+        "runtime_applied": False,
     }
     try:
         with open(PARAMS_FILE, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
-        log.info(f"💾 Parâmetros salvos em {PARAMS_FILE}")
     except Exception as exc:
         log.warning(f"save_optimized_params (arquivo): {exc}")
 
@@ -96,36 +94,27 @@ def save_optimized_params(params: dict, metadata: dict | None = None) -> None:
 
 
 def _run_strategy_with_params(k15, k1h, k4h, params: dict, symbol: str = "") -> list:
-    """Execute only parameters that the simulator actually consumes."""
+    """Replay only parameters with a verified effect on the simulator."""
     return run_strategy_public(
         k15,
         k1h,
         k4h,
         min_score=int(params.get("min_score", DEFAULT_PARAMS["min_score"])),
         min_rr=float(params.get("min_rr", DEFAULT_PARAMS["min_rr"])),
-        sl_mult=float(params.get("sl_mult", DEFAULT_PARAMS["sl_mult"])),
-        tp_mult=float(params.get("tp_mult", DEFAULT_PARAMS["tp_mult"])),
         symbol=symbol,
     )
 
 
 def _sample_params(trial) -> dict:
-    params = {
-        "sl_mult": trial.suggest_float("sl_mult", 0.8, 3.0),
-        "tp_mult": trial.suggest_float("tp_mult", 1.5, 6.0),
+    return {
         "min_score": trial.suggest_int("min_score", 55, 80),
         "min_rr": trial.suggest_float("min_rr", 1.5, 3.0),
     }
-    return params
 
 
 def _objective(trial, k15_train, k1h_train, k4h_train, symbol: str = "") -> float:
-    """Fit objective. TRAIN only — no validation/test leakage."""
+    """TRAIN-only objective. No validation/test leakage."""
     params = _sample_params(trial)
-    # Geometry sanity: target multiple should not be materially below stop multiple.
-    if params["tp_mult"] / max(params["sl_mult"], 1e-9) < 1.2:
-        return -999.0
-
     trades = _run_strategy_with_params(k15_train, k1h_train, k4h_train, params, symbol)
     if len(trades) < 20:
         return -999.0
@@ -134,14 +123,11 @@ def _objective(trial, k15_train, k1h_train, k4h_train, symbol: str = "") -> floa
     pf = float(metrics.get("profit_factor", 0) or 0)
     expectancy = float(metrics.get("expectancy_pct", 0) or 0)
     max_dd = float(metrics.get("max_drawdown_pct", 0) or 0)
-
-    # Balanced objective: reward risk-adjusted return and positive expectancy,
-    # penalize drawdown instead of chasing win rate.
     return sharpe + min(max(pf - 1.0, -1.0), 2.0) * 0.15 + expectancy * 0.02 - max_dd * 0.002
 
 
 def _split_by_time(k15: list, k1h: list, k4h: list) -> dict:
-    """60/20/20 chronological split. TEST is never exposed to Optuna."""
+    """Chronological 60/20/20 split."""
     n = len(k15)
     train_end = int(n * 0.60)
     val_end = int(n * 0.80)
@@ -185,9 +171,6 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
 
     log.info(f"🔬 Iniciando otimização sem leakage — {symbol} | {n_trials} trials")
     t0 = time.time()
-
-    # 90 days is retained for runtime cost compatibility. Historical pagination
-    # is now deterministic; longer windows can be promoted separately.
     k15 = await fetch_history(client, symbol, "15", 8640)
     k1h = await fetch_history(client, symbol, "60", 2160)
     k4h = await fetch_history(client, symbol, "240", 540)
@@ -204,7 +187,6 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
         sampler=optuna.samplers.TPESampler(seed=42),
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=20),
     )
-
     study.optimize(
         lambda trial: _objective(trial, k15_train, k1h_train, k4h_train, symbol),
         n_trials=n_trials,
@@ -214,7 +196,7 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
     best_params = dict(study.best_params)
     train_trades = _run_strategy_with_params(k15_train, k1h_train, k4h_train, best_params, symbol)
     val_trades = _run_strategy_with_params(k15_val, k1h_val, k4h_val, best_params, symbol)
-    # TEST is touched exactly once after params are frozen.
+    # Test is evaluated once, after candidate freeze.
     test_trades = _run_strategy_with_params(k15_test, k1h_test, k4h_test, best_params, symbol)
 
     train_metrics = _calc_metrics(train_trades, "train") if train_trades else {}
@@ -222,7 +204,6 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
     test_metrics = _calc_metrics(test_trades, "test") if test_trades else {}
     promote, gate_reasons = _holdout_gate(val_metrics, test_metrics)
 
-    elapsed = round(time.time() - t0, 1)
     metadata = {
         "symbol": symbol,
         "n_trials": n_trials,
@@ -233,26 +214,21 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
         "promotion_allowed": promote,
         "promotion_block_reasons": gate_reasons,
         "split": "60_train_20_validation_20_test",
-        "test_touched_after_freeze": True,
-        "elapsed_s": elapsed,
+        "test_evaluated_after_candidate_freeze": True,
+        "runtime_applied": False,
+        "elapsed_s": round(time.time() - t0, 1),
     }
 
     if promote:
         save_optimized_params(best_params, metadata)
         log.info(
-            f"✅ Candidate promoted {symbol}: train={study.best_value:.3f} "
+            f"✅ Research candidate passed holdouts {symbol}: "
             f"VAL PF={val_metrics.get('profit_factor')} TEST PF={test_metrics.get('profit_factor')}"
         )
     else:
-        log.warning(
-            f"🚫 Candidate NOT promoted {symbol}: " + "; ".join(gate_reasons[:8])
-        )
+        log.warning(f"🚫 Research candidate blocked {symbol}: " + "; ".join(gate_reasons[:8]))
 
-    return {
-        "best_params": best_params,
-        "metadata": metadata,
-        "promoted": promote,
-    }
+    return {"best_params": best_params, "metadata": metadata, "promoted": promote}
 
 
 _optimization_lock = asyncio.Lock()
@@ -293,7 +269,7 @@ def test_parameter_robustness(
         return {"robust": False, "reason": "Base sem trades ou Sharpe não positivo"}
 
     results = []
-    for param in ("sl_mult", "tp_mult", "min_score", "min_rr"):
+    for param in ("min_score", "min_rr"):
         if param not in best_params:
             continue
         base_val = best_params[param]
@@ -329,7 +305,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--trials", type=int, default=300)
-    args = parser.parse_args()
+    parser.parse_args()
     raise SystemExit(
         "Use run_optimization(client, ...) from the BGX runtime so authenticated market data is supplied safely."
     )
