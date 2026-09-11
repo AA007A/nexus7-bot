@@ -2,9 +2,9 @@
 
 Most execution/decision hardenings are installed explicitly by
 ``bot.runtime_bootstrap``. This final layer keeps passive funnel observability,
-installs the definitive headline-semantic classifier, and activates the narrow
-NEXUS HTF-regime transition consistency guard after the rest of the NEXUS
-wrapper stack has been composed.
+installs the definitive headline-semantic classifier, activates the narrow
+NEXUS HTF-regime transition consistency guard, and applies the stop-only CROSS
+geometry target policy after the core hardening stack has been composed.
 """
 from __future__ import annotations
 
@@ -17,9 +17,16 @@ def install(TradingEngine, log) -> None:
     from bot import news_semantic_hardening as news_semantics
     from bot import nexus_ai
     from bot import nexus_regime_transition_consistency as regime_transition
+    from bot import kucoin_contract_risk_hardening as cross_risk_hardening
+    from bot import cross_geometry_target_policy as cross_target_policy
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
+
+    # The core CROSS-risk hardening is already installed by runtime_bootstrap.
+    # This policy replaces only its module-level geometry helper: class APIs,
+    # exchange routing, leverage, thresholds and sizing authorities are untouched.
+    cross_target_policy.install(cross_risk_hardening, log)
 
     # Install last so it observes the already-composed closed-candle/HTF regime
     # semantics and cost-calibrated NEXUS decision path. It does not alter any
@@ -29,7 +36,7 @@ def install(TradingEngine, log) -> None:
 
     log.info(
         "[RUNTIME_OVERLAYS] no class monkey patches remain; passive funnel "
-        "observability, final headline semantics and strict NEXUS "
-        "regime-transition consistency are active; thresholds_unchanged=true "
-        "leverage_unchanged=true"
+        "observability, final headline semantics, stop-only CROSS target policy "
+        "and strict NEXUS regime-transition consistency are active; "
+        "thresholds_unchanged=true leverage_unchanged=true"
     )
