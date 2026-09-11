@@ -35,6 +35,7 @@ def install() -> None:
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import pilot_live_runtime as _pilot_live_runtime
     from bot import pilot_risk_cap_hardening as _pilot_risk_cap_hardening
+    from bot import legacy_pretrade_advisory as _legacy_pretrade_advisory
     from bot import operational_incident_recovery as _operational_incident_recovery
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import instrument_readiness_guard as _instrument_readiness_guard
@@ -154,6 +155,13 @@ def install() -> None:
     # receive the same timestamp-confirmed candle view. It also guards KuCoin WS
     # kline volume before that data can enter the cache.
     _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
+
+    # The core engine reaches the legacy pre-trade score only after an exact
+    # fail-closed NEXUS approval. In controlled LIVE, keep that older score as
+    # telemetry rather than a second contradictory soft-score authority. All
+    # independent risk/execution hard gates remain downstream and unchanged.
+    if _pilot_release_control.live_pilot_release_authorized():
+        _legacy_pretrade_advisory.install(TradingEngine, _score, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
