@@ -18,7 +18,7 @@ def install(TradingEngine, log) -> None:
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel observability active; "
-        "final headline semantics installed; class-level execution routing "
-        "is owned by explicit hardening modules; execution_effect=NONE"
+        "[RUNTIME_OVERLAYS] no class monkey patches remain in this compatibility "
+        "installer; passive funnel observability and final headline semantics "
+        "are active; execution_effect=NONE"
     )
