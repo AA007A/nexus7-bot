@@ -7,11 +7,12 @@ a cap/target rather than an override of stop-risk sizing:
     final_qty = min(stop_risk_qty, pilot_target_qty)
 
 The exact final quantity is then carried to the engine's existing
-``_refresh_entry_balance`` call, which sits immediately before order-registry,
-durable-intent, pilot-reservation and exchange dispatch. At that boundary LIVE
-now performs the same spread, visible-depth and signal-price-drift evaluation
-used by SHADOW, but from fresh REST ticker/order-book reads. Any unavailable or
-bad execution-quality data fails closed before ``place_order`` can be reached.
+``_refresh_entry_balance`` call. The engine invokes that refresh both before
+sizing and again immediately before order-registry, durable-intent,
+pilot-reservation and exchange dispatch. The LIVE spread/depth/signal-drift
+guard therefore runs only after the final quantity has actually been computed;
+the earlier balance refresh is balance-only. Any invalid final quantity or bad
+execution-quality data still fails closed before ``place_order`` can be reached.
 
 This module does not authorize LIVE mode, change leverage, modify Railway
 variables, weaken PilotGuard, or submit orders by itself. Reduce-only exits and
@@ -139,13 +140,27 @@ def install(TradingEngine, log) -> None:
         ):
             return ok
 
+        # ``_refresh_entry_balance`` is intentionally called once before pilot
+        # sizing and again immediately before dispatch. ``None`` means sizing has
+        # not run yet, so this is the pre-sizing balance refresh, not a final
+        # dispatch context. Do not turn that valid stage into a false veto.
+        if qty is None:
+            log.debug(
+                "[LIVE_PREDISPATCH_MARKET] symbol=%s stage=PRE_SIZING "
+                "result=SKIP reason=final_qty_not_computed execution_effect=NONE",
+                symbol,
+            )
+            return ok
+
         try:
-            qty_f = float(qty or 0.0)
+            qty_f = float(qty)
             entry = float(getattr(sig, "entry", 0.0) or 0.0)
             direction = str(getattr(sig, "direction", "")).upper()
         except (TypeError, ValueError):
             qty_f, entry, direction = 0.0, 0.0, ""
 
+        # Once sizing has executed, invalid/zero quantity is a real final-stage
+        # failure and remains fail-closed.
         if qty_f <= 0 or entry <= 0 or direction not in ("LONG", "SHORT"):
             log.critical(
                 "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK "
@@ -196,5 +211,5 @@ def install(TradingEngine, log) -> None:
     log.critical(
         "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
         "notional target; RiskManagerV3 is the maximum quantity authority; "
-        "LIVE spread/depth/signal-drift rechecked fail-closed immediately before dispatch"
+        "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing"
     )
