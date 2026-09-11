@@ -22,10 +22,11 @@ from fastapi.responses import JSONResponse
 
 # ---------------------------------------------------------------------------
 # Threshold contract: strategy candidate floor and NEXUS evaluation floor
-# must not silently diverge in production.  If NEXUS_MIN_SCORE is absent, use
-# the strategy floor.  If both are present but differ, fail closed at startup.
+# must not silently diverge in production. If NEXUS_MIN_SCORE is absent, use
+# the strategy floor. If both are present but differ, fail closed at startup.
+# The canonical code fallback is 60, matching production's current contract.
 # ---------------------------------------------------------------------------
-_strategy_floor_raw = os.environ.get("MIN_ENTRY_SCORE", "65").strip() or "65"
+_strategy_floor_raw = os.environ.get("MIN_ENTRY_SCORE", "60").strip() or "60"
 _nexus_floor_raw = os.environ.get("NEXUS_MIN_SCORE", _strategy_floor_raw).strip() or _strategy_floor_raw
 try:
     _strategy_floor = float(_strategy_floor_raw)
@@ -52,8 +53,8 @@ async def destructive_admin_guard(request: Request, call_next):
     """Require explicit human intent for the destructive close-all endpoint.
 
     Bearer authentication and the existing rate limiter remain enforced by the
-    original endpoint.  This adds a separate confirmation gate against
-    accidental/cross-client invocation.  It intentionally does not weaken or
+    original endpoint. This adds a separate confirmation gate against
+    accidental/cross-client invocation. It intentionally does not weaken or
     bypass the existing authentication layer.
     """
     if request.method.upper() == "POST" and request.url.path == "/api/close-all":
@@ -84,7 +85,7 @@ async def readiness():
     """Operational readiness: HTTP 503 whenever trading runtime is not ready.
 
     Unlike /health (liveness), this endpoint is designed for Railway readiness
-    checks.  It performs no exchange I/O and derives state from the already
+    checks. It performs no exchange I/O and derives state from the already
     observed runtime so a transient KuCoin call cannot itself make the probe
     hang.
     """

@@ -51,8 +51,10 @@ class Config:
     # Correlation
     MAX_CORRELATION: float = float(os.environ.get("MAX_CORRELATION", "0.70"))
 
-    # Entry quality. 65 aligns the pre-AI gate with the NEXUS NO_TRADE floor.
-    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "65"))
+    # Entry quality. 60 is the canonical fallback shared with the NEXUS gate.
+    # Production may override it, but config drift must never be created merely
+    # because an environment variable is absent in a new environment.
+    MIN_ENTRY_SCORE: int   = int(os.environ.get("MIN_ENTRY_SCORE", "60"))
     POST_TARGET_SCORE: int = int(os.environ.get("POST_TARGET_SCORE", "72"))
     POST_TARGET_RISK: float = float(os.environ.get("POST_TARGET_RISK", "0.005"))
     MIN_VOLUME_MULT: float = float(os.environ.get("MIN_VOLUME_MULT", "0.5"))
