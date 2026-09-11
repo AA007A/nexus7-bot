@@ -48,6 +48,7 @@ def install() -> None:
     from bot import nexus_structure_semantics as _nexus_structure_semantics
     from bot import nexus_decision_consistency as _nexus_decision_consistency
     from bot import nexus_live_cost_calibration as _nexus_live_cost_calibration
+    from bot import nexus_regime_transition_consistency as _nexus_regime_transition_consistency
     from bot import nexus_prefinal_veto_observability as _nexus_prefinal_veto_observability
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
@@ -146,36 +147,22 @@ def install() -> None:
     _shadow_mode_observability.install(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
-    # Optional enrichment is scored before structure semantics and the
-    # closed-candle parity wrapper so production decisions and read-only score
-    # decomposition use exactly the same component denominator.
     _nexus_optional_evidence.install(_nexus_ai, _log)
     _nexus_structure_semantics.install(_nexus_ai, _log)
     _nexus_decision_consistency.install(_nexus_ai, _log)
-    # Cost calibration changes only the EV cost inputs. It must sit after the
-    # decision-consistency wrapper but before final veto observability so the
-    # latter records the exact calibrated decision that execution receives.
     _nexus_live_cost_calibration.install(TradingEngine, _nexus_ai, _log)
-    # Observe the final NEXUS decision wrapper so early vetoes expose the exact
-    # model snapshot that caused them, without changing any decision state.
+    # Resolve only a narrow confirmed-MTF vs transitional ADX/DI disagreement.
+    # This does not flip regime or alter score/RR/risk/leverage thresholds.
+    _nexus_regime_transition_consistency.install(_nexus_ai, _log)
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
-    # Must wrap the final strategy stack (canonical + adaptive) so both paths
-    # receive the same timestamp-confirmed candle view. It also guards KuCoin WS
-    # kline volume before that data can enter the cache.
     _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
 
-    # The core engine reaches the legacy pre-trade score only after an exact
-    # fail-closed NEXUS approval. In controlled LIVE, keep that older score as
-    # telemetry rather than a second contradictory soft-score authority. All
-    # independent risk/execution hard gates remain downstream and unchanged.
     if _pilot_release_control.live_pilot_release_authorized():
         _legacy_pretrade_advisory.install(TradingEngine, _score, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
     builtins._nexus_runtime_bootstrap_installed = True
-    _log.info(
-        "[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap"
-    )
+    _log.info("[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap")
