@@ -120,6 +120,29 @@ def test_wrong_side_cannot_bypass_legacy_gate():
     assert result["aprovado"] is False
 
 
+def test_explicit_hard_block_cannot_be_bypassed_by_exact_nexus_approval():
+    Engine, scoring = _engine_class()
+
+    async def hard_block(symbol, direction, closes, highs, lows, volumes, client=None):
+        return {
+            "total": 0,
+            "tecnico": 0,
+            "orderflow": 0,
+            "macro": 0,
+            "news_mod": 0,
+            "aprovado": False,
+            "hard_block": "official_cross_mmr_unavailable",
+        }
+
+    scoring.calculate = hard_block
+    advisory.install(Engine, scoring, _Log())
+    result = asyncio.run(Engine()._open(_Signal()))
+
+    assert result["aprovado"] is False
+    assert result["hard_block"] == "official_cross_mmr_unavailable"
+    assert "legacy_gate_mode" not in result
+
+
 def test_paper_path_is_unchanged():
     Engine, scoring = _engine_class(paper=True)
     advisory.install(Engine, scoring, _Log())
