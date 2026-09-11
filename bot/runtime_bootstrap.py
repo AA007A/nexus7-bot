@@ -38,6 +38,7 @@ def install() -> None:
     from bot import legacy_pretrade_advisory as _legacy_pretrade_advisory
     from bot import operational_incident_recovery as _operational_incident_recovery
     from bot import liquidation_override_guard as _liquidation_override_guard
+    from bot import leverage_safe_signal_geometry as _leverage_safe_signal_geometry
     from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
@@ -76,6 +77,7 @@ def install() -> None:
     from bot import adaptive_mtf_entry as _adaptive_mtf_entry
     from bot import market_data_integrity as _market_data_integrity
     from bot import strategy as _strategy
+    from bot import liquidation as _liquidation
     from bot import pilot as _pilot
     from bot import score as _score
     from bot import kucoin as _kucoin
@@ -155,6 +157,11 @@ def install() -> None:
     # receive the same timestamp-confirmed candle view. It also guards KuCoin WS
     # kline volume before that data can enter the cache.
     _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
+    # This is intentionally the outermost strategy wrapper: NEXUS must review
+    # the exact leverage-compatible SL/TP that can later reach execution.
+    _leverage_safe_signal_geometry.install(
+        _strategy.Analyzer, _strategy, _liquidation, _log
+    )
 
     # The core engine reaches the legacy pre-trade score only after an exact
     # fail-closed NEXUS approval. In controlled LIVE, keep that older score as
