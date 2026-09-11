@@ -137,6 +137,17 @@ def _coinglass_api_code(payload: Any) -> str:
     return str(payload.get("code", ""))
 
 
+def _finite_number(value: Any) -> float | None:
+    """Normalize optional numeric evidence without silent exception swallowing."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
 def _coinglass_provider_status(
     http_statuses: list[int],
     api_codes: list[str],
@@ -192,12 +203,9 @@ def parse_coinglass_markets(
         return {}
 
     out: dict[str, float] = {}
-    try:
-        funding = float(btc.get("avg_funding_rate_by_oi"))
-        if funding == funding and funding not in (float("inf"), float("-inf")):
-            out["funding_rate_pct"] = funding
-    except (TypeError, ValueError, OverflowError):
-        pass
+    funding = _finite_number(btc.get("avg_funding_rate_by_oi"))
+    if funding is not None:
+        out["funding_rate_pct"] = funding
 
     try:
         oi = float(btc.get("open_interest_usd", 0) or 0)
