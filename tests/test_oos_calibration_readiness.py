@@ -9,14 +9,14 @@ from bot.oos_model_validation import ValidationRow
 
 
 class OOSCalibrationReadinessTests(unittest.TestCase):
-    def test_normalizes_percent_confidence_and_counts_invalid(self):
+    def test_reconstructs_ev_probability_and_counts_invalid(self):
         rows, invalid = normalize_completed_rows([
             ("100", 80.0, 1, 1.2),
             ("bad", 50.0, 0, -0.5),
         ])
         self.assertEqual(len(rows), 1)
         self.assertEqual(invalid, 1)
-        self.assertAlmostEqual(rows[0].confidence, 0.8)
+        self.assertAlmostEqual(rows[0].confidence, 0.66)
 
     def test_small_sample_is_fail_closed(self):
         rows = [ValidationRow(float(i), 0.8, 1, 1.0) for i in range(20)]

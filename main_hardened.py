@@ -41,6 +41,12 @@ if _strategy_floor != _nexus_floor:
     )
 os.environ.setdefault("NEXUS_MIN_SCORE", _strategy_floor_raw)
 
+# Console-script launchers may add the app directory only after Python's
+# automatic sitecustomize discovery. Import it explicitly before composing
+# the engine. Normal imports are cached: failed installations are not retried
+# or marked healthy, and the existing startup classifier still fails closed.
+import sitecustomize  # noqa: E402, F401
+
 # Import only after the threshold contract has been validated.
 from main import app  # noqa: E402
 from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402

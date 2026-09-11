@@ -23,6 +23,7 @@ from bot.nexus_types import (
     ModelOutput, DataQuality, NexusDecision,
 )
 from bot.nexus_models import run_ensemble
+from bot.nexus_probability import heuristic_win_probability
 from bot.logger import log
 from bot.config import cfg
 
@@ -624,9 +625,8 @@ def decide(symbol: str, k15: list, k1h: list, k4h: list,
     if direction == Decision.SHORT and not (tp < entry < sl):
         return _wait(f"Stop inválido para SHORT: tp={tp} entry={entry} sl={sl}")
 
-    # Probabilidade de ganho derivada da confiança do ensemble,
-    # limitada a 75% — nenhuma leitura técnica justifica mais que isso.
-    win_prob = min(0.75, 0.30 + (fusion["confidence"] / 100) * 0.45)
+    # Heurística de EV versionada; ainda não é uma probabilidade calibrada.
+    win_prob = heuristic_win_probability(fusion["confidence"])
     ev = expected_value(win_prob, entry, sl, tp)
 
     if not ev["valid"]:
@@ -781,14 +781,14 @@ def monitor_position(symbol: str, direction: str, entry: float, sl: float,
                     "urgency": "HIGH"}
 
         # Progresso bom → proteger
-        if progress >= 1.0:
-            return {"action": PositionAction.MOVE_STOP.value,
-                    "reason": f"+{progress:.1f}R — mover stop para break-even",
-                    "urgency": "LOW", "suggested_sl": entry}
         if progress >= 2.0:
             return {"action": PositionAction.TRAIL_STOP.value,
                     "reason": f"+{progress:.1f}R — ativar trailing",
                     "urgency": "LOW"}
+        if progress >= 1.0:
+            return {"action": PositionAction.MOVE_STOP.value,
+                    "reason": f"+{progress:.1f}R — mover stop para break-even",
+                    "urgency": "LOW", "suggested_sl": entry}
 
         # Funding corroendo posição longa
         if funding is not None and is_long and funding > 0.001:
