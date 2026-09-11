@@ -38,6 +38,7 @@ def install() -> None:
     from bot import legacy_pretrade_advisory as _legacy_pretrade_advisory
     from bot import operational_incident_recovery as _operational_incident_recovery
     from bot import liquidation_override_guard as _liquidation_override_guard
+    from bot import kucoin_contract_risk_hardening as _kucoin_contract_risk_hardening
     from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
@@ -79,6 +80,7 @@ def install() -> None:
     from bot import pilot as _pilot
     from bot import score as _score
     from bot import kucoin as _kucoin
+    from bot import liquidation as _liquidation
     from bot import notifier as _notifier
     from bot import nexus_types as _nexus_types
     from bot import nexus_ai as _nexus_ai
@@ -124,6 +126,9 @@ def install() -> None:
         )
 
     _liquidation_override_guard.install(_log)
+    _kucoin_contract_risk_hardening.install(
+        _kucoin.KuCoinClient, TradingEngine, _liquidation, _log
+    )
     _instrument_readiness_guard.install(_log)
     _viability_fail_closed_hardening.install(TradingEngine, _log)
     _news_context_hardening.install(_log)
