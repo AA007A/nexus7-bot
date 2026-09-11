@@ -73,14 +73,14 @@ class AuditRemainingTests(unittest.TestCase):
         original_import = builtins.__import__
         sentinel = RuntimeError("stop before application composition")
 
-        def importer(name, *args, **kwargs):
-            if name == "sitecustomize":
+        def importer(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "sitecustomize" and level == 0:
                 seen.append(name)
                 return types.ModuleType(name)
-            if name == "main":
+            if name == "main" and level == 0:
                 seen.append(name)
                 raise sentinel
-            return original_import(name, *args, **kwargs)
+            return original_import(name, globals, locals, fromlist, level)
 
         with patch.dict("os.environ", {"MIN_ENTRY_SCORE": "60", "NEXUS_MIN_SCORE": "60"}), \
              patch("builtins.__import__", side_effect=importer):
