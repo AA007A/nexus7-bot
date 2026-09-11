@@ -22,6 +22,7 @@ import numpy as np
 
 from bot.indicators import atr, ema
 from bot.strategy import TOTAL_COST, detect_entry, score_tf
+from bot import htf_transition_calibration as calibration
 
 _LOCK = threading.Lock()
 _SEEN: set[tuple] = set()
@@ -161,6 +162,7 @@ def _update_outcomes(symbol, k15, log):
             _METRICS["net_sum"] += net; _METRICS["mfe_sum"] += st["mfe_pct"]
             _METRICS["mae_sum"] += st["mae_pct"]
         _emit(log, "HTF_TRANSITION_OUTCOME", payload)
+        calibration.schedule_outcome(payload, log)
 
 
 def observe(symbol, k15, k1h, k4h, production_result, log):
@@ -237,6 +239,7 @@ def observe(symbol, k15, k1h, k4h, production_result, log):
                 "bars": 0, "mfe_pct": 0.0, "mae_pct": 0.0,
             }
         _emit(log, "HTF_TRANSITION_SHADOW", payload)
+        calibration.schedule_open(payload, log)
     except Exception as exc:
         log.debug("[HTF_TRANSITION_SHADOW] observer_error=%s execution_effect=NONE", type(exc).__name__)
 
