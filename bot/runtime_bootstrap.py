@@ -34,6 +34,7 @@ def install() -> None:
     from bot import scan_summary_hardening as _scan_summary_hardening
     from bot import validation_safety_lock as _validation_safety_lock
     from bot import pilot_live_runtime as _pilot_live_runtime
+    from bot import pilot_risk_cap_hardening as _pilot_risk_cap_hardening
     from bot import liquidation_override_guard as _liquidation_override_guard
     from bot import instrument_readiness_guard as _instrument_readiness_guard
     from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
@@ -95,6 +96,7 @@ def install() -> None:
 
     if _pilot_release_control.live_pilot_release_authorized():
         _pilot_live_runtime.install(TradingEngine, _log)
+        _pilot_risk_cap_hardening.install(TradingEngine, _log)
         _log.critical(
             "[CONTROLLED_PILOT_RELEASE] authorized=true validation_lock=false "
             "scope=pilot_only max_positions=2 external_positions=count_and_read_only"
