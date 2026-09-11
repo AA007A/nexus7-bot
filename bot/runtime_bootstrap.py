@@ -65,6 +65,8 @@ def install() -> None:
     from bot import durable_execution as _durable_execution
     from bot import order_state as _order_state
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
+    from bot import adaptive_mtf_entry as _adaptive_mtf_entry
+    from bot import strategy as _strategy
     from bot import pilot as _pilot
     from bot import score as _score
     from bot import kucoin as _kucoin
@@ -126,6 +128,7 @@ def install() -> None:
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
+    _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
