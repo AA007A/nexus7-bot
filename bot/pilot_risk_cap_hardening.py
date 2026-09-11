@@ -1,4 +1,4 @@
-"""Risk-authoritative sizing guard for the controlled LIVE pilot.
+"""Risk-authoritative sizing and final execution-quality guard for LIVE pilot.
 
 The operator target remains 50% of authenticated available USDT as POSITION
 NOTIONAL, as implemented by ``pilot_live_runtime``. This guard makes that target
@@ -6,21 +6,29 @@ a cap/target rather than an override of stop-risk sizing:
 
     final_qty = min(stop_risk_qty, pilot_target_qty)
 
-The stop-risk quantity is produced by the existing ProfessionalRiskAdapter /
-RiskManagerV3 after the NEXUS decision has prepared validated entry/stop geometry.
-No downstream layer may increase quantity above that risk-authoritative value.
+The exact final quantity is then carried to the engine's existing
+``_refresh_entry_balance`` call, which sits immediately before order-registry,
+durable-intent, pilot-reservation and exchange dispatch. At that boundary LIVE
+now performs the same spread, visible-depth and signal-price-drift evaluation
+used by SHADOW, but from fresh REST ticker/order-book reads. Any unavailable or
+bad execution-quality data fails closed before ``place_order`` can be reached.
 
 This module does not authorize LIVE mode, change leverage, modify Railway
-variables, weaken PilotGuard, or submit orders by itself.
+variables, weaken PilotGuard, or submit orders by itself. Reduce-only exits and
+emergency protection actions are not blocked by this new-entry guard.
 """
 from __future__ import annotations
 
 import contextvars
 import math
 
+from bot.pre_dispatch_guard import live_microstructure_recheck
+
 
 _PILOT_ENGINE = contextvars.ContextVar("nexus_pilot_risk_engine", default=None)
 _PILOT_SYMBOL = contextvars.ContextVar("nexus_pilot_risk_symbol", default=None)
+_PILOT_SIGNAL = contextvars.ContextVar("nexus_pilot_risk_signal", default=None)
+_PILOT_FINAL_QTY = contextvars.ContextVar("nexus_pilot_final_qty", default=None)
 
 
 def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
@@ -39,6 +47,7 @@ def install(TradingEngine, log) -> None:
     from bot import engine as engine_module
 
     original_open = TradingEngine._open
+    original_refresh_entry_balance = TradingEngine._refresh_entry_balance
     original_minimum = engine_module.minimum_base_quantity
 
     async def _open_with_pilot_risk_context(self, sig, *args, **kwargs):
@@ -50,9 +59,13 @@ def install(TradingEngine, log) -> None:
 
         token_engine = _PILOT_ENGINE.set(self)
         token_symbol = _PILOT_SYMBOL.set(getattr(sig, "symbol", None))
+        token_signal = _PILOT_SIGNAL.set(sig)
+        token_qty = _PILOT_FINAL_QTY.set(None)
         try:
             return await original_open(self, sig, *args, **kwargs)
         finally:
+            _PILOT_FINAL_QTY.reset(token_qty)
+            _PILOT_SIGNAL.reset(token_signal)
             _PILOT_SYMBOL.reset(token_symbol)
             _PILOT_ENGINE.reset(token_engine)
 
@@ -82,12 +95,14 @@ def install(TradingEngine, log) -> None:
                 symbol,
                 type(exc).__name__,
             )
+            _PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
         final_qty = _select_final_quantity(
             target_qty=target_qty,
             risk_qty=risk_qty,
         )
+        _PILOT_FINAL_QTY.set(final_qty)
         if final_qty <= 0:
             log.critical(
                 "[PILOT_RISK_CAP] symbol=%s result=BLOCK target_qty=%.12g "
@@ -108,11 +123,78 @@ def install(TradingEngine, log) -> None:
         )
         return final_qty
 
+    async def _refresh_entry_balance_with_final_market_guard(self, *args, **kwargs):
+        ok = await original_refresh_entry_balance(self, *args, **kwargs)
+        if not ok:
+            return ok
+
+        sig = _PILOT_SIGNAL.get()
+        symbol = _PILOT_SYMBOL.get()
+        qty = _PILOT_FINAL_QTY.get()
+        if (
+            getattr(self, "paper_trade", False)
+            or not bool(getattr(getattr(self, "pilot", None), "enabled", False))
+            or sig is None
+            or not symbol
+        ):
+            return ok
+
+        try:
+            qty_f = float(qty or 0.0)
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            direction = str(getattr(sig, "direction", "")).upper()
+        except (TypeError, ValueError):
+            qty_f, entry, direction = 0.0, 0.0, ""
+
+        if qty_f <= 0 or entry <= 0 or direction not in ("LONG", "SHORT"):
+            log.critical(
+                "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK "
+                "reason=invalid_final_dispatch_context qty=%s entry=%s direction=%s",
+                symbol, qty_f, entry, direction,
+            )
+            return False
+
+        result = await live_microstructure_recheck(
+            self.client,
+            instruments=self.instruments,
+            symbol=symbol,
+            signal_entry=entry,
+            side="BUY" if direction == "LONG" else "SELL",
+            qty=qty_f,
+        )
+        metrics = result.metrics or {}
+        if not result.allowed:
+            log.warning(
+                "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK blockers=%s "
+                "spread_bps=%.4f drift_bps=%.4f depth_multiple=%.4f "
+                "execution_effect=NONE",
+                symbol,
+                "+".join(result.blockers) or "unknown",
+                float(metrics.get("spread_bps", 0.0) or 0.0),
+                float(metrics.get("signal_drift_bps", 0.0) or 0.0),
+                float(metrics.get("depth_multiple", 0.0) or 0.0),
+            )
+            return False
+
+        log.info(
+            "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
+            "spread_bps=%.4f drift_bps=%.4f depth_multiple=%.4f "
+            "qty=%.12g source=fresh_rest",
+            symbol,
+            float(metrics.get("spread_bps", 0.0) or 0.0),
+            float(metrics.get("signal_drift_bps", 0.0) or 0.0),
+            float(metrics.get("depth_multiple", 0.0) or 0.0),
+            qty_f,
+        )
+        return True
+
     TradingEngine._open = _open_with_pilot_risk_context
+    TradingEngine._refresh_entry_balance = _refresh_entry_balance_with_final_market_guard
     engine_module.minimum_base_quantity = _risk_authoritative_pilot_quantity
     TradingEngine._pilot_risk_cap_hardening_installed = True
 
     log.critical(
         "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
-        "notional target; RiskManagerV3 is the maximum quantity authority"
+        "notional target; RiskManagerV3 is the maximum quantity authority; "
+        "LIVE spread/depth/signal-drift rechecked fail-closed immediately before dispatch"
     )
