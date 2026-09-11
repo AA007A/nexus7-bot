@@ -16,6 +16,7 @@ threshold, risk limit or exchange permission is changed here.
 """
 from __future__ import annotations
 
+from bot.nexus_probability import heuristic_win_probability
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Tuple
 
@@ -96,10 +97,7 @@ def _score_snapshot(nexus_ai, *, symbol: str, k15: list, k1h: list, k4h: list,
         )
         fusion = nexus_ai._fuse(models, regime)
         direction = fusion.get("direction")
-        win_prob = min(
-            0.75,
-            0.30 + (_safe_float(fusion.get("confidence")) / 100.0) * 0.45,
-        )
+        win_prob = heuristic_win_probability(fusion.get("confidence"))
         ev = nexus_ai.expected_value(win_prob, entry, sl, tp)
         if direction is None or not ev.get("valid"):
             return {

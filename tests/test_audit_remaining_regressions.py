@@ -1,6 +1,7 @@
 """Offline regressions for audit fixes; no exchange mutation or network."""
 import builtins
 import sys
+import subprocess
 import unittest
 from unittest.mock import patch
 from bot import nexus_ai
@@ -46,6 +47,21 @@ class AuditRemainingTests(unittest.TestCase):
         msg = telegram_block_message(StartupBlock("SITECUSTOMIZE_NOT_CONFIRMED",
                                                   "sitecustomize=not_loaded"))
         self.assertIn(r"sitecustomize=not\_loaded", msg)
+
+    def test_console_startup_without_automatic_sitecustomize(self):
+        code = (
+            "from tests.run_offline import install_network_guard; install_network_guard(); "
+            "import builtins; "
+            "assert not hasattr(builtins, '_nexus_sitecustomize_status'); "
+            "import main_hardened; "
+            "assert builtins._nexus_sitecustomize_status == 'ok'; "
+            "assert builtins._nexus_runtime_bootstrap_installed"
+        )
+        with patch.dict("os.environ", {"PAPER_TRADE": "true",
+                                       "MIN_ENTRY_SCORE": "60", "NEXUS_MIN_SCORE": "60"}):
+            result = subprocess.run([sys.executable, "-S", "-c", code],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_hardened_entrypoint_explicitly_imports_bootstrap(self):
         # Exercise the console-script case without running the real bootstrap:
