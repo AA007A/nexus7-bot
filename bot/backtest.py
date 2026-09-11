@@ -1,625 +1,537 @@
+"""BGX Capital — Backtesting Engine.
+
+Quant-audit hardening:
+- KuCoin historical pagination uses explicit millisecond time windows.
+- Candles are uniquely keyed by timestamp, never by price.
+- Historical integrity checks detect duplicates, non-monotonic data and gaps.
+- Trade hour/day are derived from the real candle timestamp.
+- Same-bar SL/TP ambiguity is resolved conservatively (stop first).
 """
-BGX Capital — Backtesting Engine
-Busca dados históricos OHLCV da Bybit e roda as estratégias.
-Calcula: Win Rate, Profit Factor, Sharpe, Sortino, Max DD,
-         Expectancy, melhor/pior horário UTC, melhor/pior dia da semana,
-         performance em trending vs ranging.
-Roda automaticamente toda semana.
-Persiste em tabela performance.
-"""
-import asyncio, os, time
-from datetime import datetime, timezone
-from typing import List, Dict
-import numpy as np
-from bot.logger import log
-from bot.config import cfg
+from __future__ import annotations
+
+import asyncio
+import os
 import time
+from datetime import datetime, timezone
+from typing import Dict, List
+
+import numpy as np
+
+from bot.config import cfg
+from bot.logger import log
 
 
-# ── Busca histórico OHLCV ────────────────────────────────────────
-async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -> list:
-    """
-    Busca histórico OHLCV da Bybit em lotes de 1000 candles.
-    Para 90 dias no 15M: ~8640 candles → 9 lotes automáticos.
-    Para 90 dias no  1H: ~2160 candles → 3 lotes.
-    Para 90 dias no  4H: ~540  candles → 1 lote.
-    """
+def _interval_minutes(interval: str) -> int:
+    s = str(interval)
+    if s == "D":
+        return 1440
+    if s == "W":
+        return 10080
+    return int(s)
+
+
+def _normalize_kline(raw) -> dict | None:
+    """Normalize one KuCoin Futures kline to the project's candle schema."""
     try:
-        if limit <= 1000:
-            # Busca simples para quantidades pequenas
-            return await client.get_klines(symbol, interval, limit)
+        ts = int(float(raw[0]))
+        if ts < 1e11:
+            ts *= 1000
+        candle = {
+            "ts": ts,
+            "o": float(raw[1]),
+            "h": float(raw[2]),
+            "l": float(raw[3]),
+            "c": float(raw[4]),
+            "v": float(raw[5]),
+        }
+        if candle["h"] < candle["l"] or not (candle["l"] <= candle["c"] <= candle["h"]):
+            return None
+        if min(candle["o"], candle["h"], candle["l"], candle["c"]) <= 0:
+            return None
+        return candle
+    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return None
 
-        # Busca em lotes de 1000 para quantidades maiores
-        all_klines = []
-        remaining  = limit
-        while remaining > 0:
-            batch_size = min(1000, remaining)
-            try:
-                batch = await client.get_klines(symbol, interval, batch_size)
-            except Exception as e:
-                log.warning(f"backtest fetch lote {symbol} {interval}: {e}")
-                break
-            if not batch:
-                break
-            # Evita duplicatas: descarta candles que já temos
-            if all_klines:
-                known_open = {k["o"] for k in all_klines[-5:]}
-                batch = [k for k in batch if k["o"] not in known_open]
-            all_klines.extend(batch)
-            remaining -= len(batch)
-            if len(batch) < batch_size:
-                break   # exchange retornou menos que pedido = sem mais dados
-            await asyncio.sleep(0.3)   # respeita rate limit
 
-        log.info(f"fetch_history {symbol} {interval}: {len(all_klines)} candles")
-        return all_klines
-    except Exception as e:
-        log.error(f"backtest fetch {symbol} {interval}: {e}")
+def _historical_integrity(candles: list, interval: str) -> dict:
+    """Return deterministic integrity telemetry for a chronological series."""
+    if not candles:
+        return {"ok": False, "duplicates": 0, "non_monotonic": 0, "gaps": 0}
+    expected = _interval_minutes(interval) * 60 * 1000
+    timestamps = [int(c["ts"]) for c in candles]
+    duplicates = len(timestamps) - len(set(timestamps))
+    non_monotonic = sum(1 for a, b in zip(timestamps, timestamps[1:]) if b <= a)
+    # Allow up to 10% timestamp jitter; exchange outages are surfaced as gaps.
+    gaps = sum(1 for a, b in zip(timestamps, timestamps[1:]) if b - a > expected * 1.10)
+    return {
+        "ok": duplicates == 0 and non_monotonic == 0,
+        "duplicates": duplicates,
+        "non_monotonic": non_monotonic,
+        "gaps": gaps,
+    }
+
+
+async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
+    """Read a bounded KuCoin Futures kline page without mutating live caches."""
+    from bot.kucoin import to_kucoin
+
+    data = await client._get(
+        "/api/v1/kline/query",
+        {
+            "symbol": to_kucoin(symbol),
+            "granularity": str(_interval_minutes(interval)),
+            "from": str(int(start_ms)),
+            "to": str(int(end_ms)),
+        },
+    )
+    raw = data if isinstance(data, list) else []
+    out = []
+    for item in raw:
+        candle = _normalize_kline(item)
+        if candle is not None:
+            out.append(candle)
+    out.sort(key=lambda c: c["ts"])
+    return out
+
+
+async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -> list:
+    """Fetch exactly bounded historical OHLCV using timestamp pagination.
+
+    H01 fix: the old implementation repeatedly requested the latest window and
+    de-duplicated by opening *price*. This implementation pages backwards by
+    timestamp and de-duplicates only by candle timestamp.
+    """
+    if limit <= 0:
+        return []
+
+    try:
+        # Real KuCoin client exposes _get. Keep a conservative compatibility
+        # fallback for mocks/alternate clients used by tests.
+        if not hasattr(client, "_get"):
+            rows = await client.get_klines(symbol, interval, limit)
+            unique = {int(c["ts"]): c for c in rows if c and c.get("ts")}
+            result = sorted(unique.values(), key=lambda c: c["ts"])[-limit:]
+            integ = _historical_integrity(result, interval)
+            if not integ["ok"]:
+                raise RuntimeError(f"historical integrity failed: {integ}")
+            return result
+
+        interval_ms = _interval_minutes(interval) * 60 * 1000
+        # KuCoin Futures safely supports bounded kline windows; 500 keeps each
+        # request small and deterministic across granularities.
+        page_size = 500
+        cursor_end = int(time.time() * 1000)
+        by_ts: dict[int, dict] = {}
+        previous_oldest: int | None = None
+        max_pages = max(2, (limit + page_size - 1) // page_size + 3)
+
+        for _ in range(max_pages):
+            if len(by_ts) >= limit:
+                break
+            remaining = limit - len(by_ts)
+            requested = min(page_size, remaining)
+            # Add one interval of overlap; timestamp de-dupe makes overlap safe
+            # and protects against exchange boundary semantics.
+            span = interval_ms * (requested + 1)
+            cursor_start = max(0, cursor_end - span)
+            page = await _kucoin_page(client, symbol, interval, cursor_start, cursor_end)
+            if not page:
+                break
+
+            for candle in page:
+                by_ts[int(candle["ts"])] = candle
+
+            oldest = min(int(c["ts"]) for c in page)
+            if previous_oldest is not None and oldest >= previous_oldest:
+                raise RuntimeError(
+                    f"historical pagination made no progress: oldest={oldest} previous={previous_oldest}"
+                )
+            previous_oldest = oldest
+            cursor_end = oldest - 1
+            await asyncio.sleep(0.05)
+
+        result = sorted(by_ts.values(), key=lambda c: c["ts"])[-limit:]
+        integrity = _historical_integrity(result, interval)
+        if not integrity["ok"]:
+            raise RuntimeError(f"historical integrity failed: {integrity}")
+        if integrity["gaps"]:
+            log.warning(
+                f"[BACKTEST_DATA] {symbol} {interval}m: {integrity['gaps']} historical gaps detected"
+            )
+        if len(result) < min(limit, 100):
+            log.warning(
+                f"[BACKTEST_DATA] {symbol} {interval}m: requested={limit} received={len(result)}"
+            )
+        log.info(
+            f"fetch_history {symbol} {interval}: {len(result)} candles | "
+            f"unique_ts={len({c['ts'] for c in result})} gaps={integrity['gaps']}"
+        )
+        return result
+    except Exception as exc:
+        log.error(f"backtest fetch {symbol} {interval}: {type(exc).__name__}: {exc}")
         return []
 
 
-# ── Simulador de estratégia MTF ──────────────────────────────────
-def _run_strategy(klines_15: list, klines_1h: list, klines_4h: list,
-                  min_score: int = 75,
-                  min_rr: float = 2.0,
-                  sl_mult: float = None,
-                  tp_mult: float = None,
-                  symbol: str = "") -> List[dict]:
-    """
-    Simula a estratégia MTF sobre dados históricos.
-    sl_mult e tp_mult substituem os defaults do cfg quando fornecidos
-    (usados pelo Optuna para injetar parâmetros otimizados).
-    Usa k15[:-1] para confirmar candle fechado — consistente com produção.
-    """
+def _run_strategy(
+    klines_15: list,
+    klines_1h: list,
+    klines_4h: list,
+    min_score: int = 75,
+    min_rr: float = 2.0,
+    sl_mult: float | None = None,
+    tp_mult: float | None = None,
+    symbol: str = "",
+) -> List[dict]:
+    """Replay the production MTF strategy on chronological historical data."""
     from bot.strategy import Analyzer
-    from bot.indicators import atr
 
-    # Injeta sl_mult/tp_mult no cfg temporariamente se fornecidos
     _orig_sl = getattr(cfg, "SL_ATR_MULT", 1.5)
     _orig_tp = getattr(cfg, "TP_ATR_MULT", 3.0)
     if sl_mult is not None:
-        cfg.SL_ATR_MULT = sl_mult
+        cfg.SL_ATR_MULT = float(sl_mult)
     if tp_mult is not None:
-        cfg.TP_ATR_MULT = tp_mult
+        cfg.TP_ATR_MULT = float(tp_mult)
 
     analyzer = Analyzer()
-    trades   = []
-
-    # Janela deslizante: usa 60 candles para análise, avança 1 a 1
-    # Exclui último candle de cada janela (candle fechado = k15[:-1])
+    trades: list[dict] = []
+    analysis_errors = 0
     WINDOW = 60
-    for i in range(WINDOW, len(klines_15) - 1):
-        k15 = klines_15[max(0, i-WINDOW):i]      # candle i-1 é o último fechado
-        k1h = klines_1h[max(0, i//4-20):i//4]
-        k4h = klines_4h[max(0, i//16-15):i//16]
 
-        if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
-            continue
+    try:
+        for i in range(WINDOW, len(klines_15) - 1):
+            k15 = klines_15[max(0, i - WINDOW):i]
+            k1h = klines_1h[max(0, i // 4 - 20):i // 4]
+            k4h = klines_4h[max(0, i // 16 - 15):i // 16]
+            if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
+                continue
 
-        try:
-            sig = analyzer.analyze_mtf(
-                "BT", k15, k1h, k4h,
-                min_score=getattr(cfg, 'MIN_ENTRY_SCORE', min_score),
-                fee_mult=getattr(cfg, 'FEE_MULTIPLIER', 2.0),
-                vol_mult=getattr(cfg, 'MIN_VOLUME_MULT', 1.2),
+            try:
+                sig = analyzer.analyze_mtf(
+                    symbol or "BT",
+                    k15,
+                    k1h,
+                    k4h,
+                    min_score=int(min_score),
+                    fee_mult=getattr(cfg, "FEE_MULTIPLIER", 2.0),
+                    vol_mult=getattr(cfg, "MIN_VOLUME_MULT", 1.2),
+                )
+            except Exception as exc:
+                analysis_errors += 1
+                if analysis_errors % 100 == 1:
+                    log.debug(f"backtest analysis error candle={i}: {exc}")
+                continue
+
+            if not sig or sig.rr < float(min_rr):
+                continue
+
+            entry, sl, tp = float(sig.entry), float(sig.sl), float(sig.tp)
+            tp1 = float(getattr(sig, "tp1", tp) or tp)
+            tp2 = float(getattr(sig, "tp2", tp) or tp)
+            has_partial = tp1 != tp2 and tp1 != 0
+            result = None
+            hold = 0
+            tp1_hit = False
+            pnl_pct = 0.0
+            ambiguous_bars = 0
+
+            taker = float(os.environ.get("TAKER_FEE", "0.0006"))
+            fee_pct = taker * 2
+            slip_base = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))
+            majors = ("BTC", "ETH", "SOL")
+            sym_up = str(symbol).upper()
+            slip = slip_base if any(m in sym_up for m in majors) else slip_base * 2
+            cost_pct = fee_pct + slip * 2
+            funding_8h = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
+
+            for j in range(i + 1, min(i + 41, len(klines_15))):
+                future = klines_15[j]
+                hold += 1
+                high, low = float(future["h"]), float(future["l"])
+
+                # H06 hardening: if SL and target are both inside one OHLC bar,
+                # tick ordering is unknowable. Resolve to the stop side first.
+                if sig.direction == "LONG":
+                    target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
+                    if low <= sl and high >= target_now:
+                        ambiguous_bars += 1
+                    if low <= sl:
+                        if tp1_hit:
+                            pnl_pct = abs(tp1 - entry) / entry * 0.5
+                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                            result = "PARTIAL_WIN"
+                        else:
+                            pnl_pct = -(abs(sl - entry) / entry)
+                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                            result = "LOSS"
+                        break
+                    if has_partial and not tp1_hit and high >= tp1:
+                        tp1_hit = True
+                        sl = entry
+                    if tp1_hit and high >= tp2:
+                        pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "WIN"
+                        break
+                    if not has_partial and high >= tp:
+                        pnl_pct = abs(tp - entry) / entry
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "WIN"
+                        break
+                else:
+                    target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
+                    if high >= sl and low <= target_now:
+                        ambiguous_bars += 1
+                    if high >= sl:
+                        if tp1_hit:
+                            pnl_pct = abs(tp1 - entry) / entry * 0.5
+                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                            result = "PARTIAL_WIN"
+                        else:
+                            pnl_pct = -(abs(sl - entry) / entry)
+                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                            result = "LOSS"
+                        break
+                    if has_partial and not tp1_hit and low <= tp1:
+                        tp1_hit = True
+                        sl = entry
+                    if tp1_hit and low <= tp2:
+                        pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "WIN"
+                        break
+                    if not has_partial and low <= tp:
+                        pnl_pct = abs(tp - entry) / entry
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "WIN"
+                        break
+
+            if result is None:
+                result = "TIMEOUT"
+                last = float(klines_15[min(i + 40, len(klines_15) - 1)]["c"])
+                base = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
+                pnl_pct = base * (0.5 if tp1_hit else 1.0)
+                pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+
+            # H05 fix: derive calendar attributes from the real candle timestamp.
+            ts_ms = int(klines_15[i].get("ts", 0) or 0)
+            if ts_ms < 1e11:
+                ts_ms *= 1000
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+            trades.append(
+                {
+                    "result": result,
+                    "pnl_pct": pnl_pct,
+                    "hold": hold,
+                    "direction": sig.direction,
+                    "score": sig.score,
+                    "hour_utc": dt.hour,
+                    "day_of_week": dt.weekday(),
+                    "opened_at": dt.isoformat(),
+                    "ts": ts_ms,
+                    "rr": sig.rr,
+                    "regime": getattr(sig, "regime", "UNKNOWN"),
+                    "entry_type": getattr(sig, "entry_type", "UNKNOWN"),
+                    "intrabar_ambiguous": ambiguous_bars,
+                }
             )
-        except Exception as _e:
-            # auditoria #10: falhas de análise no backtest agora são contadas
-            _skipped = locals().get("_analysis_errors", 0) + 1
-            if _skipped % 100 == 1:
-                log.debug(f"backtest: erro de análise no candle {i}: {_e}")
-            continue
-
-        if not sig:
-            continue
-        if sig.rr < getattr(cfg, "MIN_RR_RATIO", min_rr):
-            continue
-
-        # Simula resultado: verifica próximos 20 candles
-        entry  = sig.entry
-        sl     = sig.sl
-        tp     = sig.tp
-        opened = klines_15[i].get("c", entry)
-
-        # ── Simula TP parcial 50%/50% ────────────────────────────
-        tp1 = getattr(sig, 'tp1', tp)
-        tp2 = getattr(sig, 'tp2', tp)
-        # Se tp1 == tp2 (sem TP parcial definido), usa TP único
-        has_partial = tp1 != tp2 and tp1 != 0
-
-        result    = None
-        hold      = 0
-        tp1_hit   = False
-        pnl_pct   = 0.0
-
-        # ── CUSTOS REALISTAS (auditoria #5) ──────────────────────
-        # Antes: fee_pct fixo em 0.0016 sem slippage nem funding —
-        # o backtest era sistematicamente otimista vs. execução real.
-        #
-        # Taxa: KuCoin taker 0.06% × 2 (entrada + saída) = 0.12%
-        _TAKER = float(os.environ.get("TAKER_FEE", "0.0006"))
-        fee_pct = _TAKER * 2
-
-        # Slippage: ordens a mercado não preenchem no preço exato.
-        # Pares de menor liquidez (DOGE/LINK/AVAX/DOT) sofrem mais.
-        # Aplicado nas duas pontas (entrada e saída).
-        _SLIP_BASE = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))  # 0.05%
-        _MAJORS    = ("BTC", "ETH", "SOL")
-        _sym_up    = str(symbol).upper() if symbol else ""
-        _slip      = _SLIP_BASE if any(m in _sym_up for m in _MAJORS) else _SLIP_BASE * 2
-        slip_pct   = _slip * 2   # entrada + saída
-
-        # Funding: pago a cada 8h enquanto a posição está aberta.
-        # Taxa média histórica ~0.01% por período de 8h.
-        _FUNDING_8H = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
-
-        # Custo total aplicado ao PnL de cada trade
-        cost_pct = fee_pct + slip_pct
-
-        for j in range(i+1, min(i+41, len(klines_15))):  # até 40 candles (~10h)
-            future = klines_15[j]
-            hold  += 1
-
-            if sig.direction == "LONG":
-                # SL atingido
-                if future["l"] <= sl:
-                    if tp1_hit:
-                        # Metade já garantida — SL está em break-even
-                        pnl_tp1  = abs(tp1 - entry) / entry * 0.5
-                        pnl_sl   = 0.0   # SL = break-even, sem perda adicional
-                        pnl_pct  = pnl_tp1 + pnl_sl - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                        result   = "PARTIAL_WIN"
-                    else:
-                        pnl_pct = -(abs(sl - entry) / entry) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                        result  = "LOSS"
-                    break
-                # TP1 atingido (50%)
-                if has_partial and not tp1_hit and future["h"] >= tp1:
-                    tp1_hit = True
-                    sl      = entry   # move SL para break-even
-                # TP2 atingido (50% restante)
-                if tp1_hit and future["h"] >= tp2:
-                    pnl_tp1 = abs(tp1 - entry) / entry * 0.5
-                    pnl_tp2 = abs(tp2 - entry) / entry * 0.5
-                    pnl_pct = pnl_tp1 + pnl_tp2 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                    result  = "WIN"; break
-                # TP único (sem parcial)
-                if not has_partial and future["h"] >= tp:
-                    pnl_pct = abs(tp - entry) / entry - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                    result  = "WIN"; break
-
-            else:  # SHORT
-                if future["h"] >= sl:
-                    if tp1_hit:
-                        pnl_tp1 = abs(tp1 - entry) / entry * 0.5
-                        pnl_pct = pnl_tp1 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                        result  = "PARTIAL_WIN"
-                    else:
-                        pnl_pct = -(abs(sl - entry) / entry) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                        result  = "LOSS"
-                    break
-                if has_partial and not tp1_hit and future["l"] <= tp1:
-                    tp1_hit = True
-                    sl      = entry
-                if tp1_hit and future["l"] <= tp2:
-                    pnl_tp1 = abs(tp1 - entry) / entry * 0.5
-                    pnl_tp2 = abs(tp2 - entry) / entry * 0.5
-                    pnl_pct = pnl_tp1 + pnl_tp2 - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                    result  = "WIN"; break
-                if not has_partial and future["l"] <= tp:
-                    pnl_pct = abs(tp - entry) / entry - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-                    result  = "WIN"; break
-
-        if result is None:
-            result = "TIMEOUT"
-            last    = klines_15[min(i+40, len(klines_15)-1)]["c"]
-            base    = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
-            pnl_pct = (base * (0.5 if tp1_hit else 1.0)) - cost_pct - (_FUNDING_8H * max(1, hold * 15 / 480))
-
-        # Timestamp do candle
-        candle_idx = i
-        hour_utc   = (candle_idx * 15 // 60) % 24
-        day_of_week= (candle_idx // 96) % 7   # aprox
-
-        trades.append({
-            "result":     result,
-            "pnl_pct":    pnl_pct,
-            "hold":       hold,
-            "direction":  sig.direction,
-            "score":      sig.score,
-            "hour_utc":   hour_utc,
-            "day_of_week":day_of_week,
-            "rr":         sig.rr,
-        })
-
-    # Restaura cfg original após simulação (sl_mult/tp_mult injetados pelo Optuna)
-    cfg.SL_ATR_MULT = _orig_sl
-    cfg.TP_ATR_MULT = _orig_tp
+    finally:
+        cfg.SL_ATR_MULT = _orig_sl
+        cfg.TP_ATR_MULT = _orig_tp
 
     return trades
 
 
-# ── Métricas ─────────────────────────────────────────────────────
 def _calc_metrics(trades: List[dict], strategy: str = "MTF") -> dict:
     if not trades:
         return {}
-
-    pnls    = np.array([t["pnl_pct"] for t in trades])
-    # PARTIAL_WIN conta como win nas métricas
-    wins    = pnls[pnls > 0]
-    losses  = pnls[pnls < 0]
-    total   = len(pnls)
-    partial = [t for t in trades if t.get("result") == "PARTIAL_WIN"]
-    win_rate= (len(wins) + len(partial) * 0.5) / total * 100 if total else 0
-
-    # Profit Factor
-    gross_profit = wins.sum() if len(wins) else 0
-    gross_loss   = abs(losses.sum()) if len(losses) else 1e-9
+    pnls = np.array([t["pnl_pct"] for t in trades], dtype=float)
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    total = len(pnls)
+    win_rate = len(wins) / total * 100 if total else 0.0
+    gross_profit = float(wins.sum()) if len(wins) else 0.0
+    gross_loss = float(abs(losses.sum())) if len(losses) else 1e-9
     pf = gross_profit / gross_loss
-
-    # Sharpe
-    sharpe = float(pnls.mean() / pnls.std()) if pnls.std() > 0 and total > 1 else 0
-
-    # Sortino (só downside)
-    neg_std = losses.std() if len(losses) > 1 else 1e-9
-    sortino = float(pnls.mean() / neg_std) if neg_std > 0 else 0
-
-    # Max Drawdown
-    cum  = np.cumsum(pnls)
+    std = float(pnls.std())
+    sharpe = float(pnls.mean() / std) if std > 0 and total > 1 else 0.0
+    neg_std = float(losses.std()) if len(losses) > 1 else 0.0
+    sortino = float(pnls.mean() / neg_std) if neg_std > 0 else 0.0
+    cum = np.cumsum(pnls)
     peak = np.maximum.accumulate(cum)
-    dd   = peak - cum
-    max_dd = float(dd.max()) if len(dd) else 0
+    max_dd = float((peak - cum).max()) if len(cum) else 0.0
 
-    # Expectancy
-    expectancy = float(pnls.mean())
-
-    # Melhor/pior hora UTC
-    hour_pnl = {}
+    hour_pnl: Dict[int, list] = {}
+    day_pnl: Dict[int, list] = {}
     for t in trades:
-        h = t["hour_utc"]
-        hour_pnl.setdefault(h, []).append(t["pnl_pct"])
-    hour_avg = {h: np.mean(v) for h, v in hour_pnl.items()}
-    best_hour  = max(hour_avg, key=hour_avg.get) if hour_avg else None
-    worst_hour = min(hour_avg, key=hour_avg.get) if hour_avg else None
-
-    # Melhor/pior dia da semana
-    days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-    day_pnl = {}
-    for t in trades:
-        d = t["day_of_week"]
-        day_pnl.setdefault(d, []).append(t["pnl_pct"])
-    day_avg  = {days[d]: np.mean(v) for d, v in day_pnl.items()}
-    best_day  = max(day_avg, key=day_avg.get) if day_avg else None
-    worst_day = min(day_avg, key=day_avg.get) if day_avg else None
-
-    # Trending vs Ranging (usa score como proxy)
-    trending = [t for t in trades if t.get("score", 0) >= 80]
-    ranging  = [t for t in trades if t.get("score", 0) < 80]
-    trending_wr = len([t for t in trending if t["pnl_pct"] > 0]) / len(trending) * 100 if trending else 0
-    ranging_wr  = len([t for t in ranging  if t["pnl_pct"] > 0]) / len(ranging)  * 100 if ranging  else 0
+        hour_pnl.setdefault(int(t["hour_utc"]), []).append(t["pnl_pct"])
+        day_pnl.setdefault(int(t["day_of_week"]), []).append(t["pnl_pct"])
+    hour_avg = {h: float(np.mean(v)) for h, v in hour_pnl.items()}
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_avg = {days[d]: float(np.mean(v)) for d, v in day_pnl.items() if 0 <= d <= 6}
+    ambiguous = sum(int(t.get("intrabar_ambiguous", 0)) for t in trades)
 
     return {
-        "strategy":            strategy,
-        "total_trades":        total,
-        "win_rate":            round(win_rate, 1),
-        "profit_factor":       round(pf, 2),
-        "sharpe_ratio":        round(sharpe, 3),
-        "sortino_ratio":       round(sortino, 3),
-        "max_drawdown_pct":    round(max_dd * 100, 2),
-        "expectancy_pct":      round(expectancy * 100, 4),
-        "avg_hold_candles":    round(np.mean([t["hold"] for t in trades]), 1),
-        "best_hour_utc":       best_hour,
-        "worst_hour_utc":      worst_hour,
-        "best_day":            best_day,
-        "worst_day":           worst_day,
-        "trending_win_rate":   round(trending_wr, 1),
-        "ranging_win_rate":    round(ranging_wr, 1),
-        "gross_profit_pct":    round(float(gross_profit) * 100, 2),
-        "gross_loss_pct":      round(float(gross_loss) * 100, 2),
+        "strategy": strategy,
+        "total_trades": total,
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(pf, 2),
+        "sharpe_ratio": round(sharpe, 3),
+        "sortino_ratio": round(sortino, 3),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "expectancy_pct": round(float(pnls.mean()) * 100, 4),
+        "avg_hold_candles": round(float(np.mean([t["hold"] for t in trades])), 1),
+        "best_hour_utc": max(hour_avg, key=hour_avg.get) if hour_avg else None,
+        "worst_hour_utc": min(hour_avg, key=hour_avg.get) if hour_avg else None,
+        "best_day": max(day_avg, key=day_avg.get) if day_avg else None,
+        "worst_day": min(day_avg, key=day_avg.get) if day_avg else None,
+        "gross_profit_pct": round(gross_profit * 100, 2),
+        "gross_loss_pct": round(gross_loss * 100, 2),
+        "intrabar_ambiguous_bars": ambiguous,
     }
 
 
-
-
-# Alias público para uso externo (optimizer, testes)
 run_strategy_public = _run_strategy
 
 
-# ── Monte Carlo Permutation Test ─────────────────────────────────
-def monte_carlo_permutation(returns: list, n_simulations: int = 5000,
-                             random_seed: int = 42) -> dict:
-    """
-    Valida estatisticamente se o edge da estratégia é REAL ou fruto de sorte.
+def monte_carlo_permutation(returns: list, n_simulations: int = 5000, random_seed: int = 42) -> dict:
+    """Permutation diagnostic retained for compatibility.
 
-    Metodologia:
-      1. Calcula o Sharpe ratio da estratégia real
-      2. Embaralha aleatoriamente os retornos N vezes (5000 por padrão)
-      3. Calcula o Sharpe de cada versão aleatória
-      4. p-value = % das versões aleatórias que batem ou igualam o Sharpe real
-
-    Interpretação do p-value:
-      < 0.01 → edge MUITO significativo (99% confiança) — verde
-      < 0.05 → edge significativo       (95% confiança) — aceitável
-      < 0.10 → edge fraco               (90% confiança) — cuidado
-      >= 0.10 → SEM EDGE estatístico    — NÃO operar com capital real
-
-    Retorna também:
-      sharpe_percentile: onde o Sharpe real está na distribuição aleatória
-      min_trades_needed: mínimo de trades para resultado ser confiável
+    Note: permuting return order does not change mean/std Sharpe. We retain the
+    historical interface but label it diagnostic rather than using it as proof
+    of alpha; strategy validity relies primarily on untouched OOS/walk-forward.
     """
     if not returns or len(returns) < 10:
         return {"error": "Mínimo 10 trades para Monte Carlo", "edge_significant": False}
-
     arr = np.array(returns, dtype=float)
-    np.random.seed(random_seed)
-
-    # Sharpe da estratégia real
-    std = arr.std()
-    real_sharpe = float(arr.mean() / std) if std > 0 else 0.0
-
-    # Simulações aleatórias
-    random_sharpes = np.zeros(n_simulations)
+    rng = np.random.default_rng(random_seed)
+    real_sharpe = float(arr.mean() / arr.std()) if arr.std() > 0 else 0.0
+    # Bootstrap signed returns to obtain a non-degenerate empirical distribution.
+    sims = np.zeros(n_simulations)
     for i in range(n_simulations):
-        shuffled = np.random.permutation(arr)
-        s = shuffled.std()
-        random_sharpes[i] = float(shuffled.mean() / s) if s > 0 else 0.0
-
-    # p-value: fração das simulações >= Sharpe real
-    p_value = float((random_sharpes >= real_sharpe).mean())
-
-    # Percentil: onde o Sharpe real está na distribuição
-    percentile = float((random_sharpes < real_sharpe).mean() * 100)
-
-    # Classificação do nível de confiança
-    if p_value < 0.01:
-        confidence = "VERY_HIGH"
-        verdict    = "Edge estatisticamente muito significativo (99%+)"
-    elif p_value < 0.05:
-        confidence = "HIGH"
-        verdict    = "Edge estatisticamente significativo (95%+)"
-    elif p_value < 0.10:
-        confidence = "MEDIUM"
-        verdict    = "Edge fraco — monitorar com cautela (90%)"
-    else:
-        confidence = "NONE"
-        verdict    = "SEM EDGE estatístico — resultados consistentes com sorte"
-
-    # Mínimo de trades necessários para 95% de confiança
-    # Regra empírica: N > (Z/margin_of_error)² onde Z=1.96 para 95%
-    win_rate_est = float((arr > 0).mean())
-    if 0 < win_rate_est < 1:
-        margin = 0.05   # ±5% de margem de erro no win rate
-        min_trades = int(np.ceil((1.96 ** 2 * win_rate_est * (1 - win_rate_est)) / (margin ** 2)))
-    else:
-        min_trades = 100  # fallback conservador
-
+        sample = rng.choice(arr, size=len(arr), replace=True)
+        s = sample.std()
+        sims[i] = float(sample.mean() / s) if s > 0 else 0.0
+    p_value = float((sims <= 0.0).mean())
     return {
-        "real_sharpe":        round(real_sharpe, 4),
-        "p_value":            round(p_value, 4),
-        "confidence_level":   confidence,
-        "verdict":            verdict,
-        "edge_significant":   p_value < 0.05,
-        "sharpe_percentile":  round(percentile, 1),
-        "random_sharpe_mean": round(float(random_sharpes.mean()), 4),
-        "random_sharpe_std":  round(float(random_sharpes.std()), 4),
-        "n_simulations":      n_simulations,
-        "n_trades":           len(returns),
-        "min_trades_needed":  min_trades,
+        "real_sharpe": round(real_sharpe, 4),
+        "p_value": round(p_value, 4),
+        "confidence_level": "HIGH" if p_value < 0.05 else "MEDIUM" if p_value < 0.10 else "NONE",
+        "verdict": "Edge bootstrap positivo" if p_value < 0.10 else "Sem evidência bootstrap suficiente",
+        "edge_significant": p_value < 0.05,
+        "sharpe_percentile": round(float((sims < real_sharpe).mean() * 100), 1),
+        "random_sharpe_mean": round(float(sims.mean()), 4),
+        "random_sharpe_std": round(float(sims.std()), 4),
+        "n_simulations": n_simulations,
+        "n_trades": len(returns),
     }
 
-# ── Walk-Forward Testing ─────────────────────────────────────────
-def _walk_forward(klines_15: list, klines_1h: list, klines_4h: list,
-                  n_windows: int = 5, train_ratio: float = 0.70,
-                  symbol: str = "", rolling: bool = True) -> dict:
-    """
-    Walk-Forward Testing: divide os dados em N janelas temporais.
-    Em cada janela: treina nos primeiros 70% e testa nos 30% restantes.
-    Detecta degradação de performance entre treino e teste (overfitting).
 
-    Retorna:
-      windows:         métricas de cada janela (treino e teste)
-      oos_win_rate:    win rate médio out-of-sample
-      oos_pf:          profit factor médio out-of-sample
-      degradation_pct: quanto a performance cai do treino para o teste (%)
-      overfit_risk:    "LOW" | "MEDIUM" | "HIGH"
-    """
+def _walk_forward(
+    klines_15: list,
+    klines_1h: list,
+    klines_4h: list,
+    n_windows: int = 5,
+    train_ratio: float = 0.70,
+    symbol: str = "",
+    rolling: bool = True,
+) -> dict:
     if len(klines_15) < 200:
         return {"error": "Dados insuficientes para walk-forward (min 200 candles 15M)"}
-
     n = len(klines_15)
     results = []
-
-    # ── WALK-FORWARD ROLANTE (auditoria #9) ─────────────────────
-    # Antes: cortes fixos e disjuntos (n // n_windows), o que testava
-    # cada período uma única vez e ignorava a transição entre regimes.
-    #
-    # Agora: janelas DESLIZANTES com 50% de sobreposição — cada janela
-    # avança metade do seu tamanho, cobrindo mais combinações de regime
-    # e aproximando o teste de uma reotimização periódica real.
     if rolling and n_windows > 1:
-        # window_size maior que n/n_windows porque as janelas se sobrepõem
         window_size = int(n / ((n_windows + 1) / 2))
-        step        = window_size // 2          # avanço de 50%
+        step = max(1, window_size // 2)
     else:
         window_size = n // n_windows
-        step        = window_size
+        step = window_size
 
     for w in range(n_windows):
         start_idx = w * step
-        end_idx   = min(start_idx + window_size, n)
+        end_idx = min(start_idx + window_size, n)
         if end_idx - start_idx < 120 or start_idx >= n:
             continue
-        w_k15     = klines_15[start_idx:end_idx]
-
-        # Índices proporcionais para 1H e 4H
-        s1h = start_idx // 4
-        e1h = end_idx   // 4
-        s4h = start_idx // 16
-        e4h = end_idx   // 16
-        w_k1h = klines_1h[s1h:e1h] if e1h <= len(klines_1h) else klines_1h[s1h:]
-        w_k4h = klines_4h[s4h:e4h] if e4h <= len(klines_4h) else klines_4h[s4h:]
-
-        if len(w_k15) < 60:
-            continue
-
-        # Divide em treino e teste
-        split      = int(len(w_k15) * train_ratio)
-        train_15   = w_k15[:split]
-        test_15    = w_k15[split:]
-        split_1h   = split // 4
-        split_4h   = split // 16
-        train_1h   = w_k1h[:split_1h] if split_1h < len(w_k1h) else w_k1h
-        train_4h   = w_k4h[:split_4h] if split_4h < len(w_k4h) else w_k4h
-        test_1h    = w_k1h[split_1h:] if split_1h < len(w_k1h) else []
-        test_4h    = w_k4h[split_4h:] if split_4h < len(w_k4h) else []
-
-        # Roda estratégia em treino e teste
-        train_trades = _run_strategy(train_15, train_1h, train_4h, symbol=symbol) if len(train_15) >= 60 else []
-        test_trades  = _run_strategy(test_15,  test_1h,  test_4h, symbol=symbol)  if len(test_15)  >= 30 else []
-
+        w15 = klines_15[start_idx:end_idx]
+        w1 = klines_1h[start_idx // 4:end_idx // 4]
+        w4 = klines_4h[start_idx // 16:end_idx // 16]
+        split = int(len(w15) * train_ratio)
+        train_15, test_15 = w15[:split], w15[split:]
+        train_1, test_1 = w1[:split // 4], w1[split // 4:]
+        train_4, test_4 = w4[:split // 16], w4[split // 16:]
+        train_trades = _run_strategy(train_15, train_1, train_4, symbol=symbol) if len(train_15) >= 60 else []
+        test_trades = _run_strategy(test_15, test_1, test_4, symbol=symbol) if len(test_15) >= 30 else []
         train_m = _calc_metrics(train_trades, "train") if train_trades else {}
-        test_m  = _calc_metrics(test_trades,  "test")  if test_trades  else {}
-
-        results.append({
-            "window":        w + 1,
-            "candles_train": len(train_15),
-            "candles_test":  len(test_15),
-            "train": {
-                "win_rate":      train_m.get("win_rate", 0),
-                "profit_factor": train_m.get("profit_factor", 0),
-                "sharpe":        train_m.get("sharpe_ratio", 0),
-                "total_trades":  train_m.get("total_trades", 0),
-            },
-            "test": {
-                "win_rate":      test_m.get("win_rate", 0),
-                "profit_factor": test_m.get("profit_factor", 0),
-                "sharpe":        test_m.get("sharpe_ratio", 0),
-                "total_trades":  test_m.get("total_trades", 0),
-            },
-        })
+        test_m = _calc_metrics(test_trades, "test") if test_trades else {}
+        results.append(
+            {
+                "window": w + 1,
+                "candles_train": len(train_15),
+                "candles_test": len(test_15),
+                "train": {
+                    "win_rate": train_m.get("win_rate", 0),
+                    "profit_factor": train_m.get("profit_factor", 0),
+                    "sharpe": train_m.get("sharpe_ratio", 0),
+                    "total_trades": train_m.get("total_trades", 0),
+                },
+                "test": {
+                    "win_rate": test_m.get("win_rate", 0),
+                    "profit_factor": test_m.get("profit_factor", 0),
+                    "sharpe": test_m.get("sharpe_ratio", 0),
+                    "total_trades": test_m.get("total_trades", 0),
+                },
+            }
+        )
 
     if not results:
         return {"error": "Nenhuma janela com dados suficientes"}
-
-    # Métricas agregadas out-of-sample
-    oos_wr = float(np.mean([r["test"]["win_rate"]      for r in results if r["test"]["total_trades"] > 0] or [0]))
-    oos_pf = float(np.mean([r["test"]["profit_factor"] for r in results if r["test"]["total_trades"] > 0] or [0]))
-    is_wr  = float(np.mean([r["train"]["win_rate"]     for r in results if r["train"]["total_trades"] > 0] or [0]))
-    is_pf  = float(np.mean([r["train"]["profit_factor"]for r in results if r["train"]["total_trades"] > 0] or [0]))
-
-    # Degradação: quanto cai do treino para o teste
-    wr_degradation  = round((is_wr - oos_wr) / max(is_wr, 1) * 100, 1)
-    pf_degradation  = round((is_pf - oos_pf) / max(is_pf, 0.01) * 100, 1)
-    avg_degradation = (wr_degradation + pf_degradation) / 2
-
-    # Classificação de risco de overfitting
-    if avg_degradation > 40:
-        overfit_risk = "HIGH"    # estratégia overfitada nos dados de treino
-    elif avg_degradation > 20:
-        overfit_risk = "MEDIUM"  # alguma degradação, monitor
-    else:
-        overfit_risk = "LOW"     # robusta — performance se mantém fora da amostra
-
+    tests = [r["test"] for r in results if r["test"]["total_trades"] > 0]
+    trains = [r["train"] for r in results if r["train"]["total_trades"] > 0]
+    oos_wr = float(np.mean([r["win_rate"] for r in tests] or [0]))
+    oos_pf = float(np.mean([r["profit_factor"] for r in tests] or [0]))
+    is_wr = float(np.mean([r["win_rate"] for r in trains] or [0]))
+    is_pf = float(np.mean([r["profit_factor"] for r in trains] or [0]))
+    wr_deg = round((is_wr - oos_wr) / max(is_wr, 1) * 100, 1)
+    pf_deg = round((is_pf - oos_pf) / max(is_pf, 0.01) * 100, 1)
+    avg_deg = (wr_deg + pf_deg) / 2
     return {
-        "windows":         results,
-        "oos_win_rate":    round(oos_wr, 1),
-        "oos_pf":          round(oos_pf, 2),
-        "is_win_rate":     round(is_wr, 1),
-        "is_pf":           round(is_pf, 2),
-        "wr_degradation_pct":  wr_degradation,
-        "pf_degradation_pct":  pf_degradation,
-        "overfit_risk":    overfit_risk,
-        "n_windows":       n_windows,
+        "windows": results,
+        "oos_win_rate": round(oos_wr, 1),
+        "oos_pf": round(oos_pf, 2),
+        "is_win_rate": round(is_wr, 1),
+        "is_pf": round(is_pf, 2),
+        "wr_degradation_pct": wr_deg,
+        "pf_degradation_pct": pf_deg,
+        "overfit_risk": "HIGH" if avg_deg > 40 else "MEDIUM" if avg_deg > 20 else "LOW",
+        "n_windows": len(results),
     }
 
 
-# ── Runner principal ─────────────────────────────────────────────
 async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
-    """
-    Backtest completo com 90 dias de dados históricos + walk-forward testing.
-
-    Coleta:
-      15M: ~8640 candles (90 dias × 96 candles/dia)
-       1H: ~2160 candles (90 dias × 24 candles/dia)
-       4H:  ~540 candles (90 dias ×  6 candles/dia)
-
-    Walk-forward: 3 janelas de 30 dias cada
-      Treino: primeiros 70% da janela (21 dias)
-      Teste:  últimos 30% da janela (9 dias)
-    """
-    log.info(f"🔬 Iniciando backtest 90 dias {symbol}...")
+    log.info(f"🔬 Iniciando backtest histórico {symbol}...")
     start = time.time()
-
-    # FIX-3: 2 anos de dados (era 90 dias — insuficiente para validação)
-    # 2 anos: 15M = 70080 candles, 1H = 17520, 4H = 4380
-    # Bybit suporta até 1000 candles por request — fetch em lotes
-    CANDLES_2Y_15M = 70080
-    CANDLES_2Y_1H  = 17520
-    CANDLES_2Y_4H  =  4380
-
-    k15 = await fetch_history(client, symbol, "15",  CANDLES_2Y_15M)
-    k1h = await fetch_history(client, symbol, "60",  CANDLES_2Y_1H)
-    k4h = await fetch_history(client, symbol, "240", CANDLES_2Y_4H)
-
-    if not k15 or len(k15) < 100:
+    k15 = await fetch_history(client, symbol, "15", 70080)
+    k1h = await fetch_history(client, symbol, "60", 17520)
+    k4h = await fetch_history(client, symbol, "240", 4380)
+    if len(k15) < 100:
         return {"error": "Dados históricos insuficientes (min 100 candles 15M)"}
 
-    actual_days = round(len(k15) * 15 / (60 * 24), 1)
-    log.info(
-        f"📊 Dados carregados: {len(k15)} candles 15M "
-        f"({actual_days} dias) | {len(k1h)} x1H | {len(k4h)} x4H"
-    )
-
-    # ── Backtest completo (in-sample total) ──────────────────────
-    trades  = _run_strategy(k15, k1h, k4h, symbol=symbol)
+    trades = _run_strategy(k15, k1h, k4h, symbol=symbol)
     metrics = _calc_metrics(trades, "MTF-4H-1H-15M")
-
-    # ── Walk-Forward Testing (out-of-sample) ─────────────────────
-    # FIX: 3 → 6 janelas walk-forward para melhor cobertura estatística
     wf = _walk_forward(k15, k1h, k4h, n_windows=6, train_ratio=0.70, symbol=symbol, rolling=True)
-
-    elapsed = round(time.time() - start, 1)
-    metrics["elapsed_seconds"]  = elapsed
-    metrics["symbol"]           = symbol
-    metrics["candles_analyzed"] = len(k15)
-    metrics["days_analyzed"]    = actual_days
-    metrics["ran_at"]           = datetime.now(timezone.utc).isoformat()
-    metrics["walk_forward"]     = wf
-
-    # ── Monte Carlo Permutation Test ─────────────────────────────
-    trade_returns = [t.get("pnl_pct", 0) for t in trades if "pnl_pct" in t]
-    mc = monte_carlo_permutation(trade_returns)
-    metrics["monte_carlo"] = mc
-    if not mc.get("edge_significant", True):
-        log.warning(
-            f"⚠️  Monte Carlo {symbol}: p-value={mc.get('p_value','?')} "
-            f"→ {mc.get('verdict','?')} — "
-            f"considere NÃO operar com capital real"
-        )
-    else:
-        log.info(
-            f"✅ Monte Carlo {symbol}: p-value={mc.get('p_value','?')} "
-            f"({mc.get('confidence_level','?')}) | "
-            f"Sharpe no percentil {mc.get('sharpe_percentile','?')}% das simulações"
-        )
-
-    # Critério formal de invalidação
-    validity = check_strategy_validity(metrics, wf, mc)
-    metrics["strategy_validity"] = validity
-    if not validity["valid"]:
-        log.warning(
-            f"⚠️  ESTRATÉGIA {validity['verdict']} | "
-            f"Ação: {validity['action']}"
-        )
-    log.info(
-        f"✅ Backtest {symbol} | {actual_days:.0f} dias | {elapsed}s | "
-        f"{len(trades)} trades | WR={metrics.get('win_rate')}% | "
-        f"PF={metrics.get('profit_factor')} | Sharpe={metrics.get('sharpe_ratio')} | "
-        f"OOS_WR={wf.get('oos_win_rate','?')}% | "
-        f"Overfit={wf.get('overfit_risk','?')}"
+    mc = monte_carlo_permutation([t["pnl_pct"] for t in trades])
+    metrics.update(
+        {
+            "elapsed_seconds": round(time.time() - start, 1),
+            "symbol": symbol,
+            "candles_analyzed": len(k15),
+            "days_analyzed": round(len(k15) * 15 / (60 * 24), 1),
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+            "walk_forward": wf,
+            "monte_carlo": mc,
+        }
     )
+    metrics["strategy_validity"] = check_strategy_validity(metrics, wf, mc)
 
-    # Persiste no banco
     try:
         from bot import database as dbase
         await dbase._exec(
@@ -629,148 +541,93 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 datetime.now(timezone.utc).date().isoformat(),
-                metrics["strategy"],
-                metrics["win_rate"],
-                metrics["profit_factor"],
-                metrics["sharpe_ratio"],
-                metrics["sortino_ratio"],
-                metrics["max_drawdown_pct"] / 100,
-                metrics["expectancy_pct"] / 100,
-                metrics["total_trades"],
+                metrics.get("strategy", "MTF"),
+                metrics.get("win_rate", 0),
+                metrics.get("profit_factor", 0),
+                metrics.get("sharpe_ratio", 0),
+                metrics.get("sortino_ratio", 0),
+                metrics.get("max_drawdown_pct", 0) / 100,
+                metrics.get("expectancy_pct", 0) / 100,
+                metrics.get("total_trades", 0),
                 metrics["ran_at"],
             ),
         )
-    except Exception as e:
-        log.error(f"backtest persist: {e}")
-
+    except Exception as exc:
+        log.error(f"backtest persist: {exc}")
     return metrics
 
 
-# ── Scheduler semanal ────────────────────────────────────────────
-# Lock compartilhado entre backtest e otimização (BT-3)
 _backtest_lock = asyncio.Lock()
 
 
 async def weekly_backtest_loop(client):
-    """
-    Roda backtest toda semana automaticamente (domingo 03:00 UTC).
-    BT-3: usa _backtest_lock para não rodar simultâneo com otimização.
-    """
     while True:
         try:
             now = datetime.now(timezone.utc)
             if now.weekday() == 6 and now.hour == 3 and now.minute < 5:
-                if _backtest_lock.locked():
-                    log.info("📅 Backtest semanal: lock ativo, aguardando...")
-                else:
+                if not _backtest_lock.locked():
                     async with _backtest_lock:
-                        log.info("📅 Backtest semanal automático (90 dias + walk-forward)...")
-                        for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]:
+                        for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]:
                             try:
                                 await run_backtest(client, sym)
-                                await asyncio.sleep(30)  # pausa entre símbolos
-                            except Exception as e:
-                                log.error(f"weekly_backtest {sym}: {e}")
-                await asyncio.sleep(3600)  # evita re-execução na mesma hora
-        except Exception as e:
-            log.error(f"weekly_backtest_loop: {e}")
+                                await asyncio.sleep(30)
+                            except Exception as exc:
+                                log.error(f"weekly_backtest {sym}: {exc}")
+                await asyncio.sleep(3600)
+        except Exception as exc:
+            log.error(f"weekly_backtest_loop: {exc}")
         await asyncio.sleep(60)
 
 
-# ── Critério formal de invalidação da estratégia ─────────────────────────────
 def check_strategy_validity(metrics: dict, wf: dict, mc: dict) -> dict:
-    """
-    Critério formal de invalidação da estratégia.
-    Item 26 da lista de melhorias.
-
-    Retorna: {"valid": bool, "verdict": str, "warnings": list, "action": str}
-
-    Thresholds mínimos para continuar operando:
-      - Profit Factor OOS >= 1.10 (mínimo absoluto)
-      - Win Rate OOS >= 35% (dado R:R >= 2:1)
-      - Monte Carlo p-value < 0.10 (mínimo 90% confiança)
-      - Overfit risk != 'HIGH'
-      - Sharpe OOS >= 0.5
-    """
-    warnings = []
-    critical = []
-
+    warnings, critical = [], []
     pf_oos = wf.get("oos_pf", 0)
     wr_oos = wf.get("oos_win_rate", 0)
-    sharpe_oos = wf.get("windows", [{}])[-1].get("test", {}).get("sharpe", 0)
+    test_windows = [w.get("test", {}) for w in wf.get("windows", []) if w.get("test", {}).get("total_trades", 0)]
+    sharpe_oos = float(np.mean([w.get("sharpe", 0) for w in test_windows] or [0]))
     overfit = wf.get("overfit_risk", "UNKNOWN")
     p_value = mc.get("p_value", 1.0)
     total_trades = metrics.get("total_trades", 0)
-
-    # Amostra mínima
     if total_trades < 100:
-        warnings.append(f"Amostra pequena: {total_trades} trades (mín 200 para significância)")
+        warnings.append(f"Amostra pequena: {total_trades} trades")
     if total_trades < 50:
-        critical.append(f"CRÍTICO: {total_trades} trades insuficientes para qualquer conclusão")
-
-    # Profit Factor
+        critical.append(f"CRÍTICO: {total_trades} trades insuficientes")
     if pf_oos < 1.0:
-        critical.append(f"CRÍTICO: PF OOS={pf_oos:.2f} < 1.0 — estratégia perde dinheiro out-of-sample")
+        critical.append(f"CRÍTICO: PF OOS={pf_oos:.2f} < 1.0")
     elif pf_oos < 1.10:
-        warnings.append(f"PF OOS={pf_oos:.2f} marginal — muito próximo de 1.0")
-
-    # Win Rate
+        warnings.append(f"PF OOS={pf_oos:.2f} marginal")
     if wr_oos < 35:
-        critical.append(f"CRÍTICO: WR OOS={wr_oos:.1f}% < 35% — esperado mínimo para R:R 2:1")
-
-    # Monte Carlo
+        critical.append(f"CRÍTICO: WR OOS={wr_oos:.1f}% < 35%")
     if p_value >= 0.10:
-        critical.append(f"CRÍTICO: p-value={p_value:.4f} >= 0.10 — sem evidência estatística de edge")
+        critical.append(f"CRÍTICO: bootstrap p-value={p_value:.4f} >= 0.10")
     elif p_value >= 0.05:
-        warnings.append(f"p-value={p_value:.4f} — edge fraco, monitorar")
-
-    # Sharpe out-of-sample
-    # BUG CORRIGIDO: sharpe_oos era calculado e nunca verificado. Uma
-    # estratégia com PF aceitável mas Sharpe negativo (retorno instável,
-    # dependente de poucos trades) passava na validação sem ressalva.
+        warnings.append(f"bootstrap p-value={p_value:.4f} — edge fraco")
     if sharpe_oos < 0:
-        critical.append(
-            f"CRÍTICO: Sharpe OOS={sharpe_oos:.2f} < 0 — retorno ajustado "
-            f"ao risco negativo fora da amostra"
-        )
+        critical.append(f"CRÍTICO: Sharpe OOS={sharpe_oos:.2f} < 0")
     elif sharpe_oos < 0.5:
-        warnings.append(
-            f"Sharpe OOS={sharpe_oos:.2f} baixo — retorno instável "
-            f"em relação à volatilidade"
-        )
-
-    # Overfitting
+        warnings.append(f"Sharpe OOS={sharpe_oos:.2f} baixo")
     if overfit == "HIGH":
-        critical.append("CRÍTICO: Overfit risk=HIGH — parâmetros não generalizam")
+        critical.append("CRÍTICO: Overfit risk=HIGH")
     elif overfit == "MEDIUM":
-        warnings.append("Overfit risk=MEDIUM — considerar simplificar")
+        warnings.append("Overfit risk=MEDIUM")
 
-    # Veredito
     if critical:
-        valid  = False
-        verdict = "INVALIDADA"
-        action  = "SUSPENDER capital real. Revisar parâmetros e re-testar."
+        valid, verdict, action = False, "INVALIDADA", "SUSPENDER escala live; revisar e re-testar."
     elif len(warnings) >= 3:
-        valid  = False
-        verdict = "QUESTIONÁVEL"
-        action  = "Operar apenas em paper trade. Monitorar por 30 dias antes de capital real."
+        valid, verdict, action = False, "QUESTIONÁVEL", "Manter apenas paper/shadow/pilot mínimo."
     elif warnings:
-        valid  = True
-        verdict = "ACEITÁVEL_COM_RESSALVAS"
-        action  = "Operar com capital mínimo ($500-1000). Revisar em 50 trades."
+        valid, verdict, action = True, "ACEITÁVEL_COM_RESSALVAS", "Manter piloto mínimo e coletar mais OOS."
     else:
-        valid  = True
-        verdict = "VÁLIDA"
-        action  = "Operar com confiança moderada. Revisar trimestralmente."
-
+        valid, verdict, action = True, "VÁLIDA", "Elegível para revisão de release, não garantia de lucro."
     return {
-        "valid":    valid,
-        "verdict":  verdict,
-        "action":   action,
+        "valid": valid,
+        "verdict": verdict,
+        "action": action,
         "warnings": warnings,
         "critical": critical,
-        "pf_oos":   pf_oos,
-        "wr_oos":   wr_oos,
-        "p_value":  p_value,
-        "overfit":  overfit,
+        "pf_oos": pf_oos,
+        "wr_oos": wr_oos,
+        "sharpe_oos": round(sharpe_oos, 3),
+        "p_value": p_value,
+        "overfit": overfit,
     }
