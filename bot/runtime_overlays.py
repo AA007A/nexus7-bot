@@ -1,8 +1,10 @@
-"""Compatibility installer for remaining non-class runtime observability.
+"""Compatibility installer for remaining passive runtime observability.
 
-All TradingEngine/Analyzer method replacement overlays have been migrated to
-explicit core/runtime composition. This module now installs only the passive
-funnel log handler and performs no class or method assignment.
+All legacy TradingEngine/Analyzer decision or execution method replacement
+overlays have been migrated to explicit core/runtime composition. This module
+installs only the passive funnel log handler. Notification-only instrumentation
+may still wrap methods elsewhere without changing trading decisions or exchange
+behavior.
 """
 from __future__ import annotations
 
@@ -14,5 +16,6 @@ def install(TradingEngine, log) -> None:
     fm.install(log)
     log.info(
         "[RUNTIME_OVERLAYS] no class monkey patches remain; "
+        "notification-only instrumentation may be active; "
         "decision_effect=NONE execution_effect=NONE"
     )

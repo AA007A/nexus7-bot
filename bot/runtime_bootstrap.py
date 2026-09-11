@@ -39,6 +39,7 @@ def install() -> None:
     from bot import viability_fail_closed_hardening as _viability_fail_closed_hardening
     from bot import nexus_decision_dedupe as _nexus_decision_dedupe
     from bot import nexus_grade_display as _nexus_grade_display
+    from bot import nexus_terminal_notifications as _nexus_terminal_notifications
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
     from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
@@ -67,6 +68,7 @@ def install() -> None:
     from bot import score as _score
     from bot import kucoin as _kucoin
     from bot import notifier as _notifier
+    from bot import nexus_types as _nexus_types
     from bot.logger import log as _log
 
     _rh.install_database_schema_fix(_log)
@@ -121,6 +123,7 @@ def install() -> None:
     _shadow_mode_observability.install(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
+    _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
