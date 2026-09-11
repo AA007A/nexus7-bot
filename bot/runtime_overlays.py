@@ -23,11 +23,13 @@ def install(TradingEngine, log) -> None:
 
     # Install last so it observes the already-composed closed-candle/HTF regime
     # semantics and cost-calibrated NEXUS decision path. It does not alter any
-    # threshold, leverage, risk sizing, exchange permission or order routing.
+    # class method, threshold, leverage, risk sizing, exchange permission or
+    # order routing.
     regime_transition.install(nexus_ai, log)
 
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel observability, final headline "
-        "semantics and strict NEXUS regime-transition consistency are active; "
-        "thresholds_unchanged=true leverage_unchanged=true"
+        "[RUNTIME_OVERLAYS] no class monkey patches remain; passive funnel "
+        "observability, final headline semantics and strict NEXUS "
+        "regime-transition consistency are active; thresholds_unchanged=true "
+        "leverage_unchanged=true"
     )
