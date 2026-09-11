@@ -45,7 +45,9 @@ def _reason_from_decision(decision, validation_reason: str | None) -> str:
         if reasoning:
             return str(reasoning[-1])
     except Exception:
-        pass
+        # Telemetry-only fallback: an unreadable reasoning object is equivalent
+        # to no reasoning being available and must not affect execution.
+        reasoning = []
     return "NEXUS não autorizou a execução"
 
 
@@ -91,7 +93,9 @@ def _reject_metrics(sig, decision, reason: str) -> dict:
     try:
         candidate_score = float(getattr(sig, "score", None))
     except (TypeError, ValueError):
-        pass
+        # Optional display metric only. Invalid or absent candidate score is
+        # rendered as unavailable; it cannot change the NEXUS decision.
+        candidate_score = None
 
     nexus_score = _meaningful_numeric(decision, "setup_quality")
     confidence = _meaningful_numeric(decision, "confidence")
