@@ -114,6 +114,7 @@ class _ClientBase:
         self._cross_mmr_cache = {}
         self.cross_calls = 0
         self.account_calls = 0
+        self.requested_leverages = []
 
     async def load_instruments(self):
         return {"ADAUSDT": {"kucoinSymbol": "ADAUSDTM"}}
@@ -128,6 +129,7 @@ class _ClientBase:
         if path == "/api/v2/batchGetCrossOrderLimit":
             self.cross_calls += 1
             self.events.append("cross")
+            self.requested_leverages.append(str((params or {}).get("leverage")))
             if self.fail_cross:
                 raise RuntimeError("unavailable")
             return [{
@@ -221,6 +223,21 @@ def _build_runtime(*, first_approval=True, second_approval=True,
     return events, client, engine, sig
 
 
+def _run_at_production_50x(engine, sig):
+    """Exercise the integration under Railway's explicit 50x setting.
+
+    CI intentionally has a conservative 10x fallback, so tests must set the
+    production-specific value locally and restore it to avoid contaminating
+    the rest of the offline suite.
+    """
+    original = cfg.LEVERAGE
+    cfg.LEVERAGE = 50
+    try:
+        return asyncio.run(engine._open(sig))
+    finally:
+        cfg.LEVERAGE = original
+
+
 def test_geometry_real_ada_example_uses_exact_cross_mmr_and_stays_50x_safe():
     liquidation.set_mmr_from_api(
         "ADAUSDT", 0.006691, source="test_exact_cross_mmr"
@@ -250,7 +267,7 @@ def test_live_unsafe_50x_geometry_fetches_cross_mmr_then_rechecks_nexus_before_s
     events, client, engine, sig = _build_runtime()
     old_sl, old_tp = sig.sl, sig.tp
 
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     nexus_events = [event for event in events if isinstance(event, tuple) and event[0] == "nexus"]
     assert len(nexus_events) == 2
@@ -260,19 +277,18 @@ def test_live_unsafe_50x_geometry_fetches_cross_mmr_then_rechecks_nexus_before_s
     assert sig.tp != old_tp
     assert events.index("account") < events.index("sized")
     assert events.index("cross") < events.index("sized")
-    assert nexus_events[1] in events
     assert events.index(nexus_events[1]) < events.index("sized")
     assert events[-2:] == ["sized", "legacy_score"]
     assert client.account_calls == 1
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert engine.sizing_calls == 1
     assert result["total"] == 54
-    assert cfg.LEVERAGE == 50
 
     final_check = liquidation.analyze(
         entry=sig.entry,
         stop=sig.sl,
-        leverage=cfg.LEVERAGE,
+        leverage=50,
         is_long=False,
         symbol=sig.symbol,
         n_open_positions=1,
@@ -282,15 +298,16 @@ def test_live_unsafe_50x_geometry_fetches_cross_mmr_then_rechecks_nexus_before_s
 
 def test_pretrade_reuses_fresh_presizing_cross_mmr_cache_without_second_private_call():
     events, client, engine, sig = _build_runtime()
-    asyncio.run(engine._open(sig))
+    _run_at_production_50x(engine, sig)
     assert client.account_calls == 1
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert events.count("legacy_score") == 1
 
 
 def test_initial_nexus_reject_spends_no_cross_risk_private_request():
     events, client, engine, sig = _build_runtime(first_approval=False)
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
     assert client.account_calls == 0
@@ -301,11 +318,12 @@ def test_initial_nexus_reject_spends_no_cross_risk_private_request():
 
 def test_cross_mmr_failure_after_nexus_fails_closed_before_sizing():
     events, client, engine, sig = _build_runtime(fail_cross=True)
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
     assert client.account_calls == 1
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert engine.sizing_calls == 0
     assert events[-1] == "blocked_before_sizing"
     assert "legacy_score" not in events
@@ -313,12 +331,13 @@ def test_cross_mmr_failure_after_nexus_fails_closed_before_sizing():
 
 def test_second_nexus_veto_of_adjusted_geometry_fails_closed_before_sizing():
     events, client, engine, sig = _build_runtime(second_approval=False)
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
     assert engine.nexus_calls == 2
     assert engine.sizing_calls == 0
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert "blocked_before_sizing" in events
     assert "legacy_score" not in events
 
@@ -334,12 +353,13 @@ def test_already_safe_geometry_keeps_levels_and_requires_only_one_nexus_decision
     events, client, engine, sig = _build_runtime(signal=safe_sig)
     old_levels = (sig.sl, sig.tp)
 
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert (sig.sl, sig.tp) == old_levels
     assert engine.nexus_calls == 1
     assert engine.sizing_calls == 1
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert result["total"] == 54
     assert events[-2:] == ["sized", "legacy_score"]
 
@@ -353,12 +373,13 @@ def test_pathologically_wide_stop_is_blocked_instead_of_overcompressed():
         tp2=0.19240860,
     )
     events, client, engine, sig = _build_runtime(signal=wide_sig)
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
     assert engine.nexus_calls == 1
     assert engine.sizing_calls == 0
     assert client.cross_calls == 1
+    assert client.requested_leverages == ["50"]
     assert "blocked_before_sizing" in events
     assert "legacy_score" not in events
 
@@ -366,7 +387,7 @@ def test_pathologically_wide_stop_is_blocked_instead_of_overcompressed():
 def test_existing_cross_position_blocks_second_entry_before_private_risk_request():
     events, client, engine, sig = _build_runtime()
     engine.positions = {"BTCUSDT": object()}
-    result = asyncio.run(engine._open(sig))
+    result = _run_at_production_50x(engine, sig)
 
     assert result.execution_allowed is False
     assert engine.nexus_calls == 1
