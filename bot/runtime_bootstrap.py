@@ -127,7 +127,7 @@ def install() -> None:
 
     _liquidation_override_guard.install(_log)
     _kucoin_contract_risk_hardening.install(
-        _kucoin.KuCoinClient, TradingEngine, _liquidation, _log
+        _kucoin.KuCoinClient, TradingEngine, _score, _liquidation, _log
     )
     _instrument_readiness_guard.install(_log)
     _viability_fail_closed_hardening.install(TradingEngine, _log)

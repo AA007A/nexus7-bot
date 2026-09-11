@@ -11,7 +11,8 @@ This module preserves the legacy score and all of its telemetry, but makes its
 boolean ``aprovado`` field advisory only when the current LIVE opening task can
 prove that the exact same trade has already received a valid NEXUS approval.
 Any missing, stale, mismatched or negative NEXUS record leaves the legacy gate
-unchanged. PAPER and non-pilot paths are unchanged.
+unchanged. Explicit ``hard_block`` results from downstream safety enrichment are
+never advisory-bypassed. PAPER and non-pilot paths are unchanged.
 """
 from __future__ import annotations
 
@@ -100,6 +101,19 @@ def install(TradingEngine, scoring, log) -> None:
         if not isinstance(result, dict):
             return result
 
+        # Safety enrichments may deliberately return a well-formed negative
+        # score with an explicit hard block (for example, unavailable fresh
+        # KuCoin CROSS MMR). Such a result is not the legacy soft-score veto
+        # this module is allowed to de-duplicate.
+        hard_block = result.get("hard_block")
+        if hard_block:
+            log.warning(
+                "[LEGACY_PRETRADE_AUTHORITY] symbol=%s result=HARD_BLOCK_PRESERVED "
+                "reason=%s execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol, hard_block,
+            )
+            return result
+
         engine = _ENGINE.get()
         sig = _SIGNAL.get()
         if engine is None or sig is None:
@@ -144,5 +158,6 @@ def install(TradingEngine, scoring, log) -> None:
     log.warning(
         "[LEGACY_PRETRADE_AUTHORITY] installed: legacy score remains telemetry; "
         "only exact NEXUS-approved LIVE pilot trades may continue when legacy<min; "
+        "explicit hard_block results remain authoritative; "
         "RiskManagerV3/PilotGuard/DD/market-risk/ownership/final-market gates unchanged"
     )
