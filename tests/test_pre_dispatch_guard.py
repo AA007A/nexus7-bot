@@ -3,6 +3,8 @@ import unittest
 from bot.pre_dispatch_guard import (
     MicrostructureLimits,
     evaluate_microstructure,
+    live_microstructure_recheck,
+    normalize_orderbook_base_units,
     recheck_exchange_exposure,
 )
 
@@ -24,6 +26,30 @@ class FakeClient:
             raise RuntimeError("orders unavailable")
         self.last_get = (endpoint, params, auth)
         return self.active
+
+
+class FreshMarketClient:
+    def __init__(self, ticker=None, book=None, fail=False):
+        self.ticker = ticker or {"bid": 99.98, "ask": 100.02, "lastPrice": 100.0}
+        self.book = book if book is not None else {
+            "b": [[99.98, 50]],
+            "a": [[100.02, 50]],
+        }
+        self.fail = fail
+        self.ticker_reads = 0
+        self.book_reads = 0
+
+    async def get_ticker(self, symbol):
+        self.ticker_reads += 1
+        if self.fail:
+            raise RuntimeError("ticker unavailable")
+        return self.ticker
+
+    async def get_orderbook(self, symbol, depth=20):
+        self.book_reads += 1
+        if self.fail:
+            raise RuntimeError("book unavailable")
+        return self.book
 
 
 class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -62,6 +88,44 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(out.allowed)
         self.assertIn("ORDERBOOK_UNAVAILABLE", out.blockers)
+
+    def test_orderbook_contract_depth_normalizes_to_base_units(self):
+        out = normalize_orderbook_base_units(
+            {"BTCUSDT": {"multiplier": 0.001}},
+            "BTCUSDT",
+            {"b": [[99.9, 2000]], "a": [[100.1, 3000]]},
+        )
+        self.assertEqual(out["bids"][0][1], 2.0)
+        self.assertEqual(out["asks"][0][1], 3.0)
+
+    async def test_live_recheck_uses_fresh_rest_reads_and_passes_good_market(self):
+        c = FreshMarketClient()
+        out = await live_microstructure_recheck(
+            c,
+            instruments={"BTCUSDT": {"multiplier": 0.1}},
+            symbol="BTCUSDT",
+            signal_entry=100.0,
+            side="BUY",
+            qty=1.0,
+            limits=MicrostructureLimits(max_spread_bps=10, max_signal_drift_bps=10, min_depth_multiple=3),
+        )
+        self.assertTrue(out.allowed)
+        self.assertEqual(c.ticker_reads, 1)
+        self.assertEqual(c.book_reads, 1)
+        self.assertGreaterEqual(out.metrics["depth_multiple"], 3.0)
+
+    async def test_live_recheck_fails_closed_on_exchange_read_error(self):
+        c = FreshMarketClient(fail=True)
+        out = await live_microstructure_recheck(
+            c,
+            instruments={"BTCUSDT": {"multiplier": 0.1}},
+            symbol="BTCUSDT",
+            signal_entry=100.0,
+            side="BUY",
+            qty=1.0,
+        )
+        self.assertFalse(out.allowed)
+        self.assertEqual(out.blockers, ["MICROSTRUCTURE_RECHECK_FAILED"])
 
     async def test_existing_symbol_position_blocks(self):
         c = FakeClient(positions=[{"symbol": "BTCUSDT", "size": 1}], active={"items": []})
