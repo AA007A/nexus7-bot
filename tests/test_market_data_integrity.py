@@ -118,17 +118,21 @@ def test_nexus_hard_gate_accepts_fresh_contiguous_closed_series():
 
 def test_nexus_hard_gate_blocks_abnormal_recent_gap():
     now = 1_789_200_000_000
+    width = 15 * 60_000
     last_close = now - 5 * 60_000
-    k15 = _series(60, 15 * 60_000, last_close)
+    # Start with 62 contiguous bars, then remove two adjacent recent bars.
+    # Sixty bars remain (so minimum-history validation still passes), while the
+    # resulting three-interval jump deterministically exercises the gap gate.
+    k15 = _series(62, width, last_close)
+    del k15[-3]
+    del k15[-3]
+    assert len(k15) == 60
     k1h = _series(40, 60 * 60_000, last_close)
     k4h = _series(20, 240 * 60_000, last_close)
-    # Create a >2 interval hole near the decision boundary while preserving
-    # enough history.
-    k15[-2]["ts"] -= 3 * 15 * 60_000
 
     ok, reason, _ = validate_nexus_candles(k15, k1h, k4h, now_ms=now)
     assert ok is False
-    assert ("abnormal_gap" in reason) or ("non_monotonic" in reason)
+    assert "abnormal_gap" in reason
 
 
 def test_nexus_validate_data_wrapper_turns_hard_integrity_failure_into_zero_quality():
