@@ -54,11 +54,17 @@ def _row(symbol="NEARUSDT"):
     }
 
 
-def test_startup_manual_position_is_not_adopted(monkeypatch):
-    async def unprotected(*_args, **_kwargs):
-        return False, "no_full_protective_stop"
-    monkeypatch.setattr(guard, "conditional_stop_confirmed", unprotected)
-    guard.install(Engine, DummyLog())
+async def _unprotected(*_args, **_kwargs):
+    return False, "no_full_protective_stop"
+
+
+# tests.run_offline invokes test functions directly and does not provide pytest
+# fixtures. Install the deterministic stub once at import time.
+guard.conditional_stop_confirmed = _unprotected
+guard.install(Engine, DummyLog())
+
+
+def test_startup_manual_position_is_not_adopted():
     e = Engine([_row()])
     asyncio.run(e._load_existing_positions())
     assert "NEARUSDT" in e._external_position_symbols
@@ -66,20 +72,14 @@ def test_startup_manual_position_is_not_adopted(monkeypatch):
     assert "NEARUSDT" not in e._trade_ids
 
 
-def test_external_position_never_reaches_naked_guard(monkeypatch):
-    async def unprotected(*_args, **_kwargs):
-        return False, "no_full_protective_stop"
-    monkeypatch.setattr(guard, "conditional_stop_confirmed", unprotected)
+def test_external_position_never_reaches_naked_guard():
     e = Engine([_row()])
     asyncio.run(e._load_existing_positions())
     asyncio.run(e._guard_naked_positions())
     assert e.client.mutations == []
 
 
-def test_external_symbol_cannot_use_scoped_reconcile(monkeypatch):
-    async def unprotected(*_args, **_kwargs):
-        return False, "no_full_protective_stop"
-    monkeypatch.setattr(guard, "conditional_stop_confirmed", unprotected)
+def test_external_symbol_cannot_use_scoped_reconcile():
     e = Engine([_row()])
     asyncio.run(e._load_existing_positions())
     asyncio.run(e._reconcile_exchange_positions(only_symbol="NEARUSDT"))
