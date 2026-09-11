@@ -6,6 +6,8 @@ H02/H03 hardening:
 - TEST remains untouched until the candidate is frozen.
 - Search space contains only parameters that demonstrably affect replay:
   min_score and min_rr.
+- HTF context is kept complete and filtered inside the backtest strictly by
+  closed-candle timestamps, avoiding index-ratio drift when data has gaps.
 
 The production strategy currently chooses SL/TP ATR multipliers internally by
 entry type. Therefore sl_mult/tp_mult, RSI thresholds, ADX thresholds, BOS
@@ -127,22 +129,20 @@ def _objective(trial, k15_train, k1h_train, k4h_train, symbol: str = "") -> floa
 
 
 def _split_by_time(k15: list, k1h: list, k4h: list) -> dict:
-    """Chronological 60/20/20 split."""
+    """Chronological 60/20/20 split with timestamp-safe shared HTF context.
+
+    Only the 15m decision stream is partitioned. Complete 1h/4h histories are
+    supplied to each partition because ``run_strategy_public`` filters them by
+    candle close time at every decision. This preserves legitimate pre-split
+    context while making future HTF candles inaccessible to the strategy.
+    """
     n = len(k15)
     train_end = int(n * 0.60)
     val_end = int(n * 0.80)
     return {
-        "train": (k15[:train_end], k1h[:train_end // 4], k4h[:train_end // 16]),
-        "validation": (
-            k15[train_end:val_end],
-            k1h[train_end // 4:val_end // 4],
-            k4h[train_end // 16:val_end // 16],
-        ),
-        "test": (
-            k15[val_end:],
-            k1h[val_end // 4:],
-            k4h[val_end // 16:],
-        ),
+        "train": (k15[:train_end], k1h, k4h),
+        "validation": (k15[train_end:val_end], k1h, k4h),
+        "test": (k15[val_end:], k1h, k4h),
     }
 
 
