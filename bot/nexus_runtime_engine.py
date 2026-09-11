@@ -10,6 +10,7 @@ No exchange mutation, release state, or execution permission is changed here.
 from __future__ import annotations
 
 from bot import account_balance_semantics
+from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
 from bot.drawdown_persistence import restore_update_real_account_peak
@@ -121,5 +122,9 @@ class TradingEngine(CoreTradingEngine):
     @observe_nexus_validation
     async def _nexus_validate(self, sig):
         decision = await super()._nexus_validate(sig)
+        # Counterfactual opportunity tracking is deliberately best-effort and
+        # isolated from the trading decision. It records both approvals and
+        # rejections so future gate calibration has a control group.
+        await missed_opportunity_audit.observe(self, sig, decision, log)
         await self._prepare_professional_risk(sig, decision)
         return decision
