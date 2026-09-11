@@ -10,6 +10,12 @@ def _candles(n):
     ]
 
 
+def _fake_ai(decide, detect_regime=None):
+    if detect_regime is None:
+        detect_regime = lambda closes, highs, lows, volumes: ("RANGE", {})
+    return SimpleNamespace(decide=decide, detect_regime=detect_regime)
+
+
 def test_closed_mtf_removes_forming_candle_when_minimum_is_preserved():
     k15, k1h, k4h = consistency.closed_mtf(
         _candles(100), _candles(100), _candles(100)
@@ -40,7 +46,7 @@ def test_install_routes_decision_through_confirmed_candles_only():
         observed["last_ts"] = (k15[-1]["ts"], k1h[-1]["ts"], k4h[-1]["ts"])
         return SimpleNamespace(decision="WAIT", setup_quality=0.0)
 
-    fake_ai = SimpleNamespace(decide=original)
+    fake_ai = _fake_ai(original)
     fake_log = SimpleNamespace(info=lambda *args, **kwargs: None,
                                warning=lambda *args, **kwargs: None)
 
@@ -53,6 +59,53 @@ def test_install_routes_decision_through_confirmed_candles_only():
     assert observed["last_ts"] == (98, 98, 98)
 
 
+def test_entry_regime_detection_uses_confirmed_4h_context_not_15m_series():
+    observed = []
+
+    def detect_regime(closes, highs, lows, volumes):
+        observed.append(len(closes))
+        return ("TRENDING_BULL", {})
+
+    def original(symbol, k15, k1h, k4h, *args, **kwargs):
+        closes = [float(k["c"]) for k in k15]
+        highs = [float(k["h"]) for k in k15]
+        lows = [float(k["l"]) for k in k15]
+        volumes = [float(k["v"]) for k in k15]
+        # Mirrors nexus_ai.decide: it asks detect_regime using 15m arrays.
+        fake_ai.detect_regime(closes, highs, lows, volumes)
+        return SimpleNamespace(decision="WAIT", setup_quality=0.0)
+
+    fake_ai = _fake_ai(original, detect_regime=detect_regime)
+    fake_log = SimpleNamespace(info=lambda *args, **kwargs: None,
+                               warning=lambda *args, **kwargs: None)
+
+    consistency.install(fake_ai, fake_log)
+    fake_ai.decide("ETHUSDT", _candles(200), _candles(100), _candles(120))
+
+    # 4H cache has 120 bars; confirmed view removes the forming bar => 119.
+    # If the old 15M behavior were used this would be 199 instead.
+    assert observed == [119]
+
+
+def test_detect_regime_outside_entry_decision_retains_original_inputs():
+    observed = []
+
+    def detect_regime(closes, highs, lows, volumes):
+        observed.append(len(closes))
+        return ("RANGE", {})
+
+    fake_ai = _fake_ai(
+        lambda *args, **kwargs: SimpleNamespace(decision="WAIT", setup_quality=0.0),
+        detect_regime=detect_regime,
+    )
+    fake_log = SimpleNamespace(info=lambda *args, **kwargs: None,
+                               warning=lambda *args, **kwargs: None)
+    consistency.install(fake_ai, fake_log)
+
+    fake_ai.detect_regime([1] * 15, [1] * 15, [1] * 15, [1] * 15)
+    assert observed == [15]
+
+
 def test_install_is_idempotent():
     calls = {"n": 0}
 
@@ -60,15 +113,18 @@ def test_install_is_idempotent():
         calls["n"] += 1
         return SimpleNamespace(decision="WAIT", setup_quality=0.0)
 
-    fake_ai = SimpleNamespace(decide=original)
+    fake_ai = _fake_ai(original)
     fake_log = SimpleNamespace(info=lambda *args, **kwargs: None,
                                warning=lambda *args, **kwargs: None)
 
     consistency.install(fake_ai, fake_log)
     first = fake_ai.decide
+    first_regime = fake_ai.detect_regime
     consistency.install(fake_ai, fake_log)
     second = fake_ai.decide
+    second_regime = fake_ai.detect_regime
 
     assert first is second
+    assert first_regime is second_regime
     second("BTCUSDT", _candles(100), _candles(100), _candles(100))
     assert calls["n"] == 1
