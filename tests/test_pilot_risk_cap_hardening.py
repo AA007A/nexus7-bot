@@ -45,6 +45,9 @@ class _Risk:
 
 
 class _Log:
+    def debug(self, *args, **kwargs):
+        pass
+
     def info(self, *args, **kwargs):
         pass
 
@@ -200,6 +203,89 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["orderId"], "should-only-exist-on-pass")
         self.assertEqual(instance.client.place_calls, 1)
+
+
+class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def _exercise_engine_order(self, *, ticker, book):
+        """Mirror the real engine order: refresh -> size -> final refresh -> dispatch."""
+        from bot import engine as engine_module
+
+        original_module_minimum = engine_module.minimum_base_quantity
+
+        class FakeEngine:
+            _pilot_risk_cap_hardening_installed = False
+
+            def __init__(self):
+                self.paper_trade = False
+                self.pilot = _Pilot()
+                self.risk = _Risk(6.0)
+                self.instruments = {"ADAUSDT": {"multiplier": 1.0}}
+                self.positions = {}
+                self.client = _MarketClient(ticker, book)
+                self.refresh_calls = 0
+
+            async def _refresh_entry_balance(self):
+                self.refresh_calls += 1
+                return True
+
+            async def _open(self, sig):
+                # This first refresh is present in the production engine before
+                # minimum_base_quantity() has created the final quantity.
+                if not await self._refresh_entry_balance():
+                    return "blocked_pre_sizing"
+
+                qty = engine_module.minimum_base_quantity(
+                    self.instruments[sig.symbol], sig.entry
+                )
+
+                # This is the final pre-dispatch refresh where the market guard
+                # must actually run against the computed quantity.
+                if not await self._refresh_entry_balance():
+                    return "blocked_final"
+
+                return await self.client.place_order(
+                    symbol=sig.symbol,
+                    side="Sell",
+                    qty=qty,
+                )
+
+        class Sig:
+            symbol = "ADAUSDT"
+            entry = 0.20461
+            direction = "SHORT"
+
+        try:
+            engine_module.minimum_base_quantity = lambda info, price: 10.0
+            guard.install(FakeEngine, _Log())
+            instance = FakeEngine()
+            result = await instance._open(Sig())
+            return instance, result
+        finally:
+            engine_module.minimum_base_quantity = original_module_minimum
+
+    async def test_pre_sizing_refresh_does_not_false_block_valid_live_candidate(self):
+        instance, result = await self._exercise_engine_order(
+            ticker={"bid": 0.20460, "ask": 0.20462, "lastPrice": 0.20461},
+            book={"b": [[0.20460, 100]], "a": [[0.20462, 100]]},
+        )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["orderId"], "should-only-exist-on-pass")
+        self.assertEqual(instance.refresh_calls, 2)
+        # Market quality is fetched only at the final, post-sizing boundary.
+        self.assertEqual(instance.client.ticker_calls, 1)
+        self.assertEqual(instance.client.book_calls, 1)
+        self.assertEqual(instance.client.place_calls, 1)
+
+    async def test_bad_market_still_blocks_at_final_post_sizing_boundary(self):
+        instance, result = await self._exercise_engine_order(
+            ticker={"bid": 0.20200, "ask": 0.20700, "lastPrice": 0.20461},
+            book={"b": [[0.20200, 100]], "a": [[0.20700, 100]]},
+        )
+        self.assertEqual(result, "blocked_final")
+        self.assertEqual(instance.refresh_calls, 2)
+        self.assertEqual(instance.client.ticker_calls, 1)
+        self.assertEqual(instance.client.book_calls, 1)
+        self.assertEqual(instance.client.place_calls, 0)
 
 
 if __name__ == "__main__":
