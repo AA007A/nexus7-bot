@@ -2,6 +2,7 @@ import time
 import unittest
 
 from bot import derivatives_news_freshness_hardening as hardening
+from bot import news_semantic_hardening as news_semantics
 
 
 class _ScoringStub:
@@ -21,7 +22,7 @@ class _ScoringStub:
 
 class NewsNegationSemanticsTests(unittest.TestCase):
     def test_etf_not_approved_is_bearish(self):
-        classification, confidence, is_macro = hardening.classify_headline(
+        classification, confidence, is_macro = news_semantics.classify_headline(
             "SEC says spot Bitcoin ETF not approved after review",
             _ScoringStub,
         )
@@ -30,7 +31,7 @@ class NewsNegationSemanticsTests(unittest.TestCase):
         self.assertFalse(is_macro)
 
     def test_etf_approved_is_bullish(self):
-        classification, confidence, _ = hardening.classify_headline(
+        classification, confidence, _ = news_semantics.classify_headline(
             "SEC approves spot Bitcoin ETF for trading",
             _ScoringStub,
         )
@@ -38,7 +39,7 @@ class NewsNegationSemanticsTests(unittest.TestCase):
         self.assertGreaterEqual(confidence, 0.6)
 
     def test_negated_hack_is_not_bearish(self):
-        classification, confidence, _ = hardening.classify_headline(
+        classification, confidence, _ = news_semantics.classify_headline(
             "Exchange says wallets were not hacked and funds are safe",
             _ScoringStub,
         )
@@ -46,7 +47,7 @@ class NewsNegationSemanticsTests(unittest.TestCase):
         self.assertLessEqual(confidence, 0.5)
 
     def test_rejected_etf_approval_is_bearish_even_with_sec_keyword(self):
-        classification, confidence, _ = hardening.classify_headline(
+        classification, confidence, _ = news_semantics.classify_headline(
             "Bitcoin ETF approval rejected by SEC",
             _ScoringStub,
         )
@@ -54,7 +55,7 @@ class NewsNegationSemanticsTests(unittest.TestCase):
         self.assertGreaterEqual(confidence, 0.6)
 
     def test_macro_detection_is_preserved(self):
-        classification, _, is_macro = hardening.classify_headline(
+        classification, _, is_macro = news_semantics.classify_headline(
             "Fed CPI report shows inflation cooling as Bitcoin rallies",
             _ScoringStub,
         )
