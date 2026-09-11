@@ -1,21 +1,24 @@
-"""Compatibility installer for remaining passive runtime observability.
+"""Compatibility installer for final runtime observability and semantics.
 
-All legacy TradingEngine/Analyzer decision or execution method replacement
-overlays have been migrated to explicit core/runtime composition. This module
-installs only the passive funnel log handler. Notification-only instrumentation
-may still wrap methods elsewhere without changing trading decisions or exchange
-behavior.
+Most execution/decision hardenings are installed explicitly by
+``bot.runtime_bootstrap``. This final compatibility layer keeps passive funnel
+observability and installs the definitive headline-semantic classifier after
+all earlier news/context wrappers have been composed.
 """
 from __future__ import annotations
 
 
 def install(TradingEngine, log) -> None:
-    """Install passive funnel observability; TradingEngine is kept for API compatibility."""
+    """Install passive funnel metrics and final headline semantics."""
     from bot import funnel_metrics as fm
+    from bot import score as scoring
+    from bot import derivatives_news_freshness_hardening as derivatives_hardening
+    from bot import news_semantic_hardening as news_semantics
 
     fm.install(log)
+    news_semantics.install(scoring, derivatives_hardening, log)
     log.info(
-        "[RUNTIME_OVERLAYS] no class monkey patches remain; "
-        "notification-only instrumentation may be active; "
-        "decision_effect=NONE execution_effect=NONE"
+        "[RUNTIME_OVERLAYS] passive funnel observability active; "
+        "final headline semantics installed; class-level execution routing "
+        "is owned by explicit hardening modules; execution_effect=NONE"
     )
