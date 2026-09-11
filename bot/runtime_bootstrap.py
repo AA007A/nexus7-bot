@@ -43,6 +43,7 @@ def install() -> None:
     from bot import nexus_grade_display as _nexus_grade_display
     from bot import nexus_terminal_notifications as _nexus_terminal_notifications
     from bot import nexus_optional_evidence as _nexus_optional_evidence
+    from bot import nexus_structure_semantics as _nexus_structure_semantics
     from bot import nexus_decision_consistency as _nexus_decision_consistency
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
@@ -132,10 +133,11 @@ def install() -> None:
     _shadow_mode_observability.install(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
-    # Optional enrichment is scored before the closed-candle parity wrapper so
-    # both the real decision and read-only score decomposition see identical
-    # semantics.
+    # Optional enrichment is scored before structure semantics and the
+    # closed-candle parity wrapper so production decisions and read-only score
+    # decomposition use exactly the same component denominator.
     _nexus_optional_evidence.install(_nexus_ai, _log)
+    _nexus_structure_semantics.install(_nexus_ai, _log)
     _nexus_decision_consistency.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
