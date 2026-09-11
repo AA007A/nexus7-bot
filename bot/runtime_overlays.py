@@ -15,7 +15,7 @@ def install(TradingEngine, log) -> None:
 
     fm.install(log)
     log.info(
-        "[RUNTIME_OVERLAYS] no legacy decision/execution class patches remain; "
+        "[RUNTIME_OVERLAYS] no class monkey patches remain; "
         "notification-only instrumentation may be active; "
         "decision_effect=NONE execution_effect=NONE"
     )
