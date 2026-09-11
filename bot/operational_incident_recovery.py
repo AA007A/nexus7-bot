@@ -140,3 +140,49 @@ async def maybe_rebase(engine, current_equity: float, log, *, preflight_clear: b
         PRESERVED_STRATEGY_DRAWDOWN * 100.0,
     )
     return True
+
+
+def install(TradingEngine, log) -> None:
+    """Run the one-time migration after the normal LIVE preflight is clear."""
+    if getattr(TradingEngine, "_operational_incident_recovery_installed", False):
+        return
+
+    original_connect = TradingEngine._connect
+
+    async def _connect_with_incident_recovery(self, *args, **kwargs):
+        result = await original_connect(self, *args, **kwargs)
+        if getattr(self, "paper_trade", False) or not getattr(self, "connected", False):
+            return result
+
+        preflight_clear = bool(getattr(self, "_pilot_live_prelive_ready", False))
+        if not preflight_clear:
+            return result
+
+        try:
+            equity = float(getattr(self, "_pilot_account_equity", 0.0) or 0.0)
+            applied = await maybe_rebase(
+                self,
+                equity,
+                log,
+                preflight_clear=preflight_clear,
+            )
+            if applied:
+                self.risk.balance_confirmed = True
+        except Exception as exc:
+            self._pilot_live_prelive_ready = False
+            self.risk.balance_confirmed = False
+            log.critical(
+                "[OPERATIONAL_INCIDENT_REBASE] incident=%s result=BLOCKED "
+                "reason=%s action=no_new_entry",
+                INCIDENT_ID,
+                type(exc).__name__,
+            )
+        return result
+
+    TradingEngine._connect = _connect_with_incident_recovery
+    TradingEngine._operational_incident_recovery_installed = True
+    log.warning(
+        "[OPERATIONAL_INCIDENT_REBASE] installed incident=%s "
+        "one_time=true max_drawdown_unchanged=true",
+        INCIDENT_ID,
+    )
