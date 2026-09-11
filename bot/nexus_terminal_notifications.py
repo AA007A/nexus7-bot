@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 
 
@@ -18,7 +19,7 @@ _terminal_cache: dict[tuple[str, str, str], float] = {}
 _TERMINAL_COOLDOWN = int(os.environ.get("NEXUS_TERMINAL_COOLDOWN", "120"))
 
 
-def _decision_value(decision, name: str, default=0):
+def _decision_value(decision, name: str, default=None):
     try:
         value = getattr(decision, name, default)
         return default if value is None else value
@@ -36,6 +37,78 @@ def _reason_from_decision(decision, validation_reason: str | None) -> str:
     except Exception:
         pass
     return "NEXUS não autorizou a execução"
+
+
+def _reasoning_text(decision) -> str:
+    try:
+        return " | ".join(str(x) for x in (getattr(decision, "reasoning", None) or []))
+    except Exception:
+        return ""
+
+
+def _extract_float(text: str, pattern: str):
+    match = re.search(pattern, text or "", flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _meaningful_numeric(decision, name: str):
+    """Return a real metric or None when the field is only a dataclass default.
+
+    Several fail-closed exits happen before final NEXUS scoring. NexusDecision
+    deliberately defaults those not-yet-computed metrics to 0.0. Reporting the
+    defaults as measured values is misleading, so zero is treated as unavailable
+    for reject observability and we recover already-computed values from the
+    reasoning text when possible.
+    """
+    value = _decision_value(decision, name, None)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value != 0.0 else None
+
+
+def _reject_metrics(sig, decision, reason: str) -> dict:
+    reasoning = _reasoning_text(decision)
+    combined = f"{reason} | {reasoning}"
+
+    candidate_score = None
+    try:
+        candidate_score = float(getattr(sig, "score", None))
+    except (TypeError, ValueError):
+        pass
+
+    nexus_score = _meaningful_numeric(decision, "setup_quality")
+    confidence = _meaningful_numeric(decision, "confidence")
+    if confidence is None:
+        confidence = _extract_float(combined, r"\bconf(?:idence)?\s*[=:]\s*([+-]?\d+(?:\.\d+)?)")
+
+    rr = _meaningful_numeric(decision, "risk_reward")
+    if rr is None:
+        rr = _extract_float(combined, r"R:R\s*l[ií]quido\s*([+-]?\d+(?:\.\d+)?)")
+
+    ev = _meaningful_numeric(decision, "expected_value")
+    if ev is None:
+        ev = _extract_float(combined, r"\bEV(?:\s+negativo\s+ap[oó]s\s+custos)?[:\s]+([+-]?\d+(?:\.\d+)?)%")
+
+    return {
+        "candidate_score": candidate_score,
+        "nexus_score": nexus_score,
+        "confidence": confidence,
+        "rr": rr,
+        "ev": ev,
+    }
+
+
+def _fmt_metric(value, fmt: str, unavailable: str = "—") -> str:
+    if value is None:
+        return unavailable
+    return format(value, fmt)
 
 
 def _dedupe_ok(symbol: str, status: str, reason: str) -> bool:
@@ -57,20 +130,26 @@ async def _notify_reject(notifier, sig, decision, validation_reason: str | None)
     if not _dedupe_ok(sig.symbol, "REJECT", reason):
         return
 
-    score = float(_decision_value(decision, "setup_quality", 0) or 0)
-    confidence = float(_decision_value(decision, "confidence", 0) or 0)
-    rr = float(_decision_value(decision, "risk_reward", 0) or 0)
-    ev = float(_decision_value(decision, "expected_value", 0) or 0)
+    metrics = _reject_metrics(sig, decision, reason)
+    candidate_score = _fmt_metric(metrics["candidate_score"], ".1f")
+    nexus_score = _fmt_metric(
+        metrics["nexus_score"], ".1f", "não calculado (veto anterior ao score final)"
+    )
+    confidence = _fmt_metric(metrics["confidence"], ".1f")
+    rr = _fmt_metric(metrics["rr"], ".2f")
+    ev = _fmt_metric(metrics["ev"], "+.3f")
+    ev_suffix = "%" if metrics["ev"] is not None else ""
 
     await notifier.notify(
         f"🚫 *NEXUS AI — REJEITADO*\n"
         f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
         f"📍 Par: `{sig.symbol}`\n"
         f"🧭 Direção: `{sig.direction}`\n"
-        f"🧠 Score final: `{score:.1f}/100`\n"
-        f"🎯 Confiança: `{confidence:.1f}%`\n"
-        f"⚖️ R:R líquido: `{rr:.2f}`\n"
-        f"📈 EV: `{ev:+.3f}%`\n"
+        f"🧠 Score candidato: `{candidate_score}/100`\n"
+        f"🧠 Score NEXUS: `{nexus_score}`\n"
+        f"🎯 Confiança: `{confidence}{'%' if metrics['confidence'] is not None else ''}`\n"
+        f"⚖️ R:R líquido: `{rr}`\n"
+        f"📈 EV: `{ev}{ev_suffix}`\n"
         f"❌ Motivo: _{reason[:180]}_\n"
         f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
         f"_Nenhuma ordem foi enviada._"
@@ -115,8 +194,6 @@ def install(TradingEngine, notifier, nexus_types, log) -> None:
                 )
             return decision
         except asyncio.CancelledError:
-            # asyncio.wait_for cancels _nexus_validate when the engine timeout
-            # expires. Emit the terminal status before propagating cancellation.
             asyncio.create_task(
                 _notify_failure(notifier, sig, "TIMEOUT", "ai_timeout")
             )
@@ -131,5 +208,6 @@ def install(TradingEngine, notifier, nexus_types, log) -> None:
     TradingEngine._nexus_terminal_notifications_installed = True
     log.info(
         "[NEXUS_TERMINAL_TELEGRAM] installed: REJECT/TIMEOUT/ERROR final "
-        "notifications; decision_effect=NONE execution_effect=NONE"
+        "notifications with truthful partial-metric display; "
+        "decision_effect=NONE execution_effect=NONE"
     )
