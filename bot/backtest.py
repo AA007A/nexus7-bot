@@ -6,6 +6,7 @@ Quant-audit hardening:
 - Historical integrity checks detect duplicates, non-monotonic data and gaps.
 - Trade hour/day are derived from the real candle timestamp.
 - Same-bar SL/TP ambiguity is resolved conservatively (stop first).
+- Backtests never mutate shared runtime configuration.
 """
 from __future__ import annotations
 
@@ -61,7 +62,6 @@ def _historical_integrity(candles: list, interval: str) -> dict:
     timestamps = [int(c["ts"]) for c in candles]
     duplicates = len(timestamps) - len(set(timestamps))
     non_monotonic = sum(1 for a, b in zip(timestamps, timestamps[1:]) if b <= a)
-    # Allow up to 10% timestamp jitter; exchange outages are surfaced as gaps.
     gaps = sum(1 for a, b in zip(timestamps, timestamps[1:]) if b - a > expected * 1.10)
     return {
         "ok": duplicates == 0 and non_monotonic == 0,
@@ -95,18 +95,11 @@ async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms
 
 
 async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -> list:
-    """Fetch exactly bounded historical OHLCV using timestamp pagination.
-
-    H01 fix: the old implementation repeatedly requested the latest window and
-    de-duplicated by opening *price*. This implementation pages backwards by
-    timestamp and de-duplicates only by candle timestamp.
-    """
+    """Fetch bounded historical OHLCV using timestamp pagination."""
     if limit <= 0:
         return []
 
     try:
-        # Real KuCoin client exposes _get. Keep a conservative compatibility
-        # fallback for mocks/alternate clients used by tests.
         if not hasattr(client, "_get"):
             rows = await client.get_klines(symbol, interval, limit)
             unique = {int(c["ts"]): c for c in rows if c and c.get("ts")}
@@ -117,8 +110,6 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
             return result
 
         interval_ms = _interval_minutes(interval) * 60 * 1000
-        # KuCoin Futures safely supports bounded kline windows; 500 keeps each
-        # request small and deterministic across granularities.
         page_size = 500
         cursor_end = int(time.time() * 1000)
         by_ts: dict[int, dict] = {}
@@ -130,8 +121,6 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
                 break
             remaining = limit - len(by_ts)
             requested = min(page_size, remaining)
-            # Add one interval of overlap; timestamp de-dupe makes overlap safe
-            # and protects against exchange boundary semantics.
             span = interval_ms * (requested + 1)
             cursor_start = max(0, cursor_end - span)
             page = await _kucoin_page(client, symbol, interval, cursor_start, cursor_end)
@@ -182,161 +171,159 @@ def _run_strategy(
     tp_mult: float | None = None,
     symbol: str = "",
 ) -> List[dict]:
-    """Replay the production MTF strategy on chronological historical data."""
+    """Replay the production MTF strategy on chronological historical data.
+
+    ``sl_mult`` and ``tp_mult`` are retained only for backward call-signature
+    compatibility. The production Analyzer owns SL/TP geometry by entry type,
+    so these legacy arguments are intentionally ignored. Most importantly,
+    this function never mutates shared ``cfg`` state (H07).
+    """
     from bot.strategy import Analyzer
 
-    _orig_sl = getattr(cfg, "SL_ATR_MULT", 1.5)
-    _orig_tp = getattr(cfg, "TP_ATR_MULT", 3.0)
-    if sl_mult is not None:
-        cfg.SL_ATR_MULT = float(sl_mult)
-    if tp_mult is not None:
-        cfg.TP_ATR_MULT = float(tp_mult)
+    if sl_mult is not None or tp_mult is not None:
+        log.debug(
+            "[BACKTEST_H07] legacy sl_mult/tp_mult ignored; production strategy "
+            "owns protective-level geometry and shared cfg is immutable"
+        )
 
     analyzer = Analyzer()
     trades: list[dict] = []
     analysis_errors = 0
     WINDOW = 60
 
-    try:
-        for i in range(WINDOW, len(klines_15) - 1):
-            k15 = klines_15[max(0, i - WINDOW):i]
-            k1h = klines_1h[max(0, i // 4 - 20):i // 4]
-            k4h = klines_4h[max(0, i // 16 - 15):i // 16]
-            if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
-                continue
+    for i in range(WINDOW, len(klines_15) - 1):
+        k15 = klines_15[max(0, i - WINDOW):i]
+        k1h = klines_1h[max(0, i // 4 - 20):i // 4]
+        k4h = klines_4h[max(0, i // 16 - 15):i // 16]
+        if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
+            continue
 
-            try:
-                sig = analyzer.analyze_mtf(
-                    symbol or "BT",
-                    k15,
-                    k1h,
-                    k4h,
-                    min_score=int(min_score),
-                    fee_mult=getattr(cfg, "FEE_MULTIPLIER", 2.0),
-                    vol_mult=getattr(cfg, "MIN_VOLUME_MULT", 1.2),
-                )
-            except Exception as exc:
-                analysis_errors += 1
-                if analysis_errors % 100 == 1:
-                    log.debug(f"backtest analysis error candle={i}: {exc}")
-                continue
-
-            if not sig or sig.rr < float(min_rr):
-                continue
-
-            entry, sl, tp = float(sig.entry), float(sig.sl), float(sig.tp)
-            tp1 = float(getattr(sig, "tp1", tp) or tp)
-            tp2 = float(getattr(sig, "tp2", tp) or tp)
-            has_partial = tp1 != tp2 and tp1 != 0
-            result = None
-            hold = 0
-            tp1_hit = False
-            pnl_pct = 0.0
-            ambiguous_bars = 0
-
-            taker = float(os.environ.get("TAKER_FEE", "0.0006"))
-            fee_pct = taker * 2
-            slip_base = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))
-            majors = ("BTC", "ETH", "SOL")
-            sym_up = str(symbol).upper()
-            slip = slip_base if any(m in sym_up for m in majors) else slip_base * 2
-            cost_pct = fee_pct + slip * 2
-            funding_8h = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
-
-            for j in range(i + 1, min(i + 41, len(klines_15))):
-                future = klines_15[j]
-                hold += 1
-                high, low = float(future["h"]), float(future["l"])
-
-                # H06 hardening: if SL and target are both inside one OHLC bar,
-                # tick ordering is unknowable. Resolve to the stop side first.
-                if sig.direction == "LONG":
-                    target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
-                    if low <= sl and high >= target_now:
-                        ambiguous_bars += 1
-                    if low <= sl:
-                        if tp1_hit:
-                            pnl_pct = abs(tp1 - entry) / entry * 0.5
-                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                            result = "PARTIAL_WIN"
-                        else:
-                            pnl_pct = -(abs(sl - entry) / entry)
-                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                            result = "LOSS"
-                        break
-                    if has_partial and not tp1_hit and high >= tp1:
-                        tp1_hit = True
-                        sl = entry
-                    if tp1_hit and high >= tp2:
-                        pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "WIN"
-                        break
-                    if not has_partial and high >= tp:
-                        pnl_pct = abs(tp - entry) / entry
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "WIN"
-                        break
-                else:
-                    target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
-                    if high >= sl and low <= target_now:
-                        ambiguous_bars += 1
-                    if high >= sl:
-                        if tp1_hit:
-                            pnl_pct = abs(tp1 - entry) / entry * 0.5
-                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                            result = "PARTIAL_WIN"
-                        else:
-                            pnl_pct = -(abs(sl - entry) / entry)
-                            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                            result = "LOSS"
-                        break
-                    if has_partial and not tp1_hit and low <= tp1:
-                        tp1_hit = True
-                        sl = entry
-                    if tp1_hit and low <= tp2:
-                        pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "WIN"
-                        break
-                    if not has_partial and low <= tp:
-                        pnl_pct = abs(tp - entry) / entry
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "WIN"
-                        break
-
-            if result is None:
-                result = "TIMEOUT"
-                last = float(klines_15[min(i + 40, len(klines_15) - 1)]["c"])
-                base = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
-                pnl_pct = base * (0.5 if tp1_hit else 1.0)
-                pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-
-            # H05 fix: derive calendar attributes from the real candle timestamp.
-            ts_ms = int(klines_15[i].get("ts", 0) or 0)
-            if ts_ms < 1e11:
-                ts_ms *= 1000
-            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-            trades.append(
-                {
-                    "result": result,
-                    "pnl_pct": pnl_pct,
-                    "hold": hold,
-                    "direction": sig.direction,
-                    "score": sig.score,
-                    "hour_utc": dt.hour,
-                    "day_of_week": dt.weekday(),
-                    "opened_at": dt.isoformat(),
-                    "ts": ts_ms,
-                    "rr": sig.rr,
-                    "regime": getattr(sig, "regime", "UNKNOWN"),
-                    "entry_type": getattr(sig, "entry_type", "UNKNOWN"),
-                    "intrabar_ambiguous": ambiguous_bars,
-                }
+        try:
+            sig = analyzer.analyze_mtf(
+                symbol or "BT",
+                k15,
+                k1h,
+                k4h,
+                min_score=int(min_score),
+                fee_mult=getattr(cfg, "FEE_MULTIPLIER", 2.0),
+                vol_mult=getattr(cfg, "MIN_VOLUME_MULT", 1.2),
             )
-    finally:
-        cfg.SL_ATR_MULT = _orig_sl
-        cfg.TP_ATR_MULT = _orig_tp
+        except Exception as exc:
+            analysis_errors += 1
+            if analysis_errors % 100 == 1:
+                log.debug(f"backtest analysis error candle={i}: {exc}")
+            continue
+
+        if not sig or sig.rr < float(min_rr):
+            continue
+
+        entry, sl, tp = float(sig.entry), float(sig.sl), float(sig.tp)
+        tp1 = float(getattr(sig, "tp1", tp) or tp)
+        tp2 = float(getattr(sig, "tp2", tp) or tp)
+        has_partial = tp1 != tp2 and tp1 != 0
+        result = None
+        hold = 0
+        tp1_hit = False
+        pnl_pct = 0.0
+        ambiguous_bars = 0
+
+        taker = float(os.environ.get("TAKER_FEE", "0.0006"))
+        fee_pct = taker * 2
+        slip_base = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))
+        majors = ("BTC", "ETH", "SOL")
+        sym_up = str(symbol).upper()
+        slip = slip_base if any(m in sym_up for m in majors) else slip_base * 2
+        cost_pct = fee_pct + slip * 2
+        funding_8h = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
+
+        for j in range(i + 1, min(i + 41, len(klines_15))):
+            future = klines_15[j]
+            hold += 1
+            high, low = float(future["h"]), float(future["l"])
+
+            if sig.direction == "LONG":
+                target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
+                if low <= sl and high >= target_now:
+                    ambiguous_bars += 1
+                if low <= sl:
+                    if tp1_hit:
+                        pnl_pct = abs(tp1 - entry) / entry * 0.5
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "PARTIAL_WIN"
+                    else:
+                        pnl_pct = -(abs(sl - entry) / entry)
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "LOSS"
+                    break
+                if has_partial and not tp1_hit and high >= tp1:
+                    tp1_hit = True
+                    sl = entry
+                if tp1_hit and high >= tp2:
+                    pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
+                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    result = "WIN"
+                    break
+                if not has_partial and high >= tp:
+                    pnl_pct = abs(tp - entry) / entry
+                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    result = "WIN"
+                    break
+            else:
+                target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
+                if high >= sl and low <= target_now:
+                    ambiguous_bars += 1
+                if high >= sl:
+                    if tp1_hit:
+                        pnl_pct = abs(tp1 - entry) / entry * 0.5
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "PARTIAL_WIN"
+                    else:
+                        pnl_pct = -(abs(sl - entry) / entry)
+                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                        result = "LOSS"
+                    break
+                if has_partial and not tp1_hit and low <= tp1:
+                    tp1_hit = True
+                    sl = entry
+                if tp1_hit and low <= tp2:
+                    pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
+                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    result = "WIN"
+                    break
+                if not has_partial and low <= tp:
+                    pnl_pct = abs(tp - entry) / entry
+                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    result = "WIN"
+                    break
+
+        if result is None:
+            result = "TIMEOUT"
+            last = float(klines_15[min(i + 40, len(klines_15) - 1)]["c"])
+            base = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
+            pnl_pct = base * (0.5 if tp1_hit else 1.0)
+            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+
+        ts_ms = int(klines_15[i].get("ts", 0) or 0)
+        if ts_ms < 1e11:
+            ts_ms *= 1000
+        dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+        trades.append(
+            {
+                "result": result,
+                "pnl_pct": pnl_pct,
+                "hold": hold,
+                "direction": sig.direction,
+                "score": sig.score,
+                "hour_utc": dt.hour,
+                "day_of_week": dt.weekday(),
+                "opened_at": dt.isoformat(),
+                "ts": ts_ms,
+                "rr": sig.rr,
+                "regime": getattr(sig, "regime", "UNKNOWN"),
+                "entry_type": getattr(sig, "entry_type", "UNKNOWN"),
+                "intrabar_ambiguous": ambiguous_bars,
+            }
+        )
 
     return trades
 
@@ -394,18 +381,12 @@ run_strategy_public = _run_strategy
 
 
 def monte_carlo_permutation(returns: list, n_simulations: int = 5000, random_seed: int = 42) -> dict:
-    """Permutation diagnostic retained for compatibility.
-
-    Note: permuting return order does not change mean/std Sharpe. We retain the
-    historical interface but label it diagnostic rather than using it as proof
-    of alpha; strategy validity relies primarily on untouched OOS/walk-forward.
-    """
+    """Bootstrap diagnostic retained under the historical public function name."""
     if not returns or len(returns) < 10:
         return {"error": "Mínimo 10 trades para Monte Carlo", "edge_significant": False}
     arr = np.array(returns, dtype=float)
     rng = np.random.default_rng(random_seed)
     real_sharpe = float(arr.mean() / arr.std()) if arr.std() > 0 else 0.0
-    # Bootstrap signed returns to obtain a non-degenerate empirical distribution.
     sims = np.zeros(n_simulations)
     for i in range(n_simulations):
         sample = rng.choice(arr, size=len(arr), replace=True)
