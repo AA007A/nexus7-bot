@@ -1,31 +1,42 @@
-"""Use KuCoin's margin-mode-correct maintenance margin in liquidation safety.
+"""Use KuCoin's margin-mode-correct CROSS risk before LIVE sizing.
 
-Public contract ``maintainMargin`` is reference metadata only: NEXUS-7 routes
-LIVE orders in CROSS margin, where KuCoin exposes account-specific MMR through
-private GET ``/api/v2/batchGetCrossOrderLimit`` using symbol, totalMargin and
-leverage.
+Public contract ``maintainMargin`` remains reference metadata only. Controlled
+LIVE entries obtain account-specific CROSS MMR from KuCoin's private
+``/api/v2/batchGetCrossOrderLimit`` endpoint after an exact NEXUS approval but
+before RiskManagerV3 sizing.
 
-The expensive/private CROSS lookup is deliberately deferred until the core
-opening path has already received an exact NEXUS approval and completed pilot
-sizing. The engine then reaches ``score.calculate`` (the legacy pre-trade stage),
-which acts as the last asynchronous boundary before final parameter/liquidation
-checks. At that boundary this module refreshes account margin, obtains exact
-symbol CROSS MMR, registers it in ``bot.liquidation``, and only then allows the
-opening path to continue. Any failure produces an explicit hard-block result.
+Why the placement matters: with fixed high leverage, an ATR-derived stop can be
+technically valid yet sit beyond the exchange liquidation boundary. The final
+liquidation guard correctly rejects that order, but if the exact CROSS MMR is
+known only after sizing there is no opportunity to make the strategy geometry
+compatible with the configured leverage while preserving exact NEXUS approval.
 
-This placement avoids spending private API budget on candidates that NEXUS will
-reject, while keeping the MMR fresher for the final liquidation guard. PAPER,
-leverage, signal thresholds, sizing, stop geometry and order routing are never
-changed here.
+For an initially NEXUS-approved setup this module therefore:
+1. refreshes exact account-specific CROSS MMR;
+2. keeps already-safe geometry unchanged;
+3. otherwise compresses SL and TP proportionally, preserving R:R, only when at
+   least 40% of the original stop distance remains and fee viability survives;
+4. re-runs NEXUS on the exact adjusted SL/TP;
+5. lets RiskManagerV3 size only after that second exact approval.
+
+The configured leverage is never lowered. The downstream liquidation guard,
+RiskManagerV3, drawdown, ownership, exposure, durable execution and native
+SL/TP protections remain authoritative. Any missing/invalid CROSS risk or
+unsafe geometry fails closed.
 """
 from __future__ import annotations
 
 import contextvars
 import math
+import time
 
 
 _ENGINE = contextvars.ContextVar("nexus_cross_mmr_engine", default=None)
 _SIGNAL = contextvars.ContextVar("nexus_cross_mmr_signal", default=None)
+
+_CROSS_MMR_CACHE_TTL_S = 15.0
+_EXTRA_LIQ_HEADROOM_PCT = 0.10
+_MIN_RETAINED_STOP_FRACTION = 0.40
 
 
 def _normalize_mmr(value):
@@ -98,6 +109,98 @@ def _hard_block_result(reason: str) -> dict:
     }
 
 
+def _geometry_from_exact_mmr(liquidation, sig, leverage: int) -> dict:
+    """Return SAFE, ADJUSTED or BLOCK using already-registered exact MMR."""
+    try:
+        entry = float(sig.entry)
+        sl = float(sig.sl)
+        tp = float(sig.tp)
+        direction = str(sig.direction).upper()
+    except (TypeError, ValueError, AttributeError):
+        return {"status": "BLOCK", "reason": "invalid_signal_geometry"}
+
+    if direction not in {"LONG", "SHORT"} or leverage <= 0:
+        return {"status": "BLOCK", "reason": "invalid_signal_geometry"}
+    if not all(math.isfinite(v) and v > 0 for v in (entry, sl, tp)):
+        return {"status": "BLOCK", "reason": "invalid_signal_geometry"}
+    if direction == "LONG" and not (sl < entry < tp):
+        return {"status": "BLOCK", "reason": "invalid_long_geometry"}
+    if direction == "SHORT" and not (tp < entry < sl):
+        return {"status": "BLOCK", "reason": "invalid_short_geometry"}
+
+    analysis = liquidation.analyze(
+        entry=entry,
+        stop=sl,
+        leverage=int(leverage),
+        is_long=(direction == "LONG"),
+        symbol=str(sig.symbol),
+        n_open_positions=1,
+    )
+    original_stop_pct = abs(entry - sl) / entry * 100.0
+    raw_rr = abs(tp - entry) / abs(entry - sl)
+
+    if analysis.stop_effective:
+        return {
+            "status": "SAFE",
+            "reason": "already_liquidation_compatible",
+            "sl": sl,
+            "tp": tp,
+            "rr": raw_rr,
+            "original_stop_pct": original_stop_pct,
+            "final_stop_pct": original_stop_pct,
+            "safe_stop_pct": float(analysis.max_safe_stop_pct),
+            "retained_fraction": 1.0,
+            "liq_move_pct": float(analysis.liq_move_pct),
+        }
+
+    safe_stop_pct = max(
+        0.0,
+        float(analysis.max_safe_stop_pct) - _EXTRA_LIQ_HEADROOM_PCT,
+    )
+    if not math.isfinite(safe_stop_pct) or safe_stop_pct <= 0:
+        return {
+            "status": "BLOCK",
+            "reason": "no_safe_stop_capacity",
+            "original_stop_pct": original_stop_pct,
+            "safe_stop_pct": safe_stop_pct,
+        }
+
+    retained = safe_stop_pct / original_stop_pct if original_stop_pct > 0 else 0.0
+    if retained < _MIN_RETAINED_STOP_FRACTION:
+        return {
+            "status": "BLOCK",
+            "reason": "required_compression_too_large",
+            "original_stop_pct": original_stop_pct,
+            "safe_stop_pct": safe_stop_pct,
+            "retained_fraction": retained,
+            "liq_move_pct": float(analysis.liq_move_pct),
+        }
+
+    new_risk = entry * safe_stop_pct / 100.0
+    if direction == "LONG":
+        new_sl = entry - new_risk
+        new_tp = entry + new_risk * raw_rr
+    else:
+        new_sl = entry + new_risk
+        new_tp = entry - new_risk * raw_rr
+
+    if not all(math.isfinite(v) and v > 0 for v in (new_sl, new_tp)):
+        return {"status": "BLOCK", "reason": "invalid_adjusted_geometry"}
+
+    return {
+        "status": "ADJUSTED",
+        "reason": "compressed_for_configured_leverage",
+        "sl": new_sl,
+        "tp": new_tp,
+        "rr": raw_rr,
+        "original_stop_pct": original_stop_pct,
+        "final_stop_pct": safe_stop_pct,
+        "safe_stop_pct": safe_stop_pct,
+        "retained_fraction": retained,
+        "liq_move_pct": float(analysis.liq_move_pct),
+    }
+
+
 def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
     if getattr(KuCoinClient, "_official_contract_mmr_installed", False):
         return
@@ -105,10 +208,12 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
     original_load = KuCoinClient.load_instruments
     original_open = TradingEngine._open
     original_calculate = scoring.calculate
+    original_nexus_validate = getattr(TradingEngine, "_nexus_validate", None)
 
     async def load_instruments_with_contract_risk_metadata(self):
         instruments = await original_load(self)
         self._cross_mmr_symbols = set()
+        self._cross_mmr_cache = {}
 
         # Public maintainMargin is useful audit/reference metadata, but it is
         # deliberately NOT registered as execution authority because LIVE uses
@@ -159,8 +264,98 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         )
         return instruments
 
+    async def _refresh_cross_risk(engine, symbol: str, stage: str):
+        from bot.config import cfg
+
+        info = (getattr(engine, "instruments", {}) or {}).get(symbol, {})
+        kucoin_symbol = str(info.get("kucoinSymbol", "")) if isinstance(info, dict) else ""
+        if not kucoin_symbol:
+            raise ValueError("missing_kucoin_symbol")
+
+        exchange_client = getattr(engine, "client", None)
+        if exchange_client is None:
+            raise ValueError("missing_exchange_client")
+
+        account = await exchange_client._get(
+            "/api/v1/account-overview", {"currency": "USDT"}, auth=True
+        )
+        total_margin = None
+        if isinstance(account, dict):
+            for key in ("marginBalance", "accountEquity", "equity"):
+                total_margin = _positive_finite(account.get(key))
+                if total_margin is not None:
+                    break
+        if total_margin is None:
+            raise ValueError("invalid_total_margin")
+
+        response = await exchange_client._get(
+            "/api/v2/batchGetCrossOrderLimit",
+            {
+                "symbol": kucoin_symbol,
+                "totalMargin": f"{total_margin:.8f}",
+                "leverage": str(int(cfg.LEVERAGE)),
+            },
+            auth=True,
+        )
+        cross = _select_cross_risk(response, kucoin_symbol)
+        if cross is None:
+            raise ValueError("cross_risk_row_unavailable")
+
+        returned_lev = cross.get("leverage")
+        if returned_lev is not None and abs(returned_lev - float(cfg.LEVERAGE)) > 1e-9:
+            raise ValueError("cross_risk_leverage_mismatch")
+
+        liquidation.set_mmr_from_api(
+            symbol, cross["mmr"], source="kucoin_cross_order_limit"
+        )
+        if not hasattr(exchange_client, "_cross_mmr_symbols"):
+            exchange_client._cross_mmr_symbols = set()
+        if not hasattr(exchange_client, "_cross_mmr_cache"):
+            exchange_client._cross_mmr_cache = {}
+        exchange_client._cross_mmr_symbols.add(symbol)
+        exchange_client._cross_mmr_cache[symbol] = {
+            "mmr": cross["mmr"],
+            "leverage": float(cfg.LEVERAGE),
+            "total_margin": total_margin,
+            "ts": time.monotonic(),
+        }
+        log.warning(
+            "[KUCOIN_CROSS_RISK] symbol=%s kucoin_symbol=%s result=PASS "
+            "mmr=%.6f total_margin=%.4f leverage=%sx source=KuCoin_private "
+            "stage=%s execution_effect=NONE",
+            symbol, kucoin_symbol, cross["mmr"], total_margin,
+            int(cfg.LEVERAGE), stage,
+        )
+        return cross
+
+    def _cached_cross_risk(engine, symbol: str):
+        from bot.config import cfg
+
+        client = getattr(engine, "client", None)
+        cache = getattr(client, "_cross_mmr_cache", {}) if client is not None else {}
+        item = cache.get(symbol) if isinstance(cache, dict) else None
+        if not isinstance(item, dict):
+            return None
+        try:
+            age = time.monotonic() - float(item.get("ts", 0.0))
+            leverage = float(item.get("leverage"))
+            mmr = _normalize_mmr(item.get("mmr"))
+        except (TypeError, ValueError):
+            return None
+        if age < 0 or age > _CROSS_MMR_CACHE_TTL_S:
+            return None
+        if abs(leverage - float(cfg.LEVERAGE)) > 1e-9 or mmr is None:
+            return None
+        registered = symbol in getattr(client, "_cross_mmr_symbols", set())
+        if not registered:
+            return None
+        liquidation.set_mmr_from_api(
+            symbol, mmr, source="kucoin_cross_order_limit_cached"
+        )
+        return {"mmr": mmr, "age": age}
+
     async def _open_with_cross_context(self, sig, *args, **kwargs):
-        # Context only. No private KuCoin risk call is spent before NEXUS.
+        # Context only. Private CROSS risk remains forbidden before NEXUS.
         if getattr(self, "paper_trade", True) or not bool(
             getattr(getattr(self, "pilot", None), "enabled", False)
         ):
@@ -173,6 +368,160 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         finally:
             _SIGNAL.reset(token_signal)
             _ENGINE.reset(token_engine)
+
+    async def _nexus_validate_with_exact_cross_geometry(self, sig, *args, **kwargs):
+        # This wrapper is installed only when the engine exposes the NEXUS
+        # boundary. The first evaluation is unchanged and spends no private
+        # CROSS-risk request unless it grants exact execution approval.
+        initial = await original_nexus_validate(self, sig, *args, **kwargs)
+        if getattr(self, "paper_trade", True) or not bool(
+            getattr(getattr(self, "pilot", None), "enabled", False)
+        ):
+            return initial
+
+        from bot.config import cfg
+        from bot.nexus_types import NexusDecision, decision_validation_error
+
+        validation_error = decision_validation_error(
+            initial, sig.symbol, sig.direction, sig.entry, sig.sl, sig.tp
+        )
+        if validation_error is not None or initial.execution_allowed is not True:
+            return initial
+
+        # The existing liquidation model is intentionally fail-closed for a
+        # second simultaneous CROSS position because shared-margin liquidation
+        # has not been proven. Do not spend another private request in that case.
+        if len(getattr(self, "positions", {}) or {}) >= 1:
+            log.warning(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
+                "reason=cross_multi_position_liquidation_unmodeled "
+                "stage=POST_NEXUS_PRE_SIZING execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                sig.symbol,
+            )
+            return NexusDecision.wait(
+                sig.symbol, "cross_multi_position_liquidation_unmodeled"
+            )
+
+        try:
+            await _refresh_cross_risk(
+                self, sig.symbol, "POST_NEXUS_PRE_SIZING"
+            )
+        except Exception as exc:
+            log.warning(
+                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
+                "reason=fresh_cross_margin_mmr_unavailable "
+                "stage=POST_NEXUS_PRE_SIZING execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                sig.symbol, type(exc).__name__,
+            )
+            return NexusDecision.wait(
+                sig.symbol, "official_cross_mmr_unavailable"
+            )
+
+        geometry = _geometry_from_exact_mmr(
+            liquidation, sig, int(cfg.LEVERAGE)
+        )
+        if geometry.get("status") == "BLOCK":
+            log.warning(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=BLOCK "
+                "reason=%s leverage=%sx original_stop=%.3f%% safe_stop=%.3f%% "
+                "retained=%.1f%% execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                sig.symbol, sig.direction, geometry.get("reason"),
+                int(cfg.LEVERAGE),
+                float(geometry.get("original_stop_pct", 0.0)),
+                float(geometry.get("safe_stop_pct", 0.0)),
+                float(geometry.get("retained_fraction", 0.0)) * 100.0,
+            )
+            return NexusDecision.wait(
+                sig.symbol, str(geometry.get("reason", "unsafe_geometry"))
+            )
+
+        if geometry.get("status") == "SAFE":
+            log.info(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=SAFE "
+                "leverage=%sx stop=%.3f%% liq=%.3f%% exact_mmr=true "
+                "nexus_recheck=false execution_effect=NONE",
+                sig.symbol, sig.direction, int(cfg.LEVERAGE),
+                float(geometry.get("final_stop_pct", 0.0)),
+                float(geometry.get("liq_move_pct", 0.0)),
+            )
+            return initial
+
+        # Exact CROSS MMR says the original stop is unsafe, but it can be made
+        # compatible without discarding more than 60% of the strategy risk
+        # distance. Preserve R:R and then force a second NEXUS decision on the
+        # exact new trade levels before sizing can occur.
+        old_sl = float(sig.sl)
+        old_tp = float(sig.tp)
+        sig.sl = round(float(geometry["sl"]), 8)
+        sig.tp = round(float(geometry["tp"]), 8)
+        sig.tp1 = sig.tp
+        sig.tp2 = sig.tp
+        sig.rr = round(float(geometry["rr"]), 2)
+        sig.rr1 = sig.rr
+        sig.rr2 = sig.rr
+
+        move_to_tp_pct = abs(sig.tp - float(sig.entry)) / float(sig.entry) * 100.0
+        total_fees_pct = float(getattr(sig, "total_fees", 0.0) or 0.0)
+        min_move_pct = total_fees_pct * float(getattr(cfg, "FEE_MULTIPLIER", 2.0))
+        if move_to_tp_pct < min_move_pct:
+            sig.sl, sig.tp = old_sl, old_tp
+            log.warning(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
+                "reason=post_compression_fee_viability move_to_tp=%.3f%% "
+                "required=%.3f%% execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                sig.symbol, move_to_tp_pct, min_move_pct,
+            )
+            return NexusDecision.wait(
+                sig.symbol, "post_compression_fee_viability"
+            )
+
+        sig.expected_pnl = round(move_to_tp_pct - total_fees_pct, 3)
+        sig.reason = (
+            f"{getattr(sig, 'reason', '')} | CROSS50_SAFE "
+            f"SL{float(geometry['original_stop_pct']):.2f}%→"
+            f"{float(geometry['final_stop_pct']):.2f}%"
+        ).strip(" |")
+
+        log.warning(
+            "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=ADJUSTED "
+            "leverage=%sx stop=%.3f%%->%.3f%% rr=%.3f retained=%.1f%% "
+            "extra_liq_headroom=%.2fpp nexus_recheck=REQUIRED",
+            sig.symbol, sig.direction, int(cfg.LEVERAGE),
+            float(geometry["original_stop_pct"]),
+            float(geometry["final_stop_pct"]),
+            float(geometry["rr"]),
+            float(geometry["retained_fraction"]) * 100.0,
+            _EXTRA_LIQ_HEADROOM_PCT,
+        )
+
+        revised = await original_nexus_validate(self, sig, *args, **kwargs)
+        revised_error = decision_validation_error(
+            revised, sig.symbol, sig.direction, sig.entry, sig.sl, sig.tp
+        )
+        if revised_error is not None:
+            log.warning(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
+                "reason=nexus_recheck_invalid_%s execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                sig.symbol, revised_error,
+            )
+            return NexusDecision.wait(
+                sig.symbol, f"nexus_recheck_invalid_{revised_error}"
+            )
+        if revised.execution_allowed is not True:
+            log.info(
+                "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=REJECT "
+                "reason=nexus_recheck_veto execution_effect=NONE",
+                sig.symbol,
+            )
+            return revised
+
+        log.warning(
+            "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=PASS "
+            "exact_cross_mmr=true nexus_recheck=true leverage_unchanged=%sx "
+            "execution_effect=NONE",
+            sig.symbol, int(cfg.LEVERAGE),
+        )
+        return revised
 
     async def _calculate_with_fresh_cross_mmr(
         symbol, direction, closes, highs, lows, volumes, client=None
@@ -190,72 +539,29 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         if str(getattr(sig, "direction", "")).upper() != str(direction).upper():
             return _hard_block_result("cross_mmr_signal_side_mismatch")
 
-        from bot.config import cfg
-
-        info = (getattr(engine, "instruments", {}) or {}).get(symbol, {})
-        kucoin_symbol = str(info.get("kucoinSymbol", "")) if isinstance(info, dict) else ""
-        if not kucoin_symbol:
-            log.warning(
-                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK reason=missing_kucoin_symbol "
-                "stage=POST_NEXUS_PRETRADE execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                symbol,
+        cached = _cached_cross_risk(engine, symbol)
+        if cached is not None:
+            log.info(
+                "[KUCOIN_CROSS_RISK] symbol=%s result=PASS source=pre_sizing_cache "
+                "mmr=%.6f age=%.2fs stage=POST_NEXUS_PRETRADE "
+                "execution_effect=NONE",
+                symbol, cached["mmr"], cached["age"],
             )
-            return _hard_block_result("official_cross_mmr_unavailable")
+        else:
+            try:
+                await _refresh_cross_risk(
+                    engine, symbol, "POST_NEXUS_PRETRADE"
+                )
+            except Exception as exc:
+                log.warning(
+                    "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
+                    "reason=fresh_cross_margin_mmr_unavailable "
+                    "stage=POST_NEXUS_PRETRADE execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                    symbol, type(exc).__name__,
+                )
+                return _hard_block_result("official_cross_mmr_unavailable")
 
         exchange_client = getattr(engine, "client", None)
-        if exchange_client is None:
-            return _hard_block_result("official_cross_mmr_unavailable")
-
-        try:
-            account = await exchange_client._get(
-                "/api/v1/account-overview", {"currency": "USDT"}, auth=True
-            )
-            total_margin = None
-            if isinstance(account, dict):
-                for key in ("marginBalance", "accountEquity", "equity"):
-                    total_margin = _positive_finite(account.get(key))
-                    if total_margin is not None:
-                        break
-            if total_margin is None:
-                raise ValueError("invalid_total_margin")
-
-            response = await exchange_client._get(
-                "/api/v2/batchGetCrossOrderLimit",
-                {
-                    "symbol": kucoin_symbol,
-                    "totalMargin": f"{total_margin:.8f}",
-                    "leverage": str(int(cfg.LEVERAGE)),
-                },
-                auth=True,
-            )
-            cross = _select_cross_risk(response, kucoin_symbol)
-            if cross is None:
-                raise ValueError("cross_risk_row_unavailable")
-
-            returned_lev = cross.get("leverage")
-            if returned_lev is not None and abs(returned_lev - float(cfg.LEVERAGE)) > 1e-9:
-                raise ValueError("cross_risk_leverage_mismatch")
-
-            liquidation.set_mmr_from_api(
-                symbol, cross["mmr"], source="kucoin_cross_order_limit"
-            )
-            exchange_client._cross_mmr_symbols.add(symbol)
-            log.warning(
-                "[KUCOIN_CROSS_RISK] symbol=%s kucoin_symbol=%s result=PASS "
-                "mmr=%.6f total_margin=%.4f leverage=%sx source=KuCoin_private "
-                "stage=POST_NEXUS_PRETRADE execution_effect=NONE",
-                symbol, kucoin_symbol, cross["mmr"], total_margin,
-                int(cfg.LEVERAGE),
-            )
-        except Exception as exc:
-            log.warning(
-                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
-                "reason=fresh_cross_margin_mmr_unavailable stage=POST_NEXUS_PRETRADE "
-                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                symbol, type(exc).__name__,
-            )
-            return _hard_block_result("official_cross_mmr_unavailable")
-
         _, official = liquidation.get_mmr(symbol)
         registered = symbol in getattr(exchange_client, "_cross_mmr_symbols", set())
         if not official or not registered:
@@ -273,11 +579,15 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
 
     KuCoinClient.load_instruments = load_instruments_with_contract_risk_metadata
     TradingEngine._open = _open_with_cross_context
+    if original_nexus_validate is not None:
+        TradingEngine._nexus_validate = _nexus_validate_with_exact_cross_geometry
     scoring.calculate = _calculate_with_fresh_cross_mmr
     KuCoinClient._official_contract_mmr_installed = True
     log.warning(
-        "[KUCOIN_CONTRACT_RISK] installed: public maintainMargin is reference-only; "
-        "fresh account-specific CROSS mmr is required fail-closed at the "
-        "post-NEXUS/pretrade boundary; rejected NEXUS candidates spend no CROSS-risk "
-        "private request; leverage/score/sizing/SL-TP geometry unchanged"
+        "[KUCOIN_CONTRACT_RISK] installed: public maintainMargin reference-only; "
+        "fresh account-specific CROSS mmr is required after exact NEXUS approval "
+        "and before LIVE sizing; unsafe 50x geometry may be compressed with R:R "
+        "preserved then must pass a second exact NEXUS review; CROSS cache ttl=%.0fs; "
+        "leverage/score thresholds/execution protections unchanged",
+        _CROSS_MMR_CACHE_TTL_S,
     )
