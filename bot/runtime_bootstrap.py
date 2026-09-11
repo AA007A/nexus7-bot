@@ -71,6 +71,7 @@ def install() -> None:
     from bot import order_state as _order_state
     from bot import integrity_external_coexistence_runtime as _integrity_external_coexistence_runtime
     from bot import adaptive_mtf_entry as _adaptive_mtf_entry
+    from bot import market_data_integrity as _market_data_integrity
     from bot import strategy as _strategy
     from bot import pilot as _pilot
     from bot import score as _score
@@ -145,6 +146,10 @@ def install() -> None:
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
+    # Must wrap the final strategy stack (canonical + adaptive) so both paths
+    # receive the same timestamp-confirmed candle view. It also guards KuCoin WS
+    # kline volume before that data can enter the cache.
+    _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
