@@ -45,6 +45,7 @@ def install() -> None:
     from bot import nexus_optional_evidence as _nexus_optional_evidence
     from bot import nexus_structure_semantics as _nexus_structure_semantics
     from bot import nexus_decision_consistency as _nexus_decision_consistency
+    from bot import nexus_prefinal_veto_observability as _nexus_prefinal_veto_observability
     from bot import daily_stop_observability as _daily_stop_observability
     from bot import daily_stop_runtime_hardening as _daily_stop_runtime_hardening
     from bot import selfcheck_entrypoint_hardening as _selfcheck_entrypoint_hardening
@@ -139,6 +140,9 @@ def install() -> None:
     _nexus_optional_evidence.install(_nexus_ai, _log)
     _nexus_structure_semantics.install(_nexus_ai, _log)
     _nexus_decision_consistency.install(_nexus_ai, _log)
+    # Observe the final NEXUS decision wrapper so early vetoes expose the exact
+    # model snapshot that caused them, without changing any decision state.
+    _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
 
