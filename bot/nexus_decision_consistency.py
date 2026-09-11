@@ -1,34 +1,49 @@
 """Closed-candle parity, HTF regime parity and score telemetry for NEXUS.
 
-The canonical strategy explicitly removes the still-forming last candle before
-4H/1H/15M analysis and derives its market regime from 4H. Historically
-``nexus_ai.decide`` received raw caches and then derived its regime from the 15M
-series. That let the strategy approve a 4H trend while the final NEXUS gate
-weighted the ensemble as RANGE, creating avoidable false negatives.
+The canonical strategy and NEXUS must consume the same *confirmed* market bars.
+Historically both layers inferred "the open candle" from list length/position,
+which can discard an already-closed bar or keep a still-forming one. This module
+now delegates closed-bar selection to the timestamp/timeframe integrity policy.
 
-This module makes the decision layer consume the same confirmed-candle semantics
-and routes regime detection to the confirmed 4H context only while a NEXUS entry
-decision is being evaluated. Other callers of ``detect_regime`` retain their
-original behavior.
+It also installs an independent hard candle-integrity check at the NEXUS data
+validation boundary. Critically stale, gapped, or timestamp-less production
+series fail closed even if the softer DataQuality score would otherwise remain
+numerically acceptable.
 
-It also emits a read-only score decomposition for every terminal NEXUS decision.
-No threshold, risk limit or exchange permission is changed here.
+Regime detection continues to use confirmed 4H context while a NEXUS entry
+decision is being evaluated. Read-only score decomposition is preserved. No
+threshold, risk limit or exchange permission is changed here.
 """
 from __future__ import annotations
 
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Tuple
 
+from bot.market_data_integrity import (
+    closed_candles,
+    has_usable_timestamps,
+    validate_nexus_candles,
+)
+
 
 _MIN_CONFIRMED = {"15m": 60, "1h": 40, "4h": 20}
+_INTERVAL = {"15m": "15", "1h": "60", "4h": "240"}
 _HTF_REGIME_CONTEXT: ContextVar[tuple | None] = ContextVar(
     "nexus_htf_regime_context", default=None
 )
 
 
 def _closed_view(klines: Iterable[dict] | None, timeframe: str) -> list:
-    """Return a copy ending at the last confirmed candle."""
+    """Return a copy ending at the last timestamp-confirmed candle.
+
+    Synthetic unit fixtures with non-exchange timestamps retain the historical
+    fallback solely so unrelated isolated tests can run. Production KuCoin
+    series always carry real timestamps and therefore take the strict path.
+    """
     data = list(klines or [])
+    if has_usable_timestamps(data):
+        return closed_candles(data, _INTERVAL[timeframe], require_timestamps=True)
+
     minimum = _MIN_CONFIRMED[timeframe]
     if len(data) > minimum:
         return data[:-1]
@@ -150,6 +165,19 @@ def install(nexus_ai, log) -> None:
 
     original_decide = nexus_ai.decide
     original_detect_regime = nexus_ai.detect_regime
+    original_validate_data = getattr(nexus_ai, "validate_data", None)
+
+    # Independent NEXUS boundary: stale/gapped/timestamp-less production
+    # candles are a hard data error, not a soft score penalty.
+    if callable(original_validate_data):
+        def validate_data_hard(symbol, k15, k1h, k4h, *args, **kwargs):
+            dq = original_validate_data(symbol, k15, k1h, k4h, *args, **kwargs)
+            ok, reason, _ = validate_nexus_candles(k15, k1h, k4h)
+            if not ok:
+                dq.mark_error(f"CRITICAL_CANDLE_INTEGRITY:{reason}", 100.0)
+            return dq
+
+        nexus_ai.validate_data = validate_data_hard
 
     def detect_regime_with_htf_context(closes, highs, lows, volumes):
         htf = _HTF_REGIME_CONTEXT.get()
@@ -213,7 +241,7 @@ def install(nexus_ai, log) -> None:
     nexus_ai._closed_candle_consistency_installed = True
     log.warning(
         "[NEXUS_CLOSED_CANDLE_PARITY] installed "
-        "strategy_ai_same_confirmed_candle_semantics=true "
-        "entry_regime_source=4H_CONFIRMED score_decomposition=true "
-        "thresholds_unchanged=true execution_effect=NONE"
+        "closed_by=timestamp_boundary strategy_ai_same_confirmed_candle_semantics=true "
+        "entry_regime_source=4H_CONFIRMED hard_freshness_fail_closed=true "
+        "score_decomposition=true thresholds_unchanged=true execution_effect=NONE"
     )
