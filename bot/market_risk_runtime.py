@@ -1,12 +1,19 @@
 """Live market-risk collectors for NEXUS-7.
 
-CoinGlass is optional. Cross-asset macro prices use a free public chart source.
+CoinGlass v4 is optional and API-body validated before any derivative signal is
+accepted. Cross-asset macro prices come from Yahoo Finance daily chart data and
 US 2Y/10Y yield changes come from the official U.S. Treasury par-yield feed.
+
+External observations have two freshness clocks where the upstream source
+publishes a timestamp: fetch freshness and source-observation freshness. A
+successful HTTP fetch never refreshes an already-stale market observation.
+
 All external sources are fail-neutral and can never authorize execution.
 """
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import os
 import time
 import xml.etree.ElementTree as ET
@@ -15,6 +22,7 @@ from typing import Any
 import aiohttp
 
 from bot.market_risk_intelligence import assess_market_risk, compact_risk_log
+
 
 _SIGNAL_TTL_S = {
     "liquidation_usd_1h": 1200.0,
@@ -28,9 +36,26 @@ _SIGNAL_TTL_S = {
     "us10y_yield_change_bps": 21600.0,
     "macro_event_severity": 1800.0,
 }
+
+# Fetching the same daily close/yield repeatedly must not make that observation
+# "new". These source-age limits are intentionally wider than the fetch TTL to
+# tolerate ordinary market closures while still expiring genuinely stale data.
+_SOURCE_MAX_AGE_S = {
+    "spx_change_pct": 36 * 3600.0,
+    "ndx_change_pct": 36 * 3600.0,
+    "vix_change_pct": 36 * 3600.0,
+    "dxy_change_pct": 36 * 3600.0,
+    "us2y_yield_change_bps": 96 * 3600.0,
+    "us10y_yield_change_bps": 96 * 3600.0,
+}
+
+_COINGLASS_DEFAULT_POLL_S = 900.0
+_MAX_FUTURE_SKEW_S = 30.0
+
 _state: dict[str, Any] = {
     "signals": {},
     "signal_updated_at": {},
+    "signal_observed_at": {},
     "providers": {},
 }
 _previous_coinglass_oi: tuple[float, float] | None = None
@@ -39,21 +64,42 @@ _previous_coinglass_oi: tuple[float, float] | None = None
 def snapshot(now: float | None = None) -> dict[str, Any]:
     current = time.time() if now is None else float(now)
     raw = dict(_state.get("signals", {}) or {})
-    timestamps = dict(_state.get("signal_updated_at", {}) or {})
+    fetched_at = dict(_state.get("signal_updated_at", {}) or {})
+    observed_at = dict(_state.get("signal_observed_at", {}) or {})
     signals: dict[str, Any] = {}
-    ages: dict[str, float] = {}
+    fetch_ages: dict[str, float] = {}
+    source_ages: dict[str, float] = {}
+    stale_reasons: dict[str, str] = {}
+
     for key, value in raw.items():
-        ts = float(timestamps.get(key, 0) or 0)
+        fetch_ts = float(fetched_at.get(key, 0) or 0)
+        source_ts = float(observed_at.get(key, fetch_ts) or 0)
         ttl = float(_SIGNAL_TTL_S.get(key, 1800.0))
-        age = current - ts if ts > 0 else float("inf")
-        if ts > 0 and -5.0 <= age <= ttl:
-            signals[key] = value
-            ages[key] = max(0.0, age)
+        fetch_age = current - fetch_ts if fetch_ts > 0 else float("inf")
+        source_age = current - source_ts if source_ts > 0 else float("inf")
+        source_max_age = _SOURCE_MAX_AGE_S.get(key)
+
+        if fetch_ts <= 0 or not (-_MAX_FUTURE_SKEW_S <= fetch_age <= ttl):
+            stale_reasons[key] = "FETCH_TTL"
+            continue
+        if source_max_age is not None:
+            if source_ts <= 0 or not (
+                -_MAX_FUTURE_SKEW_S <= source_age <= float(source_max_age)
+            ):
+                stale_reasons[key] = "SOURCE_AGE"
+                continue
+
+        signals[key] = value
+        fetch_ages[key] = max(0.0, fetch_age)
+        source_ages[key] = max(0.0, source_age)
+
     assessment = assess_market_risk(signals)
     return {
         "fresh": bool(signals),
         "signals": signals,
-        "signal_ages_s": ages,
+        "signal_ages_s": fetch_ages,
+        "signal_source_ages_s": source_ages,
+        "stale_reasons": stale_reasons,
         "providers": dict(_state.get("providers", {}) or {}),
         "assessment": assessment,
     }
@@ -63,19 +109,57 @@ def _mark_provider(name: str, status: str) -> None:
     _state.setdefault("providers", {})[name] = status
 
 
-def _merge_signals(values: dict[str, Any], now: float | None = None) -> None:
+def _merge_signals(
+    values: dict[str, Any],
+    now: float | None = None,
+    observed_at: float | dict[str, float] | None = None,
+) -> None:
     clean = {k: v for k, v in values.items() if v is not None}
     if not clean:
         return
     ts = time.time() if now is None else float(now)
     _state.setdefault("signals", {}).update(clean)
     signal_ts = _state.setdefault("signal_updated_at", {})
+    source_ts = _state.setdefault("signal_observed_at", {})
     for key in clean:
         signal_ts[key] = ts
+        if isinstance(observed_at, dict):
+            source_ts[key] = float(observed_at.get(key, ts) or ts)
+        elif observed_at is None:
+            source_ts[key] = ts
+        else:
+            source_ts[key] = float(observed_at)
+
+
+def _coinglass_api_code(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return "invalid_payload"
+    return str(payload.get("code", ""))
+
+
+def _coinglass_provider_status(
+    http_statuses: list[int],
+    api_codes: list[str],
+    signal_names: list[str],
+) -> str:
+    if (
+        http_statuses
+        and all(status == 200 for status in http_statuses)
+        and api_codes
+        and all(code == "0" for code in api_codes)
+        and signal_names
+    ):
+        return f"ok:{len(set(signal_names))}_signals"
+    if signal_names:
+        return (
+            f"partial:{len(set(signal_names))}_signals:"
+            f"http={http_statuses}:api={api_codes}"
+        )
+    return f"no_valid_signals:http={http_statuses}:api={api_codes}:fail_neutral"
 
 
 def parse_coinglass_liquidation(payload: dict[str, Any]) -> dict[str, float]:
-    if str(payload.get("code", "")) != "0":
+    if _coinglass_api_code(payload) != "0":
         return {}
     for row in payload.get("data") or []:
         if str((row or {}).get("exchange", "")).casefold() == "all":
@@ -94,7 +178,7 @@ def parse_coinglass_markets(
     payload: dict[str, Any], now: float | None = None
 ) -> dict[str, float]:
     global _previous_coinglass_oi
-    if str(payload.get("code", "")) != "0":
+    if _coinglass_api_code(payload) != "0":
         return {}
     btc = next(
         (
@@ -109,9 +193,11 @@ def parse_coinglass_markets(
 
     out: dict[str, float] = {}
     try:
-        out["funding_rate_pct"] = float(btc.get("avg_funding_rate_by_oi", 0) or 0)
+        funding = float(btc.get("avg_funding_rate_by_oi"))
+        if funding == funding and funding not in (float("inf"), float("-inf")):
+            out["funding_rate_pct"] = funding
     except (TypeError, ValueError, OverflowError):
-        out.pop("funding_rate_pct", None)
+        pass
 
     try:
         oi = float(btc.get("open_interest_usd", 0) or 0)
@@ -126,23 +212,49 @@ def parse_coinglass_markets(
     return out
 
 
-def parse_chart_change(payload: dict[str, Any]) -> float | None:
+def parse_chart_change_with_observation(
+    payload: dict[str, Any],
+) -> tuple[float | None, float | None]:
     try:
         result = payload["chart"]["result"][0]
-        closes = [
-            float(value)
-            for value in result["indicators"]["quote"][0]["close"]
-            if value is not None
-        ]
-        if len(closes) < 2 or closes[-2] == 0:
-            return None
-        return ((closes[-1] / closes[-2]) - 1.0) * 100.0
+        closes_raw = result["indicators"]["quote"][0]["close"]
+        timestamps_raw = result.get("timestamp") or []
+        pairs: list[tuple[float | None, float]] = []
+        for index, raw_close in enumerate(closes_raw):
+            if raw_close is None:
+                continue
+            close = float(raw_close)
+            ts: float | None = None
+            if index < len(timestamps_raw) and timestamps_raw[index] is not None:
+                ts = float(timestamps_raw[index])
+            pairs.append((ts, close))
+        if len(pairs) < 2 or pairs[-2][1] == 0:
+            return None, None
+        change = ((pairs[-1][1] / pairs[-2][1]) - 1.0) * 100.0
+        return change, pairs[-1][0]
     except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+        return None, None
+
+
+def parse_chart_change(payload: dict[str, Any]) -> float | None:
+    value, _ = parse_chart_change_with_observation(payload)
+    return value
+
+
+def _parse_utc_timestamp(value: str) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).timestamp()
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def parse_treasury_curve_xml(xml_text: str) -> dict[str, float]:
-    """Return latest daily 2Y/10Y Treasury yield changes in basis points."""
+def parse_treasury_curve_xml_with_observation(
+    xml_text: str,
+) -> tuple[dict[str, float], float | None]:
+    """Return latest 2Y/10Y daily changes plus the Treasury observation time."""
     namespaces = {
         "a": "http://www.w3.org/2005/Atom",
         "d": "http://schemas.microsoft.com/ado/2007/08/dataservices",
@@ -151,7 +263,7 @@ def parse_treasury_curve_xml(xml_text: str) -> dict[str, float]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
-        return {}
+        return {}, None
 
     rows: list[tuple[str, float, float]] = []
     for entry in root.findall("a:entry", namespaces):
@@ -176,61 +288,90 @@ def parse_treasury_curve_xml(xml_text: str) -> dict[str, float]:
             continue
 
     if len(rows) < 2:
-        return {}
+        return {}, None
     rows.sort(key=lambda row: row[0])
     previous = rows[-2]
     latest = rows[-1]
-    return {
+    values = {
         "us2y_yield_change_bps": (latest[1] - previous[1]) * 100.0,
         "us10y_yield_change_bps": (latest[2] - previous[2]) * 100.0,
     }
+    return values, _parse_utc_timestamp(latest[0])
+
+
+def parse_treasury_curve_xml(xml_text: str) -> dict[str, float]:
+    values, _ = parse_treasury_curve_xml_with_observation(xml_text)
+    return values
 
 
 async def _coinglass_loop(log) -> None:
     key = os.environ.get("COINGLASS_API_KEY", "").strip()
     if not key:
-        _mark_provider("coinglass", "disabled_no_key")
+        _mark_provider("coinglass_v4", "disabled_no_key")
         return
     poll_s = max(
-        60.0, float(os.environ.get("COINGLASS_POLL_SECONDS", "14400") or 14400)
+        60.0,
+        float(
+            os.environ.get(
+                "COINGLASS_POLL_SECONDS", str(int(_COINGLASS_DEFAULT_POLL_S))
+            )
+            or _COINGLASS_DEFAULT_POLL_S
+        ),
     )
     headers = {"CG-API-KEY": key, "accept": "application/json"}
     urls = (
-        "https://open-api-v4.coinglass.com/api/futures/liquidation/exchange-list?symbol=BTC&range=1h",
-        "https://open-api-v4.coinglass.com/api/futures/coins-markets?per_page=20&page=1",
+        "https://open-api-v4.coinglass.com/api/futures/liquidation/"
+        "exchange-list?symbol=BTC&range=1h",
+        "https://open-api-v4.coinglass.com/api/futures/coins-markets"
+        "?per_page=20&page=1",
     )
     while True:
         try:
             statuses: list[int] = []
+            api_codes: list[str] = []
+            merged_names: list[str] = []
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(
                     urls[0], timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     statuses.append(response.status)
                     if response.status == 200:
-                        _merge_signals(
-                            parse_coinglass_liquidation(
-                                await response.json(content_type=None)
-                            )
-                        )
+                        payload = await response.json(content_type=None)
+                        api_codes.append(_coinglass_api_code(payload))
+                        values = parse_coinglass_liquidation(payload)
+                        _merge_signals(values)
+                        merged_names.extend(values)
+                    else:
+                        api_codes.append("http_non_200")
+
                 async with session.get(
                     urls[1], timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     statuses.append(response.status)
                     if response.status == 200:
-                        _merge_signals(
-                            parse_coinglass_markets(await response.json(content_type=None))
-                        )
-            _mark_provider(
-                "coinglass",
-                "ok"
-                if all(status == 200 for status in statuses)
-                else f"http_{statuses}_fail_neutral",
+                        payload = await response.json(content_type=None)
+                        api_codes.append(_coinglass_api_code(payload))
+                        values = parse_coinglass_markets(payload)
+                        _merge_signals(values)
+                        merged_names.extend(values)
+                    else:
+                        api_codes.append("http_non_200")
+
+            status = _coinglass_provider_status(
+                statuses, api_codes, merged_names
             )
+            _mark_provider("coinglass_v4", status)
+            if not status.startswith("ok:"):
+                log.warning(
+                    "[MARKET_RISK_SOURCE] provider=coinglass_v4 status=%s "
+                    "raw_payload_logged=false fail_neutral=true",
+                    status,
+                )
         except Exception as exc:
-            _mark_provider("coinglass", f"unavailable:{type(exc).__name__}")
+            _mark_provider("coinglass_v4", f"unavailable:{type(exc).__name__}")
             log.warning(
-                "[MARKET_RISK_SOURCE] provider=coinglass unavailable=%s fail_neutral=true",
+                "[MARKET_RISK_SOURCE] provider=coinglass_v4 unavailable=%s "
+                "fail_neutral=true",
                 type(exc).__name__,
             )
         await asyncio.sleep(poll_s)
@@ -246,7 +387,7 @@ async def _cross_asset_loop(log) -> None:
     headers = {"User-Agent": "Mozilla/5.0"}
     while True:
         ok = 0
-        values: dict[str, float] = {}
+        stale = 0
         try:
             async with aiohttp.ClientSession(headers=headers) as session:
                 for key, symbol in symbols.items():
@@ -258,31 +399,59 @@ async def _cross_asset_loop(log) -> None:
                         async with session.get(
                             url, timeout=aiohttp.ClientTimeout(total=8)
                         ) as response:
-                            if response.status == 200:
-                                value = parse_chart_change(
-                                    await response.json(content_type=None)
-                                )
-                                if value is not None:
-                                    values[key] = value
-                                    ok += 1
+                            if response.status != 200:
+                                continue
+                            value, observed_at = parse_chart_change_with_observation(
+                                await response.json(content_type=None)
+                            )
+                            if value is None or observed_at is None:
+                                continue
+                            source_age = time.time() - observed_at
+                            if not (
+                                -_MAX_FUTURE_SKEW_S
+                                <= source_age
+                                <= _SOURCE_MAX_AGE_S[key]
+                            ):
+                                stale += 1
+                                continue
+                            _merge_signals(
+                                {key: value},
+                                observed_at=observed_at,
+                            )
+                            ok += 1
                     except Exception as exc:
                         log.debug(
-                            "[CROSS_ASSET] symbol=%s unavailable=%s fail_neutral=true",
+                            "[CROSS_ASSET] symbol=%s unavailable=%s "
+                            "fail_neutral=true",
                             symbol,
                             type(exc).__name__,
                         )
-            _merge_signals(values)
-            _mark_provider(
-                "cross_asset_macro",
-                f"ok:{ok}/{len(symbols)}" if ok else "unavailable_fail_neutral",
-            )
+            if ok:
+                _mark_provider(
+                    "yahoo_finance_daily",
+                    f"ok_fresh:{ok}/{len(symbols)}:stale={stale}",
+                )
+            elif stale:
+                _mark_provider(
+                    "yahoo_finance_daily",
+                    f"stale_source:{stale}/{len(symbols)}:fail_neutral",
+                )
+            else:
+                _mark_provider(
+                    "yahoo_finance_daily", "unavailable_fail_neutral"
+                )
         except Exception as exc:
-            _mark_provider("cross_asset_macro", f"unavailable:{type(exc).__name__}")
+            _mark_provider(
+                "yahoo_finance_daily", f"unavailable:{type(exc).__name__}"
+            )
         await asyncio.sleep(900)
 
 
 async def _treasury_curve_loop(log) -> None:
-    headers = {"User-Agent": "Mozilla/5.0", "accept": "application/xml,text/xml"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "accept": "application/xml,text/xml",
+    }
     while True:
         year = time.gmtime().tm_year
         url = (
@@ -296,22 +465,51 @@ async def _treasury_curve_loop(log) -> None:
                     url, timeout=aiohttp.ClientTimeout(total=12)
                 ) as response:
                     if response.status == 200:
-                        values = parse_treasury_curve_xml(await response.text())
-                        if len(values) == 2:
-                            _merge_signals(values)
-                            _mark_provider("treasury_curve", "ok")
+                        values, observed_at = (
+                            parse_treasury_curve_xml_with_observation(
+                                await response.text()
+                            )
+                        )
+                        source_age = (
+                            time.time() - observed_at
+                            if observed_at is not None
+                            else float("inf")
+                        )
+                        max_age = _SOURCE_MAX_AGE_S["us2y_yield_change_bps"]
+                        if (
+                            len(values) == 2
+                            and observed_at is not None
+                            and -_MAX_FUTURE_SKEW_S <= source_age <= max_age
+                        ):
+                            _merge_signals(
+                                values,
+                                observed_at=observed_at,
+                            )
+                            _mark_provider(
+                                "us_treasury_curve", "ok_source_fresh"
+                            )
+                        elif len(values) == 2:
+                            _mark_provider(
+                                "us_treasury_curve",
+                                "stale_source_fail_neutral",
+                            )
                         else:
                             _mark_provider(
-                                "treasury_curve", "incomplete_fail_neutral"
+                                "us_treasury_curve",
+                                "incomplete_fail_neutral",
                             )
                     else:
                         _mark_provider(
-                            "treasury_curve", f"http_{response.status}_fail_neutral"
+                            "us_treasury_curve",
+                            f"http_{response.status}_fail_neutral",
                         )
         except Exception as exc:
-            _mark_provider("treasury_curve", f"unavailable:{type(exc).__name__}")
+            _mark_provider(
+                "us_treasury_curve", f"unavailable:{type(exc).__name__}"
+            )
             log.warning(
-                "[MARKET_RISK_SOURCE] provider=treasury_curve unavailable=%s fail_neutral=true",
+                "[MARKET_RISK_SOURCE] provider=us_treasury_curve "
+                "unavailable=%s fail_neutral=true",
                 type(exc).__name__,
             )
         await asyncio.sleep(900)
@@ -319,8 +517,11 @@ async def _treasury_curve_loop(log) -> None:
 
 async def market_risk_reader_loop(log) -> None:
     log.info(
-        "[MARKET_RISK_SOURCES] providers=CoinGlass,cross_asset_macro(SPX,NDX,VIX,DXY),"
-        "US_Treasury(2Y,10Y),public_macro_news; execution_effect=NONE"
+        "[MARKET_RISK_SOURCES] "
+        "providers=CoinGlassV4(optional,api-body-validated),"
+        "YahooFinanceDaily(SPX,NDX,VIX,DXY),"
+        "US_Treasury(2Y,10Y),public_macro_news; "
+        "source_timestamp_freshness=true execution_effect=NONE"
     )
     tasks = [
         asyncio.create_task(_coinglass_loop(log)),
@@ -331,10 +532,12 @@ async def market_risk_reader_loop(log) -> None:
         while True:
             snap = snapshot()
             log.info(
-                "%s providers=%s fresh_signals=%s execution_effect=NONE",
+                "%s providers=%s fresh_signals=%s stale=%s "
+                "execution_effect=NONE",
                 compact_risk_log(snap["assessment"]),
                 snap["providers"],
                 sorted(snap["signals"]),
+                snap["stale_reasons"],
             )
             await asyncio.sleep(120)
     finally:
@@ -353,8 +556,12 @@ def install(PilotGuard, scoring, log) -> None:
 
     original_evaluate = PilotGuard.evaluate
 
-    def evaluate_with_market_risk(self, engine, client, symbol, ai_decision=None):
-        reasons = list(original_evaluate(self, engine, client, symbol, ai_decision))
+    def evaluate_with_market_risk(
+        self, engine, client, symbol, ai_decision=None
+    ):
+        reasons = list(
+            original_evaluate(self, engine, client, symbol, ai_decision)
+        )
         snap = snapshot()
         assessment = snap["assessment"]
         if snap["fresh"] and assessment.block_new_entries:
@@ -368,8 +575,16 @@ def install(PilotGuard, scoring, log) -> None:
     scoring.news_reader_loop = combined_reader_loop
     PilotGuard.evaluate = evaluate_with_market_risk
     PilotGuard._market_risk_intelligence_installed = True
+
+    coinglass_configured = bool(
+        os.environ.get("COINGLASS_API_KEY", "").strip()
+    )
     log.warning(
-        "[MARKET_RISK_INTELLIGENCE] installed: CoinGlass + SPX/NDX/VIX/DXY + "
-        "official US Treasury 2Y/10Y + structured US macro/news; EXTREME combined "
-        "risk blocks pilot entries; external signals never authorize execution"
+        "[MARKET_RISK_INTELLIGENCE] installed: "
+        "CoinGlassV4 configured=%s api_body_validated=true default_poll_s=%s; "
+        "YahooFinanceDaily + official US Treasury use source timestamps; "
+        "EXTREME combined risk blocks pilot entries; "
+        "external signals never authorize execution",
+        str(coinglass_configured).lower(),
+        int(_COINGLASS_DEFAULT_POLL_S),
     )

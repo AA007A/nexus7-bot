@@ -2,14 +2,15 @@ import time
 
 from bot import market_risk_runtime as runtime
 
-# Collector tests cover retained free sources only: CoinGlass, cross-asset prices,
-# official U.S. Treasury yields, and the existing public macro/news bridge.
+# Collector tests cover CoinGlass v4 semantics, source-observation freshness,
+# Yahoo Finance daily cross-assets, official U.S. Treasury yields, and the
+# existing public macro/news bridge. External data remains fail-neutral.
 
 
 def _reset_runtime_state():
-    """Reset runtime state used by the retained-provider test suite."""
     runtime._state["signals"] = {}
     runtime._state["signal_updated_at"] = {}
+    runtime._state["signal_observed_at"] = {}
     runtime._state["providers"] = {}
     runtime._previous_coinglass_oi = None
 
@@ -49,6 +50,44 @@ def test_coinglass_open_interest_change_requires_two_samples():
     assert round(second["open_interest_change_pct"], 2) == 12.0
 
 
+def test_coinglass_missing_funding_does_not_invent_zero():
+    _reset_runtime_state()
+    out = runtime.parse_coinglass_markets({
+        "code": "0",
+        "data": [{
+            "symbol": "BTC",
+            "open_interest_usd": 10_000_000_000,
+        }],
+    }, now=1000)
+    assert "funding_rate_pct" not in out
+
+
+def test_coinglass_http_200_with_api_error_is_not_ok():
+    status = runtime._coinglass_provider_status(
+        [200, 200], ["0", "10001"], []
+    )
+    assert not status.startswith("ok:")
+    assert "fail_neutral" in status
+
+
+def test_coinglass_ok_requires_valid_parsed_signal():
+    status = runtime._coinglass_provider_status(
+        [200, 200],
+        ["0", "0"],
+        ["liquidation_usd_1h", "funding_rate_pct"],
+    )
+    assert status == "ok:2_signals"
+
+
+def test_coinglass_default_poll_cannot_exceed_shortest_derivative_ttl():
+    derivative_ttl = min(
+        runtime._SIGNAL_TTL_S["liquidation_usd_1h"],
+        runtime._SIGNAL_TTL_S["open_interest_change_pct"],
+        runtime._SIGNAL_TTL_S["funding_rate_pct"],
+    )
+    assert runtime._COINGLASS_DEFAULT_POLL_S <= derivative_ttl
+
+
 def test_chart_change_normalizes_percent_move():
     out = runtime.parse_chart_change({
         "chart": {
@@ -60,6 +99,34 @@ def test_chart_change_normalizes_percent_move():
         }
     })
     assert round(out, 2) == 2.5
+
+
+def test_chart_change_preserves_source_observation_timestamp():
+    out, observed_at = runtime.parse_chart_change_with_observation({
+        "chart": {
+            "result": [{
+                "timestamp": [1_789_000_000, 1_789_086_400],
+                "indicators": {
+                    "quote": [{"close": [100.0, 102.5]}]
+                },
+            }]
+        }
+    })
+    assert round(out, 2) == 2.5
+    assert observed_at == 1_789_086_400
+
+
+def test_fresh_fetch_does_not_refresh_stale_source_observation():
+    _reset_runtime_state()
+    now = time.time()
+    runtime._merge_signals(
+        {"spx_change_pct": -3.0},
+        now=now,
+        observed_at=now - runtime._SOURCE_MAX_AGE_S["spx_change_pct"] - 1,
+    )
+    snap = runtime.snapshot(now=now)
+    assert "spx_change_pct" not in snap["signals"]
+    assert snap["stale_reasons"]["spx_change_pct"] == "SOURCE_AGE"
 
 
 def test_treasury_curve_uses_actual_2y_and_10y_yields():
@@ -78,28 +145,34 @@ def test_treasury_curve_uses_actual_2y_and_10y_yields():
         <d:BC_10YEAR>4.83</d:BC_10YEAR>
       </m:properties></content></entry>
     </feed>"""
-    out = runtime.parse_treasury_curve_xml(xml)
+    out, observed_at = runtime.parse_treasury_curve_xml_with_observation(xml)
     assert round(out["us2y_yield_change_bps"], 2) == 11.0
     assert round(out["us10y_yield_change_bps"], 2) == 3.0
+    assert observed_at == runtime._parse_utc_timestamp("2026-09-09T00:00:00")
+    assert runtime.parse_treasury_curve_xml(xml) == out
 
 
 def test_treasury_curve_malformed_xml_is_fail_neutral():
     assert runtime.parse_treasury_curve_xml("<bad") == {}
+    assert runtime.parse_treasury_curve_xml_with_observation("<bad") == ({}, None)
 
 
 def test_signal_expiry_is_independent_per_signal():
     _reset_runtime_state()
     now = time.time()
-    runtime._merge_signals({"liquidation_usd_1h": 600_000_000}, now=now - 1300)
+    runtime._merge_signals(
+        {"liquidation_usd_1h": 600_000_000}, now=now - 1300
+    )
     runtime._merge_signals({"macro_event_severity": 60}, now=now - 100)
 
     snap = runtime.snapshot(now=now)
     assert "liquidation_usd_1h" not in snap["signals"]
+    assert snap["stale_reasons"]["liquidation_usd_1h"] == "FETCH_TTL"
     assert snap["signals"]["macro_event_severity"] == 60
     assert snap["assessment"].block_new_entries is False
 
 
-def test_combined_fresh_risk_can_block_pilot_gate_with_free_macro_sources():
+def test_combined_fresh_risk_can_block_pilot_gate():
     _reset_runtime_state()
 
     class DummyState:
