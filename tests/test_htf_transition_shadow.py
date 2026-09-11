@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot import htf_transition_shadow as shadow
 
@@ -21,21 +22,20 @@ def _reset():
         shadow._METRICS["mae_sum"] = 0.0
 
 
-def test_transition_shadow_records_strong_forming_4h_flip(monkeypatch):
+def test_transition_shadow_records_strong_forming_4h_flip():
     _reset()
     states = iter(["LONG", "LONG", "SHORT", "LONG"])
-    monkeypatch.setattr(shadow, "_ema_state", lambda closes: next(states))
-    monkeypatch.setattr(shadow, "_atr_pair", lambda h, l, c: (1.0, 1.0))
-    monkeypatch.setattr(shadow, "score_tf", lambda *a, **k: {
-        "ok": True, "total": 85, "vol_r": 1.8, "adx_v": 30,
-    })
-    monkeypatch.setattr(shadow, "detect_entry", lambda *a, **k: (True, "MOMENTUM"))
-    monkeypatch.setattr(shadow, "_update_outcomes", lambda *a, **k: None)
     emitted = []
-    monkeypatch.setattr(shadow, "_emit", lambda log, tag, payload: emitted.append((tag, payload)))
-
     log = SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None)
-    shadow.observe("ETHUSDT", _bars(100), _bars(100), _bars(100), None, log)
+    with patch.object(shadow, "_ema_state", side_effect=lambda closes: next(states)), \
+         patch.object(shadow, "_atr_pair", return_value=(1.0, 1.0)), \
+         patch.object(shadow, "score_tf", return_value={
+             "ok": True, "total": 85, "vol_r": 1.8, "adx_v": 30,
+         }), \
+         patch.object(shadow, "detect_entry", return_value=(True, "MOMENTUM")), \
+         patch.object(shadow, "_update_outcomes", return_value=None), \
+         patch.object(shadow, "_emit", side_effect=lambda log, tag, payload: emitted.append((tag, payload))):
+        shadow.observe("ETHUSDT", _bars(100), _bars(100), _bars(100), None, log)
 
     snap = shadow.snapshot()
     assert snap["eligible"] == 1
@@ -46,23 +46,23 @@ def test_transition_shadow_records_strong_forming_4h_flip(monkeypatch):
     assert emitted[0][1]["execution_effect"] == "NONE"
 
 
-def test_transition_shadow_never_observes_when_production_already_signaled(monkeypatch):
+def test_transition_shadow_never_observes_when_production_already_signaled():
     _reset()
-    monkeypatch.setattr(shadow, "_update_outcomes", lambda *a, **k: None)
     log = SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None)
-    shadow.observe(
-        "ETHUSDT", _bars(100), _bars(100), _bars(100),
-        SimpleNamespace(direction="LONG"), log,
-    )
+    with patch.object(shadow, "_update_outcomes", return_value=None):
+        shadow.observe(
+            "ETHUSDT", _bars(100), _bars(100), _bars(100),
+            SimpleNamespace(direction="LONG"), log,
+        )
     assert shadow.snapshot()["eligible"] == 0
     assert shadow.snapshot()["active"] == 0
 
 
-def test_transition_shadow_requires_forming_4h_flip(monkeypatch):
+def test_transition_shadow_requires_forming_4h_flip():
     _reset()
     states = iter(["LONG", "LONG", "SHORT", "SHORT"])
-    monkeypatch.setattr(shadow, "_ema_state", lambda closes: next(states))
-    monkeypatch.setattr(shadow, "_update_outcomes", lambda *a, **k: None)
     log = SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None)
-    shadow.observe("ETHUSDT", _bars(100), _bars(100), _bars(100), None, log)
+    with patch.object(shadow, "_ema_state", side_effect=lambda closes: next(states)), \
+         patch.object(shadow, "_update_outcomes", return_value=None):
+        shadow.observe("ETHUSDT", _bars(100), _bars(100), _bars(100), None, log)
     assert shadow.snapshot()["eligible"] == 0
