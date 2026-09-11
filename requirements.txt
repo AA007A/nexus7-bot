@@ -1,7 +1,6 @@
 # BGX Capital — dependências (apenas o que é realmente importado)
 # HTTP stack refreshed after pip-audit found known vulnerabilities in the
-# legacy aiohttp/Starlette combination. FastAPI 0.141.1 and aiohttp 3.14.3
-# are the current stable PyPI releases used by this hardening branch.
+# legacy aiohttp/Starlette combination.
 fastapi==0.141.1
 uvicorn[standard]==0.27.1
 aiohttp==3.14.3
@@ -10,3 +9,5 @@ asyncpg==0.29.0
 aiosqlite==0.20.0
 websockets==12.0
 feedparser==6.0.11
+# Quant validation / hyperparameter search. Pin for reproducibility.
+optuna==4.5.0
