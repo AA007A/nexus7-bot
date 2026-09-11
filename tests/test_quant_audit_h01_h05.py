@@ -48,13 +48,17 @@ def _candles(count=12, interval_min=15, start_ms=1_700_000_000_000):
     return out
 
 
-def test_h01_history_paginates_and_dedupes_by_timestamp(monkeypatch):
+def test_h01_history_paginates_and_dedupes_by_timestamp():
     rows = _candles(count=12)
     client = FakeKuCoinHistoryClient(rows)
 
     # Force a historical cursor that fully contains the deterministic fixture.
-    monkeypatch.setattr(backtest.time, "time", lambda: (rows[-1][0] + 1) / 1000)
-    got = asyncio.run(backtest.fetch_history(client, "BTCUSDT", "15", 12))
+    original_time = backtest.time.time
+    backtest.time.time = lambda: (rows[-1][0] + 1) / 1000
+    try:
+        got = asyncio.run(backtest.fetch_history(client, "BTCUSDT", "15", 12))
+    finally:
+        backtest.time.time = original_time
 
     assert len(got) == 12
     assert len({c["ts"] for c in got}) == 12
@@ -64,7 +68,7 @@ def test_h01_history_paginates_and_dedupes_by_timestamp(monkeypatch):
 
 
 def test_h01_integrity_detects_duplicates_and_gaps():
-    rows = [c for c in (_candles(count=4))]
+    rows = list(_candles(count=4))
     normalized = [backtest._normalize_kline(r) for r in rows]
     clean = [c for c in normalized if c is not None]
     assert backtest._historical_integrity(clean, "15")["ok"] is True
@@ -114,17 +118,30 @@ def test_h03_optimizer_search_space_contains_only_effective_parameters():
     params = optimizer._sample_params(trial)
     assert set(params) == {"min_score", "min_rr"}
     assert set(trial.seen) == {"min_score", "min_rr"}
-    forbidden = {"sl_mult", "tp_mult", "rsi_ob", "rsi_os", "min_adx", "vol_threshold", "bos_lookback", "momentum_atr_mult"}
+    forbidden = {
+        "sl_mult", "tp_mult", "rsi_ob", "rsi_os", "min_adx",
+        "vol_threshold", "bos_lookback", "momentum_atr_mult",
+    }
     assert forbidden.isdisjoint(params)
 
 
 def test_h02_holdout_gate_is_fail_closed():
-    good = {"total_trades": 20, "profit_factor": 1.2, "expectancy_pct": 0.1, "sharpe_ratio": 0.4}
+    good = {
+        "total_trades": 20,
+        "profit_factor": 1.2,
+        "expectancy_pct": 0.1,
+        "sharpe_ratio": 0.4,
+    }
     allowed, reasons = optimizer._holdout_gate(good, good)
     assert allowed is True
     assert reasons == []
 
-    bad_test = {"total_trades": 20, "profit_factor": 0.9, "expectancy_pct": -0.1, "sharpe_ratio": -0.2}
+    bad_test = {
+        "total_trades": 20,
+        "profit_factor": 0.9,
+        "expectancy_pct": -0.1,
+        "sharpe_ratio": -0.2,
+    }
     allowed, reasons = optimizer._holdout_gate(good, bad_test)
     assert allowed is False
     assert any("test: PF" in r for r in reasons)
