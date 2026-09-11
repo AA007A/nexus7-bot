@@ -8,6 +8,7 @@ Quant-audit hardening:
 - Same-bar SL/TP ambiguity is resolved conservatively (stop first).
 - Backtests never mutate shared runtime configuration.
 - MTF context is aligned by real candle close timestamps, never index ratios.
+- KuCoin market fills, taker fees and discrete funding settlements are modeled.
 """
 from __future__ import annotations
 
@@ -21,6 +22,15 @@ from typing import Dict, List
 import numpy as np
 
 from bot.config import cfg
+from bot.kucoin_execution_model import (
+    adverse_fill,
+    configured_taker_fee,
+    fee_return_fraction,
+    fetch_actual_taker_fee,
+    fetch_public_funding_history,
+    funding_return_fraction,
+    slippage_rate_for_symbol,
+)
 from bot.logger import log
 
 
@@ -42,7 +52,6 @@ def _ts_ms(candle: dict) -> int:
 
 
 def _timestamp_index(candles: list) -> list[int]:
-    """Build a chronological open-timestamp index for bisect-based MTF alignment."""
     return [_ts_ms(c) for c in candles]
 
 
@@ -53,13 +62,7 @@ def _closed_window_by_ts(
     interval_min: int,
     lookback: int,
 ) -> list:
-    """Return only candles that were fully closed at ``decision_ts_ms``.
-
-    KuCoin kline timestamps represent candle opens. A higher-timeframe candle
-    is therefore admissible only when ``open_ts + interval <= decision_ts``.
-    This prevents look-ahead and remains correct when any timeframe contains
-    missing candles/gaps, unlike positional ``i//4`` and ``i//16`` mapping.
-    """
+    """Return only candles fully closed at ``decision_ts_ms``."""
     if not candles or not open_timestamps_ms or lookback <= 0:
         return []
     interval_ms = int(interval_min) * 60 * 1000
@@ -70,7 +73,6 @@ def _closed_window_by_ts(
 
 
 def _normalize_kline(raw) -> dict | None:
-    """Normalize one KuCoin Futures kline to the project's candle schema."""
     try:
         ts = int(float(raw[0]))
         if ts < 1e11:
@@ -93,7 +95,6 @@ def _normalize_kline(raw) -> dict | None:
 
 
 def _historical_integrity(candles: list, interval: str) -> dict:
-    """Return deterministic integrity telemetry for a chronological series."""
     if not candles:
         return {"ok": False, "duplicates": 0, "non_monotonic": 0, "gaps": 0}
     expected = _interval_minutes(interval) * 60 * 1000
@@ -110,7 +111,6 @@ def _historical_integrity(candles: list, interval: str) -> dict:
 
 
 async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
-    """Read a bounded KuCoin Futures kline page without mutating live caches."""
     from bot.kucoin import to_kucoin
 
     data = await client._get(
@@ -133,10 +133,8 @@ async def _kucoin_page(client, symbol: str, interval: str, start_ms: int, end_ms
 
 
 async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -> list:
-    """Fetch bounded historical OHLCV using timestamp pagination."""
     if limit <= 0:
         return []
-
     try:
         if not hasattr(client, "_get"):
             rows = await client.get_klines(symbol, interval, limit)
@@ -164,10 +162,8 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
             page = await _kucoin_page(client, symbol, interval, cursor_start, cursor_end)
             if not page:
                 break
-
             for candle in page:
                 by_ts[int(candle["ts"])] = candle
-
             oldest = min(int(c["ts"]) for c in page)
             if previous_oldest is not None and oldest >= previous_oldest:
                 raise RuntimeError(
@@ -182,13 +178,9 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
         if not integrity["ok"]:
             raise RuntimeError(f"historical integrity failed: {integrity}")
         if integrity["gaps"]:
-            log.warning(
-                f"[BACKTEST_DATA] {symbol} {interval}m: {integrity['gaps']} historical gaps detected"
-            )
+            log.warning(f"[BACKTEST_DATA] {symbol} {interval}m: {integrity['gaps']} historical gaps detected")
         if len(result) < min(limit, 100):
-            log.warning(
-                f"[BACKTEST_DATA] {symbol} {interval}m: requested={limit} received={len(result)}"
-            )
+            log.warning(f"[BACKTEST_DATA] {symbol} {interval}m: requested={limit} received={len(result)}")
         log.info(
             f"fetch_history {symbol} {interval}: {len(result)} candles | "
             f"unique_ts={len({c['ts'] for c in result})} gaps={integrity['gaps']}"
@@ -197,6 +189,15 @@ async def fetch_history(client, symbol: str, interval: str, limit: int = 1000) -
     except Exception as exc:
         log.error(f"backtest fetch {symbol} {interval}: {type(exc).__name__}: {exc}")
         return []
+
+
+def _execution_context_defaults(symbol: str, execution_context: dict | None) -> dict:
+    ctx = dict(execution_context or {})
+    ctx.setdefault("taker_fee_rate", configured_taker_fee())
+    ctx.setdefault("fee_source", "configured_fallback")
+    ctx.setdefault("slippage_rate", slippage_rate_for_symbol(symbol))
+    ctx.setdefault("funding_events", [])
+    return ctx
 
 
 def _run_strategy(
@@ -208,13 +209,12 @@ def _run_strategy(
     sl_mult: float | None = None,
     tp_mult: float | None = None,
     symbol: str = "",
+    execution_context: dict | None = None,
 ) -> List[dict]:
-    """Replay the production MTF strategy on chronological historical data.
+    """Replay production MTF logic with a KuCoin-like market execution proxy.
 
-    ``sl_mult`` and ``tp_mult`` are retained only for backward call-signature
-    compatibility. The production Analyzer owns SL/TP geometry by entry type,
-    so these legacy arguments are intentionally ignored. Most importantly,
-    this function never mutates shared ``cfg`` state (H07).
+    ``pnl_pct`` remains a return fraction on initial notional (historical API
+    compatibility); leverage is intentionally NOT multiplied into this metric.
     """
     from bot.strategy import Analyzer
 
@@ -227,15 +227,26 @@ def _run_strategy(
     analyzer = Analyzer()
     trades: list[dict] = []
     analysis_errors = 0
-    WINDOW = 60
+    window = 60
+    ctx = _execution_context_defaults(symbol, execution_context)
+    fee_rate = float(ctx["taker_fee_rate"])
+    slip = float(ctx["slippage_rate"])
+    funding_events = list(ctx.get("funding_events") or [])
 
     ts15 = _timestamp_index(klines_15)
     ts1h = _timestamp_index(klines_1h)
     ts4h = _timestamp_index(klines_4h)
+    candle_ms = 15 * 60 * 1000
 
-    for i in range(WINDOW, len(klines_15) - 1):
+    def price_at_ts(target_ts: int) -> float:
+        idx = bisect_right(ts15, int(target_ts)) - 1
+        if idx < 0 or idx >= len(klines_15):
+            return 0.0
+        return float(klines_15[idx].get("c", 0.0) or 0.0)
+
+    for i in range(window, len(klines_15) - 1):
         decision_ts = ts15[i]
-        k15 = _closed_window_by_ts(klines_15, ts15, decision_ts, 15, WINDOW)
+        k15 = _closed_window_by_ts(klines_15, ts15, decision_ts, 15, window)
         k1h = _closed_window_by_ts(klines_1h, ts1h, decision_ts, 60, 20)
         k4h = _closed_window_by_ts(klines_4h, ts4h, decision_ts, 240, 15)
         if len(k15) < 30 or len(k1h) < 10 or len(k4h) < 5:
@@ -260,109 +271,148 @@ def _run_strategy(
         if not sig or sig.rr < float(min_rr):
             continue
 
-        entry, sl, tp = float(sig.entry), float(sig.sl), float(sig.tp)
-        tp1 = float(getattr(sig, "tp1", tp) or tp)
-        tp2 = float(getattr(sig, "tp2", tp) or tp)
-        has_partial = tp1 != tp2 and tp1 != 0
+        direction = str(sig.direction).upper()
+        signal_entry = float(sig.entry)
+        market_open = float(klines_15[i]["o"])
+        entry_fill = adverse_fill(market_open, direction, is_entry=True, slippage_rate=slip)
+        if signal_entry <= 0 or entry_fill <= 0:
+            continue
+
+        # Live BGX rebases protection geometry after the confirmed market fill.
+        fill_delta = entry_fill - signal_entry
+        sl = float(sig.sl) + fill_delta
+        tp = float(sig.tp) + fill_delta
+        tp1 = float(getattr(sig, "tp1", sig.tp) or sig.tp) + fill_delta
+        tp2 = float(getattr(sig, "tp2", sig.tp) or sig.tp) + fill_delta
+        has_partial = abs(tp1 - tp2) > max(abs(entry_fill), 1.0) * 1e-12
+
         result = None
         hold = 0
         tp1_hit = False
-        pnl_pct = 0.0
+        tp1_ts: int | None = None
         ambiguous_bars = 0
+        exit_legs: list[tuple[float, float]] = []
+        exit_ts = decision_ts
 
-        taker = float(os.environ.get("TAKER_FEE", "0.0006"))
-        fee_pct = taker * 2
-        slip_base = float(os.environ.get("BACKTEST_SLIPPAGE", "0.0005"))
-        majors = ("BTC", "ETH", "SOL")
-        sym_up = str(symbol).upper()
-        slip = slip_base if any(m in sym_up for m in majors) else slip_base * 2
-        cost_pct = fee_pct + slip * 2
-        funding_8h = float(os.environ.get("BACKTEST_FUNDING", "0.0001"))
-
-        for j in range(i + 1, min(i + 41, len(klines_15))):
+        # Execution starts in the decision candle. The signal consumed only
+        # candles closed before decision_ts, so candle i is the first tradable bar.
+        for j in range(i, min(i + 40, len(klines_15))):
             future = klines_15[j]
             hold += 1
             high, low = float(future["h"]), float(future["l"])
+            bar_exit_ts = _ts_ms(future) + candle_ms
 
-            if sig.direction == "LONG":
+            if direction == "LONG":
                 target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
                 if low <= sl and high >= target_now:
                     ambiguous_bars += 1
                 if low <= sl:
-                    if tp1_hit:
-                        pnl_pct = abs(tp1 - entry) / entry * 0.5
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "PARTIAL_WIN"
-                    else:
-                        pnl_pct = -(abs(sl - entry) / entry)
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "LOSS"
+                    stop_fill = adverse_fill(sl, direction, is_entry=False, slippage_rate=slip)
+                    exit_legs.append((stop_fill, 0.5 if tp1_hit else 1.0))
+                    result = "PARTIAL_WIN" if tp1_hit else "LOSS"
+                    exit_ts = bar_exit_ts
                     break
                 if has_partial and not tp1_hit and high >= tp1:
                     tp1_hit = True
-                    sl = entry
+                    tp1_ts = bar_exit_ts
+                    exit_legs.append((adverse_fill(tp1, direction, is_entry=False, slippage_rate=slip), 0.5))
+                    sl = entry_fill
                 if tp1_hit and high >= tp2:
-                    pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
-                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    exit_legs.append((adverse_fill(tp2, direction, is_entry=False, slippage_rate=slip), 0.5))
                     result = "WIN"
+                    exit_ts = bar_exit_ts
                     break
                 if not has_partial and high >= tp:
-                    pnl_pct = abs(tp - entry) / entry
-                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    exit_legs.append((adverse_fill(tp, direction, is_entry=False, slippage_rate=slip), 1.0))
                     result = "WIN"
+                    exit_ts = bar_exit_ts
                     break
             else:
                 target_now = tp2 if tp1_hit else (tp1 if has_partial else tp)
                 if high >= sl and low <= target_now:
                     ambiguous_bars += 1
                 if high >= sl:
-                    if tp1_hit:
-                        pnl_pct = abs(tp1 - entry) / entry * 0.5
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "PARTIAL_WIN"
-                    else:
-                        pnl_pct = -(abs(sl - entry) / entry)
-                        pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
-                        result = "LOSS"
+                    stop_fill = adverse_fill(sl, direction, is_entry=False, slippage_rate=slip)
+                    exit_legs.append((stop_fill, 0.5 if tp1_hit else 1.0))
+                    result = "PARTIAL_WIN" if tp1_hit else "LOSS"
+                    exit_ts = bar_exit_ts
                     break
                 if has_partial and not tp1_hit and low <= tp1:
                     tp1_hit = True
-                    sl = entry
+                    tp1_ts = bar_exit_ts
+                    exit_legs.append((adverse_fill(tp1, direction, is_entry=False, slippage_rate=slip), 0.5))
+                    sl = entry_fill
                 if tp1_hit and low <= tp2:
-                    pnl_pct = (abs(tp1 - entry) + abs(tp2 - entry)) / entry * 0.5
-                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    exit_legs.append((adverse_fill(tp2, direction, is_entry=False, slippage_rate=slip), 0.5))
                     result = "WIN"
+                    exit_ts = bar_exit_ts
                     break
                 if not has_partial and low <= tp:
-                    pnl_pct = abs(tp - entry) / entry
-                    pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+                    exit_legs.append((adverse_fill(tp, direction, is_entry=False, slippage_rate=slip), 1.0))
                     result = "WIN"
+                    exit_ts = bar_exit_ts
                     break
 
         if result is None:
             result = "TIMEOUT"
-            last = float(klines_15[min(i + 40, len(klines_15) - 1)]["c"])
-            base = (last - entry) / entry * (1 if sig.direction == "LONG" else -1)
-            pnl_pct = base * (0.5 if tp1_hit else 1.0)
-            pnl_pct -= cost_pct + funding_8h * max(1, hold * 15 / 480)
+            last_idx = min(i + 39, len(klines_15) - 1)
+            last = float(klines_15[last_idx]["c"])
+            timeout_fill = adverse_fill(last, direction, is_entry=False, slippage_rate=slip)
+            exit_legs.append((timeout_fill, 0.5 if tp1_hit else 1.0))
+            exit_ts = _ts_ms(klines_15[last_idx]) + candle_ms
 
-        ts_ms = decision_ts
-        dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+        # Defensive normalization: every completed simulated trade must close 100%.
+        closed_weight = sum(weight for _, weight in exit_legs)
+        if closed_weight < 0.999999:
+            continue
+
+        side = 1.0 if direction == "LONG" else -1.0
+        gross_return = sum(
+            side * ((fill - entry_fill) / entry_fill) * weight
+            for fill, weight in exit_legs
+        )
+        fee_fraction = fee_return_fraction(entry_fill, exit_legs, fee_rate)
+        funding_fraction, funding_count = funding_return_fraction(
+            funding_events,
+            direction,
+            decision_ts,
+            exit_ts,
+            entry_fill,
+            price_at_ts=price_at_ts,
+            partial_after_ts_ms=tp1_ts,
+        )
+        pnl_pct = gross_return - fee_fraction + funding_fraction
+        weighted_exit = sum(fill * weight for fill, weight in exit_legs)
+
+        dt = datetime.fromtimestamp(decision_ts / 1000, tz=timezone.utc)
         trades.append(
             {
                 "result": result,
                 "pnl_pct": pnl_pct,
+                "gross_pnl_pct": gross_return,
+                "fee_pct": fee_fraction,
+                "funding_pct": funding_fraction,
                 "hold": hold,
-                "direction": sig.direction,
+                "direction": direction,
                 "score": sig.score,
                 "hour_utc": dt.hour,
                 "day_of_week": dt.weekday(),
                 "opened_at": dt.isoformat(),
-                "ts": ts_ms,
+                "ts": decision_ts,
+                "exit_ts": exit_ts,
                 "rr": sig.rr,
                 "regime": getattr(sig, "regime", "UNKNOWN"),
                 "entry_type": getattr(sig, "entry_type", "UNKNOWN"),
                 "intrabar_ambiguous": ambiguous_bars,
+                "signal_entry": signal_entry,
+                "market_open": market_open,
+                "entry_fill": entry_fill,
+                "exit_fill": weighted_exit,
+                "entry_slippage_pct": (entry_fill - market_open) / market_open,
+                "funding_events_charged": funding_count,
+                "taker_fee_rate": fee_rate,
+                "fee_source": ctx.get("fee_source", "unknown"),
+                "execution_model": "KUCOIN_MARKET_PROXY_V1",
             }
         )
 
@@ -390,9 +440,9 @@ def _calc_metrics(trades: List[dict], strategy: str = "MTF") -> dict:
 
     hour_pnl: Dict[int, list] = {}
     day_pnl: Dict[int, list] = {}
-    for t in trades:
-        hour_pnl.setdefault(int(t["hour_utc"]), []).append(t["pnl_pct"])
-        day_pnl.setdefault(int(t["day_of_week"]), []).append(t["pnl_pct"])
+    for trade in trades:
+        hour_pnl.setdefault(int(trade["hour_utc"]), []).append(trade["pnl_pct"])
+        day_pnl.setdefault(int(trade["day_of_week"]), []).append(trade["pnl_pct"])
     hour_avg = {h: float(np.mean(v)) for h, v in hour_pnl.items()}
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     day_avg = {days[d]: float(np.mean(v)) for d, v in day_pnl.items() if 0 <= d <= 6}
@@ -415,6 +465,8 @@ def _calc_metrics(trades: List[dict], strategy: str = "MTF") -> dict:
         "gross_profit_pct": round(gross_profit * 100, 2),
         "gross_loss_pct": round(gross_loss * 100, 2),
         "intrabar_ambiguous_bars": ambiguous,
+        "total_fee_pct": round(sum(float(t.get("fee_pct", 0)) for t in trades) * 100, 4),
+        "total_funding_pct": round(sum(float(t.get("funding_pct", 0)) for t in trades) * 100, 4),
     }
 
 
@@ -422,7 +474,6 @@ run_strategy_public = _run_strategy
 
 
 def monte_carlo_permutation(returns: list, n_simulations: int = 5000, random_seed: int = 42) -> dict:
-    """Bootstrap diagnostic retained under the historical public function name."""
     if not returns or len(returns) < 10:
         return {"error": "Mínimo 10 trades para Monte Carlo", "edge_significant": False}
     arr = np.array(returns, dtype=float)
@@ -431,8 +482,8 @@ def monte_carlo_permutation(returns: list, n_simulations: int = 5000, random_see
     sims = np.zeros(n_simulations)
     for i in range(n_simulations):
         sample = rng.choice(arr, size=len(arr), replace=True)
-        s = sample.std()
-        sims[i] = float(sample.mean() / s) if s > 0 else 0.0
+        std = sample.std()
+        sims[i] = float(sample.mean() / std) if std > 0 else 0.0
     p_value = float((sims <= 0.0).mean())
     return {
         "real_sharpe": round(real_sharpe, 4),
@@ -456,6 +507,7 @@ def _walk_forward(
     train_ratio: float = 0.70,
     symbol: str = "",
     rolling: bool = True,
+    execution_context: dict | None = None,
 ) -> dict:
     if len(klines_15) < 200:
         return {"error": "Dados insuficientes para walk-forward (min 200 candles 15M)"}
@@ -476,39 +528,33 @@ def _walk_forward(
         w15 = klines_15[start_idx:end_idx]
         split = int(len(w15) * train_ratio)
         train_15, test_15 = w15[:split], w15[split:]
-
-        # Keep complete HTF histories available. _run_strategy admits only
-        # candles closed at each 15m decision timestamp, so this preserves
-        # pre-window context without leaking future 1h/4h candles.
         train_trades = (
-            _run_strategy(train_15, klines_1h, klines_4h, symbol=symbol)
+            _run_strategy(train_15, klines_1h, klines_4h, symbol=symbol, execution_context=execution_context)
             if len(train_15) >= 60 else []
         )
         test_trades = (
-            _run_strategy(test_15, klines_1h, klines_4h, symbol=symbol)
+            _run_strategy(test_15, klines_1h, klines_4h, symbol=symbol, execution_context=execution_context)
             if len(test_15) >= 30 else []
         )
         train_m = _calc_metrics(train_trades, "train") if train_trades else {}
         test_m = _calc_metrics(test_trades, "test") if test_trades else {}
-        results.append(
-            {
-                "window": w + 1,
-                "candles_train": len(train_15),
-                "candles_test": len(test_15),
-                "train": {
-                    "win_rate": train_m.get("win_rate", 0),
-                    "profit_factor": train_m.get("profit_factor", 0),
-                    "sharpe": train_m.get("sharpe_ratio", 0),
-                    "total_trades": train_m.get("total_trades", 0),
-                },
-                "test": {
-                    "win_rate": test_m.get("win_rate", 0),
-                    "profit_factor": test_m.get("profit_factor", 0),
-                    "sharpe": test_m.get("sharpe_ratio", 0),
-                    "total_trades": test_m.get("total_trades", 0),
-                },
-            }
-        )
+        results.append({
+            "window": w + 1,
+            "candles_train": len(train_15),
+            "candles_test": len(test_15),
+            "train": {
+                "win_rate": train_m.get("win_rate", 0),
+                "profit_factor": train_m.get("profit_factor", 0),
+                "sharpe": train_m.get("sharpe_ratio", 0),
+                "total_trades": train_m.get("total_trades", 0),
+            },
+            "test": {
+                "win_rate": test_m.get("win_rate", 0),
+                "profit_factor": test_m.get("profit_factor", 0),
+                "sharpe": test_m.get("sharpe_ratio", 0),
+                "total_trades": test_m.get("total_trades", 0),
+            },
+        })
 
     if not results:
         return {"error": "Nenhuma janela com dados suficientes"}
@@ -543,21 +589,41 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
     if len(k15) < 100:
         return {"error": "Dados históricos insuficientes (min 100 candles 15M)"}
 
-    trades = _run_strategy(k15, k1h, k4h, symbol=symbol)
+    start_ms = _ts_ms(k15[0])
+    end_ms = _ts_ms(k15[-1]) + 15 * 60 * 1000
+    taker_fee, fee_source = await fetch_actual_taker_fee(client, symbol)
+    funding_events = await fetch_public_funding_history(client, symbol, start_ms, end_ms)
+    funding_required = (end_ms - start_ms) > 8 * 60 * 60 * 1000
+    execution_context = {
+        "taker_fee_rate": taker_fee,
+        "fee_source": fee_source,
+        "slippage_rate": slippage_rate_for_symbol(symbol),
+        "funding_events": funding_events,
+    }
+
+    trades = _run_strategy(k15, k1h, k4h, symbol=symbol, execution_context=execution_context)
     metrics = _calc_metrics(trades, "MTF-4H-1H-15M")
-    wf = _walk_forward(k15, k1h, k4h, n_windows=6, train_ratio=0.70, symbol=symbol, rolling=True)
-    mc = monte_carlo_permutation([t["pnl_pct"] for t in trades])
-    metrics.update(
-        {
-            "elapsed_seconds": round(time.time() - start, 1),
-            "symbol": symbol,
-            "candles_analyzed": len(k15),
-            "days_analyzed": round(len(k15) * 15 / (60 * 24), 1),
-            "ran_at": datetime.now(timezone.utc).isoformat(),
-            "walk_forward": wf,
-            "monte_carlo": mc,
-        }
+    wf = _walk_forward(
+        k15, k1h, k4h, n_windows=6, train_ratio=0.70,
+        symbol=symbol, rolling=True, execution_context=execution_context,
     )
+    mc = monte_carlo_permutation([t["pnl_pct"] for t in trades])
+    cost_data_complete = bool(funding_events) or not funding_required
+    metrics.update({
+        "elapsed_seconds": round(time.time() - start, 1),
+        "symbol": symbol,
+        "candles_analyzed": len(k15),
+        "days_analyzed": round(len(k15) * 15 / (60 * 24), 1),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "walk_forward": wf,
+        "monte_carlo": mc,
+        "execution_model": "KUCOIN_MARKET_PROXY_V1",
+        "taker_fee_rate": taker_fee,
+        "fee_source": fee_source,
+        "slippage_rate": execution_context["slippage_rate"],
+        "funding_events_loaded": len(funding_events),
+        "execution_cost_data_complete": cost_data_complete,
+    })
     metrics["strategy_validity"] = check_strategy_validity(metrics, wf, mc)
 
     try:
@@ -569,14 +635,10 @@ async def run_backtest(client, symbol: str = "BTCUSDT") -> dict:
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 datetime.now(timezone.utc).date().isoformat(),
-                metrics.get("strategy", "MTF"),
-                metrics.get("win_rate", 0),
-                metrics.get("profit_factor", 0),
-                metrics.get("sharpe_ratio", 0),
-                metrics.get("sortino_ratio", 0),
-                metrics.get("max_drawdown_pct", 0) / 100,
-                metrics.get("expectancy_pct", 0) / 100,
-                metrics.get("total_trades", 0),
+                metrics.get("strategy", "MTF"), metrics.get("win_rate", 0),
+                metrics.get("profit_factor", 0), metrics.get("sharpe_ratio", 0),
+                metrics.get("sortino_ratio", 0), metrics.get("max_drawdown_pct", 0) / 100,
+                metrics.get("expectancy_pct", 0) / 100, metrics.get("total_trades", 0),
                 metrics["ran_at"],
             ),
         )
@@ -616,6 +678,8 @@ def check_strategy_validity(metrics: dict, wf: dict, mc: dict) -> dict:
     overfit = wf.get("overfit_risk", "UNKNOWN")
     p_value = mc.get("p_value", 1.0)
     total_trades = metrics.get("total_trades", 0)
+    if metrics.get("execution_cost_data_complete") is False:
+        critical.append("CRÍTICO: histórico de funding indisponível; custos de execução incompletos")
     if total_trades < 100:
         warnings.append(f"Amostra pequena: {total_trades} trades")
     if total_trades < 50:

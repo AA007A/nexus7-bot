@@ -1,31 +1,23 @@
 """Persistent counterfactual audit for approved and rejected NEXUS candidates.
 
-This module is observability only. It never authorizes execution and never
-changes a signal, position, order, risk limit, or exchange setting.
-
-For each strategy candidate that reaches the NEXUS gate, one row per 15-minute
-signal bucket is persisted. While the bot keeps scanning, cached ticker prices
-are sampled to estimate the counterfactual path after the decision:
-
-- directional MFE / MAE;
-- directional net return after estimated round-trip trading costs;
-- snapshots near +15m, +30m, +1h, +2h and +4h;
-- whether the proposed SL or TP was observed crossing during sampling.
-
-The purpose is to measure false negatives instead of lowering gates based on
-hindsight or intuition. Sampling uses the existing in-process ticker cache and
-therefore adds no exchange REST load. Results are diagnostic, not a backtest and
-not proof that a rejected trade would have filled at the quoted price.
+Observability only: this module never authorizes execution or changes positions,
+orders, risk limits, thresholds, leverage or exchange settings.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import math
+import os
 import time
 from typing import Any
 
 from bot import database as db
+from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+
+# Backward-compatible public diagnostic used by older tests/telemetry. Runtime
+# evaluation below is symbol-aware and does not rely on this single reference.
+_ESTIMATED_ROUND_TRIP_COST_PCT = estimated_round_trip_cost_pct("BTCUSDT")
 
 _TABLE_READY = False
 _TABLE_LOCK = asyncio.Lock()
@@ -34,8 +26,8 @@ _EVAL_INTERVAL_S = 30.0
 _HORIZONS = ((900, "p15_net_pct"), (1800, "p30_net_pct"),
              (3600, "p60_net_pct"), (7200, "p120_net_pct"),
              (14400, "p240_net_pct"))
-# KuCoin taker both sides (0.12%) + the NEXUS default slippage both sides (0.10%).
-_ESTIMATED_ROUND_TRIP_COST_PCT = 0.22
+_RECORDED_KEYS: set[str] = set()
+_NEAR_MISS_LOGGED: set[str] = set()
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -56,10 +48,28 @@ def _directional_return_pct(direction: str, entry: float, current: float) -> flo
 
 
 def _signal_key(symbol: str, direction: str, entry_type: str, epoch: float) -> str:
-    # The strategy uses confirmed 15m candles, so repeated scans within the same
-    # candle represent the same opportunity rather than independent samples.
     bucket = int(float(epoch) // 900)
     return f"{symbol}:{str(direction).upper()}:{entry_type or 'UNKNOWN'}:{bucket}"
+
+
+def _blocker_class(reason: str) -> str:
+    """Normalize NEXUS WAIT reasons for false-negative calibration."""
+    text = str(reason or "").lower()
+    if any(x in text for x in ("r:r", "rr ", "ev ", "expected value", "líquido", "liquido")):
+        return "EV_RR"
+    if any(x in text for x in ("regime", "compat=", "incompatível", "incompativel")):
+        return "REGIME"
+    if any(x in text for x in ("score", "threshold", "qualidade")):
+        return "SCORE"
+    if any(x in text for x in ("timeframe", "mtf", "diverge", "conflito")):
+        return "MTF"
+    if any(x in text for x in ("data", "dados", "stale", "antigos", "candles insuficientes")):
+        return "DATA"
+    if any(x in text for x in ("news", "notícia", "noticia", "macro")):
+        return "NEWS_RISK"
+    if "timeout" in text:
+        return "TIMEOUT"
+    return "OTHER"
 
 
 async def _ensure_table(log) -> bool:
@@ -130,13 +140,21 @@ async def _record(engine, sig, decision, log) -> None:
     if not await _ensure_table(log):
         return
     now = time.time()
-    key = _signal_key(
-        sig.symbol,
-        sig.direction,
-        getattr(sig, "entry_type", "UNKNOWN"),
-        now,
+    key = _signal_key(sig.symbol, sig.direction, getattr(sig, "entry_type", "UNKNOWN"), now)
+    if key in _RECORDED_KEYS:
+        return
+
+    existing = await db._fetchall(
+        "SELECT signal_key FROM opportunity_audit WHERE signal_key=? LIMIT 1", (key,)
     )
+    if existing:
+        _RECORDED_KEYS.add(key)
+        return
+
     approved = 1 if getattr(decision, "execution_allowed", None) is True else 0
+    reason = _decision_reason(decision)
+    blocker = "APPROVED" if approved else _blocker_class(reason)
+    estimated_cost = estimated_round_trip_cost_pct(sig.symbol)
     metadata = json.dumps({
         "rr": _finite(getattr(sig, "rr", 0.0)),
         "expected_pnl": _finite(getattr(sig, "expected_pnl", 0.0)),
@@ -144,6 +162,8 @@ async def _record(engine, sig, decision, log) -> None:
         "tf_4h": str(getattr(sig, "tf_4h", "")),
         "tf_1h": str(getattr(sig, "tf_1h", "")),
         "tf_15m": str(getattr(sig, "tf_15m", "")),
+        "blocker_class": blocker,
+        "estimated_round_trip_cost_pct": round(estimated_cost, 5),
     }, separators=(",", ":"), sort_keys=True)
     sql = """INSERT INTO opportunity_audit (
         signal_key,created_at,created_epoch,symbol,direction,entry_type,
@@ -168,18 +188,20 @@ async def _record(engine, sig, decision, log) -> None:
         _finite(getattr(decision, "confidence", 0.0)),
         str(getattr(decision, "market_regime", "UNKNOWN")),
         approved,
-        _decision_reason(decision),
+        reason,
         metadata,
     )
     inserted = await db._exec(sql, params)
+    _RECORDED_KEYS.add(key)
     if inserted:
         log.info(
             "[OPPORTUNITY_AUDIT] candidate=%s symbol=%s side=%s approved=%s "
-            "strategy_score=%.1f nexus_score=%.1f entry=%.8f execution_effect=NONE",
-            key, sig.symbol, sig.direction, bool(approved),
+            "blocker=%s strategy_score=%.1f nexus_score=%.1f cost=%.3f%% "
+            "entry=%.8f execution_effect=NONE",
+            key, sig.symbol, sig.direction, bool(approved), blocker,
             _finite(getattr(sig, "score", 0.0)),
             _finite(getattr(decision, "setup_quality", 0.0)),
-            _finite(sig.entry),
+            estimated_cost, _finite(sig.entry),
         )
 
 
@@ -197,7 +219,7 @@ async def _evaluate_pending(engine, log) -> None:
         """SELECT signal_key,created_epoch,symbol,direction,entry_price,
                   stop_loss,take_profit,mfe_pct,mae_pct,
                   p15_net_pct,p30_net_pct,p60_net_pct,p120_net_pct,p240_net_pct,
-                  hypothetical_status
+                  hypothetical_status,approved,decision_reason,metadata
            FROM opportunity_audit
            WHERE created_epoch>=? AND (p240_net_pct IS NULL OR last_eval_epoch IS NULL)
            ORDER BY created_epoch ASC LIMIT 250""",
@@ -207,16 +229,19 @@ async def _evaluate_pending(engine, log) -> None:
         return
 
     updated = 0
+    near_miss_threshold = max(0.0, _finite(os.environ.get("OPPORTUNITY_NEAR_MISS_PCT", "0.50"), 0.50))
     for row in rows:
         try:
             (key, created_epoch, symbol, direction, entry, sl, tp,
-             old_mfe, old_mae, p15, p30, p60, p120, p240, status) = row
+             old_mfe, old_mae, p15, p30, p60, p120, p240, status,
+             approved, decision_reason, metadata_raw) = row
             ticker = engine.client.get_cached_ticker(symbol) or {}
             current = _finite(ticker.get("lastPrice"))
             if current <= 0:
                 continue
+            cost_pct = estimated_round_trip_cost_pct(symbol)
             raw_pct = _directional_return_pct(direction, entry, current)
-            net_pct = raw_pct - _ESTIMATED_ROUND_TRIP_COST_PCT
+            net_pct = raw_pct - cost_pct
             mfe = max(_finite(old_mfe), raw_pct)
             mae = min(_finite(old_mae), raw_pct)
             age = max(0.0, now - _finite(created_epoch))
@@ -235,8 +260,6 @@ async def _evaluate_pending(engine, log) -> None:
                 sl_hit = (is_long and current <= _finite(sl)) or (
                     not is_long and current >= _finite(sl)
                 )
-                # If an instantaneous sample somehow satisfies both, do not
-                # guess event ordering; mark ambiguous instead of inventing PnL.
                 if tp_hit and sl_hit:
                     new_status = "AMBIGUOUS"
                     hit_epoch = now
@@ -259,6 +282,22 @@ async def _evaluate_pending(engine, log) -> None:
                  now, key),
             )
             updated += 1
+
+            net_mfe = mfe - cost_pct
+            if not int(approved or 0) and net_mfe >= near_miss_threshold and key not in _NEAR_MISS_LOGGED:
+                blocker = _blocker_class(decision_reason)
+                try:
+                    meta = json.loads(metadata_raw or "{}")
+                    blocker = str(meta.get("blocker_class") or blocker)
+                except (TypeError, ValueError):
+                    pass
+                _NEAR_MISS_LOGGED.add(key)
+                log.warning(
+                    "[OPPORTUNITY_NEAR_MISS] symbol=%s side=%s blocker=%s "
+                    "net_mfe=%.3f%% raw_mfe=%.3f%% est_cost=%.3f%% age_s=%.0f "
+                    "execution_effect=NONE",
+                    symbol, direction, blocker, net_mfe, mfe, cost_pct, age,
+                )
         except Exception as exc:
             log.debug(
                 "[OPPORTUNITY_AUDIT] evaluation skipped key=%s error=%s",
