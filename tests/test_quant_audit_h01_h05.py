@@ -1,4 +1,4 @@
-"""Regression tests for quant-audit findings H01-H05.
+"""Regression tests for quant-audit findings H01-H07.
 
 These tests are deliberately offline. They verify the statistical/data contracts
 without sending orders or requiring KuCoin credentials.
@@ -6,10 +6,12 @@ without sending orders or requiring KuCoin credentials.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timezone
 
 from bot import backtest
 from bot import optimizer
+from bot.config import cfg
 
 
 class FakeKuCoinHistoryClient:
@@ -30,7 +32,6 @@ class FakeKuCoinHistoryClient:
             ts = int(candle[0])
             if start <= ts <= end:
                 rows.append(candle)
-        # KuCoin may return newest first; deliberately exercise normalization.
         return list(reversed(rows))
 
 
@@ -39,7 +40,6 @@ def _candles(count=12, interval_min=15, start_ms=1_700_000_000_000):
     step = interval_min * 60 * 1000
     for i in range(count):
         ts = start_ms + i * step
-        # Same opening price on purpose: H01 must not de-dupe by price.
         o = 100.0
         c = 100.0 + i * 0.1
         h = max(o, c) + 1.0
@@ -51,8 +51,6 @@ def _candles(count=12, interval_min=15, start_ms=1_700_000_000_000):
 def test_h01_history_paginates_and_dedupes_by_timestamp():
     rows = _candles(count=12)
     client = FakeKuCoinHistoryClient(rows)
-
-    # Force a historical cursor that fully contains the deterministic fixture.
     original_time = backtest.time.time
     backtest.time.time = lambda: (rows[-1][0] + 1) / 1000
     try:
@@ -63,7 +61,7 @@ def test_h01_history_paginates_and_dedupes_by_timestamp():
     assert len(got) == 12
     assert len({c["ts"] for c in got}) == 12
     assert [c["ts"] for c in got] == sorted(c["ts"] for c in got)
-    assert len({c["o"] for c in got}) == 1  # proves equal open prices survive
+    assert len({c["o"] for c in got}) == 1
     assert client.calls
 
 
@@ -153,4 +151,19 @@ def test_h05_real_timestamp_calendar_fields():
     ts = int(datetime(2026, 9, 11, 22, 15, tzinfo=timezone.utc).timestamp() * 1000)
     dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
     assert dt.hour == 22
-    assert dt.weekday() == 4  # Friday
+    assert dt.weekday() == 4
+
+
+def test_h07_backtest_never_assigns_shared_sl_tp_config():
+    source = inspect.getsource(backtest._run_strategy)
+    assert "cfg.SL_ATR_MULT =" not in source
+    assert "cfg.TP_ATR_MULT =" not in source
+
+
+def test_h07_legacy_multiplier_arguments_are_side_effect_free():
+    before_sl = getattr(cfg, "SL_ATR_MULT", None)
+    before_tp = getattr(cfg, "TP_ATR_MULT", None)
+    result = backtest._run_strategy([], [], [], sl_mult=9.9, tp_mult=19.9, symbol="TEST")
+    assert result == []
+    assert getattr(cfg, "SL_ATR_MULT", None) == before_sl
+    assert getattr(cfg, "TP_ATR_MULT", None) == before_tp
