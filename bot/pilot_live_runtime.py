@@ -6,17 +6,89 @@ cash-flow aware, tracks free collateral separately, performs authenticated
 read-only exposure and private-WS preflight, and refreshes those checks
 immediately before each candidate reaches the normal _open pipeline.
 
+For the controlled LIVE pilot, the requested entry-size policy is expressed as
+POSITION NOTIONAL, not margin collateral: by default the target position value
+is 50% of the currently available USDT balance. Example: available ~= 20 USDT
+=> target position notional ~= 10 USDT. At 50x leverage this uses only about
+0.20 USDT initial margin before fees; it does NOT mean risking 10 USDT of margin.
+Exchange lot-size rounding may make the final notional slightly larger than the
+target. All existing AI, RR/EV, drawdown, liquidation, affordability, exposure,
+durable-state and release gates still run and may block an entry.
+
 External/manual positions remain governed by pilot_external_position_guard and
 pilot_exposure_capacity; this module never adopts, amends, reduces or closes
 one.
 """
 from __future__ import annotations
 
+import contextvars
+import os
 import time
+from decimal import Decimal, ROUND_CEILING
 
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
 from bot.drawdown_persistence import restore_update_real_account_peak
+from bot.quantity import quantity_rules
+
+
+_PILOT_TARGET_NOTIONAL = contextvars.ContextVar(
+    "nexus_pilot_target_notional", default=None
+)
+_PILOT_NOTIONAL_PCT = float(os.environ.get("PILOT_NOTIONAL_PCT", "0.50"))
+
+
+def _pilot_quantity_for_notional(info: dict, price: float, target_notional: float) -> float:
+    """Smallest valid base quantity whose quote notional meets the target.
+
+    KuCoin Futures quantities are integer contract lots. The requested quote
+    target therefore cannot always be hit exactly; round UP to the next valid
+    lot so a 50% target is not silently reduced to the minimum exchange lot.
+    """
+    if isinstance(target_notional, bool):
+        raise ValueError("target_notional must be numeric")
+    price_d = Decimal(str(price))
+    target_d = Decimal(str(target_notional))
+    if not price_d.is_finite() or price_d <= 0:
+        raise ValueError("invalid price")
+    if not target_d.is_finite() or target_d <= 0:
+        raise ValueError("invalid target_notional")
+
+    multiplier, lot, minimum, min_notional = quantity_rules(info)
+    target_d = max(target_d, min_notional)
+    contracts = max(minimum, target_d / (price_d * multiplier))
+    contracts = (contracts / lot).to_integral_value(rounding=ROUND_CEILING) * lot
+    return float(contracts * multiplier)
+
+
+def _install_pilot_notional_sizing(log) -> None:
+    """Patch only the LIVE-pilot minimum-lot hook used by core engine._open.
+
+    The core engine deliberately calls ``minimum_base_quantity`` while pilot is
+    enabled. Rather than weakening PilotGuard, replace that narrow hook with a
+    context-scoped target. Outside a LIVE pilot candidate the original function
+    is returned unchanged.
+    """
+    from bot import engine as engine_module
+
+    if getattr(engine_module, "_pilot_notional_sizing_installed", False):
+        return
+
+    original_minimum = engine_module.minimum_base_quantity
+
+    def _pilot_aware_minimum(info, price):
+        target = _PILOT_TARGET_NOTIONAL.get()
+        if target is None:
+            return original_minimum(info, price)
+        return _pilot_quantity_for_notional(info, price, target)
+
+    engine_module.minimum_base_quantity = _pilot_aware_minimum
+    engine_module._pilot_notional_sizing_installed = True
+    log.critical(
+        "[PILOT_SIZING] installed target_notional_pct=%.2f%% basis=available_balance "
+        "meaning=position_notional_not_margin",
+        _PILOT_NOTIONAL_PCT * 100.0,
+    )
 
 
 async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
@@ -98,6 +170,11 @@ def install(TradingEngine, log) -> None:
     """Install LIVE-pilot-only wrappers. Caller must enforce release auth."""
     if getattr(TradingEngine, "_pilot_live_runtime_patched", False):
         return
+
+    if not (0.0 < _PILOT_NOTIONAL_PCT <= 1.0):
+        raise RuntimeError("PILOT_NOTIONAL_PCT must be >0 and <=1")
+
+    _install_pilot_notional_sizing(log)
 
     original_connect = TradingEngine._connect
     original_update_balance = TradingEngine._update_balance
@@ -187,6 +264,28 @@ def install(TradingEngine, log) -> None:
                     self.integrity.block_reason(),
                 )
                 return None
+
+            # Fresh authenticated balance for the position-notional target.
+            # This is intentionally not inferred from stale dashboard state.
+            sizing_state = await _refresh_account(self, log, for_entry=True)
+            available = float(sizing_state["available"])
+            if available <= 0:
+                log.warning(
+                    "[PILOT_SIZING] symbol=%s result=BLOCK reason=available_balance_nonpositive",
+                    getattr(sig, "symbol", "?"),
+                )
+                return None
+            target_notional = available * _PILOT_NOTIONAL_PCT
+            log.warning(
+                "[PILOT_SIZING] symbol=%s available=%.4f pct=%.2f%% "
+                "target_notional=%.4f leverage=%sx target_margin_approx=%.4f",
+                getattr(sig, "symbol", "?"),
+                available,
+                _PILOT_NOTIONAL_PCT * 100.0,
+                target_notional,
+                int(getattr(__import__("bot.config", fromlist=["cfg"]).cfg, "LEVERAGE", 1)),
+                target_notional / max(1, int(getattr(__import__("bot.config", fromlist=["cfg"]).cfg, "LEVERAGE", 1))),
+            )
         except Exception as exc:
             log.critical(
                 "[PILOT_LIVE_GATE] symbol=%s stage=PRELIVE result=BLOCK reason=%s",
@@ -196,9 +295,11 @@ def install(TradingEngine, log) -> None:
             return None
 
         self._pilot_open_in_progress = True
+        token = _PILOT_TARGET_NOTIONAL.set(target_notional)
         try:
             return await original_open(self, sig, *args, **kwargs)
         finally:
+            _PILOT_TARGET_NOTIONAL.reset(token)
             self._pilot_open_in_progress = False
             # Restore risk.balance to the account-equity basis even if the
             # candidate is rejected or dispatch raises. Failure keeps future
@@ -221,6 +322,6 @@ def install(TradingEngine, log) -> None:
 
     log.critical(
         "[PILOT_LIVE_RUNTIME] installed: cash-flow-aware durable equity drawdown + "
-        "free-collateral sizing + read-only exposure/private-WS preflight; "
-        "external positions immutable"
+        "50pct-available position-notional sizing + read-only exposure/private-WS "
+        "preflight; external positions immutable"
     )
