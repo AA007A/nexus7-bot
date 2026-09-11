@@ -1,24 +1,31 @@
 """Use KuCoin's margin-mode-correct maintenance margin in liquidation safety.
 
-The public contract payload exposes ``maintainMargin``, but that value belongs
-to contract / isolated-risk metadata. NEXUS-7 sends LIVE orders in CROSS margin.
-KuCoin documents CROSS risk as a smooth curve and exposes the account-specific
-MMR through private GET ``/api/v2/batchGetCrossOrderLimit`` using symbol,
-totalMargin and leverage.
+Public contract ``maintainMargin`` is reference metadata only: NEXUS-7 routes
+LIVE orders in CROSS margin, where KuCoin exposes account-specific MMR through
+private GET ``/api/v2/batchGetCrossOrderLimit`` using symbol, totalMargin and
+leverage.
 
-This hardening therefore treats public contract MMR as reference metadata only.
-Immediately before a controlled LIVE opening it reads fresh account margin,
-queries KuCoin's CROSS risk endpoint for the exact symbol at the configured
-leverage, registers the returned ``mmr`` with ``bot.liquidation``, and only then
-lets the existing final liquidation guard run. Any missing, malformed or failed
-CROSS MMR lookup blocks the new LIVE entry. PAPER is unchanged.
+The expensive/private CROSS lookup is deliberately deferred until the core
+opening path has already received an exact NEXUS approval and completed pilot
+sizing. The engine then reaches ``score.calculate`` (the legacy pre-trade stage),
+which acts as the last asynchronous boundary before final parameter/liquidation
+checks. At that boundary this module refreshes account margin, obtains exact
+symbol CROSS MMR, registers it in ``bot.liquidation``, and only then allows the
+opening path to continue. Any failure produces an explicit hard-block result.
 
-Leverage, signal thresholds, sizing, stop geometry and order routing are never
+This placement avoids spending private API budget on candidates that NEXUS will
+reject, while keeping the MMR fresher for the final liquidation guard. PAPER,
+leverage, signal thresholds, sizing, stop geometry and order routing are never
 changed here.
 """
 from __future__ import annotations
 
+import contextvars
 import math
+
+
+_ENGINE = contextvars.ContextVar("nexus_cross_mmr_engine", default=None)
+_SIGNAL = contextvars.ContextVar("nexus_cross_mmr_signal", default=None)
 
 
 def _normalize_mmr(value):
@@ -77,12 +84,27 @@ def _select_cross_risk(data, kucoin_symbol):
     return None
 
 
-def install(KuCoinClient, TradingEngine, liquidation, log) -> None:
+def _hard_block_result(reason: str) -> dict:
+    """Well-formed legacy-score result that cannot be advisory-bypassed."""
+    return {
+        "total": 0,
+        "tecnico": 0,
+        "orderflow": 0,
+        "macro": 0,
+        "news_mod": 0,
+        "aprovado": False,
+        "hard_block": reason,
+        "detalhes": {"cross_margin_risk": reason},
+    }
+
+
+def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
     if getattr(KuCoinClient, "_official_contract_mmr_installed", False):
         return
 
     original_load = KuCoinClient.load_instruments
     original_open = TradingEngine._open
+    original_calculate = scoring.calculate
 
     async def load_instruments_with_contract_risk_metadata(self):
         instruments = await original_load(self)
@@ -137,91 +159,125 @@ def install(KuCoinClient, TradingEngine, liquidation, log) -> None:
         )
         return instruments
 
-    async def open_requires_fresh_cross_mmr(self, sig, *args, **kwargs):
-        # PAPER retains its existing behavior. For real controlled-pilot orders,
-        # CROSS MMR must be refreshed for the exact current account margin and
-        # configured leverage immediately before the existing _open path.
-        if not getattr(self, "paper_trade", True) and getattr(self.pilot, "enabled", False):
-            from bot.config import cfg
+    async def _open_with_cross_context(self, sig, *args, **kwargs):
+        # Context only. No private KuCoin risk call is spent before NEXUS.
+        if getattr(self, "paper_trade", True) or not bool(
+            getattr(getattr(self, "pilot", None), "enabled", False)
+        ):
+            return await original_open(self, sig, *args, **kwargs)
 
-            info = (getattr(self, "instruments", {}) or {}).get(sig.symbol, {})
-            kucoin_symbol = str(info.get("kucoinSymbol", "")) if isinstance(info, dict) else ""
-            if not kucoin_symbol:
-                log.warning(
-                    "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK reason=missing_kucoin_symbol "
-                    "execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                    sig.symbol,
-                )
-                return None
+        token_engine = _ENGINE.set(self)
+        token_signal = _SIGNAL.set(sig)
+        try:
+            return await original_open(self, sig, *args, **kwargs)
+        finally:
+            _SIGNAL.reset(token_signal)
+            _ENGINE.reset(token_engine)
 
-            try:
-                account = await self.client._get(
-                    "/api/v1/account-overview", {"currency": "USDT"}, auth=True
-                )
-                total_margin = None
-                if isinstance(account, dict):
-                    for key in ("marginBalance", "accountEquity", "equity"):
-                        total_margin = _positive_finite(account.get(key))
-                        if total_margin is not None:
-                            break
-                if total_margin is None:
-                    raise ValueError("invalid_total_margin")
+    async def _calculate_with_fresh_cross_mmr(
+        symbol, direction, closes, highs, lows, volumes, client=None
+    ):
+        engine = _ENGINE.get()
+        sig = _SIGNAL.get()
 
-                response = await self.client._get(
-                    "/api/v2/batchGetCrossOrderLimit",
-                    {
-                        "symbol": kucoin_symbol,
-                        "totalMargin": f"{total_margin:.8f}",
-                        "leverage": str(int(cfg.LEVERAGE)),
-                    },
-                    auth=True,
-                )
-                cross = _select_cross_risk(response, kucoin_symbol)
-                if cross is None:
-                    raise ValueError("cross_risk_row_unavailable")
+        # Outside the controlled LIVE opening task, scoring is untouched.
+        if engine is None or sig is None:
+            return await original_calculate(
+                symbol, direction, closes, highs, lows, volumes, client
+            )
+        if str(getattr(sig, "symbol", "")) != str(symbol):
+            return _hard_block_result("cross_mmr_signal_symbol_mismatch")
+        if str(getattr(sig, "direction", "")).upper() != str(direction).upper():
+            return _hard_block_result("cross_mmr_signal_side_mismatch")
 
-                returned_lev = cross.get("leverage")
-                if returned_lev is not None and abs(returned_lev - float(cfg.LEVERAGE)) > 1e-9:
-                    raise ValueError("cross_risk_leverage_mismatch")
+        from bot.config import cfg
 
-                liquidation.set_mmr_from_api(
-                    sig.symbol, cross["mmr"], source="kucoin_cross_order_limit"
-                )
-                self.client._cross_mmr_symbols.add(sig.symbol)
-                log.warning(
-                    "[KUCOIN_CROSS_RISK] symbol=%s kucoin_symbol=%s result=PASS "
-                    "mmr=%.6f total_margin=%.4f leverage=%sx source=KuCoin_private "
-                    "execution_effect=NONE",
-                    sig.symbol, kucoin_symbol, cross["mmr"], total_margin,
-                    int(cfg.LEVERAGE),
-                )
-            except Exception as exc:
-                log.warning(
-                    "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
-                    "reason=fresh_cross_margin_mmr_unavailable "
-                    "execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                    sig.symbol, type(exc).__name__,
-                )
-                return None
+        info = (getattr(engine, "instruments", {}) or {}).get(symbol, {})
+        kucoin_symbol = str(info.get("kucoinSymbol", "")) if isinstance(info, dict) else ""
+        if not kucoin_symbol:
+            log.warning(
+                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK reason=missing_kucoin_symbol "
+                "stage=POST_NEXUS_PRETRADE execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol,
+            )
+            return _hard_block_result("official_cross_mmr_unavailable")
 
-            _, official = liquidation.get_mmr(sig.symbol)
-            registered = sig.symbol in getattr(self.client, "_cross_mmr_symbols", set())
-            if not official or not registered:
-                log.warning(
-                    "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK "
-                    "reason=cross_mmr_registration_failed execution_effect=BLOCK_NEW_LIVE_ENTRY",
-                    sig.symbol,
-                )
-                return None
+        exchange_client = getattr(engine, "client", None)
+        if exchange_client is None:
+            return _hard_block_result("official_cross_mmr_unavailable")
 
-        return await original_open(self, sig, *args, **kwargs)
+        try:
+            account = await exchange_client._get(
+                "/api/v1/account-overview", {"currency": "USDT"}, auth=True
+            )
+            total_margin = None
+            if isinstance(account, dict):
+                for key in ("marginBalance", "accountEquity", "equity"):
+                    total_margin = _positive_finite(account.get(key))
+                    if total_margin is not None:
+                        break
+            if total_margin is None:
+                raise ValueError("invalid_total_margin")
+
+            response = await exchange_client._get(
+                "/api/v2/batchGetCrossOrderLimit",
+                {
+                    "symbol": kucoin_symbol,
+                    "totalMargin": f"{total_margin:.8f}",
+                    "leverage": str(int(cfg.LEVERAGE)),
+                },
+                auth=True,
+            )
+            cross = _select_cross_risk(response, kucoin_symbol)
+            if cross is None:
+                raise ValueError("cross_risk_row_unavailable")
+
+            returned_lev = cross.get("leverage")
+            if returned_lev is not None and abs(returned_lev - float(cfg.LEVERAGE)) > 1e-9:
+                raise ValueError("cross_risk_leverage_mismatch")
+
+            liquidation.set_mmr_from_api(
+                symbol, cross["mmr"], source="kucoin_cross_order_limit"
+            )
+            exchange_client._cross_mmr_symbols.add(symbol)
+            log.warning(
+                "[KUCOIN_CROSS_RISK] symbol=%s kucoin_symbol=%s result=PASS "
+                "mmr=%.6f total_margin=%.4f leverage=%sx source=KuCoin_private "
+                "stage=POST_NEXUS_PRETRADE execution_effect=NONE",
+                symbol, kucoin_symbol, cross["mmr"], total_margin,
+                int(cfg.LEVERAGE),
+            )
+        except Exception as exc:
+            log.warning(
+                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
+                "reason=fresh_cross_margin_mmr_unavailable stage=POST_NEXUS_PRETRADE "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol, type(exc).__name__,
+            )
+            return _hard_block_result("official_cross_mmr_unavailable")
+
+        _, official = liquidation.get_mmr(symbol)
+        registered = symbol in getattr(exchange_client, "_cross_mmr_symbols", set())
+        if not official or not registered:
+            log.warning(
+                "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK "
+                "reason=cross_mmr_registration_failed stage=POST_NEXUS_PRETRADE "
+                "execution_effect=BLOCK_NEW_LIVE_ENTRY",
+                symbol,
+            )
+            return _hard_block_result("official_cross_mmr_unavailable")
+
+        return await original_calculate(
+            symbol, direction, closes, highs, lows, volumes, client
+        )
 
     KuCoinClient.load_instruments = load_instruments_with_contract_risk_metadata
-    TradingEngine._open = open_requires_fresh_cross_mmr
+    TradingEngine._open = _open_with_cross_context
+    scoring.calculate = _calculate_with_fresh_cross_mmr
     KuCoinClient._official_contract_mmr_installed = True
     log.warning(
         "[KUCOIN_CONTRACT_RISK] installed: public maintainMargin is reference-only; "
-        "fresh account-specific CROSS mmr from /api/v2/batchGetCrossOrderLimit is "
-        "required fail-closed before controlled LIVE openings; leverage/score/sizing/" 
-        "SL-TP geometry unchanged"
+        "fresh account-specific CROSS mmr is required fail-closed at the "
+        "post-NEXUS/pretrade boundary; rejected NEXUS candidates spend no CROSS-risk "
+        "private request; leverage/score/sizing/SL-TP geometry unchanged"
     )
