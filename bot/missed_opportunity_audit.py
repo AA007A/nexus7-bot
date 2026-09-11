@@ -15,6 +15,10 @@ from typing import Any
 from bot import database as db
 from bot.kucoin_execution_model import estimated_round_trip_cost_pct
 
+# Backward-compatible public diagnostic used by older tests/telemetry. Runtime
+# evaluation below is symbol-aware and does not rely on this single reference.
+_ESTIMATED_ROUND_TRIP_COST_PCT = estimated_round_trip_cost_pct("BTCUSDT")
+
 _TABLE_READY = False
 _TABLE_LOCK = asyncio.Lock()
 _LAST_EVAL_MONO = 0.0
@@ -140,8 +144,6 @@ async def _record(engine, sig, decision, log) -> None:
     if key in _RECORDED_KEYS:
         return
 
-    # Avoid repeated logs/DB writes when a deployment restarts inside the same
-    # 15m bucket. The DB remains the durable dedupe authority.
     existing = await db._fetchall(
         "SELECT signal_key FROM opportunity_audit WHERE signal_key=? LIMIT 1", (key,)
     )
@@ -287,7 +289,7 @@ async def _evaluate_pending(engine, log) -> None:
                 try:
                     meta = json.loads(metadata_raw or "{}")
                     blocker = str(meta.get("blocker_class") or blocker)
-                except Exception:
+                except (TypeError, ValueError):
                     pass
                 _NEAR_MISS_LOGGED.add(key)
                 log.warning(
