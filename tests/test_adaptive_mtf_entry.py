@@ -126,7 +126,7 @@ def test_weak_volume_is_blocked():
         bear_1h=False,
         s4h=s4,
         s1h=s1,
-        s15m=s15 if False else s15,
+        s15=s15,
         combined=80,
         entry_type="MOMENTUM",
         extension_atr=1.0,
