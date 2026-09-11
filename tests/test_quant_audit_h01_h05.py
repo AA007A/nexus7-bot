@@ -1,4 +1,4 @@
-"""Regression tests for quant-audit findings H01-H07.
+"""Regression tests for quant-audit findings H01-H07 plus MTF timestamp alignment.
 
 These tests are deliberately offline. They verify the statistical/data contracts
 without sending orders or requiring KuCoin credentials.
@@ -46,6 +46,10 @@ def _candles(count=12, interval_min=15, start_ms=1_700_000_000_000):
         l = min(o, c) - 1.0
         out.append([ts, o, h, l, c, 10 + i, 0])
     return out
+
+
+def _project_candles(count=12, interval_min=15, start_ms=1_700_000_000_000):
+    return [backtest._normalize_kline(r) for r in _candles(count, interval_min, start_ms)]
 
 
 def test_h01_history_paginates_and_dedupes_by_timestamp():
@@ -96,6 +100,10 @@ def test_h02_chronological_train_validation_test_split_is_disjoint():
     assert train15[-1]["ts"] < val15[0]["ts"] < test15[0]["ts"]
     assert {x["ts"] for x in train15}.isdisjoint({x["ts"] for x in val15})
     assert {x["ts"] for x in val15}.isdisjoint({x["ts"] for x in test15})
+    # HTF history remains complete; run_strategy filters it by each decision ts.
+    for name in ("train", "validation", "test"):
+        assert split[name][1] is k1h
+        assert split[name][2] is k4h
 
 
 class FakeTrial:
@@ -167,3 +175,41 @@ def test_h07_legacy_multiplier_arguments_are_side_effect_free():
     assert result == []
     assert getattr(cfg, "SL_ATR_MULT", None) == before_sl
     assert getattr(cfg, "TP_ATR_MULT", None) == before_tp
+
+
+def test_mtf_alignment_excludes_unclosed_higher_timeframe_candle():
+    start = 1_700_000_000_000
+    one_hour = [c for c in _project_candles(4, 60, start) if c is not None]
+    index = backtest._timestamp_index(one_hour)
+
+    # At start+2h exactly, candles opened at 0h and 1h are closed; 2h is not.
+    decision = start + 2 * 60 * 60 * 1000
+    window = backtest._closed_window_by_ts(one_hour, index, decision, 60, 20)
+    assert [c["ts"] for c in window] == [start, start + 60 * 60 * 1000]
+
+
+def test_mtf_alignment_uses_timestamp_not_positional_ratio_when_gap_exists():
+    start = 1_700_000_000_000
+    one_hour = [c for c in _project_candles(6, 60, start) if c is not None]
+    # Remove the second candle to create a real historical gap.
+    one_hour.pop(1)
+    index = backtest._timestamp_index(one_hour)
+
+    decision = start + 5 * 60 * 60 * 1000
+    window = backtest._closed_window_by_ts(one_hour, index, decision, 60, 20)
+    # 5h candle is still open; every actually available earlier closed candle is valid.
+    expected = [start, start + 2 * 3600_000, start + 3 * 3600_000, start + 4 * 3600_000]
+    assert [c["ts"] for c in window] == expected
+
+
+def test_mtf_runtime_has_no_index_ratio_alignment():
+    source = inspect.getsource(backtest._run_strategy)
+    walk = inspect.getsource(backtest._walk_forward)
+    split = inspect.getsource(optimizer._split_by_time)
+    for text in (source, walk, split):
+        assert "i // 4" not in text
+        assert "i // 16" not in text
+        assert "split // 4" not in text
+        assert "split // 16" not in text
+        assert "train_end // 4" not in text
+        assert "train_end // 16" not in text
