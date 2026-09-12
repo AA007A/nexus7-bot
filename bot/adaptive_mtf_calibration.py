@@ -1,13 +1,15 @@
 """Read-only calibration for Adaptive MTF HOLD decisions.
 
-This module does not create Signals, call NEXUS, touch the exchange, or mutate
+This module never creates Signals, calls NEXUS, touches the exchange, or mutates
 strategy thresholds. It records one compact reject snapshot per symbol and
 confirmed 15m candle so we can distinguish a single near-threshold miss from a
 setup that fails several adaptive requirements simultaneously.
 
-It also keeps a process-local aggregate for each confirmed 15m candle. The
-aggregate is observability only: it summarizes which gates fail most often and
-how many candidates are genuine near-misses versus broad multi-gate rejects.
+It also attributes raw gate failures to independent evidence families. This is
+important because score_tf already embeds trend/alignment, ADX, volume,
+momentum, volatility and structure, while Adaptive can hard-check some of the
+same evidence again and NEXUS later scores many of those dimensions a third
+time. Attribution is observability only; it has zero decision/execution effect.
 """
 from __future__ import annotations
 
@@ -19,17 +21,59 @@ _LOCK = threading.Lock()
 _SEEN: set[tuple[str, object]] = set()
 _SEEN_ORDER = deque(maxlen=5000)
 
-# One process-local aggregate bucket per latest confirmed 15m candle. This is
-# deliberately not persisted and never feeds a decision. A summary is emitted
-# once the bucket has enough independent symbols to be informative, and the
-# previous bucket is also flushed when a newer candle begins.
 _AGG_TS: object | None = None
 _AGG_FAILURES: Counter[str] = Counter()
+_AGG_FAMILIES: Counter[str] = Counter()
+_AGG_OVERLAPS: Counter[str] = Counter()
 _AGG_SAMPLES = 0
 _AGG_NEAR_MISS_1 = 0
 _AGG_NEAR_MISS_2 = 0
+_AGG_INDEPENDENT_NEAR_1 = 0
+_AGG_INDEPENDENT_NEAR_2 = 0
 _AGG_EMITTED = False
 _AGG_MIN_SAMPLES = 6
+
+# Raw Adaptive failures collapsed into economically/technically distinct
+# evidence families. Four timeframe score failures are one correlated score
+# family, not four independent pieces of evidence.
+_FAILURE_FAMILY = {
+    "SCORE_4H": "SCORE_FAMILY",
+    "SCORE_1H": "SCORE_FAMILY",
+    "SCORE_15M": "SCORE_FAMILY",
+    "SCORE_COMBINED": "SCORE_FAMILY",
+    "ALIGN_15M": "TREND_ALIGNMENT",
+    "CANONICAL_ALIGNMENT": "TREND_ALIGNMENT",
+    "HTF_OPPOSITION": "HTF_OPPOSITION",
+    "ADX": "TREND_STRENGTH",
+    "VOLUME": "ACTIVITY_VOLUME",
+    "ENTRY_TYPE": "ENTRY_TRIGGER",
+    "RSI_LONG": "TAIL_MOMENTUM_GUARD",
+    "RSI_SHORT": "TAIL_MOMENTUM_GUARD",
+    "EXTENSION": "ANTI_CHASE",
+}
+
+# Which hard Adaptive checks reuse evidence that is already embedded in
+# strategy.score_tf. This does not say the check is wrong; it quantifies that it
+# is not statistically independent from the score gate.
+_SCORE_TF_OVERLAP = {
+    "ALIGN_15M": "score_tf.trend_s(EMA/aligned)",
+    "CANONICAL_ALIGNMENT": "score_tf.trend_s(EMA/aligned)",
+    "ADX": "score_tf.trend_s(ADX)",
+    "VOLUME": "score_tf.vol_s(vol_r)",
+    "RSI_LONG": "score_tf.momentum_s(RSI)",
+    "RSI_SHORT": "score_tf.momentum_s(RSI)",
+}
+
+# Dimensions that NEXUS scores again downstream. This makes the potential
+# triple-count explicit without changing NEXUS behavior.
+_NEXUS_REEVALUATES = {
+    "SCORE_FAMILY": "TREND_ALIGNMENT/MOMENTUM/VOLUME/MARKET_STRUCTURE/VOLATILITY/MULTI_TIMEFRAME",
+    "TREND_ALIGNMENT": "TREND_ALIGNMENT/MULTI_TIMEFRAME",
+    "TREND_STRENGTH": "TREND_ALIGNMENT/regime",
+    "ACTIVITY_VOLUME": "VOLUME",
+    "TAIL_MOMENTUM_GUARD": "MOMENTUM",
+    "ENTRY_TRIGGER": "MARKET_STRUCTURE/MOMENTUM",
+}
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -44,8 +88,6 @@ def _closed_15m_ts(k15) -> object:
     data = list(k15 or [])
     if not data:
         return "missing"
-    # Same semantics used by Adaptive MTF: when the normal history is present,
-    # the last element is forming and the previous element is confirmed.
     bar = data[-2] if len(data) > 20 else data[-1]
     return bar.get("ts") or bar.get("time") or bar.get("timestamp") or len(data)
 
@@ -63,80 +105,163 @@ def _remember(symbol: str, k15) -> bool:
         return True
 
 
-def _format_top_failures(counter: Counter[str], limit: int = 6) -> str:
+def _format_counter(counter: Counter[str], limit: int = 6) -> str:
     if not counter:
         return "NONE"
     return ",".join(f"{name}:{count}" for name, count in counter.most_common(limit))
 
 
+def evidence_attribution(failures: list[str]) -> dict[str, Any]:
+    """Collapse correlated failures and identify repeated evidence checks."""
+    families: list[str] = []
+    seen: set[str] = set()
+    overlaps: list[str] = []
+    nexus_rechecks: list[str] = []
+
+    for failure in failures:
+        family = _FAILURE_FAMILY.get(failure, failure)
+        if family not in seen:
+            seen.add(family)
+            families.append(family)
+        if failure in _SCORE_TF_OVERLAP:
+            overlaps.append(failure)
+
+    for family in families:
+        if family in _NEXUS_REEVALUATES:
+            nexus_rechecks.append(family)
+
+    raw_count = len(failures)
+    independent_count = len(families)
+    return {
+        "families": families,
+        "independent_count": independent_count,
+        "raw_count": raw_count,
+        "collapsed_duplicates": max(0, raw_count - independent_count),
+        "score_tf_overlap_checks": overlaps,
+        "score_tf_overlap_count": len(overlaps),
+        "nexus_recheck_families": nexus_rechecks,
+        "nexus_recheck_count": len(nexus_rechecks),
+    }
+
+
+def _component_deficits(score: dict) -> dict[str, float]:
+    """Normalize score_tf component deficits against their documented maxima."""
+    maxima = {
+        "trend": ("trend_s", 30.0),
+        "volume": ("vol_s", 20.0),
+        "momentum": ("momentum_s", 20.0),
+        "volatility": ("atr_s", 15.0),
+        "structure": ("struct_s", 15.0),
+    }
+    out: dict[str, float] = {}
+    for name, (key, maximum) in maxima.items():
+        value = max(0.0, min(maximum, _finite(score.get(key))))
+        out[name] = round(maximum - value, 2)
+    return out
+
+
 def _emit_aggregate(log, *, candle_ts: object, samples: int,
-                    failures: Counter[str], near1: int, near2: int,
+                    failures: Counter[str], families: Counter[str],
+                    overlaps: Counter[str], near1: int, near2: int,
+                    independent_near1: int, independent_near2: int,
                     trigger: str) -> None:
     if samples <= 0:
         return
     multi = max(0, samples - near2)
+    independent_multi = max(0, samples - independent_near2)
     log.info(
         "[ADAPTIVE_MTF_FUNNEL_SUMMARY] candle=%s samples=%d "
         "near_miss_1=%d near_miss_2=%d multi_gate_gt2=%d "
-        "top_failures=%s trigger=%s thresholds_unchanged=true "
-        "leverage_unchanged=true decision_effect=NONE execution_effect=NONE",
+        "independent_near_1=%d independent_near_2=%d independent_multi_gt2=%d "
+        "top_failures=%s top_families=%s score_tf_overlaps=%s trigger=%s "
+        "thresholds_unchanged=true leverage_unchanged=true "
+        "decision_effect=NONE execution_effect=NONE",
         candle_ts, samples, near1, near2, multi,
-        _format_top_failures(failures), trigger,
+        independent_near1, independent_near2, independent_multi,
+        _format_counter(failures), _format_counter(families),
+        _format_counter(overlaps), trigger,
     )
 
 
 def _aggregate_snapshot(*, candle_ts: object, snapshot: dict[str, Any], log) -> None:
-    """Update/emit read-only per-candle rejection statistics."""
-    global _AGG_TS, _AGG_FAILURES, _AGG_SAMPLES
-    global _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2, _AGG_EMITTED
+    global _AGG_TS, _AGG_FAILURES, _AGG_FAMILIES, _AGG_OVERLAPS, _AGG_SAMPLES
+    global _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2
+    global _AGG_INDEPENDENT_NEAR_1, _AGG_INDEPENDENT_NEAR_2, _AGG_EMITTED
 
     with _LOCK:
         if _AGG_TS is not None and candle_ts != _AGG_TS:
             previous = (
                 _AGG_TS, _AGG_SAMPLES, Counter(_AGG_FAILURES),
-                _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2, _AGG_EMITTED,
+                Counter(_AGG_FAMILIES), Counter(_AGG_OVERLAPS),
+                _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2,
+                _AGG_INDEPENDENT_NEAR_1, _AGG_INDEPENDENT_NEAR_2,
+                _AGG_EMITTED,
             )
             _AGG_TS = candle_ts
             _AGG_FAILURES = Counter()
+            _AGG_FAMILIES = Counter()
+            _AGG_OVERLAPS = Counter()
             _AGG_SAMPLES = 0
             _AGG_NEAR_MISS_1 = 0
             _AGG_NEAR_MISS_2 = 0
+            _AGG_INDEPENDENT_NEAR_1 = 0
+            _AGG_INDEPENDENT_NEAR_2 = 0
             _AGG_EMITTED = False
         else:
             previous = None
             if _AGG_TS is None:
                 _AGG_TS = candle_ts
 
-        failures = list(snapshot.get("failures") or [])
-        count = int(snapshot.get("failure_count") or len(failures))
-        _AGG_FAILURES.update(failures)
+        failures_list = list(snapshot.get("failures") or [])
+        raw_count = int(snapshot.get("failure_count") or len(failures_list))
+        attribution = snapshot.get("attribution") or evidence_attribution(failures_list)
+        families_list = list(attribution.get("families") or [])
+        independent_count = int(attribution.get("independent_count") or len(families_list))
+        overlap_list = list(attribution.get("score_tf_overlap_checks") or [])
+
+        _AGG_FAILURES.update(failures_list)
+        _AGG_FAMILIES.update(families_list)
+        _AGG_OVERLAPS.update(overlap_list)
         _AGG_SAMPLES += 1
-        if count <= 1:
+        if raw_count <= 1:
             _AGG_NEAR_MISS_1 += 1
-        if count <= 2:
+        if raw_count <= 2:
             _AGG_NEAR_MISS_2 += 1
+        if independent_count <= 1:
+            _AGG_INDEPENDENT_NEAR_1 += 1
+        if independent_count <= 2:
+            _AGG_INDEPENDENT_NEAR_2 += 1
 
         immediate = None
         if _AGG_SAMPLES >= _AGG_MIN_SAMPLES and not _AGG_EMITTED:
             _AGG_EMITTED = True
             immediate = (
                 _AGG_TS, _AGG_SAMPLES, Counter(_AGG_FAILURES),
+                Counter(_AGG_FAMILIES), Counter(_AGG_OVERLAPS),
                 _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2,
+                _AGG_INDEPENDENT_NEAR_1, _AGG_INDEPENDENT_NEAR_2,
             )
 
-    # Logging happens outside the lock; no trading state is involved.
     if previous is not None:
-        pts, psamples, pfailures, pnear1, pnear2, pemitted = previous
+        (pts, psamples, pfailures, pfamilies, poverlaps, pnear1, pnear2,
+         pind1, pind2, pemitted) = previous
         if not pemitted:
             _emit_aggregate(
                 log, candle_ts=pts, samples=psamples, failures=pfailures,
-                near1=pnear1, near2=pnear2, trigger="candle_rollover",
+                families=pfamilies, overlaps=poverlaps,
+                near1=pnear1, near2=pnear2,
+                independent_near1=pind1, independent_near2=pind2,
+                trigger="candle_rollover",
             )
     if immediate is not None:
-        its, isamples, ifailures, inear1, inear2 = immediate
+        (its, isamples, ifailures, ifamilies, ioverlaps, inear1, inear2,
+         iind1, iind2) = immediate
         _emit_aggregate(
             log, candle_ts=its, samples=isamples, failures=ifailures,
-            near1=inear1, near2=inear2, trigger="sample_threshold",
+            families=ifamilies, overlaps=ioverlaps,
+            near1=inear1, near2=inear2,
+            independent_near1=iind1, independent_near2=iind2,
+            trigger="sample_threshold",
         )
 
 
@@ -144,7 +269,6 @@ def failure_vector(*, direction: str, bull_4h: bool, bear_4h: bool,
                    bull_1h: bool, bear_1h: bool, s4h: dict, s1h: dict,
                    s15: dict, combined: float, entry_type: str,
                    extension_atr: float, thresholds: dict) -> dict[str, Any]:
-    """Return all adaptive-gate failures and numeric distances, not just first."""
     min_4h = _finite(thresholds.get("min_4h"))
     min_1h = _finite(thresholds.get("min_1h"))
     min_15m = _finite(thresholds.get("min_15m"))
@@ -195,9 +319,11 @@ def failure_vector(*, direction: str, bull_4h: bool, bear_4h: bool,
     if extension > max_extension:
         failures.append("EXTENSION")
 
+    attribution = evidence_attribution(failures)
     return {
         "failures": failures,
         "failure_count": len(failures),
+        "attribution": attribution,
         "score_4h": score_4h,
         "score_1h": score_1h,
         "score_15m": score_15m,
@@ -213,7 +339,14 @@ def failure_vector(*, direction: str, bull_4h: bool, bear_4h: bool,
         "gap_volume": round(max(0.0, min_vol - vol), 4),
         "gap_adx": round(max(0.0, min_adx - adx), 4),
         "extension_excess": round(max(0.0, extension - max_extension), 4),
+        "components_4h": _component_deficits(s4h),
+        "components_1h": _component_deficits(s1h),
+        "components_15m": _component_deficits(s15),
     }
+
+
+def _fmt_components(deficits: dict[str, float]) -> str:
+    return ",".join(f"{k}:{v:.1f}" for k, v in deficits.items())
 
 
 def observe_reject(*, symbol: str, k15, direction: str, reason: str,
@@ -221,10 +354,6 @@ def observe_reject(*, symbol: str, k15, direction: str, reason: str,
                    s4h: dict, s1h: dict, s15: dict, combined: float,
                    entry_type: str, extension_atr: float,
                    thresholds: dict, log) -> None:
-    """Emit one deduplicated structured reject snapshot per confirmed 15m bar."""
-    # Canonical-alignment cases are HOLD for a different canonical reason, and
-    # explicit HTF opposition is intentionally non-negotiable. Neither is a
-    # threshold-calibration cohort.
     if reason in {"canonical_alignment_already_present", "higher_timeframe_opposition",
                   "invalid_direction", "regime_direction_mismatch", "invalid_score"}:
         return
@@ -240,6 +369,11 @@ def observe_reject(*, symbol: str, k15, direction: str, reason: str,
         extension_atr=extension_atr, thresholds=thresholds,
     )
     failures = ",".join(snapshot["failures"]) or "NONE"
+    attribution = snapshot["attribution"]
+    families = ",".join(attribution["families"]) or "NONE"
+    overlaps = ",".join(attribution["score_tf_overlap_checks"]) or "NONE"
+    nexus_rechecks = ",".join(attribution["nexus_recheck_families"]) or "NONE"
+
     log.info(
         "[ADAPTIVE_MTF_CALIBRATION] symbol=%s side=%s reason=%s failures=%s "
         "failure_count=%d scores=4h:%.1f,1h:%.1f,15m:%.1f,combined:%.1f "
@@ -255,6 +389,22 @@ def observe_reject(*, symbol: str, k15, direction: str, reason: str,
         snapshot["volume_ratio"], snapshot["gap_volume"],
         snapshot["adx_15m"], snapshot["gap_adx"], entry_type,
         snapshot["extension_atr"], snapshot["extension_excess"],
+    )
+    log.info(
+        "[ADAPTIVE_MTF_DUPLICATION] symbol=%s raw_failures=%d "
+        "independent_families=%d collapsed_duplicates=%d families=%s "
+        "score_tf_overlap_checks=%s score_tf_overlap_count=%d "
+        "nexus_recheck_families=%s nexus_recheck_count=%d "
+        "component_deficit_4h=%s component_deficit_1h=%s component_deficit_15m=%s "
+        "thresholds_unchanged=true leverage_unchanged=true "
+        "decision_effect=NONE execution_effect=NONE",
+        symbol, attribution["raw_count"], attribution["independent_count"],
+        attribution["collapsed_duplicates"], families, overlaps,
+        attribution["score_tf_overlap_count"], nexus_rechecks,
+        attribution["nexus_recheck_count"],
+        _fmt_components(snapshot["components_4h"]),
+        _fmt_components(snapshot["components_1h"]),
+        _fmt_components(snapshot["components_15m"]),
     )
     _aggregate_snapshot(
         candle_ts=_closed_15m_ts(k15), snapshot=snapshot, log=log
