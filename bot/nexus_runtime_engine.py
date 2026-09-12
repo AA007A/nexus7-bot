@@ -18,7 +18,7 @@ from bot.engine import TradingEngine as CoreTradingEngine
 from bot.kucoin_position_units import KuCoinPositionUnitAdapter
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
-from bot.notifier import drawdown_msg, notify
+from bot.notifier import notify
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
 from bot.shadow_balance_semantics import refresh_shadow_risk
@@ -68,6 +68,12 @@ class TradingEngine(CoreTradingEngine):
         also reset its high-water mark on restart. PAPER keeps the legacy path.
         SHADOW remains mutation-free and uses the same authenticated read-only
         equity semantics through ``refresh_shadow_risk``.
+
+        In controlled LIVE, account drawdown is deliberately advisory-only:
+        the durable high-water mark, drawdown percentage, one-shot alert and all
+        telemetry remain active, but MAX_DRAWDOWN does not mutate ``active`` or
+        veto entries by itself. Independent daily-stop, integrity, NEXUS,
+        protection, ownership and market-risk gates remain authoritative.
         """
         if getattr(self, "paper_trade", False):
             return await super()._update_balance()
@@ -89,13 +95,20 @@ class TradingEngine(CoreTradingEngine):
             if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                 if not getattr(self, "_dd_alerted", False):
                     self._dd_alerted = True
-                    self.active = False
                     log.warning(
-                        "🚨 Drawdown %.1f%% ≥ %.0f%% → pausando entradas",
+                        "[DRAWDOWN_ADVISORY_RUNTIME] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "entries_blocked=false active_unchanged=true execution_effect=NONE",
                         self.risk.drawdown * 100.0,
                         cfg.MAX_DRAWDOWN * 100.0,
                     )
-                    await notify(await drawdown_msg(self.risk.drawdown, equity))
+                    await notify(
+                        f"⚠️ *DRAWDOWN ELEVADO — ADVISORY*\n"
+                        f"`{'━'*28}`\n"
+                        f"📉 Drawdown:     `{self.risk.drawdown:.1%}`\n"
+                        f"💼 Equity:       `${equity:,.2f} USDT`\n"
+                        f"`{'━'*28}`\n"
+                        f"_BGX continua operando; drawdown não bloqueia novas entradas._"
+                    )
             else:
                 self._dd_alerted = False
         except Exception as exc:
