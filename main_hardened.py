@@ -1,15 +1,17 @@
-"""Production hardening wrapper for the NEXUS-7 API.
+"""Production hardening wrapper for the BGX API.
 
 Keeps the legacy ``main:app`` module intact while adding controls that are
 safe to deploy independently:
 
 * fail-closed score-threshold alignment before the trading app is imported;
-* a real readiness endpoint suitable for Railway health checks;
+* service readiness suitable for Railway health checks;
 * an explicit confirmation header for destructive emergency close-all calls;
 * audit logging for destructive API attempts.
 
-This module does not change trading thresholds, position sizing, leverage,
-order routing, or exchange credentials.
+Service readiness is intentionally separate from trading permission: a
+drawdown/integrity safety pause must keep the process alive so it can observe,
+reconcile and recover. This module does not change trading thresholds, position
+sizing, leverage, order routing, or exchange credentials.
 """
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ from main import app  # noqa: E402
 from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
 from bot import runtime_mode_observability as runtime_mode  # noqa: E402
 from bot.logger import log  # noqa: E402
+from bot.service_readiness import evaluate_service_readiness  # noqa: E402
 
 
 @app.middleware("http")
@@ -88,12 +91,13 @@ async def destructive_admin_guard(request: Request, call_next):
 
 @app.get("/ready", include_in_schema=False)
 async def readiness():
-    """Operational readiness: HTTP 503 whenever trading runtime is not ready.
+    """Infrastructure readiness, deliberately distinct from trading readiness.
 
-    Unlike /health (liveness), this endpoint is designed for Railway readiness
-    checks. It performs no exchange I/O and derives state from the already
-    observed runtime so a transient KuCoin call cannot itself make the probe
-    hang.
+    Railway uses this endpoint to decide whether the deployment is healthy.
+    Trading may be intentionally fail-closed while the service remains healthy
+    and must continue running to monitor/reconcile the account. Therefore
+    ``engine.active`` and exchange connectivity are telemetry here, not
+    infrastructure health requirements. No exchange I/O is performed.
     """
     engine = getattr(app.state, "engine", None)
     blocked = bool(getattr(app.state, "blocked", False))
@@ -103,22 +107,26 @@ async def readiness():
         blocked=blocked,
         mode_reason=TRADING_MODE_REASON,
     )
+    bootstrap_complete = bool(getattr(app.state, "ready", False)) and engine is not None
     durable_ok = bool(getattr(engine, "_durable_state_ok", False)) if engine else False
     instruments = len(getattr(engine, "instruments", {}) or {}) if engine else 0
-
-    ready = bool(
-        snap.get("ready")
-        and snap.get("connected")
-        and snap.get("active")
-        and not blocked
-        and durable_ok
-        and instruments > 0
+    service = evaluate_service_readiness(
+        bootstrap_complete=bootstrap_complete,
+        startup_blocked=blocked,
+        durable_state_ok=durable_ok,
+        instrument_count=instruments,
     )
+    trading_ready = bool(snap.get("ready"))
+
     body = {
-        "status": "ready" if ready else "not_ready",
-        "ready": ready,
+        "status": "ready" if service.ready else "not_ready",
+        "ready": service.ready,
+        "service_ready": service.ready,
+        "service_reason": service.reason,
+        "trading_ready": trading_ready,
         "connected": bool(snap.get("connected")),
         "active": bool(snap.get("active")),
+        "safety_paused": bool(snap.get("connected")) and not bool(snap.get("active")),
         "blocked": blocked,
         "durable_state_ok": durable_ok,
         "instruments": instruments,
@@ -127,4 +135,4 @@ async def readiness():
         "orders_sent_to_exchange": snap.get("orders_sent_to_exchange"),
         "score_floor": _strategy_floor,
     }
-    return JSONResponse(status_code=200 if ready else 503, content=body)
+    return JSONResponse(status_code=200 if service.ready else 503, content=body)
