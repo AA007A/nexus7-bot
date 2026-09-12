@@ -155,7 +155,7 @@ def _protective_order(
         return False, False, 0.0
 
     # KuCoin closeOrder means close the entire side and therefore does not
-    # depend on a native size field. No unit conversion is needed here.
+    # depend on a native size field. No unit metadata/conversion is needed.
     if close_order:
         return True, True, float("inf")
 
@@ -217,19 +217,15 @@ async def conditional_stop_confirmed(client, position: dict) -> tuple[bool, str]
     if not symbol:
         return False, "invalid_position"
 
-    info = _instrument_info(client, symbol)
-    position_size = _to_base_size(
-        position.get("size", 0),
-        position.get("sizeUnit", "CONTRACTS"),
-        info,
-    )
-    if position_size <= 0:
-        return False, "position_size_unconfirmed"
-
+    # Read/evaluate full closeOrder protection first. A valid closeOrder closes
+    # the entire position side by exchange semantics, so instrument quantity
+    # metadata is irrelevant. Only quantitative reduceOnly coverage requires
+    # contract→base normalization.
     orders = await read_stop_orders(client, symbol)
     if orders is None:
         return False, "stop_orders_unconfirmed"
 
+    info = _instrument_info(client, symbol)
     covered = 0.0
     for order in orders:
         qualifies, full_close, amount = _protective_order(
@@ -240,6 +236,17 @@ async def conditional_stop_confirmed(client, position: dict) -> tuple[bool, str]
         if full_close:
             return True, "conditional_close_order"
         covered += amount
+
+    if covered <= 0:
+        return False, "no_full_protective_stop"
+
+    position_size = _to_base_size(
+        position.get("size", 0),
+        position.get("sizeUnit", "CONTRACTS"),
+        info,
+    )
+    if position_size <= 0:
+        return False, "position_size_unconfirmed"
 
     if covered + max(1e-12, position_size * 1e-9) >= position_size:
         return True, "conditional_reduce_only"
