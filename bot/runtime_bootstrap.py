@@ -65,6 +65,7 @@ def install() -> None:
     from bot import pilot_exposure_capacity as _pilot_exposure_capacity
     from bot import pilot_submission_counter as _pilot_submission_counter
     from bot import shadow_mode_observability as _shadow_mode_observability
+    from bot import startup_position_unit_hardening as _startup_position_unit_hardening
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
@@ -100,6 +101,9 @@ def install() -> None:
     _paper_wallet.install(_log)
     _paper_lifecycle.install(_log)
     _paper_validation_reset.install(_log)
+    # Must precede restart ownership guard installation: that guard captures the
+    # current startup loader and validates its reconstructed local quantity.
+    _startup_position_unit_hardening.install(TradingEngine, _log)
     _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
     _pilot_external_position_guard.install(TradingEngine, _log)
     _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
