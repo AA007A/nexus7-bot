@@ -9,6 +9,9 @@ class _Log:
     def warning(self, *args, **kwargs):
         return None
 
+    def critical(self, *args, **kwargs):
+        return None
+
 
 class _Engine:
     async def _update_balance(self):
@@ -37,6 +40,20 @@ class _LegacyFlagAwareEngine:
             if not getattr(self, "_dd_alerted", False):
                 self._dd_alerted = True
                 self.active = False
+
+
+class _LateReplaceEngine:
+    async def _update_balance(self):
+        return None
+
+    async def run(self):
+        await self._update_balance()
+        return self.active
+
+
+async def _late_legacy_replacement(self):
+    self.risk.drawdown = float(cfg.MAX_DRAWDOWN) + 0.01
+    self.active = False
 
 
 def test_drawdown_advisory_restores_only_drawdown_originated_active_state():
@@ -98,3 +115,21 @@ def test_drawdown_advisory_preempts_legacy_pause_when_already_above_threshold():
 
     assert engine.active is True
     assert engine._dd_alerted is True
+
+
+def test_run_binds_instance_advisory_even_if_class_update_is_replaced_late():
+    policy._install_drawdown_advisory(_LateReplaceEngine, _Log())
+
+    # Reproduce a late runtime hardening/rebinding after the class-level policy.
+    # The run wrapper must capture this actual method and protect the instance.
+    _LateReplaceEngine._update_balance = _late_legacy_replacement
+
+    engine = _LateReplaceEngine()
+    engine.active = True
+    engine.risk = SimpleNamespace(drawdown=0.0)
+
+    result = asyncio.run(engine.run())
+
+    assert result is True
+    assert engine.active is True
+    assert engine.__dict__.get("_operator_drawdown_instance_advisory") is True
