@@ -210,7 +210,7 @@ async def _refresh_derivatives_proxy(mdata, log, *, force: bool = False) -> dict
             "?symbol=BTCUSDT&period=5m&limit=2",
             "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT",
             "https://fapi.binance.com/futures/data/takerlongshortRatio"
-            "?symbol=BTCUSDT&period=5m&limit=1",
+            "?symbol=BTCUSDT&period=5m&limit=2",
         )
 
         try:
@@ -233,7 +233,7 @@ async def _refresh_derivatives_proxy(mdata, log, *, force: bool = False) -> dict
         completion_ts = time.time()
 
         if isinstance(ls_data, list) and ls_data and isinstance(ls_data[0], dict):
-            row = ls_data[0]
+            row = _latest_source_row(ls_data)
             ts = _server_timestamp(row.get("timestamp"), completion_ts)
             ratio = _finite(row.get("longShortRatio"))
             long_ratio = _finite(row.get("longAccount"))
