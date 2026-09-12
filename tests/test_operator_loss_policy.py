@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from bot.operator_loss_policy import stop_price, install
+from bot.operator_loss_policy import stop_price, required_target_price, install
 
 
 class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -23,7 +23,7 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         class Engine:
             async def _open(self, sig):
-                calls.append(sig.sl)
+                calls.append((sig.sl, sig.tp))
                 return "normal_gate"
             _check_stagnation_and_invalidation = AsyncMock()
         log = SimpleNamespace(info=lambda *a: None, error=lambda *a: None)
@@ -31,11 +31,12 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
         engine = Engine()
         engine.paper_trade = False
         engine.pilot = SimpleNamespace(enabled=True)
-        sig = SimpleNamespace(symbol="ETHUSDT", entry=2500., direction="LONG", sl=2499., tp=2600.)
+        sig = SimpleNamespace(symbol="ETHUSDT", entry=2500., direction="LONG", sl=2499., tp=2600., tp1=2550., tp2=2600.)
         with patch.object(cfg, "LEVERAGE", 50):
             self.assertEqual(await engine._open(sig), "normal_gate")
-        self.assertLess(calls[0], 2499.)
-        self.assertAlmostEqual(sig.rr, 100 / (2500 - calls[0]))
+        self.assertLess(calls[0][0], 2499.)
+        self.assertGreaterEqual(calls[0][1], 2600.)
+        self.assertAlmostEqual(sig.rr, abs(sig.tp - 2500.) / (2500. - calls[0][0]))
 
     def test_long_short_cost_budget(self):
         for side in ("LONG", "SHORT"):
@@ -43,6 +44,38 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual((abs(stop - 2500) / 2500 + .0022) * 50, .5)
         with self.assertRaises(ValueError):
             stop_price(2500., "LONG", 50., .02)
+
+    def test_required_target_meets_nexus_net_rr(self):
+        for side in ("LONG", "SHORT"):
+            entry = 2500.0
+            cost = .0022
+            stop = stop_price(entry, side, 50., cost)
+            target = required_target_price(entry, stop, side, cost, 1.60)
+            stop_distance = abs(entry - stop) / entry
+            target_distance = abs(target - entry) / entry
+            net_rr = (target_distance - cost) / (stop_distance + cost)
+            self.assertAlmostEqual(net_rr, 1.60, places=10)
+            if side == "LONG":
+                self.assertTrue(stop < entry < target)
+            else:
+                self.assertTrue(target < entry < stop)
+
+    async def test_farther_existing_target_is_not_reduced(self):
+        from unittest.mock import patch
+        from bot.config import cfg
+        class Engine:
+            async def _open(self, sig):
+                return sig.tp
+            _check_stagnation_and_invalidation = AsyncMock()
+        install(Engine, SimpleNamespace(info=lambda *a: None, error=lambda *a: None))
+        engine = Engine()
+        engine.paper_trade = False
+        engine.pilot = SimpleNamespace(enabled=True)
+        sig = SimpleNamespace(symbol="ETHUSDT", entry=2500., direction="LONG", sl=2490., tp=2700., tp1=2600., tp2=2700.)
+        with patch.object(cfg, "LEVERAGE", 50):
+            result = await engine._open(sig)
+        self.assertEqual(result, 2700.)
+        self.assertEqual(sig.tp, 2700.)
 
     def test_margin_rounds_down(self):
         from bot.pilot_live_runtime import _pilot_quantity_for_notional
