@@ -7,10 +7,130 @@ The original analyzer return value is always preserved.
 """
 from __future__ import annotations
 
+import math
+import threading
+from collections import deque
+
 import numpy as np
 
 from bot import entry_type_shadow
 from bot import htf_transition_shadow
+from bot.indicators import ema
+
+_TRIAGE_LOCK = threading.Lock()
+_TRIAGE_SEEN: set[tuple[str, object]] = set()
+_TRIAGE_ORDER = deque(maxlen=5000)
+
+
+def _bar_ts(bar):
+    if not bar:
+        return None
+    return bar.get("ts") or bar.get("time") or bar.get("timestamp")
+
+
+def _closed(kl):
+    data = list(kl or [])
+    return data[:-1] if len(data) > 2 else data
+
+
+def _ema_state(kl) -> str:
+    closed = _closed(kl)
+    if len(closed) < 51:
+        return "NEUTRAL"
+    closes = [float(k["c"]) for k in closed]
+    e20 = float(ema(closes, 20)[-1])
+    e50 = float(ema(closes, 50)[-1])
+    px = float(closes[-1])
+    if not all(math.isfinite(v) for v in (e20, e50, px)):
+        return "NEUTRAL"
+    if e20 > e50 and px > e20:
+        return "LONG"
+    if e20 < e50 and px < e20:
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def _ema_state_live(kl) -> str:
+    data = list(kl or [])
+    if len(data) < 51:
+        return "NEUTRAL"
+    closes = [float(k["c"]) for k in data]
+    e20 = float(ema(closes, 20)[-1])
+    e50 = float(ema(closes, 50)[-1])
+    px = float(closes[-1])
+    if not all(math.isfinite(v) for v in (e20, e50, px)):
+        return "NEUTRAL"
+    if e20 > e50 and px > e20:
+        return "LONG"
+    if e20 < e50 and px < e20:
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def _remember_triage(symbol: str, k15) -> bool:
+    closed15 = _closed(k15)
+    if not closed15:
+        return False
+    key = (symbol, _bar_ts(closed15[-1]))
+    with _TRIAGE_LOCK:
+        if key in _TRIAGE_SEEN:
+            return False
+        if len(_TRIAGE_ORDER) == _TRIAGE_ORDER.maxlen:
+            old = _TRIAGE_ORDER.popleft()
+            _TRIAGE_SEEN.discard(old)
+        _TRIAGE_SEEN.add(key)
+        _TRIAGE_ORDER.append(key)
+    return True
+
+
+def _log_htf_transition_triage(symbol, k15, k1h, k4h, log) -> None:
+    """Explain why a HOLD did or did not reach the strict HTF transition cohort.
+
+    This is read-only observability. It deliberately mirrors only the structural
+    EMA-state preconditions. The existing htf_transition_shadow remains the sole
+    owner of strict score/volume/ADX/entry-type qualification and hypothetical
+    outcome tracking.
+    """
+    if len(k15) < 60 or len(k1h) < 60 or len(k4h) < 60:
+        return
+    if not _remember_triage(symbol, k15):
+        return
+
+    state_15 = _ema_state(k15)
+    state_1h = _ema_state(k1h)
+    state_4h_closed = _ema_state(k4h)
+    state_4h_live = _ema_state_live(k4h)
+
+    reasons: list[str] = []
+    if state_15 not in ("LONG", "SHORT"):
+        reasons.append("15M_NOT_DIRECTIONAL")
+    if state_1h not in ("LONG", "SHORT"):
+        reasons.append("1H_NOT_DIRECTIONAL")
+    if state_15 in ("LONG", "SHORT") and state_1h in ("LONG", "SHORT") and state_1h != state_15:
+        reasons.append("15M_1H_MISALIGNED")
+
+    direction = state_15 if state_15 in ("LONG", "SHORT") and state_1h == state_15 else "NONE"
+    if direction != "NONE":
+        if state_4h_closed == direction:
+            reasons.append("4H_CONFIRMED_ALREADY_ALIGNED")
+        if state_4h_live != direction:
+            reasons.append("4H_FORMING_NOT_FLIPPED")
+
+    structural_candidate = (
+        direction != "NONE"
+        and state_4h_closed != direction
+        and state_4h_live == direction
+    )
+    log.info(
+        "[HTF_TRANSITION_TRIAGE] symbol=%s state15=%s state1h=%s "
+        "state4h_confirmed=%s state4h_forming=%s candidate_direction=%s "
+        "structural_candidate=%s precondition_rejects=%s "
+        "strict_cohort_owner=HTF_TRANSITION_SHADOW forming_4h_diagnostic_only=true "
+        "shadow_only=true thresholds_unchanged=true leverage_unchanged=true "
+        "decision_effect=NONE execution_effect=NONE",
+        symbol, state_15, state_1h, state_4h_closed, state_4h_live, direction,
+        str(structural_candidate).lower(), ",".join(reasons) or "NONE",
+    )
 
 
 def install(Analyzer, strategy, log) -> None:
@@ -30,6 +150,7 @@ def install(Analyzer, strategy, log) -> None:
         try:
             # Read-only transition audit. Forming 4H is diagnostic-only inside
             # htf_transition_shadow and can never create a Signal/NEXUS call.
+            _log_htf_transition_triage(symbol, k15, k1h, k4h, log)
             htf_transition_shadow.observe(symbol, k15, k1h, k4h, result, log)
 
             if len(k4h) < 10 or len(k15) < 20:
@@ -88,7 +209,7 @@ def install(Analyzer, strategy, log) -> None:
     Analyzer._entry_type_shadow_installed = True
     log.info(
         "[ENTRY_TYPE_SHADOW] installed multi_bar_displacement=true htf_transition_shadow=true "
-        "forming_4h_diagnostic_only=true closed_candles=true shadow_only=true "
-        "entry_type_unchanged=true thresholds_unchanged=true leverage_unchanged=true "
-        "decision_effect=NONE execution_effect=NONE"
+        "htf_transition_triage=true forming_4h_diagnostic_only=true closed_candles=true "
+        "shadow_only=true entry_type_unchanged=true thresholds_unchanged=true "
+        "leverage_unchanged=true decision_effect=NONE execution_effect=NONE"
     )
