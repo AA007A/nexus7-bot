@@ -10,11 +10,14 @@ Fail-closed rules:
 - stop must be active/untriggered, on the same symbol, opposite the position;
 - it must be reduce-only or a close-order;
 - trigger price must be on the protective side of the position reference price;
-- a reduce-only stop must cover the full position size (multiple stops may sum).
+- a reduce-only stop must cover the full position size after both quantities
+  are normalized to engine base-asset units.
 """
 
 import math
 from urllib.parse import quote
+
+from bot.quantity import contracts_to_base
 
 
 def _finite_positive(value) -> float:
@@ -80,8 +83,49 @@ def _normalized_symbol(raw: str) -> str:
     return sym
 
 
-def _protective_order(order: dict, position: dict, symbol: str) -> tuple[bool, bool, float]:
-    """Return (qualifies, closes_full_position, covered_size)."""
+def _instrument_info(client, symbol: str):
+    """Return canonical KuCoin instrument metadata without exchange I/O."""
+    standard = _normalized_symbol(symbol)
+    getter = getattr(client, "get_instruments", None)
+    if callable(getter):
+        try:
+            instruments = getter() or {}
+        except Exception:
+            instruments = {}
+        if isinstance(instruments, dict):
+            info = instruments.get(standard)
+            if isinstance(info, dict):
+                return info
+    instruments = getattr(client, "_instruments", None)
+    if isinstance(instruments, dict):
+        info = instruments.get(standard)
+        if isinstance(info, dict):
+            return info
+    return None
+
+
+def _to_base_size(value, unit: str, info) -> float:
+    """Normalize one quantity to base units, failing closed on ambiguity."""
+    amount = _finite_positive(value)
+    if amount <= 0:
+        return 0.0
+    if str(unit or "").strip().upper() == "BASE_ASSET":
+        return amount
+    if not isinstance(info, dict):
+        return 0.0
+    try:
+        return _finite_positive(contracts_to_base(amount, info))
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def _protective_order(
+    order: dict,
+    position: dict,
+    symbol: str,
+    instrument_info,
+) -> tuple[bool, bool, float]:
+    """Return (qualifies, closes_full_position, covered_base_size)."""
     if not _order_active(order):
         return False, False, 0.0
     if _normalized_symbol(order.get("symbol")) != _normalized_symbol(symbol):
@@ -110,13 +154,19 @@ def _protective_order(order: dict, position: dict, symbol: str) -> tuple[bool, b
     if not close_order and not reduce_only:
         return False, False, 0.0
 
+    # KuCoin closeOrder means close the entire side and therefore does not
+    # depend on a native size field. No unit metadata/conversion is needed.
     if close_order:
         return True, True, float("inf")
 
-    size = _finite_positive(order.get("size", order.get("qty", 0)))
-    if size <= 0:
+    covered_base = _to_base_size(
+        order.get("size", order.get("qty", 0)),
+        order.get("sizeUnit", "CONTRACTS"),
+        instrument_info,
+    )
+    if covered_base <= 0:
         return False, False, 0.0
-    return True, False, size
+    return True, False, covered_base
 
 
 async def read_stop_orders(client, symbol: str):
@@ -164,25 +214,39 @@ async def conditional_stop_confirmed(client, position: dict) -> tuple[bool, str]
         return False, "invalid_position"
 
     symbol = str(position.get("symbol", "") or "")
-    try:
-        position_size = _finite_positive(abs(float(position.get("size", 0) or 0)))
-    except (TypeError, ValueError):
-        position_size = 0.0
-    if not symbol or position_size <= 0:
+    if not symbol:
         return False, "invalid_position"
 
+    # Read/evaluate full closeOrder protection first. A valid closeOrder closes
+    # the entire position side by exchange semantics, so instrument quantity
+    # metadata is irrelevant. Only quantitative reduceOnly coverage requires
+    # contract→base normalization.
     orders = await read_stop_orders(client, symbol)
     if orders is None:
         return False, "stop_orders_unconfirmed"
 
+    info = _instrument_info(client, symbol)
     covered = 0.0
     for order in orders:
-        qualifies, full_close, amount = _protective_order(order, position, symbol)
+        qualifies, full_close, amount = _protective_order(
+            order, position, symbol, info
+        )
         if not qualifies:
             continue
         if full_close:
             return True, "conditional_close_order"
         covered += amount
+
+    if covered <= 0:
+        return False, "no_full_protective_stop"
+
+    position_size = _to_base_size(
+        position.get("size", 0),
+        position.get("sizeUnit", "CONTRACTS"),
+        info,
+    )
+    if position_size <= 0:
+        return False, "position_size_unconfirmed"
 
     if covered + max(1e-12, position_size * 1e-9) >= position_size:
         return True, "conditional_reduce_only"

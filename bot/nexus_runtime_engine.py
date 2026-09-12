@@ -1,4 +1,4 @@
-"""Explicit runtime TradingEngine composition for NEXUS-7.
+"""Explicit runtime TradingEngine composition for BGX.
 
 The large canonical engine remains in ``bot.engine``. This runtime subclass
 adds post-decision observability declaratively and prepares professional,
@@ -37,6 +37,28 @@ class TradingEngine(CoreTradingEngine):
             self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
+
+    def _contracts_to_base_qty(self, symbol: str, quantity: float) -> float:
+        """Honor the runtime position-unit boundary exactly once.
+
+        The legacy core calls this helper after reading ``get_positions()`` and
+        historically expected that read to expose native contracts. In the BGX
+        runtime, ``KuCoinPositionUnitAdapter`` already normalizes every
+        ``get_positions()[\"size\"]`` to base-asset units and labels the row
+        ``sizeUnit=BASE_ASSET``. Reapplying the multiplier here would therefore
+        shrink/grow exposure a second time.
+
+        This override is intentionally limited to the composed runtime. The
+        unwrapped legacy core keeps its original contracts-to-base conversion.
+        """
+        if isinstance(self.client, KuCoinPositionUnitAdapter):
+            value = float(quantity)
+            if value != value or value < 0:
+                raise ValueError(
+                    f"_contracts_to_base_qty({symbol}): invalid normalized base quantity"
+                )
+            return value
+        return super()._contracts_to_base_qty(symbol, quantity)
 
     async def _update_balance(self):
         """Refresh real-account risk from equity and durable high-water mark.
