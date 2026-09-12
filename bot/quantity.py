@@ -46,6 +46,20 @@ def validate_base_quantity(qty, info, price):
         raise ValueError('quote notional below exchange minimum')
 
 
+def contracts_to_base(contracts, info):
+    """Convert an exchange-native contract count into engine base-asset units.
+
+    KuCoin Futures position ``currentQty`` is expressed in contracts. The
+    engine, Position and RiskManager contract is base-asset quantity, so every
+    inbound position quantity must cross this boundary exactly once.
+    """
+    multiplier, lot, _, _ = quantity_rules(info)
+    contracts = number(contracts)
+    if contracts != contracts.to_integral_value() or contracts % lot != 0:
+        raise ValueError('position contracts violate native lotSize')
+    return float(contracts * multiplier)
+
+
 def base_to_contracts(qty, info):
     """Single outgoing conversion. Floor to a native lot; never grow exposure."""
     multiplier, lot, minimum, _ = quantity_rules(info)

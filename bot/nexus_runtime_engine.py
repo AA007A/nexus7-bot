@@ -15,6 +15,7 @@ from bot.account_capital_reader import read_account_capital
 from bot.config import cfg
 from bot.drawdown_persistence import restore_update_real_account_peak
 from bot.engine import TradingEngine as CoreTradingEngine
+from bot.kucoin_position_units import KuCoinPositionUnitAdapter
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.notifier import drawdown_msg, notify
@@ -28,6 +29,12 @@ class TradingEngine(CoreTradingEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # KuCoin currentQty is native contracts while every engine/risk/Position
+        # quantity is base asset. Normalize all engine-facing position reads at
+        # one explicit runtime boundary. The underlying exchange client and all
+        # order-dispatch methods remain untouched/delegated.
+        if not isinstance(self.client, KuCoinPositionUnitAdapter):
+            self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
 
