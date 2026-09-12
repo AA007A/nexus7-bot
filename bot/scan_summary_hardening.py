@@ -46,12 +46,12 @@ def latest_unique(records, limit):
 
 
 def _rewrite_hold_diagnostic(msg):
-    """Render HOLD telemetry using the same strict MTF semantics as production.
+    """Label the engine's legacy forming-candle HOLD diagnostic explicitly.
 
-    Production only has a directional setup when 4H and 1H agree. The legacy
-    diagnostic used LONG whenever either timeframe was bullish and weighted
-    30/30/40, so a HOLD line could look stronger/directional even though the
-    strategy correctly rejected it. This function changes only the log text.
+    This diagnostic is not the canonical Analyzer decision. The engine rebuilds
+    it after a canonical HOLD using the raw kline arrays, which include the
+    currently-forming candle, and legacy direction/weight semantics. Preserve it
+    as troubleshooting evidence but make that distinction impossible to miss.
     """
     match = _HOLD_DIAG_RE.match(msg)
     if not match:
@@ -60,12 +60,14 @@ def _rewrite_hold_diagnostic(msg):
     d = match.groupdict()
     t4, t1 = d["t4"], d["t1"]
     aligned = (t4 == t1) and t4 in {"↑", "↓"}
+    prefix = f"[LEGACY_FORMING_CANDLE_DIAG] {d['prefix']}"
 
     if not aligned:
         return (
-            f"{d['prefix']} MTF_ALIGN=NO "
+            f"{prefix} MTF_ALIGN=NO "
             f"(4H:{d['s4']} 1H:{d['s1']} 15M:{d['s15']}) "
-            f"{d['context']}4H={t4} 1H={t1} → HOLD"
+            f"{d['context']}4H={t4} 1H={t1} → HOLD "
+            f"| execution_effect=NONE"
         )
 
     combined = round(
@@ -74,9 +76,10 @@ def _rewrite_hold_diagnostic(msg):
         + float(d["s15"]) * 0.45
     )
     return (
-        f"{d['prefix']} Score={combined}/100 "
+        f"{prefix} Score={combined}/100 "
         f"(4H:{d['s4']} 1H:{d['s1']} 15M:{d['s15']}) "
-        f"{d['context']}4H={t4} 1H={t1} → HOLD"
+        f"{d['context']}4H={t4} 1H={t1} → HOLD "
+        f"| execution_effect=NONE"
     )
 
 
@@ -238,5 +241,6 @@ def install(log):
     _install_selfcheck_sitecustomize_awareness(log)
 
     log.info(
-        "[SCAN_SUMMARY] latest-per-symbol score-stage + HOLD diagnostic hardening enabled; trading logic unchanged"
+        "[SCAN_SUMMARY] latest-per-symbol score-stage + HOLD diagnostic hardening enabled; "
+        "legacy forming-candle diagnostics explicitly labeled; trading logic unchanged"
     )
