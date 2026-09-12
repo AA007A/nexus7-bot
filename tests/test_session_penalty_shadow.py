@@ -74,6 +74,7 @@ def _reset():
         shadow._METRICS["unique"] = 0
         shadow._METRICS["eligible"] = 0
         shadow._METRICS["resolved"] = 0
+        shadow._METRICS["restored"] = 0
         shadow._METRICS["outcomes"] = Counter()
         shadow._METRICS["sessions"] = Counter()
         shadow._METRICS["symbols"] = Counter()
@@ -83,13 +84,16 @@ def _reset():
         shadow._METRICS["nexus_timeout"] = 0
         shadow._METRICS["nexus_error"] = 0
         shadow._METRICS["nexus_schedule_unavailable"] = 0
+        shadow._METRICS["nexus_schedule_recovered"] = 0
 
 
 def _enroll_asia_doge():
     original_session = TradingEngine.__dict__["_get_market_session"]
     original_closed = shadow.closed_mtf
+    original_runtime_engine = shadow._runtime_engine
     TradingEngine._get_market_session = staticmethod(lambda: "ASIA")
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
+    shadow._runtime_engine = lambda: None
     signal = _Signal()
     try:
         shadow.observe(
@@ -99,15 +103,8 @@ def _enroll_asia_doge():
     finally:
         TradingEngine._get_market_session = original_session
         shadow.closed_mtf = original_closed
+        shadow._runtime_engine = original_runtime_engine
     return signal
-
-
-def _arm_for_direct_counterfactual():
-    with shadow._LOCK:
-        state = next(iter(shadow._ACTIVE.values()))
-        state["nexus_status"] = "NOT_CHECKED"
-        state["nexus_approved"] = None
-        state["nexus_reason"] = ""
 
 
 def test_doge_asia_penalty_is_observed_without_changing_production_signal():
@@ -118,6 +115,7 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     assert signal.score == 64
     assert snap["eligible"] == 1
     assert snap["active"] == 1
+    assert snap["nexus_schedule_unavailable"] == 1
     state = next(iter(shadow._ACTIVE.values()))
     assert state["session"] == "ASIA"
     assert state["penalty"] == -10
@@ -125,8 +123,8 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     assert state["adjusted_score"] == 54
     assert state["min_score"] == 60
     assert state["nexus_status"] == "SCHEDULE_UNAVAILABLE"
-    assert state["nexus_approved"] is False
-    assert snap["nexus_schedule_unavailable"] == 1
+    assert state["nexus_reason"] == "runtime_engine_unavailable"
+    assert state["nexus_schedule_pending"] is True
 
 
 def test_signal_not_killed_by_session_penalty_is_not_enrolled():
@@ -177,7 +175,6 @@ def test_same_bar_tp_and_sl_resolves_stop_first():
 def test_exact_nexus_counterfactual_uses_live_validator_once():
     _reset()
     signal = _enroll_asia_doge()
-    _arm_for_direct_counterfactual()
     engine = _NexusEngine(approved=True)
     original_closed = shadow.closed_mtf
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
@@ -205,7 +202,6 @@ def test_exact_nexus_counterfactual_uses_live_validator_once():
 def test_exact_nexus_veto_is_recorded_fail_closed():
     _reset()
     signal = _enroll_asia_doge()
-    _arm_for_direct_counterfactual()
     engine = _NexusEngine(approved=False)
     original_closed = shadow.closed_mtf
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
@@ -223,6 +219,60 @@ def test_exact_nexus_veto_is_recorded_fail_closed():
     assert state["nexus_status"] == "VETOED"
     assert state["nexus_approved"] is False
     assert "ensemble veto" in state["nexus_reason"]
+
+
+def test_no_running_loop_is_explicit_and_retries_when_loop_recovers():
+    _reset()
+    engine = _NexusEngine(approved=True)
+    signal = _Signal()
+    log = _Log()
+    original_session = TradingEngine.__dict__["_get_market_session"]
+    original_closed = shadow.closed_mtf
+    original_runtime_engine = shadow._runtime_engine
+    original_schedule_restore = shadow._schedule_restore
+    original_schedule_persist = shadow._schedule_persist
+    TradingEngine._get_market_session = staticmethod(lambda: "ASIA")
+    shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
+    shadow._runtime_engine = lambda: engine
+    shadow._schedule_restore = lambda _log: None
+    shadow._schedule_persist = lambda *args, **kwargs: None
+    try:
+        # Engine exists, but this synchronous call has no running event loop.
+        shadow.observe(
+            "DOGEUSDT", _bars(), _bars(), _bars(),
+            production_result=signal, min_score=60, log=log,
+        )
+        state = next(iter(shadow._ACTIVE.values()))
+        assert state["nexus_status"] == "SCHEDULE_UNAVAILABLE"
+        assert state["nexus_reason"] == "RuntimeError"
+        assert shadow.snapshot()["nexus_schedule_unavailable"] == 1
+
+        async def _retry_inside_loop():
+            # Same cohort must retry instead of being discarded by _SEEN.
+            shadow.observe(
+                "DOGEUSDT", _bars(), _bars(), _bars(),
+                production_result=signal, min_score=60, log=log,
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        asyncio.run(_retry_inside_loop())
+    finally:
+        TradingEngine._get_market_session = original_session
+        shadow.closed_mtf = original_closed
+        shadow._runtime_engine = original_runtime_engine
+        shadow._schedule_restore = original_schedule_restore
+        shadow._schedule_persist = original_schedule_persist
+
+    snap = shadow.snapshot()
+    state = next(iter(shadow._ACTIVE.values()))
+    assert engine.calls == 1
+    assert snap["nexus_schedule_recovered"] == 1
+    assert snap["nexus_counterfactuals"] == 1
+    assert snap["nexus_approved"] == 1
+    assert state["nexus_status"] == "APPROVED"
+    assert any("SCHEDULE_UNAVAILABLE" in line for line in log.lines)
+    assert any("SCHEDULE_RECOVERED" in line for line in log.lines)
 
 
 def test_runtime_engine_lookup_uses_loaded_main_without_import_or_registration():
@@ -247,10 +297,12 @@ def test_session_shadow_reads_production_policy_instead_of_copying_table():
     assert '"AVAXUSDT": -8' not in source
 
 
-def test_scheduler_failure_is_explicit_not_silent():
+def test_scheduler_failure_is_explicit_and_recoverable():
     source = inspect.getsource(shadow)
     assert "SCHEDULE_UNAVAILABLE" in source
+    assert "SCHEDULE_RECOVERED" in source
     assert "nexus_schedule_unavailable" in source
+    assert "nexus_schedule_recovered" in source
     assert "except RuntimeError:\n            pass" not in source
 
 
