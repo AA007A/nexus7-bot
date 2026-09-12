@@ -39,6 +39,7 @@ _METRICS = {
     "nexus_timeout": 0,
     "nexus_error": 0,
     "nexus_schedule_unavailable": 0,
+    "nexus_schedule_recovered": 0,
 }
 
 
@@ -214,6 +215,7 @@ def _update_outcomes(symbol: str, k15, k1h, k4h, log) -> None:
                     tp_hit = low <= state["tp"]
                     sl_hit = high >= state["sl"]
 
+                # Conservative same-bar ordering: stop first.
                 if tp_hit and sl_hit:
                     _resolve(key, state, "AMBIGUOUS_STOP_FIRST", state["sl"], log)
                     _ACTIVE.pop(key, None)
@@ -245,9 +247,12 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
 
     with _LOCK:
         state = _ACTIVE.get(key)
-        if not state or state.get("nexus_status") != "NOT_CHECKED":
+        if not state or state.get("nexus_status") not in {
+            "NOT_CHECKED", "SCHEDULED", "SCHEDULE_UNAVAILABLE"
+        }:
             return
         state["nexus_status"] = "IN_PROGRESS"
+        state["nexus_schedule_pending"] = False
         _METRICS["nexus_counterfactuals"] += 1
         persist_state = dict(state)
     _schedule_persist(key, persist_state, "OPEN", log)
@@ -328,23 +333,83 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
 
 
 def _mark_schedule_unavailable(key: str, state: dict, log, reason: str) -> None:
-    """Make a missing async scheduler explicit instead of silently losing evidence."""
+    """Make a missing async scheduler explicit so a later observation can retry."""
     with _LOCK:
         current = _ACTIVE.get(key)
         if current is None:
             return
+        if current.get("nexus_status") != "SCHEDULE_UNAVAILABLE":
+            _METRICS["nexus_schedule_unavailable"] += 1
         current["nexus_status"] = "SCHEDULE_UNAVAILABLE"
         current["nexus_approved"] = False
         current["nexus_reason"] = reason
-        _METRICS["nexus_schedule_unavailable"] += 1
+        current["nexus_schedule_pending"] = True
+        current["nexus_schedule_reason"] = reason
         persist_state = dict(current)
     _schedule_persist(key, persist_state, "OPEN", log)
     log.warning(
-        "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=SCHEDULE_UNAVAILABLE "
-        "reason=%s recoverable=true production_policy_unchanged=true "
+        "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s "
+        "nexus_status=SCHEDULE_UNAVAILABLE reason=%s retry_on_next_observation=true "
+        "durable_write_best_effort=true production_policy_unchanged=true "
         "decision_effect=NONE execution_effect=NONE",
         state.get("symbol"), state.get("direction"), reason,
     )
+
+
+def _schedule_nexus_counterfactual(key: str, sig, k15, k1h, k4h, log) -> bool:
+    """Schedule exactly one counterfactual and retry prior scheduler failures."""
+    engine = _runtime_engine()
+    if engine is None:
+        with _LOCK:
+            state = _ACTIVE.get(key)
+        if state is not None:
+            _mark_schedule_unavailable(key, state, log, "runtime_engine_unavailable")
+        return False
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as exc:
+        with _LOCK:
+            state = _ACTIVE.get(key)
+        if state is not None:
+            _mark_schedule_unavailable(key, state, log, type(exc).__name__)
+        return False
+
+    with _LOCK:
+        state = _ACTIVE.get(key)
+        if state is None:
+            return False
+        previous_status = state.get("nexus_status")
+        if previous_status not in {"NOT_CHECKED", "SCHEDULE_UNAVAILABLE"}:
+            return False
+        recovered = previous_status == "SCHEDULE_UNAVAILABLE"
+        state["nexus_status"] = "SCHEDULED"
+        state["nexus_approved"] = None
+        state["nexus_reason"] = "scheduled"
+        state["nexus_schedule_pending"] = False
+        if recovered:
+            _METRICS["nexus_schedule_recovered"] += 1
+        persist_state = dict(state)
+
+    _schedule_persist(key, persist_state, "OPEN", log)
+    try:
+        loop.create_task(
+            observe_nexus_counterfactual(
+                engine, sig, k15, k1h, k4h, log, timeout_s=10.0
+            )
+        )
+    except Exception as exc:
+        _mark_schedule_unavailable(key, persist_state, log, type(exc).__name__)
+        return False
+
+    if recovered:
+        log.info(
+            "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s "
+            "nexus_status=SCHEDULE_RECOVERED exact_live_validator=true "
+            "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
+            getattr(sig, "symbol", "UNKNOWN"), getattr(sig, "direction", "UNKNOWN"),
+        )
+    return True
 
 
 def observe(symbol: str, k15, k1h, k4h, *, production_result,
@@ -386,40 +451,56 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
     key = _state_key(symbol, direction, bar_ts)
 
     with _LOCK:
-        if key in _SEEN:
-            return
-        _SEEN.add(key)
-        state = {
-            "symbol": symbol,
-            "direction": direction,
-            "session": session,
-            "penalty": penalty,
-            "base_score": base_score,
-            "adjusted_score": adjusted,
-            "min_score": int(min_score),
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "opened_bar_ts": bar_ts,
-            "last_bar_ts": bar_ts,
-            "created_epoch": time.time(),
-            "bars": 0,
-            "mfe_pct": 0.0,
-            "mae_pct": 0.0,
-            "entry_type": str(getattr(production_result, "entry_type", "UNKNOWN")),
-            "regime": str(getattr(production_result, "regime", "UNKNOWN")),
-            "nexus_status": "NOT_CHECKED",
-            "nexus_approved": None,
-            "nexus_reason": "",
-            "nexus_setup_quality": 0.0,
-            "nexus_confidence": 0.0,
-            "nexus_regime": "UNKNOWN",
-        }
-        _ACTIVE[key] = state
-        _METRICS["unique"] += 1
-        _METRICS["eligible"] += 1
-        _METRICS["sessions"][session] += 1
-        _METRICS["symbols"][symbol] += 1
+        existing = _ACTIVE.get(key)
+        already_seen = key in _SEEN
+        retry_schedule = bool(
+            already_seen and existing
+            and existing.get("nexus_status") == "SCHEDULE_UNAVAILABLE"
+        )
+        if not already_seen:
+            _SEEN.add(key)
+            state = {
+                "symbol": symbol,
+                "direction": direction,
+                "session": session,
+                "penalty": penalty,
+                "base_score": base_score,
+                "adjusted_score": adjusted,
+                "min_score": int(min_score),
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "opened_bar_ts": bar_ts,
+                "last_bar_ts": bar_ts,
+                "created_epoch": time.time(),
+                "bars": 0,
+                "mfe_pct": 0.0,
+                "mae_pct": 0.0,
+                "entry_type": str(getattr(production_result, "entry_type", "UNKNOWN")),
+                "regime": str(getattr(production_result, "regime", "UNKNOWN")),
+                "nexus_status": "NOT_CHECKED",
+                "nexus_approved": None,
+                "nexus_reason": "",
+                "nexus_setup_quality": 0.0,
+                "nexus_confidence": 0.0,
+                "nexus_regime": "UNKNOWN",
+                "nexus_schedule_pending": False,
+                "nexus_schedule_reason": "",
+            }
+            _ACTIVE[key] = state
+            _METRICS["unique"] += 1
+            _METRICS["eligible"] += 1
+            _METRICS["sessions"][session] += 1
+            _METRICS["symbols"][symbol] += 1
+        else:
+            state = existing
+
+    if already_seen:
+        if retry_schedule:
+            _schedule_nexus_counterfactual(
+                key, production_result, k15, k1h, k4h, log
+            )
+        return
 
     _schedule_persist(key, state, "OPEN", log)
     log.info(
@@ -431,19 +512,8 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
         state["entry_type"], state["regime"], _MAX_BARS,
     )
 
-    engine = _runtime_engine()
-    if engine is None:
-        _mark_schedule_unavailable(key, state, log, "runtime_engine_unavailable")
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError as exc:
-        _mark_schedule_unavailable(key, state, log, type(exc).__name__)
-        return
-    loop.create_task(
-        observe_nexus_counterfactual(
-            engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
-        )
+    _schedule_nexus_counterfactual(
+        key, production_result, k15, k1h, k4h, log
     )
 
 
@@ -464,5 +534,6 @@ def snapshot() -> dict:
             "nexus_timeout": int(_METRICS["nexus_timeout"]),
             "nexus_error": int(_METRICS["nexus_error"]),
             "nexus_schedule_unavailable": int(_METRICS["nexus_schedule_unavailable"]),
+            "nexus_schedule_recovered": int(_METRICS["nexus_schedule_recovered"]),
             "persistence_restore_complete": bool(_RESTORE_COMPLETE),
         }
