@@ -1349,8 +1349,8 @@ class TradingEngine:
                     hold_left = pos.min_hold_until - time.time()
                     if hold_left > 0:
                         log.warning(
-                            f"⚠️ {sym} fechado pela Bybit antes do tempo mínimo "
-                            f"({hold_left/60:.0f}min restantes) — SL atingido"
+                            f"⚠️ {sym} posição ausente na exchange antes do tempo mínimo "
+                            f"({hold_left/60:.0f}min restantes) — motivo não confirmado nesta reconciliação"
                         )
                     # PnL bruto (sem taxas)
                     pnl_gross = pos.pnl
