@@ -91,8 +91,8 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
     # from active -> inactive that happens inside this exact balance-update call
     # while drawdown is at/above the configured threshold. A pre-existing inactive
     # engine is never re-enabled, so unrelated operational/safety pauses remain
-    # authoritative. Do not depend on the one-shot _dd_alerted flag: telemetry
-    # state must never decide whether the engine is allowed to keep running.
+    # authoritative. Use finally so an exception after the legacy side effect
+    # cannot strand the engine in an inactive state.
     if TradingEngine is not None and not getattr(
         TradingEngine, "_operator_drawdown_engine_advisory", False
     ):
@@ -100,21 +100,21 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
         async def _update_balance_advisory(self, *args, **kwargs):
             was_active = bool(getattr(self, "active", False))
-            result = await previous_update_balance(self, *args, **kwargs)
+            try:
+                return await previous_update_balance(self, *args, **kwargs)
+            finally:
+                risk = getattr(self, "risk", None)
+                drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
+                became_inactive = was_active and not bool(getattr(self, "active", False))
 
-            risk = getattr(self, "risk", None)
-            drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
-            became_inactive = was_active and not bool(getattr(self, "active", False))
-
-            if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
-                self.active = True
-                log.warning(
-                    "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
-                    drawdown * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
-            return result
+                if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
+                    self.active = True
+                    log.warning(
+                        "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
+                        drawdown * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
 
         TradingEngine._update_balance = _update_balance_advisory
         TradingEngine._operator_drawdown_engine_advisory = True
