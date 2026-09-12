@@ -46,6 +46,12 @@ def _finite(value: Any) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _latest_source_row(rows):
+    """Select newest source timestamp, never substitute fetch time for age."""
+    valid = [r for r in rows if isinstance(r, dict) and _finite(r.get("timestamp")) is not None]
+    return max(valid, key=lambda r: float(r["timestamp"])) if valid else {}
+
+
 def _field_timestamp(cache: dict, field: str) -> float:
     timestamps = cache.get("_field_fetched_at", {})
     if not isinstance(timestamps, dict):
@@ -201,10 +207,10 @@ async def _refresh_derivatives_proxy(mdata, log, *, force: bool = False) -> dict
 
         urls = (
             "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
-            "?symbol=BTCUSDT&period=5m&limit=1",
+            "?symbol=BTCUSDT&period=5m&limit=2",
             "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT",
             "https://fapi.binance.com/futures/data/takerlongshortRatio"
-            "?symbol=BTCUSDT&period=5m&limit=1",
+            "?symbol=BTCUSDT&period=5m&limit=2",
         )
 
         try:
@@ -227,7 +233,7 @@ async def _refresh_derivatives_proxy(mdata, log, *, force: bool = False) -> dict
         completion_ts = time.time()
 
         if isinstance(ls_data, list) and ls_data and isinstance(ls_data[0], dict):
-            row = ls_data[0]
+            row = _latest_source_row(ls_data)
             ts = _server_timestamp(row.get("timestamp"), completion_ts)
             ratio = _finite(row.get("longShortRatio"))
             long_ratio = _finite(row.get("longAccount"))
@@ -249,7 +255,7 @@ async def _refresh_derivatives_proxy(mdata, log, *, force: bool = False) -> dict
                 updated.append("btc_oi")
 
         if isinstance(taker_data, list) and taker_data and isinstance(taker_data[0], dict):
-            row = taker_data[0]
+            row = _latest_source_row(taker_data)
             ts = _server_timestamp(row.get("timestamp"), completion_ts)
             ratio = _finite(row.get("buySellRatio"))
             buy_vol = _finite(row.get("buyVol"))

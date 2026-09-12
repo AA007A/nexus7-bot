@@ -24,7 +24,7 @@ from __future__ import annotations
 import contextvars
 import os
 import time
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_FLOOR
 
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
@@ -39,12 +39,7 @@ _PILOT_NOTIONAL_PCT = float(os.environ.get("PILOT_NOTIONAL_PCT", "0.50"))
 
 
 def _pilot_quantity_for_notional(info: dict, price: float, target_notional: float) -> float:
-    """Smallest valid base quantity whose quote notional meets the target.
-
-    KuCoin Futures quantities are integer contract lots. The requested quote
-    target therefore cannot always be hit exactly; round UP to the next valid
-    lot so a 50% target is not silently reduced to the minimum exchange lot.
-    """
+    """Largest valid base quantity that does not exceed allocated notional."""
     if isinstance(target_notional, bool):
         raise ValueError("target_notional must be numeric")
     price_d = Decimal(str(price))
@@ -55,9 +50,10 @@ def _pilot_quantity_for_notional(info: dict, price: float, target_notional: floa
         raise ValueError("invalid target_notional")
 
     multiplier, lot, minimum, min_notional = quantity_rules(info)
-    target_d = max(target_d, min_notional)
-    contracts = max(minimum, target_d / (price_d * multiplier))
-    contracts = (contracts / lot).to_integral_value(rounding=ROUND_CEILING) * lot
+    contracts = target_d / (price_d * multiplier)
+    contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+    if contracts < minimum or contracts * multiplier * price_d < min_notional:
+        return 0.0
     return float(contracts * multiplier)
 
 
@@ -85,7 +81,7 @@ def _install_pilot_notional_sizing(log) -> None:
     engine_module.minimum_base_quantity = _pilot_aware_minimum
     engine_module._pilot_notional_sizing_installed = True
     log.critical(
-        "[PILOT_SIZING] installed target_notional_pct=%.2f%% basis=available_balance "
+        "[PILOT_LEGACY_TARGET] preliminary_only=true installed target_notional_pct=%.2f%% basis=available_balance "
         "meaning=position_notional_not_margin",
         _PILOT_NOTIONAL_PCT * 100.0,
     )
@@ -277,7 +273,7 @@ def install(TradingEngine, log) -> None:
                 return None
             target_notional = available * _PILOT_NOTIONAL_PCT
             log.warning(
-                "[PILOT_SIZING] symbol=%s available=%.4f pct=%.2f%% "
+                "[PILOT_LEGACY_TARGET] preliminary_only=true final_authority=PILOT_MARGIN_SIZING symbol=%s available=%.4f pct=%.2f%% "
                 "target_notional=%.4f leverage=%sx target_margin_approx=%.4f",
                 getattr(sig, "symbol", "?"),
                 available,
