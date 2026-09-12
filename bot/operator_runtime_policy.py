@@ -24,7 +24,7 @@ from bot.config import cfg
 MARGIN_FRACTION = 0.50
 
 
-def _install_drawdown_advisory(log) -> None:
+def _install_drawdown_advisory(TradingEngine, log) -> None:
     from bot.risk import RiskManager
     from bot.risk_manager_v3 import RiskManagerV3
 
@@ -73,6 +73,36 @@ def _install_drawdown_advisory(log) -> None:
 
         RiskManagerV3.can_open = _v3_can_open
         RiskManagerV3._operator_drawdown_advisory = True
+
+    # engine.py still contains a legacy side effect inside _update_balance():
+    # crossing MAX_DRAWDOWN sets self.active=False after RiskManager.update().
+    # Keep the accounting + one-shot alert intact, but neutralize only that
+    # drawdown-originated deactivation. A pre-existing inactive state is never
+    # re-enabled here, so unrelated operational/safety pauses remain authoritative.
+    if not getattr(TradingEngine, "_operator_drawdown_engine_advisory", False):
+        previous_update_balance = TradingEngine._update_balance
+
+        async def _update_balance_advisory(self, *args, **kwargs):
+            was_active = bool(getattr(self, "active", False))
+            result = await previous_update_balance(self, *args, **kwargs)
+
+            risk = getattr(self, "risk", None)
+            drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
+            dd_alerted = bool(getattr(self, "_dd_alerted", False))
+            became_inactive = was_active and not bool(getattr(self, "active", False))
+
+            if became_inactive and dd_alerted and drawdown >= float(cfg.MAX_DRAWDOWN):
+                self.active = True
+                log.warning(
+                    "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
+                    drawdown * 100.0,
+                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                )
+            return result
+
+        TradingEngine._update_balance = _update_balance_advisory
+        TradingEngine._operator_drawdown_engine_advisory = True
 
 
 def _install_margin_sizing(log) -> None:
@@ -177,8 +207,7 @@ def _install_margin_sizing(log) -> None:
 
 def install(TradingEngine, log) -> None:
     """Install after all controlled-pilot sizing/risk wrappers."""
-    del TradingEngine  # sizing context is carried by the already-installed pilot wrapper.
-    _install_drawdown_advisory(log)
+    _install_drawdown_advisory(TradingEngine, log)
     _install_margin_sizing(log)
     log.critical(
         "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
