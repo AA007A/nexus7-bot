@@ -43,6 +43,25 @@ def observe_analyze_mtf(func):
                 type(exc).__name__,
             )
 
+        # Calibrate the existing pre-NEXUS session penalty without changing it.
+        # Only Analyzer-approved signals that the current UTC-session table would
+        # push below min_score are tracked. Their confirmed 15m TP/SL path is
+        # observational and the production result is returned unchanged.
+        try:
+            from bot import session_penalty_shadow as session_shadow
+            session_shadow.observe(
+                symbol, k15, k1h, k4h,
+                production_result=result,
+                min_score=min_score,
+                log=log,
+            )
+        except Exception as exc:
+            log.debug(
+                "[SESSION_PENALTY_SHADOW] observability_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
         try:
             # Lazy import avoids a module-import cycle: mtf_shadow consumes
             # strategy helpers, while strategy owns this decorator explicitly.
