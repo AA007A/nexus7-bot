@@ -87,12 +87,12 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         RiskManagerV3._operator_drawdown_advisory = True
 
     # engine.py still contains a legacy side effect inside _update_balance():
-    # crossing MAX_DRAWDOWN sets self.active=False. Neutralize only a transition
-    # from active -> inactive that happens inside this exact balance-update call
-    # while drawdown is at/above the configured threshold. A pre-existing inactive
-    # engine is never re-enabled, so unrelated operational/safety pauses remain
-    # authoritative. Use finally so an exception after the legacy side effect
-    # cannot strand the engine in an inactive state.
+    # crossing MAX_DRAWDOWN sets self.active=False when _dd_alerted is false.
+    # If the already-known drawdown is above the configured limit, mark that
+    # one-shot alert as handled before calling the legacy method so the pause
+    # branch is never entered. If drawdown crosses the threshold during the
+    # update itself, the finally block remains the second line of defence and
+    # restores only an active -> inactive transition from this call.
     if TradingEngine is not None and not getattr(
         TradingEngine, "_operator_drawdown_engine_advisory", False
     ):
@@ -100,6 +100,21 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
         async def _update_balance_advisory(self, *args, **kwargs):
             was_active = bool(getattr(self, "active", False))
+            risk_before = getattr(self, "risk", None)
+            drawdown_before = float(getattr(risk_before, "drawdown", 0.0) or 0.0)
+            preempted_legacy_pause = (
+                was_active and drawdown_before >= float(cfg.MAX_DRAWDOWN)
+            )
+
+            if preempted_legacy_pause:
+                self._dd_alerted = True
+                log.warning(
+                    "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "legacy_pause_preempted=true active_preserved=true execution_effect=NONE",
+                    drawdown_before * 100.0,
+                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                )
+
             try:
                 return await previous_update_balance(self, *args, **kwargs)
             finally:
@@ -109,6 +124,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
                 if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
                     self.active = True
+                    self._dd_alerted = True
                     log.warning(
                         "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
                         "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
