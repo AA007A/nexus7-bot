@@ -6,7 +6,7 @@ embedded in ``strategy.score_tf``, would the candidate have reached the NEXUS
 review stage?
 
 It never creates a Signal, never calls NEXUS, never touches risk/execution, and
-never mutates thresholds.  It is observability only.
+never mutates thresholds. It is observability only.
 """
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from collections import Counter, deque
 from typing import Any
 
 from bot import adaptive_mtf_calibration
+from bot import score_tf_rebalanced_shadow
 
-# These hard checks reuse evidence already represented inside score_tf.
-# Removing them in shadow does NOT remove the score thresholds themselves.
 _DEDUP_REMOVABLE = {
     "ALIGN_15M",
     "VOLUME",
@@ -70,11 +69,6 @@ def _fmt_counter(counter: Counter[str], limit: int = 6) -> str:
 
 
 def assess_failures(failures: list[str]) -> dict[str, Any]:
-    """Return the strict-vs-deduplicated shadow decision.
-
-    Only checks in ``_DEDUP_REMOVABLE`` are ignored. Score thresholds and all
-    independent structural/safety checks remain authoritative in the shadow.
-    """
     raw = list(failures or [])
     removed = [name for name in raw if name in _DEDUP_REMOVABLE]
     remaining = [name for name in raw if name not in _DEDUP_REMOVABLE]
@@ -144,18 +138,14 @@ def _aggregate(*, candle_ts: object, result: dict[str, Any], log) -> None:
     if previous is not None:
         pts, psamples, preach, premoved, premaining, pemitted = previous
         if not pemitted:
-            _emit_summary(
-                log, candle_ts=pts, samples=psamples, would_reach=preach,
-                removed=premoved, remaining=premaining,
-                trigger="candle_rollover",
-            )
+            _emit_summary(log, candle_ts=pts, samples=psamples, would_reach=preach,
+                          removed=premoved, remaining=premaining,
+                          trigger="candle_rollover")
     if immediate is not None:
         its, isamples, ireach, iremoved, iremaining = immediate
-        _emit_summary(
-            log, candle_ts=its, samples=isamples, would_reach=ireach,
-            removed=iremoved, remaining=iremaining,
-            trigger="sample_threshold",
-        )
+        _emit_summary(log, candle_ts=its, samples=isamples, would_reach=ireach,
+                      removed=iremoved, remaining=iremaining,
+                      trigger="sample_threshold")
 
 
 def observe_reject(*, symbol: str, k15, direction: str,
@@ -164,11 +154,6 @@ def observe_reject(*, symbol: str, k15, direction: str,
                    s4h: dict, s1h: dict, s15: dict, combined: float,
                    entry_type: str, extension_atr: float,
                    thresholds: dict, log) -> None:
-    """Log what would happen under duplicate-only relaxation.
-
-    This function intentionally mirrors the same failure-vector inputs as the
-    strict Adaptive calibration, then removes only score_tf-overlap hard checks.
-    """
     if not _remember(symbol, k15):
         return
 
@@ -180,7 +165,14 @@ def observe_reject(*, symbol: str, k15, direction: str,
         combined=combined, entry_type=entry_type,
         extension_atr=extension_atr, thresholds=thresholds,
     )
-    result = assess_failures(list(snapshot.get("failures") or []))
+    strict_failures = list(snapshot.get("failures") or [])
+    result = assess_failures(strict_failures)
+
+    score_tf_rebalanced_shadow.observe_reject(
+        symbol=symbol, k15=k15,
+        s4h=s4h, s1h=s1h, s15=s15,
+        failures=strict_failures, thresholds=thresholds, log=log,
+    )
 
     log.info(
         "[ADAPTIVE_DEDUP_SHADOW] symbol=%s side=%s strict_failures=%d "
