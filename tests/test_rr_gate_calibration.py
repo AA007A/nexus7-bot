@@ -1,9 +1,11 @@
+import asyncio
 import inspect
 from types import SimpleNamespace
 
 from bot import nexus_validation_observability as validation_obs
 from bot import rr_gate_calibration as cal
 from bot import nexus_live_cost_calibration as live_cost
+from bot.missed_opportunity_audit import _signal_key as opportunity_signal_key
 from bot.nexus_live_cost_calibration import NexusCostContext, _COST_CONTEXT
 
 
@@ -47,6 +49,8 @@ def _ctx():
 def _sig():
     return SimpleNamespace(
         symbol="LTCUSDT",
+        direction="LONG",
+        entry_type="PULLBACK",
         entry=100.0,
         sl=101.0,
         tp=102.0,
@@ -124,6 +128,41 @@ def test_snapshot_fails_closed_when_both_cost_sources_are_missing():
     assert snapshot["available"] is False
     assert snapshot["reason"] == "nexus_cost_context_unavailable"
     assert snapshot["cost_context_handoff"] == "unavailable"
+
+
+def test_audit_signal_key_is_exactly_opportunity_audit_15m_cohort_key():
+    sig = _sig()
+    epoch = 1_789_178_730.0
+    expected = opportunity_signal_key(sig.symbol, sig.direction, sig.entry_type, epoch)
+    assert cal._audit_signal_key(sig, epoch) == expected
+
+
+def test_current_row_queries_exact_signal_key_without_120_second_window():
+    sig = _sig()
+    fixed_now = 1_789_178_730.0
+    expected_key = opportunity_signal_key(sig.symbol, sig.direction, sig.entry_type, fixed_now)
+    captured = {}
+    original_fetchall = cal.db._fetchall
+    original_time = cal.time.time
+
+    async def fake_fetchall(sql, params=()):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [(expected_key, "{}", 0, "test")]
+
+    cal.db._fetchall = fake_fetchall
+    cal.time.time = lambda: fixed_now
+    try:
+        row = asyncio.run(cal._current_row(sig))
+    finally:
+        cal.db._fetchall = original_fetchall
+        cal.time.time = original_time
+
+    assert row[0] == expected_key
+    assert captured["params"] == (expected_key,)
+    assert "WHERE signal_key=?" in captured["sql"]
+    assert "created_epoch>=?" not in captured["sql"]
+    assert "120" not in inspect.getsource(cal._current_row)
 
 
 def test_live_cost_wrapper_contains_private_decision_handoff_before_reset():
