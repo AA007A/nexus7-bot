@@ -3,27 +3,33 @@
 Production remains authoritative. This module observes only Analyzer signals that
 would be discarded by TradingEngine's existing session penalty, asks the exact
 production NEXUS validator what it would have decided, and follows the subsequent
-confirmed 15m path. It never creates/returns a trading Signal, calls an order
-route, changes a threshold, or mutates exchange/risk state.
+confirmed 15m path. Shadow evidence is durably persisted across process restarts.
+It never creates/returns a trading Signal, calls an exchange mutation route,
+changes a threshold, or mutates risk/execution state.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
 import threading
+import time
 from collections import Counter
 
 from bot.kucoin_execution_model import estimated_round_trip_cost_pct
 from bot.nexus_decision_consistency import closed_mtf
+from bot import session_penalty_persistence as persistence
 
 _MAX_BARS = 16
 _LOCK = threading.Lock()
 _SEEN: set[str] = set()
 _ACTIVE: dict[str, dict] = {}
+_RESTORE_SCHEDULED = False
+_RESTORE_COMPLETE = False
 _METRICS = {
     "unique": 0,
     "eligible": 0,
     "resolved": 0,
+    "restored": 0,
     "outcomes": Counter(),
     "sessions": Counter(),
     "symbols": Counter(),
@@ -63,16 +69,76 @@ def _decision_reason(decision) -> str:
 
 
 def _runtime_engine():
-    """Return the already-created production engine without importing main.
-
-    ``main_hardened`` imports ``main:app`` before serving requests, so the module
-    is present in ``sys.modules`` by the time Analyzer scans run. Looking it up
-    avoids a circular import, explicit registration, and all class monkey-patches.
-    """
+    """Return the already-created production engine without importing main."""
     main_module = sys.modules.get("main")
     app = getattr(main_module, "app", None) if main_module else None
     state = getattr(app, "state", None) if app is not None else None
     return getattr(state, "engine", None) if state is not None else None
+
+
+def _schedule_persist(key: str, state: dict, status: str, log) -> None:
+    """Best-effort durable write; absence of an event loop never changes trading."""
+    try:
+        loop = asyncio.get_running_loop()
+        snapshot_state = dict(state)
+        loop.create_task(
+            persistence.save_state(key, snapshot_state, status=status, log=log)
+        )
+    except RuntimeError:
+        return
+    except Exception as exc:
+        log.debug(
+            "[SESSION_PENALTY_PERSISTENCE] schedule_failed error=%s "
+            "trading_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
+
+async def _restore_persisted(log) -> None:
+    """Restore unresolved observational cohorts without touching production state."""
+    global _RESTORE_SCHEDULED, _RESTORE_COMPLETE
+    try:
+        rows = await persistence.load_open(log)
+        if rows is None:
+            _RESTORE_SCHEDULED = False
+            return
+        restored = 0
+        with _LOCK:
+            for key, state in rows:
+                if key in _ACTIVE:
+                    continue
+                if int(_finite(state.get("bars"), 0)) >= _MAX_BARS:
+                    continue
+                _SEEN.add(key)
+                _ACTIVE[key] = dict(state)
+                restored += 1
+            _METRICS["restored"] += restored
+        _RESTORE_COMPLETE = True
+        log.info(
+            "[SESSION_PENALTY_PERSISTENCE] restore_complete=true restored=%d "
+            "active=%d production_policy_unchanged=true trading_effect=NONE "
+            "execution_effect=NONE",
+            restored, len(_ACTIVE),
+        )
+    except Exception as exc:
+        _RESTORE_SCHEDULED = False
+        log.debug(
+            "[SESSION_PENALTY_PERSISTENCE] restore_failed error=%s "
+            "trading_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+
+
+def _schedule_restore(log) -> None:
+    global _RESTORE_SCHEDULED
+    if _RESTORE_COMPLETE or _RESTORE_SCHEDULED:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _RESTORE_SCHEDULED = True
+    loop.create_task(_restore_persisted(log))
 
 
 def _directional_excursions(state: dict, high: float, low: float) -> tuple[float, float]:
@@ -88,7 +154,7 @@ def _directional_excursions(state: dict, high: float, low: float) -> tuple[float
     return favorable, adverse
 
 
-def _resolve(state: dict, outcome: str, exit_price: float, log) -> None:
+def _resolve(key: str, state: dict, outcome: str, exit_price: float, log) -> None:
     entry = _finite(state.get("entry"))
     if entry <= 0:
         net_pct = 0.0
@@ -102,10 +168,11 @@ def _resolve(state: dict, outcome: str, exit_price: float, log) -> None:
     state["net_pct"] = round(net_pct, 5)
     _METRICS["resolved"] += 1
     _METRICS["outcomes"][outcome] += 1
+    _schedule_persist(key, state, "RESOLVED", log)
     log.info(
         "[SESSION_PENALTY_SHADOW_OUTCOME] symbol=%s side=%s session=%s "
         "penalty=%+d score=%s->%s nexus_status=%s nexus_approved=%s "
-        "outcome=%s net_pct=%.4f mfe=%.4f mae=%.4f bars=%d "
+        "outcome=%s net_pct=%.4f mfe=%.4f mae=%.4f bars=%d durable=true "
         "decision_effect=NONE execution_effect=NONE",
         state.get("symbol"), state.get("direction"), state.get("session"),
         int(state.get("penalty", 0)), state.get("base_score"),
@@ -148,33 +215,28 @@ def _update_outcomes(symbol: str, k15, k1h, k4h, log) -> None:
 
                 # Conservative same-bar ordering: stop first.
                 if tp_hit and sl_hit:
-                    _resolve(state, "AMBIGUOUS_STOP_FIRST", state["sl"], log)
+                    _resolve(key, state, "AMBIGUOUS_STOP_FIRST", state["sl"], log)
                     _ACTIVE.pop(key, None)
                     break
                 if sl_hit:
-                    _resolve(state, "SL", state["sl"], log)
+                    _resolve(key, state, "SL", state["sl"], log)
                     _ACTIVE.pop(key, None)
                     break
                 if tp_hit:
-                    _resolve(state, "TP", state["tp"], log)
+                    _resolve(key, state, "TP", state["tp"], log)
                     _ACTIVE.pop(key, None)
                     break
                 if state["bars"] >= _MAX_BARS:
                     last = _finite(bar.get("c"), state["entry"])
-                    _resolve(state, "TIMEOUT", last, log)
+                    _resolve(key, state, "TIMEOUT", last, log)
                     _ACTIVE.pop(key, None)
                     break
+                _schedule_persist(key, state, "OPEN", log)
 
 
 async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
                                         timeout_s: float = 10.0) -> None:
-    """Ask the exact production NEXUS validator about a session-rejected signal.
-
-    The session policy remains authoritative. This calls ``engine._nexus_validate``
-    directly, validates the returned NexusDecision with the same fail-closed
-    boundary used by LIVE entry, records the answer, and stops. It never calls
-    ``_open`` or any exchange mutation path.
-    """
+    """Ask the exact production NEXUS validator about a session-rejected signal."""
     direction = str(getattr(sig, "direction", "")).upper()
     closed = _closed_15m(k15, k1h, k4h)
     if direction not in {"LONG", "SHORT"} or not closed or closed[-1].get("ts") is None:
@@ -187,6 +249,8 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
             return
         state["nexus_status"] = "IN_PROGRESS"
         _METRICS["nexus_counterfactuals"] += 1
+        persist_state = dict(state)
+    _schedule_persist(key, persist_state, "OPEN", log)
 
     try:
         decision = await asyncio.wait_for(
@@ -214,12 +278,15 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
             state["nexus_confidence"] = _finite(getattr(decision, "confidence", 0.0))
             state["nexus_regime"] = str(getattr(decision, "market_regime", "UNKNOWN"))
             _METRICS["nexus_approved" if approved else "nexus_vetoed"] += 1
+            persist_state = dict(state)
+        _schedule_persist(key, persist_state, "OPEN", log)
 
         log.info(
             "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s session=%s "
             "penalty=%+d score=%s->%s nexus_status=%s setup_quality=%.2f "
             "confidence=%.2f nexus_regime=%s reason=%s exact_live_validator=true "
-            "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
+            "durable=true production_policy_unchanged=true decision_effect=NONE "
+            "execution_effect=NONE",
             state.get("symbol"), state.get("direction"), state.get("session"),
             int(state.get("penalty", 0)), state.get("base_score"),
             state.get("adjusted_score"), state.get("nexus_status"),
@@ -234,9 +301,14 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
                 state["nexus_approved"] = False
                 state["nexus_reason"] = "ai_timeout"
                 _METRICS["nexus_timeout"] += 1
+                persist_state = dict(state)
+            else:
+                persist_state = None
+        if persist_state:
+            _schedule_persist(key, persist_state, "OPEN", log)
         log.info(
             "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=TIMEOUT "
-            "exact_live_validator=true production_policy_unchanged=true "
+            "exact_live_validator=true durable=true production_policy_unchanged=true "
             "decision_effect=NONE execution_effect=NONE",
             getattr(sig, "symbol", "UNKNOWN"), direction,
         )
@@ -248,10 +320,15 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
                 state["nexus_approved"] = False
                 state["nexus_reason"] = type(exc).__name__
                 _METRICS["nexus_error"] += 1
+                persist_state = dict(state)
+            else:
+                persist_state = None
+        if persist_state:
+            _schedule_persist(key, persist_state, "OPEN", log)
         log.info(
             "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=ERROR "
-            "error=%s exact_live_validator=true production_policy_unchanged=true "
-            "decision_effect=NONE execution_effect=NONE",
+            "error=%s exact_live_validator=true durable=true "
+            "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
             getattr(sig, "symbol", "UNKNOWN"), direction, type(exc).__name__,
         )
 
@@ -259,6 +336,7 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
 def observe(symbol: str, k15, k1h, k4h, *, production_result,
             min_score: int, log) -> None:
     """Observe one canonical Analyzer evaluation and return no trading value."""
+    _schedule_restore(log)
     _update_outcomes(symbol, k15, k1h, k4h, log)
     if production_result is None:
         return
@@ -310,6 +388,7 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
             "tp": tp,
             "opened_bar_ts": bar_ts,
             "last_bar_ts": bar_ts,
+            "created_epoch": time.time(),
             "bars": 0,
             "mfe_pct": 0.0,
             "mae_pct": 0.0,
@@ -328,18 +407,16 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
         _METRICS["sessions"][session] += 1
         _METRICS["symbols"][symbol] += 1
 
+    _schedule_persist(key, state, "OPEN", log)
     log.info(
         "[SESSION_PENALTY_SHADOW] symbol=%s side=%s session=%s penalty=%+d "
         "score=%d->%d min=%d entry_type=%s regime=%s tracking_bars=%d "
-        "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
+        "durable=true production_policy_unchanged=true decision_effect=NONE "
+        "execution_effect=NONE",
         symbol, direction, session, penalty, base_score, adjusted, int(min_score),
         state["entry_type"], state["regime"], _MAX_BARS,
     )
 
-    # Runtime-only lookup: main_hardened always imports main:app, where the
-    # already-created TradingEngine is stored in app.state.engine. Schedule the
-    # exact production validator once for this confirmed-bar cohort. No import,
-    # registration hook, engine mutation, or order route is involved.
     engine = _runtime_engine()
     if engine is not None:
         try:
@@ -350,8 +427,6 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
                 )
             )
         except RuntimeError:
-            # Unit/offline callers may not have an event loop. Outcome tracking
-            # remains valid; production runtime always calls from the async scan.
             pass
 
 
@@ -361,6 +436,7 @@ def snapshot() -> dict:
             "unique": int(_METRICS["unique"]),
             "eligible": int(_METRICS["eligible"]),
             "resolved": int(_METRICS["resolved"]),
+            "restored": int(_METRICS["restored"]),
             "active": len(_ACTIVE),
             "outcomes": dict(_METRICS["outcomes"]),
             "sessions": dict(_METRICS["sessions"]),
@@ -370,4 +446,5 @@ def snapshot() -> dict:
             "nexus_vetoed": int(_METRICS["nexus_vetoed"]),
             "nexus_timeout": int(_METRICS["nexus_timeout"]),
             "nexus_error": int(_METRICS["nexus_error"]),
+            "persistence_restore_complete": bool(_RESTORE_COMPLETE),
         }
