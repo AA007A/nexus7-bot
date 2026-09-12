@@ -195,7 +195,22 @@ def install(TradingEngine, nexus_ai, log) -> None:
             )
             # asyncio.to_thread() inside _nexus_validate propagates contextvars
             # on Python 3.11, so expected_value sees this exact candidate context.
-            return await original_validate(self, sig)
+            decision = await original_validate(self, sig)
+
+            # Runtime post-decision observability executes *after* this wrapper
+            # returns and therefore after the ContextVar is reset. Carry the
+            # exact frozen context on the decision as private telemetry only.
+            # NexusDecision.to_dict()/asdict does not serialize dynamic attrs.
+            try:
+                setattr(decision, "_bgx_nexus_cost_context", ctx)
+            except Exception as exc:
+                log.debug(
+                    "[NEXUS_COST] context_handoff_failed symbol=%s error=%s "
+                    "decision_effect=NONE execution_effect=NONE",
+                    ctx.symbol,
+                    type(exc).__name__,
+                )
+            return decision
         finally:
             _COST_CONTEXT.reset(token)
 
