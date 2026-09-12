@@ -107,7 +107,11 @@ async def _fetch_json(
 
 
 def _field_needs_fallback(runtime, field: str) -> bool:
-    return field not in runtime.snapshot().get("signals", {})
+    snap = runtime.snapshot()
+    return (
+        field not in snap.get("signals", {})
+        or snap.get("signal_providers", {}).get(field) == _PROVIDER
+    )
 
 
 async def _collect_once(runtime, log) -> None:
@@ -149,6 +153,7 @@ async def _collect_once(runtime, log) -> None:
             runtime._merge_signals(
                 {field: value},
                 observed_at={field: candidate_observed[field]},
+                provider=_PROVIDER,
             )
             merged.append(field)
         else:
@@ -158,7 +163,7 @@ async def _collect_once(runtime, log) -> None:
     if merged:
         state = f"ok_fallback:{','.join(sorted(merged))}"
     elif standby:
-        state = f"standby_primary_fresh:{','.join(sorted(standby))}"
+        state = f"standby_existing_source_fresh:{','.join(sorted(standby))}"
     elif any(status != 200 for status in statuses):
         state = f"http_{statuses}_fail_neutral"
     else:
