@@ -31,6 +31,14 @@ class _EngineRaisesAfterLegacyPause:
         raise RuntimeError("notification failure after legacy drawdown pause")
 
 
+class _LegacyFlagAwareEngine:
+    async def _update_balance(self):
+        if self.risk.drawdown >= float(cfg.MAX_DRAWDOWN):
+            if not getattr(self, "_dd_alerted", False):
+                self._dd_alerted = True
+                self.active = False
+
+
 def test_drawdown_advisory_restores_only_drawdown_originated_active_state():
     policy._install_drawdown_advisory(_Engine, _Log())
 
@@ -76,3 +84,17 @@ def test_drawdown_advisory_restores_engine_even_when_legacy_update_raises():
         raise AssertionError("expected RuntimeError")
 
     assert engine.active is True
+
+
+def test_drawdown_advisory_preempts_legacy_pause_when_already_above_threshold():
+    policy._install_drawdown_advisory(_LegacyFlagAwareEngine, _Log())
+
+    engine = _LegacyFlagAwareEngine()
+    engine.active = True
+    engine._dd_alerted = False
+    engine.risk = SimpleNamespace(drawdown=float(cfg.MAX_DRAWDOWN) + 0.01)
+
+    asyncio.run(engine._update_balance())
+
+    assert engine.active is True
+    assert engine._dd_alerted is True
