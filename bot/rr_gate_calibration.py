@@ -22,6 +22,7 @@ from typing import Any
 from bot import database as db
 from bot import nexus_ai
 from bot.config import cfg
+from bot.missed_opportunity_audit import _signal_key as _opportunity_signal_key
 from bot.nexus_live_cost_calibration import _COST_CONTEXT
 
 _OUTCOME_LOGGED: set[str] = set()
@@ -178,18 +179,24 @@ def _load_metadata(raw: Any) -> dict:
         return {}
 
 
+def _audit_signal_key(sig, epoch: float | None = None) -> str:
+    """Use the exact canonical 15m cohort key owned by opportunity_audit."""
+    when = time.time() if epoch is None else float(epoch)
+    return _opportunity_signal_key(
+        str(getattr(sig, "symbol", "")),
+        str(getattr(sig, "direction", "")),
+        str(getattr(sig, "entry_type", "UNKNOWN")),
+        when,
+    )
+
+
 async def _current_row(sig) -> tuple | None:
+    key = _audit_signal_key(sig)
     rows = await db._fetchall(
         """SELECT signal_key,metadata,approved,decision_reason
            FROM opportunity_audit
-           WHERE symbol=? AND direction=? AND entry_type=? AND created_epoch>=?
-           ORDER BY created_epoch DESC LIMIT 1""",
-        (
-            str(getattr(sig, "symbol", "")),
-            str(getattr(sig, "direction", "")),
-            str(getattr(sig, "entry_type", "UNKNOWN")),
-            time.time() - 120.0,
-        ),
+           WHERE signal_key=? LIMIT 1""",
+        (key,),
     )
     return rows[0] if rows else None
 
@@ -258,8 +265,9 @@ async def observe(engine, sig, decision, log) -> None:
         row = await _current_row(sig)
         if not row:
             log.debug(
-                "[RR_GATE_CALIBRATION] candidate_row_missing symbol=%s execution_effect=NONE",
-                getattr(sig, "symbol", "UNKNOWN"),
+                "[RR_GATE_CALIBRATION] candidate_row_missing symbol=%s candidate=%s "
+                "lookup=canonical_15m_signal_key execution_effect=NONE",
+                getattr(sig, "symbol", "UNKNOWN"), _audit_signal_key(sig),
             )
             await _emit_available_evidence(log)
             return
