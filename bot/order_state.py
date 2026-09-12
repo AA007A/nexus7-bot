@@ -86,9 +86,47 @@ class ManagedOrder:
     def transition(self, novo: OrderState, **info):
         """
         Aplica uma transição. Levanta InvalidTransition se proibida.
+
+        Um único caso de corrida é tratado como no-op monotônico: o ACK REST
+        de SUBMITTED pode chegar depois de um evento privado WS já ter avançado
+        a ordem para PARTIALLY_FILLED ou FILLED. Nesse caso o estado mais novo
+        da exchange vence; o ACK atrasado serve apenas para anexar order_id e
+        evidência de histórico. Nenhuma outra regressão de estado é aceita.
         """
         if novo == self.state and novo != OrderState.PARTIALLY_FILLED:
             return   # idempotente: mesmo estado não é erro
+
+        source = str(info.get("source", "")).upper()
+        stale_rest_submit_ack = (
+            novo == OrderState.SUBMITTED
+            and self.state in (OrderState.PARTIALLY_FILLED, OrderState.FILLED)
+            and source == "REST"
+        )
+        if stale_rest_submit_ack:
+            ack_order_id = str(info.get("order_id") or "") or None
+            if ack_order_id and self.order_id and self.order_id != ack_order_id:
+                raise InvalidTransition(
+                    f"{self.symbol} [{self.client_oid[:8]}]: ACK REST tardio "
+                    f"trouxe order_id conflitante ({ack_order_id} != {self.order_id})"
+                )
+            if ack_order_id and not self.order_id:
+                self.order_id = ack_order_id
+
+            history_info = dict(info)
+            history_info["monotonic_noop"] = True
+            history_info["stale_ack_state"] = OrderState.SUBMITTED.value
+            self.history.append((
+                time.time(), self.state.value, self.state.value, history_info
+            ))
+            log.info(
+                "[ORDER_STATE_RACE] %s [%s]: stale REST SUBMITTED ack after %s; "
+                "action=MONOTONIC_NOOP order_id=%s",
+                self.symbol,
+                self.client_oid[:8],
+                self.state.value,
+                self.order_id or "NONE",
+            )
+            return
 
         permitidos = TRANSICOES.get(self.state, set())
         if novo not in permitidos:
