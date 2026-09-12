@@ -43,6 +43,26 @@ def observe_analyze_mtf(func):
                 type(exc).__name__,
             )
 
+        # Study canonical 55-59-style near misses without lowering the live
+        # score floor. Enrollment requires every downstream strategy filter to
+        # pass, so this cohort isolates score as the sole strategy-stage block.
+        # Exact NEXUS evaluation and forward outcome tracking are read-only.
+        try:
+            from bot import score_floor_shadow as score_shadow
+            score_shadow.observe(
+                symbol, k15, k1h, k4h,
+                production_result=result,
+                min_score=min_score,
+                fee_mult=fee_mult,
+                log=log,
+            )
+        except Exception as exc:
+            log.debug(
+                "[SCORE_FLOOR_SHADOW] observability_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
         # Calibrate the existing pre-NEXUS session penalty without changing it.
         # Only Analyzer-approved signals that the current UTC-session table would
         # push below min_score are tracked. Their confirmed 15m TP/SL path is
