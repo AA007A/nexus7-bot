@@ -302,7 +302,11 @@ class IntegrityGuard:
                 lq = abs(float(getattr(lp, "qty", 0) or 0))
                 xq_contratos = abs(float(xp.get("size", 0) or 0))
                 try:
-                    xq = engine._contracts_to_base_qty(sym, xq_contratos)
+                    xq = (
+                        xq_contratos
+                        if xp.get("sizeUnit") == "BASE_ASSET"
+                        else engine._contracts_to_base_qty(sym, xq_contratos)
+                    )
                 except Exception:
                     div.append(
                         f"{sym}: multiplier indisponível — impossível "
@@ -314,7 +318,7 @@ class IntegrityGuard:
                 if lq > 0 and xq > 0 and abs(lq - xq) / max(lq, xq) > _tol_qty:
                     div.append(
                         f"{sym}: qty local {lq} ≠ exchange {xq} "
-                        f"({xq_contratos} contratos × multiplier)"
+                        f"(size={xq_contratos}, unit={xp.get('sizeUnit', 'CONTRACTS')})"
                     )
 
                 _side_ex = "LONG" if xp.get("side", "Buy") == "Buy" else "SHORT"
