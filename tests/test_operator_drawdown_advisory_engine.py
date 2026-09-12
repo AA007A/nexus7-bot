@@ -24,6 +24,13 @@ class _EngineWithoutAlertFlag:
         self.active = False
 
 
+class _EngineRaisesAfterLegacyPause:
+    async def _update_balance(self):
+        self.risk.drawdown = float(cfg.MAX_DRAWDOWN) + 0.01
+        self.active = False
+        raise RuntimeError("notification failure after legacy drawdown pause")
+
+
 def test_drawdown_advisory_restores_only_drawdown_originated_active_state():
     policy._install_drawdown_advisory(_Engine, _Log())
 
@@ -51,4 +58,21 @@ def test_drawdown_advisory_does_not_depend_on_alert_telemetry_state():
     engine.active = True
     engine.risk = SimpleNamespace(drawdown=0.0)
     asyncio.run(engine._update_balance())
+    assert engine.active is True
+
+
+def test_drawdown_advisory_restores_engine_even_when_legacy_update_raises():
+    policy._install_drawdown_advisory(_EngineRaisesAfterLegacyPause, _Log())
+
+    engine = _EngineRaisesAfterLegacyPause()
+    engine.active = True
+    engine.risk = SimpleNamespace(drawdown=0.0)
+
+    try:
+        asyncio.run(engine._update_balance())
+    except RuntimeError as exc:
+        assert "notification failure" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
     assert engine.active is True
