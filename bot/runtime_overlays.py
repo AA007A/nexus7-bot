@@ -19,6 +19,7 @@ def install(TradingEngine, log) -> None:
     from bot import funnel_metrics as fm
     from bot import score as scoring
     from bot import strategy
+    from bot import engine as core_engine
     from bot import derivatives_news_freshness_hardening as derivatives_hardening
     from bot import news_semantic_hardening as news_semantics
     from bot import nexus_ai
@@ -28,9 +29,19 @@ def install(TradingEngine, log) -> None:
     from bot import operator_runtime_policy
     from bot import exit_policy_telemetry
     from bot import entry_type_shadow_overlay
+    from bot import scoring_safety_hardening
+    from bot import trailing_safety_hardening
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
+
+    # Correct score semantics before any downstream analyzer/shadow consumes
+    # score_tf. Thresholds remain exactly unchanged.
+    scoring_safety_hardening.install(strategy, log)
+
+    # Correct trailing geometry on the canonical Position class. This changes
+    # only the trailing calculation; native exchange SL/TP remains authoritative.
+    trailing_safety_hardening.install(core_engine.Position, strategy.cfg, log)
 
     # Observe the fully composed Adaptive analyzer without changing its return.
     # This measures possible false PULLBACK classifications only after LIVE logic
@@ -53,9 +64,9 @@ def install(TradingEngine, log) -> None:
     regime_transition.install(nexus_ai, log)
 
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel observability, entry-type shadow diagnostics, "
-        "final headline semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency are "
-        "active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
+        "entry-type shadow diagnostics, final headline semantics, stop-only CROSS "
+        "target policy, delegated operator margin/drawdown/exit policy and strict "
+        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
+        "leverage_unchanged=true railway_variables_unchanged=true"
     )
