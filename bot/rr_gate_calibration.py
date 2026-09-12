@@ -112,6 +112,52 @@ def _cost_context(decision=None):
     return None, "unavailable"
 
 
+def _geometry_snapshot(sig, ctx, threshold: float) -> dict[str, Any]:
+    """Decompose the exact net-R:R equation into price geometry and costs.
+
+    NEXUS uses::
+
+        rr_net = (gain_gross - cost) / (loss_gross + cost)
+
+    Solving that equation for the gross gain required at ``threshold`` gives a
+    diagnostic target requirement without changing the strategy target itself.
+    """
+    entry = _finite(getattr(sig, "entry", 0.0))
+    sl = _finite(getattr(sig, "sl", 0.0))
+    tp = _finite(getattr(sig, "tp", 0.0))
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return {"geometry_available": False, "geometry_reason": "invalid_levels"}
+
+    gain_gross = abs(tp - entry) / entry
+    loss_gross = abs(entry - sl) / entry
+    if loss_gross <= 0:
+        return {"geometry_available": False, "geometry_reason": "zero_stop_distance"}
+
+    taker_fee = _finite(getattr(ctx, "taker_fee", 0.0))
+    slippage = _finite(getattr(ctx, "slippage", 0.0))
+    round_trip_cost = (taker_fee * 2.0) + (slippage * 2.0)
+    gross_rr = gain_gross / loss_gross
+    cost_to_stop = round_trip_cost / loss_gross
+
+    # threshold = (required_gain - cost) / (loss + cost)
+    # => required_gain = threshold * (loss + cost) + cost
+    required_gain = threshold * (loss_gross + round_trip_cost) + round_trip_cost
+    required_gross_rr = required_gain / loss_gross
+    target_shortfall = max(0.0, required_gain - gain_gross)
+
+    return {
+        "geometry_available": True,
+        "stop_distance_pct": round(loss_gross * 100.0, 6),
+        "target_distance_pct": round(gain_gross * 100.0, 6),
+        "round_trip_cost_pct": round(round_trip_cost * 100.0, 6),
+        "cost_to_stop_ratio": round(cost_to_stop, 6),
+        "gross_rr_snapshot": round(gross_rr, 6),
+        "gross_rr_required_for_net_threshold": round(required_gross_rr, 6),
+        "required_target_distance_pct": round(required_gain * 100.0, 6),
+        "target_shortfall_pct": round(target_shortfall * 100.0, 6),
+    }
+
+
 def _snapshot(sig, decision=None) -> dict[str, Any]:
     """Compute net R:R from the exact NEXUS cost snapshot with no I/O."""
     threshold = _rr_net_threshold()
@@ -146,6 +192,7 @@ def _snapshot(sig, decision=None) -> dict[str, Any]:
             raise ValueError("invalid_rr_net")
         gap = threshold - rr_net
         spread_bps = getattr(ctx, "spread_bps", None)
+        geometry = _geometry_snapshot(sig, ctx, threshold)
         return {
             "available": True,
             "rr_net_snapshot": round(rr_net, 6),
@@ -160,6 +207,7 @@ def _snapshot(sig, decision=None) -> dict[str, Any]:
             "slippage_source": str(getattr(ctx, "slippage_source", "UNKNOWN")),
             "cost_context_handoff": handoff_source,
             "same_nexus_cost_context": True,
+            **geometry,
             "execution_effect": "NONE",
         }
     except Exception as exc:
@@ -289,6 +337,8 @@ async def observe(engine, sig, decision, log) -> None:
                 "[RR_GATE_CALIBRATION] candidate=%s symbol=%s side=%s blocker=%s "
                 "approved=%s rr_net=%.4f rr_min=%.4f rr_gap=%+.4f rr_bucket=%s "
                 "gap_bucket=%s taker_bps=%.3f slippage_bps=%.3f spread_bps=%s "
+                "stop_pct=%.4f target_pct=%.4f cost_pct=%.4f cost_stop=%.4f "
+                "gross_rr=%.4f gross_rr_required=%.4f target_shortfall_pct=%.4f "
                 "cost_context_handoff=%s same_nexus_cost_context=true "
                 "threshold_unchanged=true leverage_unchanged=true execution_effect=NONE",
                 key,
@@ -304,6 +354,13 @@ async def observe(engine, sig, decision, log) -> None:
                 _finite(snapshot.get("taker_fee_bps")),
                 _finite(snapshot.get("slippage_bps")),
                 "NA" if snapshot.get("spread_bps") is None else f"{_finite(snapshot.get('spread_bps')):.3f}",
+                _finite(snapshot.get("stop_distance_pct")),
+                _finite(snapshot.get("target_distance_pct")),
+                _finite(snapshot.get("round_trip_cost_pct")),
+                _finite(snapshot.get("cost_to_stop_ratio")),
+                _finite(snapshot.get("gross_rr_snapshot")),
+                _finite(snapshot.get("gross_rr_required_for_net_threshold")),
+                _finite(snapshot.get("target_shortfall_pct")),
                 snapshot.get("cost_context_handoff"),
             )
         elif snapshot.get("available") is not True:
