@@ -117,6 +117,42 @@ def _filled_base_qty(status: dict, info) -> float:
         return 0.0
 
 
+def _durable_fill_matches_position(record: dict, position_qty: float, info) -> bool:
+    """Validate durable filled_qty across the historic KuCoin unit boundary.
+
+    ManagedOrder.qty has always represented engine/base-asset quantity. Older
+    KuCoin REST fill transitions, however, persisted ``filledSize`` directly,
+    which is a contract count. Modern/test records may already contain base
+    quantity. Accept either representation only when it resolves *exactly* to
+    the same base quantity already proven by record.qty and the live position.
+
+    This is unit reconciliation, not heuristic ownership adoption: a mismatch,
+    invalid value, or missing instrument metadata still fails closed.
+    """
+    if not isinstance(record, dict):
+        return False
+    try:
+        raw = float(record.get("filled_qty", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(raw) or raw < 0:
+        return False
+    if raw == 0:
+        return True
+
+    # Base-unit durable records remain valid without conversion.
+    if _same_base_qty(raw, position_qty, info):
+        return True
+
+    # Backward compatibility for KuCoin records that stored filledSize in
+    # contracts. Conversion must land on the exact same base quantity.
+    try:
+        normalized = float(contracts_to_base(raw, info))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return _same_base_qty(normalized, position_qty, info)
+
+
 def _reject(reason: str, *, symbol: str = "") -> OwnershipProof:
     return OwnershipProof(False, reason, symbol=symbol)
 
@@ -164,12 +200,11 @@ async def prove_restart_ownership(engine, position: dict) -> OwnershipProof:
             continue
         try:
             durable_qty = float(record.get("qty", 0) or 0)
-            durable_filled = float(record.get("filled_qty", 0) or 0)
         except (TypeError, ValueError):
             continue
         if not _same_base_qty(durable_qty, position_qty, info):
             continue
-        if durable_filled > 0 and not _same_base_qty(durable_filled, position_qty, info):
+        if not _durable_fill_matches_position(record, position_qty, info):
             continue
         candidates.append(record)
 
