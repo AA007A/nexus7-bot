@@ -16,6 +16,7 @@ from functools import wraps
 from bot import nexus_persistence
 from bot import nexus_zero_observability
 from bot import notifier
+from bot import rr_gate_calibration
 from bot.logger import log
 
 
@@ -33,6 +34,21 @@ def observe_nexus_validation(method):
         except Exception as exc:
             log.debug(
                 "[NEXUS_PERSISTENCE] best_effort_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
+        # Schedule R:R-gate calibration instead of awaiting it.  create_task()
+        # copies the current contextvars state, including the exact NEXUS cost
+        # context for this candidate, while keeping calibration DB work out of
+        # the trading decision's critical path.
+        try:
+            asyncio.create_task(
+                rr_gate_calibration.observe(self, sig, decision, log)
+            )
+        except Exception as exc:
+            log.debug(
+                "[RR_GATE_CALIBRATION] schedule_failed error=%s "
                 "decision_effect=NONE execution_effect=NONE",
                 type(exc).__name__,
             )
