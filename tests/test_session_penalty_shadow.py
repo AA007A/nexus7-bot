@@ -1,7 +1,11 @@
+import asyncio
 import inspect
+import sys
 from collections import Counter
+from types import SimpleNamespace
 
 from bot.engine import TradingEngine
+from bot.nexus_types import NexusDecision
 from bot import session_penalty_shadow as shadow
 
 
@@ -27,6 +31,32 @@ class _Signal:
     regime = "TRENDING_DOWN"
 
 
+class _NexusEngine:
+    def __init__(self, approved=True):
+        self.calls = 0
+        self.approved = approved
+
+    async def _nexus_validate(self, sig):
+        self.calls += 1
+        if not self.approved:
+            return NexusDecision.wait(sig.symbol, "ensemble veto", 100.0)
+        return NexusDecision(
+            symbol=sig.symbol,
+            decision=sig.direction,
+            confidence=72.0,
+            setup_quality=68.0,
+            market_regime="TRENDING_BEAR",
+            entry=sig.entry,
+            stop_loss=sig.sl,
+            take_profit=sig.tp,
+            risk_reward=2.0,
+            expected_value=0.25,
+            data_quality=100.0,
+            execution_allowed=True,
+            reasoning=["approved"],
+        )
+
+
 def _bars(last_ts=10):
     return [
         {"ts": i, "o": 100.0, "h": 100.2, "l": 99.8, "c": 100.0, "v": 1000.0}
@@ -44,10 +74,14 @@ def _reset():
         shadow._METRICS["outcomes"] = Counter()
         shadow._METRICS["sessions"] = Counter()
         shadow._METRICS["symbols"] = Counter()
+        shadow._METRICS["nexus_counterfactuals"] = 0
+        shadow._METRICS["nexus_approved"] = 0
+        shadow._METRICS["nexus_vetoed"] = 0
+        shadow._METRICS["nexus_timeout"] = 0
+        shadow._METRICS["nexus_error"] = 0
 
 
-def test_doge_asia_penalty_is_observed_without_changing_production_signal():
-    _reset()
+def _enroll_asia_doge():
     original_session = TradingEngine.__dict__["_get_market_session"]
     original_closed = shadow.closed_mtf
     TradingEngine._get_market_session = staticmethod(lambda: "ASIA")
@@ -61,8 +95,14 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     finally:
         TradingEngine._get_market_session = original_session
         shadow.closed_mtf = original_closed
+    return signal
 
+
+def test_doge_asia_penalty_is_observed_without_changing_production_signal():
+    _reset()
+    signal = _enroll_asia_doge()
     snap = shadow.snapshot()
+
     assert signal.score == 64
     assert snap["eligible"] == 1
     assert snap["active"] == 1
@@ -72,6 +112,7 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     assert state["base_score"] == 64
     assert state["adjusted_score"] == 54
     assert state["min_score"] == 60
+    assert state["nexus_status"] == "NOT_CHECKED"
 
 
 def test_signal_not_killed_by_session_penalty_is_not_enrolled():
@@ -102,6 +143,7 @@ def test_same_bar_tp_and_sl_resolves_stop_first():
             "penalty": -10, "base_score": 64, "adjusted_score": 54,
             "entry": 100.0, "sl": 101.0, "tp": 98.0,
             "last_bar_ts": 1, "bars": 0, "mfe_pct": 0.0, "mae_pct": 0.0,
+            "nexus_status": "VETOED", "nexus_approved": False,
         }
     original_closed = shadow.closed_mtf
     shadow.closed_mtf = lambda k15, k1h, k4h: (
@@ -118,6 +160,70 @@ def test_same_bar_tp_and_sl_resolves_stop_first():
     assert snap["outcomes"]["AMBIGUOUS_STOP_FIRST"] == 1
 
 
+def test_exact_nexus_counterfactual_uses_live_validator_once():
+    _reset()
+    signal = _enroll_asia_doge()
+    engine = _NexusEngine(approved=True)
+    original_closed = shadow.closed_mtf
+    shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
+    try:
+        asyncio.run(shadow.observe_nexus_counterfactual(
+            engine, signal, _bars(), _bars(), _bars(), _Log(), timeout_s=1.0,
+        ))
+        asyncio.run(shadow.observe_nexus_counterfactual(
+            engine, signal, _bars(), _bars(), _bars(), _Log(), timeout_s=1.0,
+        ))
+    finally:
+        shadow.closed_mtf = original_closed
+
+    snap = shadow.snapshot()
+    state = next(iter(shadow._ACTIVE.values()))
+    assert engine.calls == 1
+    assert snap["nexus_counterfactuals"] == 1
+    assert snap["nexus_approved"] == 1
+    assert snap["nexus_vetoed"] == 0
+    assert state["nexus_status"] == "APPROVED"
+    assert state["nexus_approved"] is True
+    assert state["nexus_setup_quality"] == 68.0
+
+
+def test_exact_nexus_veto_is_recorded_fail_closed():
+    _reset()
+    signal = _enroll_asia_doge()
+    engine = _NexusEngine(approved=False)
+    original_closed = shadow.closed_mtf
+    shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
+    try:
+        asyncio.run(shadow.observe_nexus_counterfactual(
+            engine, signal, _bars(), _bars(), _bars(), _Log(), timeout_s=1.0,
+        ))
+    finally:
+        shadow.closed_mtf = original_closed
+
+    snap = shadow.snapshot()
+    state = next(iter(shadow._ACTIVE.values()))
+    assert snap["nexus_approved"] == 0
+    assert snap["nexus_vetoed"] == 1
+    assert state["nexus_status"] == "VETOED"
+    assert state["nexus_approved"] is False
+    assert "ensemble veto" in state["nexus_reason"]
+
+
+def test_runtime_engine_lookup_uses_loaded_main_without_import_or_registration():
+    sentinel = object()
+    previous = sys.modules.get("main")
+    sys.modules["main"] = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(engine=sentinel))
+    )
+    try:
+        assert shadow._runtime_engine() is sentinel
+    finally:
+        if previous is None:
+            sys.modules.pop("main", None)
+        else:
+            sys.modules["main"] = previous
+
+
 def test_session_shadow_reads_production_policy_instead_of_copying_table():
     source = inspect.getsource(shadow)
     assert "TradingEngine._SESSION_PENALTY" in source
@@ -125,12 +231,15 @@ def test_session_shadow_reads_production_policy_instead_of_copying_table():
     assert '"AVAXUSDT": -8' not in source
 
 
-def test_session_shadow_has_no_execution_or_threshold_mutation():
+def test_session_shadow_nexus_path_is_read_only_and_fail_closed():
     source = inspect.getsource(shadow)
+    assert "engine._nexus_validate(sig)" in source
+    assert "decision_validation_error" in source
+    assert 'sys.modules.get("main")' in source
     forbidden = (
         "place_order", "create_order", "cancel_order", "close_position",
-        "_nexus_validate", "nexus_ai.decide", "cfg.LEVERAGE =",
+        "._open(", "nexus_ai.decide", "cfg.LEVERAGE =",
         "MIN_ENTRY_SCORE =", "NEXUS_MIN_SCORE =", "MIN_VOLUME_MULT =",
-        "_SESSION_PENALTY =",
+        "_SESSION_PENALTY =", "TradingEngine.__init__ =",
     )
     assert all(token not in source for token in forbidden)

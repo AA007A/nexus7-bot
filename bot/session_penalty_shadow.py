@@ -1,12 +1,15 @@
 """Read-only counterfactual calibration for the pre-NEXUS session score penalty.
 
 Production remains authoritative. This module observes only Analyzer signals that
-would be discarded by TradingEngine's existing session penalty and follows their
-subsequent confirmed 15m path. It never creates a Signal, calls NEXUS, changes a
-threshold, or mutates exchange/risk state.
+would be discarded by TradingEngine's existing session penalty, asks the exact
+production NEXUS validator what it would have decided, and follows the subsequent
+confirmed 15m path. It never creates/returns a trading Signal, calls an order
+route, changes a threshold, or mutates exchange/risk state.
 """
 from __future__ import annotations
 
+import asyncio
+import sys
 import threading
 from collections import Counter
 
@@ -24,6 +27,11 @@ _METRICS = {
     "outcomes": Counter(),
     "sessions": Counter(),
     "symbols": Counter(),
+    "nexus_counterfactuals": 0,
+    "nexus_approved": 0,
+    "nexus_vetoed": 0,
+    "nexus_timeout": 0,
+    "nexus_error": 0,
 }
 
 
@@ -42,6 +50,29 @@ def _closed_15m(k15, k1h=None, k4h=None):
 
 def _state_key(symbol: str, direction: str, bar_ts) -> str:
     return f"{symbol}:{str(direction).upper()}:{bar_ts}"
+
+
+def _decision_reason(decision) -> str:
+    reasoning = getattr(decision, "reasoning", None) or []
+    if reasoning:
+        return str(reasoning[-1])[:500]
+    warnings = getattr(decision, "warnings", None) or []
+    if warnings:
+        return str(warnings[-1])[:500]
+    return str(getattr(decision, "decision", "UNKNOWN"))[:500]
+
+
+def _runtime_engine():
+    """Return the already-created production engine without importing main.
+
+    ``main_hardened`` imports ``main:app`` before serving requests, so the module
+    is present in ``sys.modules`` by the time Analyzer scans run. Looking it up
+    avoids a circular import, explicit registration, and all class monkey-patches.
+    """
+    main_module = sys.modules.get("main")
+    app = getattr(main_module, "app", None) if main_module else None
+    state = getattr(app, "state", None) if app is not None else None
+    return getattr(state, "engine", None) if state is not None else None
 
 
 def _directional_excursions(state: dict, high: float, low: float) -> tuple[float, float]:
@@ -73,11 +104,13 @@ def _resolve(state: dict, outcome: str, exit_price: float, log) -> None:
     _METRICS["outcomes"][outcome] += 1
     log.info(
         "[SESSION_PENALTY_SHADOW_OUTCOME] symbol=%s side=%s session=%s "
-        "penalty=%+d score=%s->%s outcome=%s net_pct=%.4f mfe=%.4f mae=%.4f "
-        "bars=%d decision_effect=NONE execution_effect=NONE",
+        "penalty=%+d score=%s->%s nexus_status=%s nexus_approved=%s "
+        "outcome=%s net_pct=%.4f mfe=%.4f mae=%.4f bars=%d "
+        "decision_effect=NONE execution_effect=NONE",
         state.get("symbol"), state.get("direction"), state.get("session"),
         int(state.get("penalty", 0)), state.get("base_score"),
-        state.get("adjusted_score"), outcome, state.get("net_pct", 0.0),
+        state.get("adjusted_score"), state.get("nexus_status"),
+        state.get("nexus_approved"), outcome, state.get("net_pct", 0.0),
         state.get("mfe_pct", 0.0), state.get("mae_pct", 0.0),
         int(state.get("bars", 0)),
     )
@@ -131,6 +164,96 @@ def _update_outcomes(symbol: str, k15, k1h, k4h, log) -> None:
                     _resolve(state, "TIMEOUT", last, log)
                     _ACTIVE.pop(key, None)
                     break
+
+
+async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
+                                        timeout_s: float = 10.0) -> None:
+    """Ask the exact production NEXUS validator about a session-rejected signal.
+
+    The session policy remains authoritative. This calls ``engine._nexus_validate``
+    directly, validates the returned NexusDecision with the same fail-closed
+    boundary used by LIVE entry, records the answer, and stops. It never calls
+    ``_open`` or any exchange mutation path.
+    """
+    direction = str(getattr(sig, "direction", "")).upper()
+    closed = _closed_15m(k15, k1h, k4h)
+    if direction not in {"LONG", "SHORT"} or not closed or closed[-1].get("ts") is None:
+        return
+    key = _state_key(str(getattr(sig, "symbol", "")), direction, closed[-1]["ts"])
+
+    with _LOCK:
+        state = _ACTIVE.get(key)
+        if not state or state.get("nexus_status") != "NOT_CHECKED":
+            return
+        state["nexus_status"] = "IN_PROGRESS"
+        _METRICS["nexus_counterfactuals"] += 1
+
+    try:
+        decision = await asyncio.wait_for(
+            engine._nexus_validate(sig), timeout=max(0.1, float(timeout_s))
+        )
+        from bot.nexus_types import decision_validation_error
+        schema_error = decision_validation_error(
+            decision,
+            sig.symbol,
+            sig.direction,
+            sig.entry,
+            sig.sl,
+            sig.tp,
+        )
+        approved = schema_error is None and decision.execution_allowed is True
+        reason = schema_error or _decision_reason(decision)
+        with _LOCK:
+            state = _ACTIVE.get(key)
+            if not state:
+                return
+            state["nexus_status"] = "APPROVED" if approved else "VETOED"
+            state["nexus_approved"] = bool(approved)
+            state["nexus_reason"] = reason
+            state["nexus_setup_quality"] = _finite(getattr(decision, "setup_quality", 0.0))
+            state["nexus_confidence"] = _finite(getattr(decision, "confidence", 0.0))
+            state["nexus_regime"] = str(getattr(decision, "market_regime", "UNKNOWN"))
+            _METRICS["nexus_approved" if approved else "nexus_vetoed"] += 1
+
+        log.info(
+            "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s session=%s "
+            "penalty=%+d score=%s->%s nexus_status=%s setup_quality=%.2f "
+            "confidence=%.2f nexus_regime=%s reason=%s exact_live_validator=true "
+            "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
+            state.get("symbol"), state.get("direction"), state.get("session"),
+            int(state.get("penalty", 0)), state.get("base_score"),
+            state.get("adjusted_score"), state.get("nexus_status"),
+            state.get("nexus_setup_quality", 0.0), state.get("nexus_confidence", 0.0),
+            state.get("nexus_regime"), str(reason)[:240],
+        )
+    except asyncio.TimeoutError:
+        with _LOCK:
+            state = _ACTIVE.get(key)
+            if state:
+                state["nexus_status"] = "TIMEOUT"
+                state["nexus_approved"] = False
+                state["nexus_reason"] = "ai_timeout"
+                _METRICS["nexus_timeout"] += 1
+        log.info(
+            "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=TIMEOUT "
+            "exact_live_validator=true production_policy_unchanged=true "
+            "decision_effect=NONE execution_effect=NONE",
+            getattr(sig, "symbol", "UNKNOWN"), direction,
+        )
+    except Exception as exc:
+        with _LOCK:
+            state = _ACTIVE.get(key)
+            if state:
+                state["nexus_status"] = "ERROR"
+                state["nexus_approved"] = False
+                state["nexus_reason"] = type(exc).__name__
+                _METRICS["nexus_error"] += 1
+        log.info(
+            "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=ERROR "
+            "error=%s exact_live_validator=true production_policy_unchanged=true "
+            "decision_effect=NONE execution_effect=NONE",
+            getattr(sig, "symbol", "UNKNOWN"), direction, type(exc).__name__,
+        )
 
 
 def observe(symbol: str, k15, k1h, k4h, *, production_result,
@@ -192,6 +315,12 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
             "mae_pct": 0.0,
             "entry_type": str(getattr(production_result, "entry_type", "UNKNOWN")),
             "regime": str(getattr(production_result, "regime", "UNKNOWN")),
+            "nexus_status": "NOT_CHECKED",
+            "nexus_approved": None,
+            "nexus_reason": "",
+            "nexus_setup_quality": 0.0,
+            "nexus_confidence": 0.0,
+            "nexus_regime": "UNKNOWN",
         }
         _ACTIVE[key] = state
         _METRICS["unique"] += 1
@@ -207,6 +336,24 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
         state["entry_type"], state["regime"], _MAX_BARS,
     )
 
+    # Runtime-only lookup: main_hardened always imports main:app, where the
+    # already-created TradingEngine is stored in app.state.engine. Schedule the
+    # exact production validator once for this confirmed-bar cohort. No import,
+    # registration hook, engine mutation, or order route is involved.
+    engine = _runtime_engine()
+    if engine is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                observe_nexus_counterfactual(
+                    engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
+                )
+            )
+        except RuntimeError:
+            # Unit/offline callers may not have an event loop. Outcome tracking
+            # remains valid; production runtime always calls from the async scan.
+            pass
+
 
 def snapshot() -> dict:
     with _LOCK:
@@ -218,4 +365,9 @@ def snapshot() -> dict:
             "outcomes": dict(_METRICS["outcomes"]),
             "sessions": dict(_METRICS["sessions"]),
             "symbols": dict(_METRICS["symbols"]),
+            "nexus_counterfactuals": int(_METRICS["nexus_counterfactuals"]),
+            "nexus_approved": int(_METRICS["nexus_approved"]),
+            "nexus_vetoed": int(_METRICS["nexus_vetoed"]),
+            "nexus_timeout": int(_METRICS["nexus_timeout"]),
+            "nexus_error": int(_METRICS["nexus_error"]),
         }
