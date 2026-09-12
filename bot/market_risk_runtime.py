@@ -56,6 +56,7 @@ _state: dict[str, Any] = {
     "signals": {},
     "signal_updated_at": {},
     "signal_observed_at": {},
+    "signal_providers": {},
     "providers": {},
 }
 _previous_coinglass_oi: tuple[float, float] | None = None
@@ -97,6 +98,7 @@ def snapshot(now: float | None = None) -> dict[str, Any]:
     return {
         "fresh": bool(signals),
         "signals": signals,
+        "signal_providers": {key: (_state.get("signal_providers", {}) or {}).get(key, "unknown") for key in signals},
         "signal_ages_s": fetch_ages,
         "signal_source_ages_s": source_ages,
         "stale_reasons": stale_reasons,
@@ -113,6 +115,7 @@ def _merge_signals(
     values: dict[str, Any],
     now: float | None = None,
     observed_at: float | dict[str, float] | None = None,
+    provider: str = "unknown",
 ) -> None:
     clean = {k: v for k, v in values.items() if v is not None}
     if not clean:
@@ -121,7 +124,9 @@ def _merge_signals(
     _state.setdefault("signals", {}).update(clean)
     signal_ts = _state.setdefault("signal_updated_at", {})
     source_ts = _state.setdefault("signal_observed_at", {})
+    owners = _state.setdefault("signal_providers", {})
     for key in clean:
+        owners[key] = provider
         signal_ts[key] = ts
         if isinstance(observed_at, dict):
             source_ts[key] = float(observed_at.get(key, ts) or ts)
@@ -347,7 +352,7 @@ async def _coinglass_loop(log) -> None:
                         payload = await response.json(content_type=None)
                         api_codes.append(_coinglass_api_code(payload))
                         values = parse_coinglass_liquidation(payload)
-                        _merge_signals(values)
+                        _merge_signals(values, provider="coinglass_v4")
                         merged_names.extend(values)
                     else:
                         api_codes.append("http_non_200")
@@ -360,7 +365,7 @@ async def _coinglass_loop(log) -> None:
                         payload = await response.json(content_type=None)
                         api_codes.append(_coinglass_api_code(payload))
                         values = parse_coinglass_markets(payload)
-                        _merge_signals(values)
+                        _merge_signals(values, provider="coinglass_v4")
                         merged_names.extend(values)
                     else:
                         api_codes.append("http_non_200")
