@@ -32,6 +32,8 @@ def install(TradingEngine, log) -> None:
     from bot import entry_type_shadow_overlay
     from bot import scoring_safety_hardening
     from bot import trailing_safety_hardening
+    from bot import market_data_integrity
+    from bot import volume_ratio_diagnostics
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
@@ -43,6 +45,10 @@ def install(TradingEngine, log) -> None:
     # Correct trailing geometry on the canonical Position class. This changes
     # only the trailing calculation; native exchange SL/TP remains authoritative.
     trailing_safety_hardening.install(core_engine.Position, strategy.cfg, log)
+
+    # Passive audit of the exact confirmed 15m activity ratio used by strategy.
+    # This never changes candles, thresholds, signals or execution.
+    volume_ratio_diagnostics.install(strategy.Analyzer, market_data_integrity, log)
 
     # Observe the fully composed Adaptive analyzer without changing its return.
     # This measures possible false PULLBACK classifications only after LIVE logic
@@ -67,8 +73,9 @@ def install(TradingEngine, log) -> None:
 
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
-        "entry-type shadow diagnostics, final headline semantics, stop-only CROSS "
-        "target policy, delegated operator margin/drawdown/exit policy and strict "
-        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
-        "leverage_unchanged=true railway_variables_unchanged=true"
+        "entry-type shadow diagnostics, volume-ratio diagnostics, final headline "
+        "semantics, stop-only CROSS target policy, delegated operator "
+        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
+        "are active; thresholds_unchanged=true leverage_unchanged=true "
+        "railway_variables_unchanged=true"
     )
