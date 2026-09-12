@@ -57,7 +57,8 @@ def _install_strategy_fakes(score15=52, volume=0.91, entry_ok=True):
     }
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
     strategy.detect_regime = lambda *args, **kwargs: "TRENDING_DOWN"
-    strategy.ema = lambda values, period: np.array([90.0 if period == 20 else 110.0])
+    # Bearish alignment requires EMA20 < EMA50 and price < EMA20.
+    strategy.ema = lambda values, period: np.array([110.0 if period == 20 else 120.0])
     totals = iter((56, 71, score15))
 
     def fake_score(*args, **kwargs):
