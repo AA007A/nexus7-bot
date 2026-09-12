@@ -1,18 +1,56 @@
 """Startup position loader with explicit KuCoin quantity-unit semantics.
 
 KuCoinPositionUnitAdapter normalizes ``get_positions()[].size`` to BASE_ASSET
-and preserves native contracts in ``sizeContracts``.  The legacy engine startup
+and preserves native contracts in ``sizeContracts``. The legacy engine startup
 loader predates that adapter and unconditionally multiplied ``size`` by the
-contract multiplier a second time.  A recovered 30 AVAX position therefore
+contract multiplier a second time. A recovered 30 AVAX position therefore
 became 3 AVAX locally and was correctly demoted by the post-load ownership
 proof as divergent.
 
-This hardening replaces only the startup reconstruction method.  It performs no
+The legacy startup fallback stop geometry also assumed that a liquidation-price
+buffer would always remain on the protective side of entry. At high leverage a
+nearby liquidation price can violate that assumption (for example a SHORT can
+produce ``liq * 0.98 <= entry``), causing Signal validation to abort the entire
+startup load. The fallback below uses liquidation geometry only when it remains
+strictly protective; otherwise it falls back to the ATR-derived level.
+
+This hardening replaces only the startup reconstruction method. It performs no
 exchange mutation and keeps unknown units fail-closed.
 """
 from __future__ import annotations
 
 import math
+
+
+def _startup_levels(entry: float, liquidation: float, direction: str) -> tuple[float, float]:
+    """Return valid local fallback SL/TP geometry without mutating exchange state."""
+    atr_est = entry * 0.007
+    if direction == "LONG":
+        fallback_sl = entry - atr_est * 1.5
+        liquidation_sl = liquidation * 1.02 if liquidation > 0 else 0.0
+        # A LONG stop must remain strictly below entry. A very near liquidation
+        # can make the 2% buffer cross entry, in which case it is unusable.
+        if 0 < liquidation_sl < entry:
+            sl = max(liquidation_sl, fallback_sl)
+        else:
+            sl = fallback_sl
+        tp = entry + atr_est * 3.0
+    else:
+        fallback_sl = entry + atr_est * 1.5
+        liquidation_sl = liquidation * 0.98 if liquidation > 0 else 0.0
+        # A SHORT stop must remain strictly above entry. At 50x, liquidation can
+        # be close enough that a 2% inward buffer lands below entry.
+        if liquidation_sl > entry:
+            sl = min(liquidation_sl, fallback_sl)
+        else:
+            sl = fallback_sl
+        tp = entry - atr_est * 3.0
+
+    if direction == "LONG" and not (sl < entry < tp):
+        raise ValueError(f"invalid LONG startup geometry: sl={sl} entry={entry} tp={tp}")
+    if direction == "SHORT" and not (tp < entry < sl):
+        raise ValueError(f"invalid SHORT startup geometry: tp={tp} entry={entry} sl={sl}")
+    return sl, tp
 
 
 def install(TradingEngine, log) -> None:
@@ -69,13 +107,15 @@ def install(TradingEngine, log) -> None:
                     continue
 
                 direction = "LONG" if side == "Buy" else "SHORT"
-                atr_est = ep * 0.007
-                if direction == "LONG":
-                    sl = max(liq * 1.02, ep - atr_est * 1.5) if liq > 0 else ep - atr_est * 1.5
-                    tp = ep + atr_est * 3.0
-                else:
-                    sl = min(liq * 0.98, ep + atr_est * 1.5) if liq > 0 else ep + atr_est * 1.5
-                    tp = ep - atr_est * 3.0
+                try:
+                    sl, tp = _startup_levels(ep, liq, direction)
+                except ValueError as exc:
+                    log.critical(
+                        "[STARTUP_POSITION_UNIT] symbol=%s result=REJECTED "
+                        "reason=invalid_startup_geometry error=%s",
+                        sym, str(exc),
+                    )
+                    continue
 
                 unit = str(p.get("sizeUnit", "") or "").strip().upper()
                 try:
@@ -117,8 +157,9 @@ def install(TradingEngine, log) -> None:
                 count += 1
                 log.info(
                     "[STARTUP_POSITION_UNIT] symbol=%s result=LOADED "
-                    "raw_size=%s sizeUnit=%s base_qty=%s source=%s",
-                    sym, size, unit or "UNSPECIFIED", base_size, source,
+                    "raw_size=%s sizeUnit=%s base_qty=%s source=%s "
+                    "local_sl=%s local_tp=%s",
+                    sym, size, unit or "UNSPECIFIED", base_size, source, sl, tp,
                 )
 
             if count:
@@ -130,5 +171,5 @@ def install(TradingEngine, log) -> None:
     TradingEngine._startup_position_unit_hardening_patched = True
     log.warning(
         "[STARTUP_POSITION_UNIT] installed=true explicit_base_asset_passthrough=true "
-        "legacy_contract_conversion=true exchange_mutation=false"
+        "legacy_contract_conversion=true valid_stop_geometry=true exchange_mutation=false"
     )
