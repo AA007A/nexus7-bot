@@ -9,6 +9,7 @@ route, changes a threshold, or mutates exchange/risk state.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from collections import Counter
 
@@ -59,6 +60,19 @@ def _decision_reason(decision) -> str:
     if warnings:
         return str(warnings[-1])[:500]
     return str(getattr(decision, "decision", "UNKNOWN"))[:500]
+
+
+def _runtime_engine():
+    """Return the already-created production engine without importing main.
+
+    ``main_hardened`` imports ``main:app`` before serving requests, so the module
+    is present in ``sys.modules`` by the time Analyzer scans run. Looking it up
+    avoids a circular import, explicit registration, and all class monkey-patches.
+    """
+    main_module = sys.modules.get("main")
+    app = getattr(main_module, "app", None) if main_module else None
+    state = getattr(app, "state", None) if app is not None else None
+    return getattr(state, "engine", None) if state is not None else None
 
 
 def _directional_excursions(state: dict, high: float, low: float) -> tuple[float, float]:
@@ -152,96 +166,14 @@ def _update_outcomes(symbol: str, k15, k1h, k4h, log) -> None:
                     break
 
 
-def observe(symbol: str, k15, k1h, k4h, *, production_result,
-            min_score: int, log) -> None:
-    """Observe one canonical Analyzer evaluation and return no trading value."""
-    _update_outcomes(symbol, k15, k1h, k4h, log)
-    if production_result is None:
-        return
-
-    try:
-        from bot.engine import TradingEngine
-        session = TradingEngine._get_market_session()
-        penalty = int(TradingEngine._SESSION_PENALTY.get(session, {}).get(symbol, 0))
-    except Exception as exc:
-        log.debug(
-            "[SESSION_PENALTY_SHADOW] policy_read_failed error=%s "
-            "decision_effect=NONE execution_effect=NONE",
-            type(exc).__name__,
-        )
-        return
-
-    base_score = int(getattr(production_result, "score", 0) or 0)
-    adjusted = max(0, base_score + penalty)
-    if penalty >= 0 or base_score < int(min_score) or adjusted >= int(min_score):
-        return
-
-    direction = str(getattr(production_result, "direction", "")).upper()
-    entry = _finite(getattr(production_result, "entry", 0.0))
-    sl = _finite(getattr(production_result, "sl", 0.0))
-    tp = _finite(getattr(production_result, "tp", 0.0))
-    if direction not in {"LONG", "SHORT"} or min(entry, sl, tp) <= 0:
-        return
-
-    closed = _closed_15m(k15, k1h, k4h)
-    if not closed or closed[-1].get("ts") is None:
-        return
-    bar_ts = closed[-1]["ts"]
-    key = _state_key(symbol, direction, bar_ts)
-
-    with _LOCK:
-        if key in _SEEN:
-            return
-        _SEEN.add(key)
-        state = {
-            "symbol": symbol,
-            "direction": direction,
-            "session": session,
-            "penalty": penalty,
-            "base_score": base_score,
-            "adjusted_score": adjusted,
-            "min_score": int(min_score),
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "opened_bar_ts": bar_ts,
-            "last_bar_ts": bar_ts,
-            "bars": 0,
-            "mfe_pct": 0.0,
-            "mae_pct": 0.0,
-            "entry_type": str(getattr(production_result, "entry_type", "UNKNOWN")),
-            "regime": str(getattr(production_result, "regime", "UNKNOWN")),
-            "nexus_status": "NOT_CHECKED",
-            "nexus_approved": None,
-            "nexus_reason": "",
-            "nexus_setup_quality": 0.0,
-            "nexus_confidence": 0.0,
-            "nexus_regime": "UNKNOWN",
-        }
-        _ACTIVE[key] = state
-        _METRICS["unique"] += 1
-        _METRICS["eligible"] += 1
-        _METRICS["sessions"][session] += 1
-        _METRICS["symbols"][symbol] += 1
-
-    log.info(
-        "[SESSION_PENALTY_SHADOW] symbol=%s side=%s session=%s penalty=%+d "
-        "score=%d->%d min=%d entry_type=%s regime=%s tracking_bars=%d "
-        "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
-        symbol, direction, session, penalty, base_score, adjusted, int(min_score),
-        state["entry_type"], state["regime"], _MAX_BARS,
-    )
-
-
 async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
                                         timeout_s: float = 10.0) -> None:
     """Ask the exact production NEXUS validator about a session-rejected signal.
 
-    This function is invoked only after production has already decided to reject
-    the signal on the session gate. It calls ``engine._nexus_validate`` directly,
-    validates the returned NexusDecision with the same fail-closed boundary used
-    by LIVE entry, records the answer, and stops. It never calls ``_open`` or any
-    exchange mutation path.
+    The session policy remains authoritative. This calls ``engine._nexus_validate``
+    directly, validates the returned NexusDecision with the same fail-closed
+    boundary used by LIVE entry, records the answer, and stops. It never calls
+    ``_open`` or any exchange mutation path.
     """
     direction = str(getattr(sig, "direction", "")).upper()
     closed = _closed_15m(k15, k1h, k4h)
@@ -322,6 +254,105 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
             "decision_effect=NONE execution_effect=NONE",
             getattr(sig, "symbol", "UNKNOWN"), direction, type(exc).__name__,
         )
+
+
+def observe(symbol: str, k15, k1h, k4h, *, production_result,
+            min_score: int, log) -> None:
+    """Observe one canonical Analyzer evaluation and return no trading value."""
+    _update_outcomes(symbol, k15, k1h, k4h, log)
+    if production_result is None:
+        return
+
+    try:
+        from bot.engine import TradingEngine
+        session = TradingEngine._get_market_session()
+        penalty = int(TradingEngine._SESSION_PENALTY.get(session, {}).get(symbol, 0))
+    except Exception as exc:
+        log.debug(
+            "[SESSION_PENALTY_SHADOW] policy_read_failed error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            type(exc).__name__,
+        )
+        return
+
+    base_score = int(getattr(production_result, "score", 0) or 0)
+    adjusted = max(0, base_score + penalty)
+    if penalty >= 0 or base_score < int(min_score) or adjusted >= int(min_score):
+        return
+
+    direction = str(getattr(production_result, "direction", "")).upper()
+    entry = _finite(getattr(production_result, "entry", 0.0))
+    sl = _finite(getattr(production_result, "sl", 0.0))
+    tp = _finite(getattr(production_result, "tp", 0.0))
+    if direction not in {"LONG", "SHORT"} or min(entry, sl, tp) <= 0:
+        return
+
+    closed = _closed_15m(k15, k1h, k4h)
+    if not closed or closed[-1].get("ts") is None:
+        return
+    bar_ts = closed[-1]["ts"]
+    key = _state_key(symbol, direction, bar_ts)
+
+    with _LOCK:
+        if key in _SEEN:
+            return
+        _SEEN.add(key)
+        state = {
+            "symbol": symbol,
+            "direction": direction,
+            "session": session,
+            "penalty": penalty,
+            "base_score": base_score,
+            "adjusted_score": adjusted,
+            "min_score": int(min_score),
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "opened_bar_ts": bar_ts,
+            "last_bar_ts": bar_ts,
+            "bars": 0,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+            "entry_type": str(getattr(production_result, "entry_type", "UNKNOWN")),
+            "regime": str(getattr(production_result, "regime", "UNKNOWN")),
+            "nexus_status": "NOT_CHECKED",
+            "nexus_approved": None,
+            "nexus_reason": "",
+            "nexus_setup_quality": 0.0,
+            "nexus_confidence": 0.0,
+            "nexus_regime": "UNKNOWN",
+        }
+        _ACTIVE[key] = state
+        _METRICS["unique"] += 1
+        _METRICS["eligible"] += 1
+        _METRICS["sessions"][session] += 1
+        _METRICS["symbols"][symbol] += 1
+
+    log.info(
+        "[SESSION_PENALTY_SHADOW] symbol=%s side=%s session=%s penalty=%+d "
+        "score=%d->%d min=%d entry_type=%s regime=%s tracking_bars=%d "
+        "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
+        symbol, direction, session, penalty, base_score, adjusted, int(min_score),
+        state["entry_type"], state["regime"], _MAX_BARS,
+    )
+
+    # Runtime-only lookup: main_hardened always imports main:app, where the
+    # already-created TradingEngine is stored in app.state.engine. Schedule the
+    # exact production validator once for this confirmed-bar cohort. No import,
+    # registration hook, engine mutation, or order route is involved.
+    engine = _runtime_engine()
+    if engine is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                observe_nexus_counterfactual(
+                    engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
+                )
+            )
+        except RuntimeError:
+            # Unit/offline callers may not have an event loop. Outcome tracking
+            # remains valid; production runtime always calls from the async scan.
+            pass
 
 
 def snapshot() -> dict:
