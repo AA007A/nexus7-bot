@@ -87,10 +87,12 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         RiskManagerV3._operator_drawdown_advisory = True
 
     # engine.py still contains a legacy side effect inside _update_balance():
-    # crossing MAX_DRAWDOWN sets self.active=False after RiskManager.update().
-    # Keep the accounting + one-shot alert intact, but neutralize only that
-    # drawdown-originated deactivation. A pre-existing inactive state is never
-    # re-enabled here, so unrelated operational/safety pauses remain authoritative.
+    # crossing MAX_DRAWDOWN sets self.active=False. Neutralize only a transition
+    # from active -> inactive that happens inside this exact balance-update call
+    # while drawdown is at/above the configured threshold. A pre-existing inactive
+    # engine is never re-enabled, so unrelated operational/safety pauses remain
+    # authoritative. Do not depend on the one-shot _dd_alerted flag: telemetry
+    # state must never decide whether the engine is allowed to keep running.
     if TradingEngine is not None and not getattr(
         TradingEngine, "_operator_drawdown_engine_advisory", False
     ):
@@ -102,10 +104,9 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
             risk = getattr(self, "risk", None)
             drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
-            dd_alerted = bool(getattr(self, "_dd_alerted", False))
             became_inactive = was_active and not bool(getattr(self, "active", False))
 
-            if became_inactive and dd_alerted and drawdown >= float(cfg.MAX_DRAWDOWN):
+            if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
                 self.active = True
                 log.warning(
                     "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
