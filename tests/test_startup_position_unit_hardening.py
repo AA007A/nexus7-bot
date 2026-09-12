@@ -24,7 +24,6 @@ class _Engine:
 class StartupPositionUnitHardeningTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.log = Mock()
-        # Use a fresh subclass each test because install is intentionally idempotent.
         class Engine(_Engine):
             pass
         self.Engine = Engine
@@ -49,6 +48,48 @@ class StartupPositionUnitHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.positions["AVAXUSDT"].qty, 30.0)
         self.assertEqual(engine.positions["AVAXUSDT"].direction, "SHORT")
         self.assertEqual(engine.conversions, [])
+
+    async def test_production_near_liquidation_short_keeps_stop_above_entry(self):
+        # Production regression: legacy geometry computed 7.52 * 0.98 = 7.3696,
+        # which is below the 7.385 SHORT entry and caused Signal validation to
+        # abort the startup loader before ownership post-load verification.
+        engine = self.Engine([{
+            "symbol": "AVAXUSDT",
+            "size": 30.0,
+            "sizeUnit": "BASE_ASSET",
+            "sizeContracts": 300.0,
+            "side": "Sell",
+            "entryPrice": 7.385,
+            "markPrice": 7.30,
+            "liquidationPrice": 7.52,
+            "unrealisedPnl": 2.0,
+        }])
+
+        await engine._load_existing_positions()
+
+        pos = engine.positions["AVAXUSDT"]
+        self.assertEqual(pos.qty, 30.0)
+        self.assertLess(pos.tp, pos.entry)
+        self.assertGreater(pos.sl, pos.entry)
+
+    async def test_near_liquidation_long_keeps_stop_below_entry(self):
+        engine = self.Engine([{
+            "symbol": "ETHUSDT",
+            "size": 0.21,
+            "sizeUnit": "BASE_ASSET",
+            "sizeContracts": 21.0,
+            "side": "Buy",
+            "entryPrice": 100.0,
+            "markPrice": 101.0,
+            "liquidationPrice": 99.0,
+            "unrealisedPnl": 0.21,
+        }])
+
+        await engine._load_existing_positions()
+
+        pos = engine.positions["ETHUSDT"]
+        self.assertLess(pos.sl, pos.entry)
+        self.assertGreater(pos.tp, pos.entry)
 
     async def test_legacy_contract_size_is_converted_exactly_once(self):
         engine = self.Engine([{
