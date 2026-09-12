@@ -16,6 +16,9 @@ class _Log:
     def info(self, message, *args):
         self.lines.append(message % args if args else message)
 
+    def warning(self, message, *args):
+        self.lines.append(message % args if args else message)
+
     def debug(self, message, *args):
         self.lines.append(message % args if args else message)
 
@@ -79,6 +82,7 @@ def _reset():
         shadow._METRICS["nexus_vetoed"] = 0
         shadow._METRICS["nexus_timeout"] = 0
         shadow._METRICS["nexus_error"] = 0
+        shadow._METRICS["nexus_schedule_unavailable"] = 0
 
 
 def _enroll_asia_doge():
@@ -98,6 +102,14 @@ def _enroll_asia_doge():
     return signal
 
 
+def _arm_for_direct_counterfactual():
+    with shadow._LOCK:
+        state = next(iter(shadow._ACTIVE.values()))
+        state["nexus_status"] = "NOT_CHECKED"
+        state["nexus_approved"] = None
+        state["nexus_reason"] = ""
+
+
 def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     _reset()
     signal = _enroll_asia_doge()
@@ -112,7 +124,9 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     assert state["base_score"] == 64
     assert state["adjusted_score"] == 54
     assert state["min_score"] == 60
-    assert state["nexus_status"] == "NOT_CHECKED"
+    assert state["nexus_status"] == "SCHEDULE_UNAVAILABLE"
+    assert state["nexus_approved"] is False
+    assert snap["nexus_schedule_unavailable"] == 1
 
 
 def test_signal_not_killed_by_session_penalty_is_not_enrolled():
@@ -163,6 +177,7 @@ def test_same_bar_tp_and_sl_resolves_stop_first():
 def test_exact_nexus_counterfactual_uses_live_validator_once():
     _reset()
     signal = _enroll_asia_doge()
+    _arm_for_direct_counterfactual()
     engine = _NexusEngine(approved=True)
     original_closed = shadow.closed_mtf
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
@@ -190,6 +205,7 @@ def test_exact_nexus_counterfactual_uses_live_validator_once():
 def test_exact_nexus_veto_is_recorded_fail_closed():
     _reset()
     signal = _enroll_asia_doge()
+    _arm_for_direct_counterfactual()
     engine = _NexusEngine(approved=False)
     original_closed = shadow.closed_mtf
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
@@ -229,6 +245,13 @@ def test_session_shadow_reads_production_policy_instead_of_copying_table():
     assert "TradingEngine._SESSION_PENALTY" in source
     assert '"DOGEUSDT": -10' not in source
     assert '"AVAXUSDT": -8' not in source
+
+
+def test_scheduler_failure_is_explicit_not_silent():
+    source = inspect.getsource(shadow)
+    assert "SCHEDULE_UNAVAILABLE" in source
+    assert "nexus_schedule_unavailable" in source
+    assert "except RuntimeError:\n            pass" not in source
 
 
 def test_session_shadow_nexus_path_is_read_only_and_fail_closed():
