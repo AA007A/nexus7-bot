@@ -72,6 +72,110 @@ def _blocker_class(reason: str) -> str:
     return "OTHER"
 
 
+def _compact_model_snapshot(decision) -> dict[str, dict]:
+    """Return model evidence already attached to the final NEXUS decision."""
+    out: dict[str, dict] = {}
+    for item in getattr(decision, "models", None) or []:
+        if isinstance(item, dict):
+            name = str(item.get("name", "UNKNOWN")).upper()
+            direction = str(item.get("direction", "WAIT")).upper()
+            confidence = _finite(item.get("confidence"))
+            risk = _finite(item.get("risk"))
+            available = bool(item.get("available", True))
+            model_reason = str(item.get("reason", ""))[:240]
+        else:
+            name = str(getattr(item, "name", "UNKNOWN")).upper()
+            raw_direction = getattr(item, "direction", "WAIT")
+            direction = str(getattr(raw_direction, "value", raw_direction)).upper()
+            confidence = _finite(getattr(item, "confidence", 0.0))
+            risk = _finite(getattr(item, "risk_score", 0.0))
+            available = bool(getattr(item, "available", True))
+            model_reason = str(getattr(item, "reason", ""))[:240]
+        out[name] = {
+            "direction": direction,
+            "confidence": round(confidence, 2),
+            "risk": round(risk, 2),
+            "available": available,
+            "reason": model_reason,
+        }
+    return out
+
+
+def _structure_conflict_context(engine, sig, decision, reason: str) -> dict:
+    """Describe 15m local-structure opposition behind an ensemble/MTF veto.
+
+    This is strictly observational. It consumes the same timestamp-confirmed
+    candle policy used by NEXUS and never changes the returned decision.
+    """
+    text = str(reason or "").lower()
+    if "diverge do mtf" not in text:
+        return {}
+
+    models = _compact_model_snapshot(decision)
+    structure_model = models.get("STRUCTURE") or {}
+    candidate_direction = str(getattr(sig, "direction", "")).upper()
+    structure_direction = str(structure_model.get("direction", "WAIT")).upper()
+    if candidate_direction not in {"LONG", "SHORT"}:
+        return {}
+    if structure_direction not in {"LONG", "SHORT"}:
+        return {}
+    if structure_direction == candidate_direction:
+        return {}
+
+    context = {
+        "classification": "LOCAL_STRUCTURE_OPPOSES_MTF_UNRESOLVED",
+        "candidate_mtf_direction": candidate_direction,
+        "structure_model_direction": structure_direction,
+        "trend_model": models.get("TREND"),
+        "structure_model": structure_model,
+        "closed_candle_source": "timestamp_boundary",
+        "execution_effect": "NONE",
+    }
+
+    try:
+        from bot.indicators import smc_analysis
+        from bot.nexus_decision_consistency import closed_mtf
+
+        k15 = engine.client.get_cached_klines(sig.symbol, "15", 200)
+        k1h = engine.client.get_cached_klines(sig.symbol, "60", 100)
+        k4h = engine.client.get_cached_klines(sig.symbol, "240", 120)
+        c15, _, _ = closed_mtf(k15, k1h, k4h)
+        if len(c15) < 20:
+            context["smc_available"] = False
+            context["smc_reason"] = f"closed_15m={len(c15)}<20"
+            return context
+
+        highs = [float(k["h"]) for k in c15]
+        lows = [float(k["l"]) for k in c15]
+        closes = [float(k["c"]) for k in c15]
+        smc = smc_analysis(highs, lows, closes)
+        compact_smc = {
+            "structure": str(smc.get("structure", "UNKNOWN")),
+            "hh": bool(smc.get("hh")),
+            "hl": bool(smc.get("hl")),
+            "lh": bool(smc.get("lh")),
+            "ll": bool(smc.get("ll")),
+            "bos": bool(smc.get("bos")),
+            "bos_dir": str(smc.get("bos_dir", "NONE")),
+            "choch": bool(smc.get("choch")),
+            "last_swing_high": _finite(smc.get("last_swing_high")),
+            "last_swing_low": _finite(smc.get("last_swing_low")),
+            "closed_15m": len(c15),
+        }
+        context["smc_available"] = True
+        context["smc_15m"] = compact_smc
+        if compact_smc["choch"]:
+            context["classification"] = "LOCAL_STRUCTURE_OPPOSES_MTF_CHOCH"
+        elif compact_smc["bos"]:
+            context["classification"] = "LOCAL_STRUCTURE_OPPOSES_MTF_WITH_BOS"
+        else:
+            context["classification"] = "LOCAL_STRUCTURE_OPPOSES_MTF_NO_BOS"
+    except Exception as exc:
+        context["smc_available"] = False
+        context["smc_reason"] = type(exc).__name__
+    return context
+
+
 async def _ensure_table(log) -> bool:
     global _TABLE_READY
     if _TABLE_READY:
@@ -155,7 +259,12 @@ async def _record(engine, sig, decision, log) -> None:
     reason = _decision_reason(decision)
     blocker = "APPROVED" if approved else _blocker_class(reason)
     estimated_cost = estimated_round_trip_cost_pct(sig.symbol)
-    metadata = json.dumps({
+    structure_conflict = (
+        _structure_conflict_context(engine, sig, decision, reason)
+        if not approved and blocker == "MTF"
+        else {}
+    )
+    metadata_obj = {
         "rr": _finite(getattr(sig, "rr", 0.0)),
         "expected_pnl": _finite(getattr(sig, "expected_pnl", 0.0)),
         "signal_regime": str(getattr(sig, "regime", "UNKNOWN")),
@@ -164,7 +273,10 @@ async def _record(engine, sig, decision, log) -> None:
         "tf_15m": str(getattr(sig, "tf_15m", "")),
         "blocker_class": blocker,
         "estimated_round_trip_cost_pct": round(estimated_cost, 5),
-    }, separators=(",", ":"), sort_keys=True)
+    }
+    if structure_conflict:
+        metadata_obj["structure_conflict_shadow"] = structure_conflict
+    metadata = json.dumps(metadata_obj, separators=(",", ":"), sort_keys=True)
     sql = """INSERT INTO opportunity_audit (
         signal_key,created_at,created_epoch,symbol,direction,entry_type,
         entry_price,stop_loss,take_profit,strategy_score,nexus_score,
@@ -203,6 +315,19 @@ async def _record(engine, sig, decision, log) -> None:
             _finite(getattr(decision, "setup_quality", 0.0)),
             estimated_cost, _finite(sig.entry),
         )
+        if structure_conflict:
+            log.info(
+                "[NEXUS_STRUCTURE_CONFLICT_SHADOW] symbol=%s side=%s class=%s "
+                "structure_side=%s bos=%s choch=%s closed_15m=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                sig.symbol,
+                sig.direction,
+                structure_conflict.get("classification"),
+                structure_conflict.get("structure_model_direction"),
+                (structure_conflict.get("smc_15m") or {}).get("bos"),
+                (structure_conflict.get("smc_15m") or {}).get("choch"),
+                (structure_conflict.get("smc_15m") or {}).get("closed_15m"),
+            )
 
 
 async def _evaluate_pending(engine, log) -> None:
