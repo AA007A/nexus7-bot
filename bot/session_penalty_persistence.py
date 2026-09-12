@@ -159,12 +159,13 @@ async def load_open(log, *, max_age_s: float = _MAX_RESTORE_AGE_S):
             state = json.loads(row[1]) if row[1] else {}
             if not isinstance(state, dict):
                 continue
-            # A process restart can interrupt the exact NEXUS read while it is
-            # in flight. Never reclassify that as approval after restart.
-            if state.get("nexus_status") == "IN_PROGRESS":
+            # A restart between enrollment and the final NEXUS answer can leave
+            # either NOT_CHECKED or IN_PROGRESS durable. Both are explicitly
+            # non-authorizing after restart; forward price-path tracking resumes.
+            if state.get("nexus_status") in {"NOT_CHECKED", "IN_PROGRESS"}:
                 state["nexus_status"] = "INTERRUPTED_RESTART"
                 state["nexus_approved"] = False
-                state["nexus_reason"] = "process_restart_during_counterfactual"
+                state["nexus_reason"] = "process_restart_before_counterfactual_completed"
             restored.append((key, state))
         except Exception as exc:
             log.debug(
