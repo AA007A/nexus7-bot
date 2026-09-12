@@ -40,13 +40,12 @@ def _duration_seconds(pos) -> float:
 
 def _min_hold_remaining(pos) -> float:
     configured = getattr(pos, "min_hold_until", None)
-    if configured is not None:
-        try:
-            return max(0.0, float(configured) - time.time())
-        except (TypeError, ValueError):
-            pass
+    if isinstance(configured, (int, float)) and not isinstance(configured, bool):
+        configured_f = float(configured)
+        if configured_f == configured_f and configured_f not in (float("inf"), float("-inf")):
+            return max(0.0, configured_f - time.time())
     # Position historically defines a 90-minute minimum hold. Keep the same
-    # policy even for a reconstructed object that lacks min_hold_until.
+    # policy even for a reconstructed object that lacks a usable min_hold_until.
     try:
         fallback_until = _opened_timestamp(pos.opened_at) + (90 * 60)
         return max(0.0, fallback_until - time.time())
