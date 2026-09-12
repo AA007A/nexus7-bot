@@ -38,6 +38,7 @@ _METRICS = {
     "nexus_vetoed": 0,
     "nexus_timeout": 0,
     "nexus_error": 0,
+    "nexus_schedule_unavailable": 0,
 }
 
 
@@ -213,7 +214,6 @@ def _update_outcomes(symbol: str, k15, k1h, k4h, log) -> None:
                     tp_hit = low <= state["tp"]
                     sl_hit = high >= state["sl"]
 
-                # Conservative same-bar ordering: stop first.
                 if tp_hit and sl_hit:
                     _resolve(key, state, "AMBIGUOUS_STOP_FIRST", state["sl"], log)
                     _ACTIVE.pop(key, None)
@@ -258,12 +258,7 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
         )
         from bot.nexus_types import decision_validation_error
         schema_error = decision_validation_error(
-            decision,
-            sig.symbol,
-            sig.direction,
-            sig.entry,
-            sig.sl,
-            sig.tp,
+            decision, sig.symbol, sig.direction, sig.entry, sig.sl, sig.tp
         )
         approved = schema_error is None and decision.execution_allowed is True
         reason = schema_error or _decision_reason(decision)
@@ -280,7 +275,6 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
             _METRICS["nexus_approved" if approved else "nexus_vetoed"] += 1
             persist_state = dict(state)
         _schedule_persist(key, persist_state, "OPEN", log)
-
         log.info(
             "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s session=%s "
             "penalty=%+d score=%s->%s nexus_status=%s setup_quality=%.2f "
@@ -331,6 +325,26 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
             "production_policy_unchanged=true decision_effect=NONE execution_effect=NONE",
             getattr(sig, "symbol", "UNKNOWN"), direction, type(exc).__name__,
         )
+
+
+def _mark_schedule_unavailable(key: str, state: dict, log, reason: str) -> None:
+    """Make a missing async scheduler explicit instead of silently losing evidence."""
+    with _LOCK:
+        current = _ACTIVE.get(key)
+        if current is None:
+            return
+        current["nexus_status"] = "SCHEDULE_UNAVAILABLE"
+        current["nexus_approved"] = False
+        current["nexus_reason"] = reason
+        _METRICS["nexus_schedule_unavailable"] += 1
+        persist_state = dict(current)
+    _schedule_persist(key, persist_state, "OPEN", log)
+    log.warning(
+        "[SESSION_PENALTY_NEXUS_SHADOW] symbol=%s side=%s nexus_status=SCHEDULE_UNAVAILABLE "
+        "reason=%s recoverable=true production_policy_unchanged=true "
+        "decision_effect=NONE execution_effect=NONE",
+        state.get("symbol"), state.get("direction"), reason,
+    )
 
 
 def observe(symbol: str, k15, k1h, k4h, *, production_result,
@@ -418,16 +432,19 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
     )
 
     engine = _runtime_engine()
-    if engine is not None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                observe_nexus_counterfactual(
-                    engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
-                )
-            )
-        except RuntimeError:
-            pass
+    if engine is None:
+        _mark_schedule_unavailable(key, state, log, "runtime_engine_unavailable")
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as exc:
+        _mark_schedule_unavailable(key, state, log, type(exc).__name__)
+        return
+    loop.create_task(
+        observe_nexus_counterfactual(
+            engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
+        )
+    )
 
 
 def snapshot() -> dict:
@@ -446,5 +463,6 @@ def snapshot() -> dict:
             "nexus_vetoed": int(_METRICS["nexus_vetoed"]),
             "nexus_timeout": int(_METRICS["nexus_timeout"]),
             "nexus_error": int(_METRICS["nexus_error"]),
+            "nexus_schedule_unavailable": int(_METRICS["nexus_schedule_unavailable"]),
             "persistence_restore_complete": bool(_RESTORE_COMPLETE),
         }
