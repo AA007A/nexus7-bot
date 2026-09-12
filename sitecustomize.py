@@ -24,7 +24,7 @@ try:
 except Exception as _sitecustomize_error:
     builtins._nexus_sitecustomize_status = "failed"
     print(
-        "CRITICAL: BGX sitecustomize hardening installation failed: "
+        "CRITICAL: NEXUS sitecustomize hardening installation failed: "
         f"{type(_sitecustomize_error).__name__}: {_sitecustomize_error}",
         file=sys.stderr,
     )
