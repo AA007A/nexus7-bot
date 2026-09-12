@@ -17,6 +17,13 @@ class _Engine:
         self.active = False
 
 
+class _EngineWithoutAlertFlag:
+    async def _update_balance(self):
+        self.risk.drawdown = float(cfg.MAX_DRAWDOWN) + 0.01
+        self._dd_alerted = False
+        self.active = False
+
+
 def test_drawdown_advisory_restores_only_drawdown_originated_active_state():
     policy._install_drawdown_advisory(_Engine, _Log())
 
@@ -35,3 +42,13 @@ def test_drawdown_advisory_does_not_reenable_preexisting_inactive_engine():
     engine.risk = SimpleNamespace(drawdown=0.0)
     asyncio.run(engine._update_balance())
     assert engine.active is False
+
+
+def test_drawdown_advisory_does_not_depend_on_alert_telemetry_state():
+    policy._install_drawdown_advisory(_EngineWithoutAlertFlag, _Log())
+
+    engine = _EngineWithoutAlertFlag()
+    engine.active = True
+    engine.risk = SimpleNamespace(drawdown=0.0)
+    asyncio.run(engine._update_balance())
+    assert engine.active is True
