@@ -1,15 +1,16 @@
-"""Passive Analyzer overlay for entry-type diagnostics.
+"""Passive Analyzer overlay for entry-type and HTF-transition diagnostics.
 
-Runs only after the fully composed analyzer has already returned HOLD. It
-reconstructs the same closed-candle 15m view, asks the live detector for the
-current entry type, and, for PULLBACK only, evaluates multi-bar expansion in
-shadow. The original analyzer return value is always preserved.
+Runs only after the fully composed analyzer has already returned HOLD. It first
+feeds the existing HTF transition shadow, then reconstructs the same closed-
+candle 15m view and, for PULLBACK only, evaluates multi-bar expansion in shadow.
+The original analyzer return value is always preserved.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from bot import entry_type_shadow
+from bot import htf_transition_shadow
 
 
 def install(Analyzer, strategy, log) -> None:
@@ -27,6 +28,10 @@ def install(Analyzer, strategy, log) -> None:
         if result is not None:
             return result
         try:
+            # Read-only transition audit. Forming 4H is diagnostic-only inside
+            # htf_transition_shadow and can never create a Signal/NEXUS call.
+            htf_transition_shadow.observe(symbol, k15, k1h, k4h, result, log)
+
             if len(k4h) < 10 or len(k15) < 20:
                 return result
 
@@ -82,7 +87,8 @@ def install(Analyzer, strategy, log) -> None:
     Analyzer.analyze_mtf = analyze_with_entry_shadow
     Analyzer._entry_type_shadow_installed = True
     log.info(
-        "[ENTRY_TYPE_SHADOW] installed multi_bar_displacement=true closed_candles=true "
-        "shadow_only=true entry_type_unchanged=true thresholds_unchanged=true "
-        "leverage_unchanged=true decision_effect=NONE execution_effect=NONE"
+        "[ENTRY_TYPE_SHADOW] installed multi_bar_displacement=true htf_transition_shadow=true "
+        "forming_4h_diagnostic_only=true closed_candles=true shadow_only=true "
+        "entry_type_unchanged=true thresholds_unchanged=true leverage_unchanged=true "
+        "decision_effect=NONE execution_effect=NONE"
     )
