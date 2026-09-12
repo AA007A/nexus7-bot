@@ -146,15 +146,15 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
     # Production-authoritative binding: capture whatever _update_balance is
     # actually present on the concrete engine instance at run-time, then place
-    # the advisory wrapper directly in the instance __dict__. This survives a
-    # later class-level replacement/re-wrap and guarantees that run()'s
+    # the advisory wrapper directly on that instance. This survives a later
+    # class-level replacement/re-wrap and guarantees that run()'s
     # ``self._update_balance()`` resolves to the advisory policy.
     if (hasattr(TradingEngine, "run") and
             not TradingEngine.__dict__.get("_operator_drawdown_run_binding", False)):
         previous_run = TradingEngine.run
 
         async def _run_with_instance_drawdown_advisory(self, *args, **kwargs):
-            if not self.__dict__.get("_operator_drawdown_instance_advisory", False):
+            if not getattr(self, "_operator_drawdown_instance_advisory", False):
                 current_bound_update = self._update_balance
                 self._update_balance = _protect_drawdown_update(
                     self,
