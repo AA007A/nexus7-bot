@@ -38,10 +38,11 @@ def observe_nexus_validation(method):
                 type(exc).__name__,
             )
 
-        # Schedule R:R-gate calibration instead of awaiting it.  create_task()
-        # copies the current contextvars state, including the exact NEXUS cost
-        # context for this candidate, while keeping calibration DB work out of
-        # the trading decision's critical path.
+        # Schedule R:R-gate calibration instead of awaiting it. The canonical
+        # live-cost wrapper carries its exact frozen candidate cost snapshot on
+        # the decision object before resetting its internal ContextVar. This
+        # task consumes that private telemetry handoff and performs no new
+        # exchange/API request or trading-state mutation.
         try:
             asyncio.create_task(
                 rr_gate_calibration.observe(self, sig, decision, log)

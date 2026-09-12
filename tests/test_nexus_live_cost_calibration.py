@@ -16,7 +16,6 @@ def test_ticker_spread_slippage_major_is_half_spread_plus_impact_floor():
     slip, source, spread_bps = calibration.slippage_from_ticker(
         {"bid": 99.99, "ask": 100.01}, "BTCUSDT"
     )
-    # ~2 bps full spread => ~1 bp half spread + 1 bp impact floor.
     assert 0.00019 < slip < 0.00021
     assert source == "ticker_half_spread_plus_impact"
     assert 1.9 < spread_bps < 2.1
@@ -72,7 +71,6 @@ class _FakeEngine:
         self._nexus_module = nexus_module
 
     async def _nexus_validate(self, sig):
-        # Mirrors production's important behavior: NEXUS runs in a worker thread.
         return await asyncio.to_thread(
             self._nexus_module.expected_value,
             0.60, 100.0, 99.0, 102.0,
@@ -129,6 +127,21 @@ def test_fee_reader_is_cached_across_candidates():
     asyncio.run(engine._nexus_validate(sig))
     asyncio.run(engine._nexus_validate(sig))
     assert engine.client.fee_reads == 1
+
+
+def test_dict_decision_handoff_is_optional_and_never_breaks_validation():
+    ctx = calibration.NexusCostContext(
+        symbol="BTCUSDT",
+        taker_fee=0.00042,
+        slippage=0.0002,
+        fee_source="test",
+        slippage_source="test",
+        spread_bps=2.0,
+    )
+    decision = {"decision": "WAIT"}
+    before = dict(decision)
+    assert calibration._attach_cost_context(decision, ctx, _Log()) is False
+    assert decision == before
 
 
 def test_expected_value_outside_candidate_context_keeps_legacy_defaults():

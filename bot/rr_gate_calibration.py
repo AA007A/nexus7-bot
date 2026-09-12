@@ -1,8 +1,11 @@
 """Read-only net-R:R calibration linked to ``opportunity_audit``.
 
-This module runs only as post-decision telemetry.  A task created while the
-canonical NEXUS cost ContextVar is active inherits the exact candidate fee and
-slippage context, so we can measure net R:R without another exchange/API call.
+This module runs only as post-decision telemetry. The canonical NEXUS cost
+wrapper attaches its exact frozen candidate cost snapshot to the decision before
+resetting the internal ContextVar. This module consumes that handoff without any
+new exchange/API request. A live ContextVar remains only as a compatibility
+fallback for direct/in-scope calls.
+
 It enriches the existing opportunity-audit row and emits calibration evidence;
 it never authorizes execution or changes thresholds, leverage, sizing, risk,
 orders, positions, or exchange state.
@@ -97,25 +100,34 @@ def _reason_rr_net(reason: str) -> float | None:
     return value if value >= 0 else None
 
 
-def _snapshot(sig) -> dict[str, Any]:
-    """Compute net R:R from the exact inherited NEXUS cost context.
+def _cost_context(decision=None):
+    """Return the exact decision handoff, falling back to an in-scope ContextVar."""
+    handed_off = getattr(decision, "_bgx_nexus_cost_context", None)
+    if handed_off is not None:
+        return handed_off, "decision_handoff"
+    inherited = _COST_CONTEXT.get()
+    if inherited is not None:
+        return inherited, "contextvar_fallback"
+    return None, "unavailable"
 
-    No I/O occurs here.  If the context is missing or belongs to another symbol,
-    the sample is marked unavailable instead of inventing a cost estimate.
-    """
+
+def _snapshot(sig, decision=None) -> dict[str, Any]:
+    """Compute net R:R from the exact NEXUS cost snapshot with no I/O."""
     threshold = _rr_net_threshold()
     symbol = str(getattr(sig, "symbol", "UNKNOWN"))
-    ctx = _COST_CONTEXT.get()
+    ctx, handoff_source = _cost_context(decision)
     if ctx is None:
         return {
             "available": False,
             "reason": "nexus_cost_context_unavailable",
+            "cost_context_handoff": handoff_source,
             "rr_net_threshold": round(threshold, 6),
         }
     if str(getattr(ctx, "symbol", "")) != symbol:
         return {
             "available": False,
             "reason": "nexus_cost_context_symbol_mismatch",
+            "cost_context_handoff": handoff_source,
             "rr_net_threshold": round(threshold, 6),
         }
 
@@ -145,6 +157,7 @@ def _snapshot(sig) -> dict[str, Any]:
             "spread_bps": None if spread_bps is None else round(_finite(spread_bps), 4),
             "fee_source": str(getattr(ctx, "fee_source", "UNKNOWN")),
             "slippage_source": str(getattr(ctx, "slippage_source", "UNKNOWN")),
+            "cost_context_handoff": handoff_source,
             "same_nexus_cost_context": True,
             "execution_effect": "NONE",
         }
@@ -152,6 +165,7 @@ def _snapshot(sig) -> dict[str, Any]:
         return {
             "available": False,
             "reason": type(exc).__name__,
+            "cost_context_handoff": handoff_source,
             "rr_net_threshold": round(threshold, 6),
         }
 
@@ -252,7 +266,7 @@ async def observe(engine, sig, decision, log) -> None:
 
         key, metadata_raw, approved, decision_reason = row
         metadata = _load_metadata(metadata_raw)
-        snapshot = _snapshot(sig)
+        snapshot = _snapshot(sig, decision)
         rounded_gate_rr = _reason_rr_net(decision_reason)
         if rounded_gate_rr is not None:
             snapshot["rr_net_gate_reason_rounded"] = rounded_gate_rr
@@ -267,8 +281,8 @@ async def observe(engine, sig, decision, log) -> None:
                 "[RR_GATE_CALIBRATION] candidate=%s symbol=%s side=%s blocker=%s "
                 "approved=%s rr_net=%.4f rr_min=%.4f rr_gap=%+.4f rr_bucket=%s "
                 "gap_bucket=%s taker_bps=%.3f slippage_bps=%.3f spread_bps=%s "
-                "same_nexus_cost_context=true threshold_unchanged=true "
-                "leverage_unchanged=true execution_effect=NONE",
+                "cost_context_handoff=%s same_nexus_cost_context=true "
+                "threshold_unchanged=true leverage_unchanged=true execution_effect=NONE",
                 key,
                 getattr(sig, "symbol", "UNKNOWN"),
                 getattr(sig, "direction", "UNKNOWN"),
@@ -282,12 +296,14 @@ async def observe(engine, sig, decision, log) -> None:
                 _finite(snapshot.get("taker_fee_bps")),
                 _finite(snapshot.get("slippage_bps")),
                 "NA" if snapshot.get("spread_bps") is None else f"{_finite(snapshot.get('spread_bps')):.3f}",
+                snapshot.get("cost_context_handoff"),
             )
         elif snapshot.get("available") is not True:
             log.debug(
-                "[RR_GATE_CALIBRATION] unavailable symbol=%s reason=%s "
+                "[RR_GATE_CALIBRATION] unavailable symbol=%s reason=%s handoff=%s "
                 "threshold_unchanged=true execution_effect=NONE",
                 getattr(sig, "symbol", "UNKNOWN"), snapshot.get("reason"),
+                snapshot.get("cost_context_handoff"),
             )
 
         await _emit_available_evidence(log)

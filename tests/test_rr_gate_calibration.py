@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from bot import nexus_validation_observability as validation_obs
 from bot import rr_gate_calibration as cal
+from bot import nexus_live_cost_calibration as live_cost
 from bot.nexus_live_cost_calibration import NexusCostContext, _COST_CONTEXT
 
 
@@ -32,14 +33,8 @@ def test_reason_parser_reads_canonical_liquid_rr_message():
     assert cal._reason_rr_net("unrelated veto") is None
 
 
-def test_snapshot_uses_inherited_nexus_cost_context_without_io():
-    sig = SimpleNamespace(
-        symbol="LTCUSDT",
-        entry=100.0,
-        sl=101.0,
-        tp=102.0,
-    )
-    ctx = NexusCostContext(
+def _ctx():
+    return NexusCostContext(
         symbol="LTCUSDT",
         taker_fee=0.0006,
         slippage=0.0003,
@@ -47,7 +42,20 @@ def test_snapshot_uses_inherited_nexus_cost_context_without_io():
         slippage_source="test_slippage",
         spread_bps=2.0,
     )
-    token = _COST_CONTEXT.set(ctx)
+
+
+def _sig():
+    return SimpleNamespace(
+        symbol="LTCUSDT",
+        entry=100.0,
+        sl=101.0,
+        tp=102.0,
+    )
+
+
+def test_snapshot_uses_in_scope_contextvar_without_io():
+    sig = _sig()
+    token = _COST_CONTEXT.set(_ctx())
     try:
         snapshot = cal._snapshot(sig)
     finally:
@@ -55,6 +63,7 @@ def test_snapshot_uses_inherited_nexus_cost_context_without_io():
 
     assert snapshot["available"] is True
     assert snapshot["same_nexus_cost_context"] is True
+    assert snapshot["cost_context_handoff"] == "contextvar_fallback"
     assert snapshot["rr_net_snapshot"] > 0
     assert snapshot["rr_net_threshold"] == 1.60
     assert snapshot["taker_fee_bps"] == 6.0
@@ -63,16 +72,65 @@ def test_snapshot_uses_inherited_nexus_cost_context_without_io():
     assert snapshot["slippage_source"] == "test_slippage"
 
 
-def test_snapshot_fails_closed_when_cost_context_is_missing():
-    sig = SimpleNamespace(symbol="LTCUSDT", entry=100.0, sl=101.0, tp=102.0)
+def test_snapshot_uses_decision_handoff_after_contextvar_reset():
+    sig = _sig()
+    decision = SimpleNamespace(_bgx_nexus_cost_context=_ctx())
     token = _COST_CONTEXT.set(None)
     try:
-        snapshot = cal._snapshot(sig)
+        snapshot = cal._snapshot(sig, decision)
+    finally:
+        _COST_CONTEXT.reset(token)
+
+    assert snapshot["available"] is True
+    assert snapshot["same_nexus_cost_context"] is True
+    assert snapshot["cost_context_handoff"] == "decision_handoff"
+    assert snapshot["taker_fee_bps"] == 6.0
+    assert snapshot["slippage_bps"] == 3.0
+    assert snapshot["spread_bps"] == 2.0
+
+
+def test_decision_handoff_wins_over_unrelated_contextvar():
+    sig = _sig()
+    decision = SimpleNamespace(_bgx_nexus_cost_context=_ctx())
+    wrong = NexusCostContext(
+        symbol="BTCUSDT",
+        taker_fee=0.001,
+        slippage=0.001,
+        fee_source="wrong",
+        slippage_source="wrong",
+        spread_bps=9.0,
+    )
+    token = _COST_CONTEXT.set(wrong)
+    try:
+        snapshot = cal._snapshot(sig, decision)
+    finally:
+        _COST_CONTEXT.reset(token)
+
+    assert snapshot["available"] is True
+    assert snapshot["cost_context_handoff"] == "decision_handoff"
+    assert snapshot["fee_source"] == "test_fee"
+    assert snapshot["slippage_source"] == "test_slippage"
+
+
+def test_snapshot_fails_closed_when_both_cost_sources_are_missing():
+    sig = _sig()
+    decision = SimpleNamespace()
+    token = _COST_CONTEXT.set(None)
+    try:
+        snapshot = cal._snapshot(sig, decision)
     finally:
         _COST_CONTEXT.reset(token)
 
     assert snapshot["available"] is False
     assert snapshot["reason"] == "nexus_cost_context_unavailable"
+    assert snapshot["cost_context_handoff"] == "unavailable"
+
+
+def test_live_cost_wrapper_contains_private_decision_handoff_before_reset():
+    source = inspect.getsource(live_cost)
+    assert 'setattr(decision, "_bgx_nexus_cost_context", ctx)' in source
+    assert "_COST_CONTEXT.reset(token)" in source
+    assert source.index('setattr(decision, "_bgx_nexus_cost_context", ctx)') < source.index("_COST_CONTEXT.reset(token)")
 
 
 def test_rr_calibration_is_scheduled_post_decision_and_not_awaited():
@@ -80,6 +138,7 @@ def test_rr_calibration_is_scheduled_post_decision_and_not_awaited():
     assert "rr_gate_calibration.observe" in source
     assert "asyncio.create_task" in source
     assert "await rr_gate_calibration.observe" not in source
+    assert "exact frozen candidate cost snapshot" in source
 
 
 def test_rr_calibration_has_no_execution_or_threshold_mutation():
