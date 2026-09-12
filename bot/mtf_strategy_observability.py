@@ -22,6 +22,27 @@ def observe_analyze_mtf(func):
             fee_mult=fee_mult,
             vol_mult=vol_mult,
         )
+
+        # Study only canonical setups that are HOLD because the 15m activity
+        # ratio is below 0.40 while every other strategy-stage condition can
+        # still be satisfied. This observer never returns a Signal or calls the
+        # exchange/NEXUS path.
+        try:
+            from bot import volume_gate_shadow as volume_shadow
+            volume_shadow.observe(
+                symbol, k15, k1h, k4h,
+                production_result=result,
+                min_score=min_score,
+                fee_mult=fee_mult,
+                log=log,
+            )
+        except Exception as exc:
+            log.debug(
+                "[VOLUME_GATE_SHADOW] observability_failed error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                type(exc).__name__,
+            )
+
         try:
             # Lazy import avoids a module-import cycle: mtf_shadow consumes
             # strategy helpers, while strategy owns this decorator explicitly.
