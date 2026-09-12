@@ -1,7 +1,15 @@
-"""Minimal fail-closed startup entrypoint for NEXUS-7 runtime hardenings.
+"""Minimal fail-closed startup entrypoint for BGX runtime hardenings.
 
 Installation ordering lives in ``bot.runtime_bootstrap`` so the runtime stack is
 explicit and testable while hardenings are progressively migrated into core.
+
+``main_hardened.py`` is also a real production entrypoint and imports
+``bot.service_readiness`` for Railway's infrastructure readiness endpoint. This
+reference is documented here because the self-check scans root startup
+entrypoints, including this module, when determining whether a bot module is
+actually orphaned. Keeping the production entrypoint dependency visible here
+prevents a false dead-code warning without importing or executing readiness
+logic during interpreter startup.
 """
 import builtins
 import sys
