@@ -4,16 +4,32 @@ This module does not create Signals, call NEXUS, touch the exchange, or mutate
 strategy thresholds. It records one compact reject snapshot per symbol and
 confirmed 15m candle so we can distinguish a single near-threshold miss from a
 setup that fails several adaptive requirements simultaneously.
+
+It also keeps a process-local aggregate for each confirmed 15m candle. The
+aggregate is observability only: it summarizes which gates fail most often and
+how many candidates are genuine near-misses versus broad multi-gate rejects.
 """
 from __future__ import annotations
 
 import threading
-from collections import deque
+from collections import Counter, deque
 from typing import Any
 
 _LOCK = threading.Lock()
 _SEEN: set[tuple[str, object]] = set()
 _SEEN_ORDER = deque(maxlen=5000)
+
+# One process-local aggregate bucket per latest confirmed 15m candle. This is
+# deliberately not persisted and never feeds a decision. A summary is emitted
+# once the bucket has enough independent symbols to be informative, and the
+# previous bucket is also flushed when a newer candle begins.
+_AGG_TS: object | None = None
+_AGG_FAILURES: Counter[str] = Counter()
+_AGG_SAMPLES = 0
+_AGG_NEAR_MISS_1 = 0
+_AGG_NEAR_MISS_2 = 0
+_AGG_EMITTED = False
+_AGG_MIN_SAMPLES = 6
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -45,6 +61,83 @@ def _remember(symbol: str, k15) -> bool:
         _SEEN.add(key)
         _SEEN_ORDER.append(key)
         return True
+
+
+def _format_top_failures(counter: Counter[str], limit: int = 6) -> str:
+    if not counter:
+        return "NONE"
+    return ",".join(f"{name}:{count}" for name, count in counter.most_common(limit))
+
+
+def _emit_aggregate(log, *, candle_ts: object, samples: int,
+                    failures: Counter[str], near1: int, near2: int,
+                    trigger: str) -> None:
+    if samples <= 0:
+        return
+    multi = max(0, samples - near2)
+    log.info(
+        "[ADAPTIVE_MTF_FUNNEL_SUMMARY] candle=%s samples=%d "
+        "near_miss_1=%d near_miss_2=%d multi_gate_gt2=%d "
+        "top_failures=%s trigger=%s thresholds_unchanged=true "
+        "leverage_unchanged=true decision_effect=NONE execution_effect=NONE",
+        candle_ts, samples, near1, near2, multi,
+        _format_top_failures(failures), trigger,
+    )
+
+
+def _aggregate_snapshot(*, candle_ts: object, snapshot: dict[str, Any], log) -> None:
+    """Update/emit read-only per-candle rejection statistics."""
+    global _AGG_TS, _AGG_FAILURES, _AGG_SAMPLES
+    global _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2, _AGG_EMITTED
+
+    with _LOCK:
+        if _AGG_TS is not None and candle_ts != _AGG_TS:
+            previous = (
+                _AGG_TS, _AGG_SAMPLES, Counter(_AGG_FAILURES),
+                _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2, _AGG_EMITTED,
+            )
+            _AGG_TS = candle_ts
+            _AGG_FAILURES = Counter()
+            _AGG_SAMPLES = 0
+            _AGG_NEAR_MISS_1 = 0
+            _AGG_NEAR_MISS_2 = 0
+            _AGG_EMITTED = False
+        else:
+            previous = None
+            if _AGG_TS is None:
+                _AGG_TS = candle_ts
+
+        failures = list(snapshot.get("failures") or [])
+        count = int(snapshot.get("failure_count") or len(failures))
+        _AGG_FAILURES.update(failures)
+        _AGG_SAMPLES += 1
+        if count <= 1:
+            _AGG_NEAR_MISS_1 += 1
+        if count <= 2:
+            _AGG_NEAR_MISS_2 += 1
+
+        immediate = None
+        if _AGG_SAMPLES >= _AGG_MIN_SAMPLES and not _AGG_EMITTED:
+            _AGG_EMITTED = True
+            immediate = (
+                _AGG_TS, _AGG_SAMPLES, Counter(_AGG_FAILURES),
+                _AGG_NEAR_MISS_1, _AGG_NEAR_MISS_2,
+            )
+
+    # Logging happens outside the lock; no trading state is involved.
+    if previous is not None:
+        pts, psamples, pfailures, pnear1, pnear2, pemitted = previous
+        if not pemitted:
+            _emit_aggregate(
+                log, candle_ts=pts, samples=psamples, failures=pfailures,
+                near1=pnear1, near2=pnear2, trigger="candle_rollover",
+            )
+    if immediate is not None:
+        its, isamples, ifailures, inear1, inear2 = immediate
+        _emit_aggregate(
+            log, candle_ts=its, samples=isamples, failures=ifailures,
+            near1=inear1, near2=inear2, trigger="sample_threshold",
+        )
 
 
 def failure_vector(*, direction: str, bull_4h: bool, bear_4h: bool,
@@ -162,4 +255,7 @@ def observe_reject(*, symbol: str, k15, direction: str, reason: str,
         snapshot["volume_ratio"], snapshot["gap_volume"],
         snapshot["adx_15m"], snapshot["gap_adx"], entry_type,
         snapshot["extension_atr"], snapshot["extension_excess"],
+    )
+    _aggregate_snapshot(
+        candle_ts=_closed_15m_ts(k15), snapshot=snapshot, log=log
     )
