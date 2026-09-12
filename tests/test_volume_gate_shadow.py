@@ -50,33 +50,43 @@ def _bars(n, start=1_700_000_000_000):
     return out
 
 
-def test_volume_shadow_registers_only_sub_040_candidate_that_otherwise_survives(monkeypatch):
+def test_volume_shadow_registers_only_sub_040_candidate_that_otherwise_survives():
     _reset_shadow_state()
     k15, k1h, k4h = _bars(30), _bars(20), _bars(15)
 
-    monkeypatch.setattr(strategy, "detect_regime", lambda *a, **k: "TRENDING_UP")
-    monkeypatch.setattr(strategy, "ema", lambda closes, period: np.array([99.0 if period == 20 else 98.0]))
-    monkeypatch.setattr(strategy, "atr", lambda h, l, c: np.array([1.0] * len(c)))
-    monkeypatch.setattr(
-        strategy,
-        "score_tf",
-        lambda *a, **k: {"ok": True, "total": 70, "rsi_v": 50.0,
-                         "vol_r": 0.35, "aligned": True},
-    )
-    monkeypatch.setattr(strategy, "detect_entry", lambda *a, **k: (True, "PULLBACK"))
+    originals = {
+        "detect_regime": strategy.detect_regime,
+        "ema": strategy.ema,
+        "atr": strategy.atr,
+        "score_tf": strategy.score_tf,
+        "detect_entry": strategy.detect_entry,
+    }
+    try:
+        strategy.detect_regime = lambda *a, **k: "TRENDING_UP"
+        strategy.ema = lambda closes, period: np.array([99.0 if period == 20 else 98.0])
+        strategy.atr = lambda h, l, c: np.array([1.0] * len(c))
+        strategy.score_tf = lambda *a, **k: {
+            "ok": True, "total": 70, "rsi_v": 50.0,
+            "vol_r": 0.35, "aligned": True,
+        }
+        strategy.detect_entry = lambda *a, **k: (True, "PULLBACK")
 
-    shadow.observe(
-        "TESTUSDT", k15, k1h, k4h,
-        production_result=None, min_score=60, fee_mult=2.0, log=_Log(),
-    )
-    snap = shadow.snapshot()
+        shadow.observe(
+            "TESTUSDT", k15, k1h, k4h,
+            production_result=None, min_score=60, fee_mult=2.0, log=_Log(),
+        )
+        snap = shadow.snapshot()
 
-    assert snap["eligible"] == 1
-    assert snap["active"] == 1
-    assert snap["thresholds"]["0.25"]["eligible"] == 1
-    assert snap["thresholds"]["0.3"]["eligible"] == 1
-    assert snap["thresholds"]["0.35"]["eligible"] == 1
-    assert snap["thresholds"]["0.4"]["eligible"] == 0
+        assert snap["eligible"] == 1
+        assert snap["active"] == 1
+        assert snap["thresholds"]["0.25"]["eligible"] == 1
+        assert snap["thresholds"]["0.3"]["eligible"] == 1
+        assert snap["thresholds"]["0.35"]["eligible"] == 1
+        assert snap["thresholds"]["0.4"]["eligible"] == 0
+    finally:
+        for name, value in originals.items():
+            setattr(strategy, name, value)
+        _reset_shadow_state()
 
 
 def test_volume_shadow_same_bar_tp_sl_is_conservative_stop_first():
@@ -98,6 +108,7 @@ def test_volume_shadow_same_bar_tp_sl_is_conservative_stop_first():
     assert snap["resolved"] == 1
     assert snap["outcomes"]["AMBIGUOUS_STOP_FIRST"] == 1
     assert snap["thresholds"]["0.35"]["sl"] == 1
+    _reset_shadow_state()
 
 
 def test_volume_shadow_has_no_execution_or_threshold_mutation():
