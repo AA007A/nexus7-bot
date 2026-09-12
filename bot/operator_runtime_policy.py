@@ -24,7 +24,19 @@ from bot.config import cfg
 MARGIN_FRACTION = 0.50
 
 
-def _install_drawdown_advisory(TradingEngine, log) -> None:
+def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
+    """Install advisory drawdown semantics.
+
+    Backward compatible with the previous private helper signature
+    ``_install_drawdown_advisory(log)`` used by regression tests. The engine
+    wrapper is installed only when a TradingEngine class is explicitly passed.
+    """
+    if log is None:
+        TradingEngine = None
+        log = TradingEngine_or_log
+    else:
+        TradingEngine = TradingEngine_or_log
+
     from bot.risk import RiskManager
     from bot.risk_manager_v3 import RiskManagerV3
 
@@ -79,7 +91,9 @@ def _install_drawdown_advisory(TradingEngine, log) -> None:
     # Keep the accounting + one-shot alert intact, but neutralize only that
     # drawdown-originated deactivation. A pre-existing inactive state is never
     # re-enabled here, so unrelated operational/safety pauses remain authoritative.
-    if not getattr(TradingEngine, "_operator_drawdown_engine_advisory", False):
+    if TradingEngine is not None and not getattr(
+        TradingEngine, "_operator_drawdown_engine_advisory", False
+    ):
         previous_update_balance = TradingEngine._update_balance
 
         async def _update_balance_advisory(self, *args, **kwargs):
