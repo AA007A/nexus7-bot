@@ -76,6 +76,38 @@ def test_snapshot_uses_in_scope_contextvar_without_io():
     assert snapshot["slippage_source"] == "test_slippage"
 
 
+def test_snapshot_decomposes_exact_cost_adjusted_geometry():
+    sig = _sig()
+    decision = SimpleNamespace(_bgx_nexus_cost_context=_ctx())
+    snapshot = cal._snapshot(sig, decision)
+
+    # entry=100, stop distance=1%, target distance=2%; exact round-trip cost
+    # is 2*(6bps+3bps)=18bps=0.18%.
+    assert snapshot["geometry_available"] is True
+    assert snapshot["stop_distance_pct"] == 1.0
+    assert snapshot["target_distance_pct"] == 2.0
+    assert snapshot["round_trip_cost_pct"] == 0.18
+    assert snapshot["cost_to_stop_ratio"] == 0.18
+    assert snapshot["gross_rr_snapshot"] == 2.0
+    # Required gross gain for net RR 1.60:
+    # 1.60*(1.00%+0.18%)+0.18%=2.068% => gross RR 2.068.
+    assert snapshot["gross_rr_required_for_net_threshold"] == 2.068
+    assert snapshot["required_target_distance_pct"] == 2.068
+    assert snapshot["target_shortfall_pct"] == 0.068
+
+
+def test_wider_stop_reduces_cost_load_for_same_gross_rr():
+    ctx = _ctx()
+    narrow = SimpleNamespace(entry=100.0, sl=99.5, tp=101.0)
+    wide = SimpleNamespace(entry=100.0, sl=99.0, tp=102.0)
+    n = cal._geometry_snapshot(narrow, ctx, 1.60)
+    w = cal._geometry_snapshot(wide, ctx, 1.60)
+    assert n["gross_rr_snapshot"] == 2.0
+    assert w["gross_rr_snapshot"] == 2.0
+    assert n["cost_to_stop_ratio"] > w["cost_to_stop_ratio"]
+    assert n["gross_rr_required_for_net_threshold"] > w["gross_rr_required_for_net_threshold"]
+
+
 def test_snapshot_uses_decision_handoff_after_contextvar_reset():
     sig = _sig()
     decision = SimpleNamespace(_bgx_nexus_cost_context=_ctx())
