@@ -28,6 +28,7 @@ def install(TradingEngine, log) -> None:
     from bot import cross_geometry_target_policy as cross_target_policy
     from bot import operator_runtime_policy
     from bot import exit_policy_telemetry
+    from bot import operator_loss_policy
     from bot import entry_type_shadow_overlay
     from bot import scoring_safety_hardening
     from bot import trailing_safety_hardening
@@ -57,6 +58,7 @@ def install(TradingEngine, log) -> None:
     # assign TradingEngine/RiskManager methods or mutate exchange state.
     operator_runtime_policy.install(TradingEngine, log)
     exit_policy_telemetry.install(TradingEngine, log)
+    operator_loss_policy.install(TradingEngine, log)
 
     # Install last so it observes the already-composed closed-candle/HTF regime
     # semantics and cost-calibrated NEXUS decision path. It does not alter any

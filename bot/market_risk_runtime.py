@@ -374,6 +374,8 @@ async def _coinglass_loop(log) -> None:
                 statuses, api_codes, merged_names
             )
             _mark_provider("coinglass_v4", status)
+            if "401" in api_codes or 401 in statuses:
+                log.warning("[COINGLASS_AUTH] authorized=false action=verify_key_and_endpoint_entitlement binance_fallback_retained=true")
             if not status.startswith("ok:"):
                 log.warning(
                     "[MARKET_RISK_SOURCE] provider=coinglass_v4 status=%s "

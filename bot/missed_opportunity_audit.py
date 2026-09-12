@@ -19,6 +19,17 @@ from bot.kucoin_execution_model import estimated_round_trip_cost_pct
 # evaluation below is symbol-aware and does not rely on this single reference.
 _ESTIMATED_ROUND_TRIP_COST_PCT = estimated_round_trip_cost_pct("BTCUSDT")
 
+
+def _decision_cost_pct(decision, symbol):
+    ctx = getattr(decision, "_bgx_nexus_cost_context", None)
+    return ((float(ctx.taker_fee) + float(ctx.slippage)) * 200.0
+            if ctx is not None else estimated_round_trip_cost_pct(symbol))
+
+
+def _persisted_cost_pct(metadata_raw, symbol):
+    saved = json.loads(metadata_raw or "{}")
+    return _finite(saved.get("estimated_round_trip_cost_pct"), estimated_round_trip_cost_pct(symbol))
+
 _TABLE_READY = False
 _TABLE_LOCK = asyncio.Lock()
 _LAST_EVAL_MONO = 0.0
@@ -279,7 +290,7 @@ async def _record(engine, sig, decision, log) -> None:
     approved = 1 if getattr(decision, "execution_allowed", None) is True else 0
     reason = _decision_reason(decision)
     blocker = "APPROVED" if approved else _blocker_class(reason)
-    estimated_cost = estimated_round_trip_cost_pct(sig.symbol)
+    estimated_cost = _decision_cost_pct(decision, sig.symbol)
     structure_conflict = (
         _structure_conflict_context(engine, sig, decision, reason)
         if not approved and blocker == "MTF"
@@ -385,7 +396,7 @@ async def _evaluate_pending(engine, log) -> None:
             current = _finite(ticker.get("lastPrice"))
             if current <= 0:
                 continue
-            cost_pct = estimated_round_trip_cost_pct(symbol)
+            cost_pct = _persisted_cost_pct(metadata_raw, symbol)
             raw_pct = _directional_return_pct(direction, entry, current)
             net_pct = raw_pct - cost_pct
             mfe = max(_finite(old_mfe), raw_pct)
