@@ -1,9 +1,11 @@
 """Final PRE-LIVE daily-stop runtime hardening.
 
 Keeps TradingEngine and DailyTracker synchronized so the daily stop uses the
-configured limit and the current realized + unrealized daily PnL. This module
-does not alter PAPER/LIVE mode, entry thresholds, exchange credentials, or the
-validation lock.
+configured limit and the current realized + unrealized daily PnL.
+
+Controlled LIVE keeps the daily stop as a hard circuit breaker. PAPER and
+read-only SHADOW keep recording the same stop event but clear only the daily
+entry-stop flag afterward so validation can continue without exchange effects.
 """
 
 
@@ -45,6 +47,12 @@ def install(TradingEngine, log):
         tracker.daily_stop_loss = stop
         tracker.daily_stopped = bool(getattr(engine, "daily_stopped", False))
 
+    def _paper_or_shadow(engine) -> bool:
+        return bool(
+            getattr(engine, "paper_trade", False)
+            or getattr(engine, "_validation_safety_lock_active", False)
+        )
+
     async def _connect_hardened(self, *args, **kwargs):
         result = await orig_connect(self, *args, **kwargs)
         _sync_limits(self)
@@ -57,7 +65,7 @@ def install(TradingEngine, log):
 
     def _check_daily_reset_hardened(self, *args, **kwargs):
         # The legacy reset logs the current stop before the previous hardening
-        # wrapper had a chance to synchronize it.  Sync first so operator-facing
+        # wrapper had a chance to synchronize it. Sync first so operator-facing
         # reset telemetry reflects the same configured limit that enforcement
         # uses, then sync again in case the core reset changes daily state.
         _sync_limits(self)
@@ -75,9 +83,22 @@ def install(TradingEngine, log):
             )
             tracker.daily_pnl = realized + unrealized
             _sync_limits(self)
+
         result = orig_update_daily_pnl(self, *args, **kwargs)
+
         if tracker is not None:
             self.daily_stopped = bool(self.daily_stopped or tracker.daily_stopped)
+
+        if _paper_or_shadow(self) and bool(getattr(self, "daily_stopped", False)):
+            self.daily_stopped = False
+            if tracker is not None:
+                tracker.daily_stopped = False
+            log.warning(
+                "[PAPER_SHADOW_DAILY_STOP_ADVISORY] mode=%s daily_stop_triggered=true "
+                "entries_blocked=false live_policy_unchanged=true execution_effect=NONE",
+                "PAPER" if getattr(self, "paper_trade", False) else "SHADOW",
+            )
+
         return result
 
     TradingEngine._connect = _connect_hardened
@@ -86,5 +107,6 @@ def install(TradingEngine, log):
     TradingEngine._update_daily_pnl = _update_daily_pnl_hardened
     TradingEngine._daily_stop_runtime_hardened = True
     log.info(
-        "[DAILY_STOP_RUNTIME] tracker synced with engine limits and current daily PnL; reset telemetry pre-synced"
+        "[DAILY_STOP_RUNTIME] tracker synced; live_daily_stop_hard=true "
+        "paper_shadow_daily_stop_advisory=true"
     )
