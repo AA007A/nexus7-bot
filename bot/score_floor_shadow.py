@@ -99,7 +99,12 @@ def _schedule_persist(key: str, state: dict, status: str, log) -> None:
         asyncio.get_running_loop().create_task(
             persistence.save_state(key, dict(state), status=status, log=log)
         )
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.debug(
+            "[SCORE_FLOOR_SHADOW_PERSISTENCE] schedule_skipped reason=no_running_loop "
+            "error=%s execution_effect=NONE",
+            type(exc).__name__,
+        )
         return
     except Exception as exc:
         log.debug(
@@ -146,7 +151,12 @@ def _schedule_restore(log) -> None:
         return
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.debug(
+            "[SCORE_FLOOR_SHADOW_PERSISTENCE] restore_skipped reason=no_running_loop "
+            "error=%s execution_effect=NONE",
+            type(exc).__name__,
+        )
         return
     _RESTORE_SCHEDULED = True
     loop.create_task(_restore(log))
@@ -453,12 +463,9 @@ def observe(symbol, k15, k1h, k4h, *, production_result, min_score, fee_mult, lo
 
         engine = _runtime_engine()
         if engine is not None:
-            try:
-                asyncio.get_running_loop().create_task(
-                    _nexus_counterfactual(engine, sig, key, log, timeout_s=10.0)
-                )
-            except RuntimeError:
-                pass
+            asyncio.get_running_loop().create_task(
+                _nexus_counterfactual(engine, sig, key, log, timeout_s=10.0)
+            )
     except Exception as exc:
         log.debug(
             "[SCORE_FLOOR_SHADOW] observer_error=%s production_floor_unchanged=true "
