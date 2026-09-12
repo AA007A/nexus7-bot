@@ -72,6 +72,27 @@ def _blocker_class(reason: str) -> str:
     return "OTHER"
 
 
+def _metadata_blocker(metadata_raw: Any, fallback: str, log) -> str:
+    """Read persisted blocker metadata without letting malformed telemetry hide a row."""
+    try:
+        meta = json.loads(metadata_raw or "{}")
+    except (TypeError, ValueError) as exc:
+        log.debug(
+            "[OPPORTUNITY_AUDIT] metadata_parse_fallback blocker=%s error=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            fallback, type(exc).__name__,
+        )
+        return fallback
+    if not isinstance(meta, dict):
+        log.debug(
+            "[OPPORTUNITY_AUDIT] metadata_type_fallback blocker=%s type=%s "
+            "decision_effect=NONE execution_effect=NONE",
+            fallback, type(meta).__name__,
+        )
+        return fallback
+    return str(meta.get("blocker_class") or fallback)
+
+
 def _compact_model_snapshot(decision) -> dict[str, dict]:
     """Return model evidence already attached to the final NEXUS decision."""
     out: dict[str, dict] = {}
@@ -410,12 +431,9 @@ async def _evaluate_pending(engine, log) -> None:
 
             net_mfe = mfe - cost_pct
             if not int(approved or 0) and net_mfe >= near_miss_threshold and key not in _NEAR_MISS_LOGGED:
-                blocker = _blocker_class(decision_reason)
-                try:
-                    meta = json.loads(metadata_raw or "{}")
-                    blocker = str(meta.get("blocker_class") or blocker)
-                except (TypeError, ValueError):
-                    pass
+                blocker = _metadata_blocker(
+                    metadata_raw, _blocker_class(decision_reason), log
+                )
                 _NEAR_MISS_LOGGED.add(key)
                 log.warning(
                     "[OPPORTUNITY_NEAR_MISS] symbol=%s side=%s blocker=%s "
