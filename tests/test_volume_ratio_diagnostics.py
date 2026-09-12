@@ -8,7 +8,7 @@ class VolumeRatioDiagnosticsTests(unittest.TestCase):
         return {"ts": ts_ms, "o": "1", "h": "2", "l": ".5", "c": "1.5", "v": str(v)}
 
     def test_ratio_uses_latest_confirmed_and_prior_20(self):
-        base = 1_800_000_000_000
+        base = 1_700_000_000_000
         width = 15 * 60 * 1000
         candles = [self._candle(base + i * width, 100.0) for i in range(20)]
         candles.append(self._candle(base + 20 * width, 2.0))
@@ -21,7 +21,7 @@ class VolumeRatioDiagnosticsTests(unittest.TestCase):
         self.assertEqual(ts, base + 20 * width)
 
     def test_invalid_or_short_history_is_diagnostic_none(self):
-        base = 1_800_000_000_000
+        base = 1_700_000_000_000
         width = 15 * 60 * 1000
         short = [self._candle(base + i * width, 10.0) for i in range(20)]
         self.assertIsNone(_closed_ratio(short, integrity))
