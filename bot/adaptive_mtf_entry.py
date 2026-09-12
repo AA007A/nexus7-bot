@@ -21,6 +21,8 @@ from typing import Optional
 
 import numpy as np
 
+from bot import adaptive_mtf_calibration
+
 
 _ENABLED = os.environ.get("ADAPTIVE_MTF_ENTRY", "true").strip().lower() in {
     "1", "true", "yes", "on"
@@ -165,6 +167,24 @@ def install(Analyzer, strategy, log) -> None:
                 extension_atr=extension_atr,
             )
             if not allowed:
+                adaptive_mtf_calibration.observe_reject(
+                    symbol=symbol, k15=k15, direction=direction, reason=reason,
+                    bull_4h=bull_4h, bear_4h=bear_4h,
+                    bull_1h=bull_1h, bear_1h=bear_1h,
+                    s4h=s4h, s1h=s1h, s15=s15,
+                    combined=combined, entry_type=entry_type,
+                    extension_atr=extension_atr,
+                    thresholds={
+                        "min_combined": _MIN_COMBINED,
+                        "min_4h": _MIN_4H,
+                        "min_1h": _MIN_1H,
+                        "min_15m": _MIN_15M,
+                        "min_vol": _MIN_VOL,
+                        "min_adx": _MIN_ADX,
+                        "max_extension_atr": _MAX_EXTENSION_ATR,
+                    },
+                    log=log,
+                )
                 log.debug("[ADAPTIVE_MTF] symbol=%s result=HOLD reason=%s", symbol, reason)
                 return None
 
