@@ -24,12 +24,49 @@ from bot.config import cfg
 MARGIN_FRACTION = 0.50
 
 
+def _protect_drawdown_update(self, bound_update, log, *, source: str):
+    """Return an instance-safe advisory wrapper around one bound balance update."""
+    async def _advisory_update(*args, **kwargs):
+        was_active = bool(getattr(self, "active", False))
+        risk_before = getattr(self, "risk", None)
+        drawdown_before = float(getattr(risk_before, "drawdown", 0.0) or 0.0)
+
+        if was_active and drawdown_before >= float(cfg.MAX_DRAWDOWN):
+            self._dd_alerted = True
+            log.warning(
+                "[DRAWDOWN_ADVISORY_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                "legacy_pause_preempted=true active_preserved=true execution_effect=NONE",
+                source,
+                drawdown_before * 100.0,
+                float(cfg.MAX_DRAWDOWN) * 100.0,
+            )
+
+        try:
+            return await bound_update(*args, **kwargs)
+        finally:
+            risk = getattr(self, "risk", None)
+            drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
+            became_inactive = was_active and not bool(getattr(self, "active", False))
+            if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
+                self.active = True
+                self._dd_alerted = True
+                log.warning(
+                    "[DRAWDOWN_ADVISORY_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
+                    source,
+                    drawdown * 100.0,
+                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                )
+
+    return _advisory_update
+
+
 def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
     """Install advisory drawdown semantics.
 
     Backward compatible with the previous private helper signature
     ``_install_drawdown_advisory(log)`` used by regression tests. The engine
-    wrapper is installed only when a TradingEngine class is explicitly passed.
+    wrappers are installed only when a TradingEngine class is explicitly passed.
     """
     if log is None:
         TradingEngine = None
@@ -86,54 +123,58 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         RiskManagerV3.can_open = _v3_can_open
         RiskManagerV3._operator_drawdown_advisory = True
 
-    # engine.py still contains a legacy side effect inside _update_balance():
-    # crossing MAX_DRAWDOWN sets self.active=False when _dd_alerted is false.
-    # If the already-known drawdown is above the configured limit, mark that
-    # one-shot alert as handled before calling the legacy method so the pause
-    # branch is never entered. If drawdown crosses the threshold during the
-    # update itself, the finally block remains the second line of defence and
-    # restores only an active -> inactive transition from this call.
-    if TradingEngine is not None and not getattr(
-        TradingEngine, "_operator_drawdown_engine_advisory", False
-    ):
+    if TradingEngine is None:
+        return
+
+    # Class-level compatibility layer. This remains useful for direct method
+    # calls in tests and auxiliary runtimes, but production additionally binds
+    # an instance-level wrapper immediately before TradingEngine.run() begins.
+    if not TradingEngine.__dict__.get("_operator_drawdown_engine_advisory", False):
         previous_update_balance = TradingEngine._update_balance
 
         async def _update_balance_advisory(self, *args, **kwargs):
-            was_active = bool(getattr(self, "active", False))
-            risk_before = getattr(self, "risk", None)
-            drawdown_before = float(getattr(risk_before, "drawdown", 0.0) or 0.0)
-            preempted_legacy_pause = (
-                was_active and drawdown_before >= float(cfg.MAX_DRAWDOWN)
+            protected = _protect_drawdown_update(
+                self,
+                lambda *a, **k: previous_update_balance(self, *a, **k),
+                log,
+                source="ENGINE",
             )
-
-            if preempted_legacy_pause:
-                self._dd_alerted = True
-                log.warning(
-                    "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "legacy_pause_preempted=true active_preserved=true execution_effect=NONE",
-                    drawdown_before * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
-
-            try:
-                return await previous_update_balance(self, *args, **kwargs)
-            finally:
-                risk = getattr(self, "risk", None)
-                drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
-                became_inactive = was_active and not bool(getattr(self, "active", False))
-
-                if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
-                    self.active = True
-                    self._dd_alerted = True
-                    log.warning(
-                        "[DRAWDOWN_ADVISORY_ENGINE] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
-                        drawdown * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
-                    )
+            return await protected(*args, **kwargs)
 
         TradingEngine._update_balance = _update_balance_advisory
         TradingEngine._operator_drawdown_engine_advisory = True
+
+    # Production-authoritative binding: capture whatever _update_balance is
+    # actually present on the concrete engine instance at run-time, then place
+    # the advisory wrapper directly on that instance. This survives a later
+    # class-level replacement/re-wrap and guarantees that run()'s
+    # ``self._update_balance()`` resolves to the advisory policy.
+    if (hasattr(TradingEngine, "run") and
+            not TradingEngine.__dict__.get("_operator_drawdown_run_binding", False)):
+        previous_run = TradingEngine.run
+
+        async def _run_with_instance_drawdown_advisory(self, *args, **kwargs):
+            if not getattr(self, "_operator_drawdown_instance_advisory", False):
+                current_bound_update = self._update_balance
+                self._update_balance = _protect_drawdown_update(
+                    self,
+                    current_bound_update,
+                    log,
+                    source="INSTANCE",
+                )
+                self._operator_drawdown_instance_advisory = True
+                log.critical(
+                    "[DRAWDOWN_ADVISORY_INSTANCE] installed=true class=%s "
+                    "bound_update_module=%s bound_update_name=%s "
+                    "drawdown=advisory_only execution_effect=NONE",
+                    type(self).__name__,
+                    getattr(current_bound_update, "__module__", "unknown"),
+                    getattr(current_bound_update, "__name__", type(current_bound_update).__name__),
+                )
+            return await previous_run(self, *args, **kwargs)
+
+        TradingEngine.run = _run_with_instance_drawdown_advisory
+        TradingEngine._operator_drawdown_run_binding = True
 
 
 def _install_margin_sizing(log) -> None:
@@ -189,9 +230,6 @@ def _install_margin_sizing(log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        # Keep the professional stop-risk computation visible for diagnostics,
-        # but do not let it silently redefine the operator-requested margin
-        # allocation. Other hard execution/risk gates remain downstream.
         risk_qty = 0.0
         try:
             risk_qty = float(
@@ -242,6 +280,7 @@ def install(TradingEngine, log) -> None:
     _install_margin_sizing(log)
     log.critical(
         "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
-        "leverage=%sx drawdown=advisory_only railway_variables_unchanged=true",
+        "leverage=%sx drawdown=advisory_only instance_binding=true "
+        "railway_variables_unchanged=true",
         cfg.LEVERAGE,
     )
