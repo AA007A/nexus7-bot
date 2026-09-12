@@ -19,6 +19,9 @@ class _Log:
     def debug(self, message, *args):
         self.lines.append(message % args if args else message)
 
+    def warning(self, message, *args):
+        self.lines.append(message % args if args else message)
+
 
 class _Signal:
     symbol = "DOGEUSDT"
@@ -68,6 +71,7 @@ def _reset():
     with shadow._LOCK:
         shadow._SEEN.clear()
         shadow._ACTIVE.clear()
+        shadow._DEFERRED_NEXUS.clear()
         shadow._METRICS["unique"] = 0
         shadow._METRICS["eligible"] = 0
         shadow._METRICS["resolved"] = 0
@@ -79,6 +83,9 @@ def _reset():
         shadow._METRICS["nexus_vetoed"] = 0
         shadow._METRICS["nexus_timeout"] = 0
         shadow._METRICS["nexus_error"] = 0
+        shadow._METRICS["nexus_schedule_deferred"] = 0
+        shadow._METRICS["nexus_schedule_recovered"] = 0
+        shadow._METRICS["nexus_schedule_error"] = 0
 
 
 def _enroll_asia_doge():
