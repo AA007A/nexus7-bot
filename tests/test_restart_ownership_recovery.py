@@ -17,6 +17,17 @@ POSITION = {
     "stopLoss": 0,
 }
 
+AVAX_POSITION = {
+    "symbol": "AVAXUSDT",
+    "size": 30.0,
+    "sizeUnit": "BASE_ASSET",
+    "sizeContracts": 300,
+    "side": "Sell",
+    "entryPrice": 27.0,
+    "markPrice": 26.8,
+    "stopLoss": 0,
+}
+
 
 class _Client:
     def __init__(self, *, status=None, stops=None, instruments=None):
@@ -60,8 +71,8 @@ class _Engine:
 
 
 def _filled_order(engine, *, client_oid="bgx7-owned", order_id="oid-1",
-                  side="Buy", qty=0.21, filled_qty=0.21):
-    order, _ = engine.orders.get_or_create(client_oid, "ETHUSDT", side, qty)
+                  side="Buy", qty=0.21, filled_qty=0.21, symbol="ETHUSDT"):
+    order, _ = engine.orders.get_or_create(client_oid, symbol, side, qty)
     order.transition(OrderState.SUBMITTING, source="LOCAL")
     order.transition(OrderState.SUBMITTED, source="REST", order_id=order_id)
     order.transition(
@@ -84,6 +95,92 @@ class RestartOwnershipRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proof.reason, "exact_durable_exchange_proof")
         self.assertEqual(proof.base_qty, 0.21)
         self.assertEqual(proof.client_oid, "bgx7-owned")
+
+    async def test_legacy_kucoin_contract_filled_qty_recovers_exact_avax_position(self):
+        client = _Client(
+            instruments={
+                "AVAXUSDT": {"multiplier": "0.1", "lotSize": "1", "minQty": "1"}
+            },
+            status={
+                "orderId": "oid-avax",
+                "clientOid": "bgx7-avax-owned",
+                "symbol": "AVAXUSDTM",
+                "side": "sell",
+                "isActive": False,
+                "cancelExist": False,
+                "filledSize": "300",
+            },
+            stops=[{
+                "symbol": "AVAXUSDTM",
+                "side": "buy",
+                "stopPrice": "27.5",
+                "reduceOnly": True,
+                "closeOrder": False,
+                "size": "300",
+                "isActive": True,
+                "stopTriggered": False,
+            }],
+        )
+        engine = _Engine(client)
+        # Historical production representation: qty is 30 AVAX base, while
+        # filled_qty was persisted directly from KuCoin filledSize=300 contracts.
+        _filled_order(
+            engine,
+            client_oid="bgx7-avax-owned",
+            order_id="oid-avax",
+            side="Sell",
+            qty=30.0,
+            filled_qty=300.0,
+            symbol="AVAXUSDT",
+        )
+
+        proof = await recovery.prove_restart_ownership(engine, dict(AVAX_POSITION))
+
+        self.assertTrue(proof.recovered)
+        self.assertEqual(proof.reason, "exact_durable_exchange_proof")
+        self.assertEqual(proof.base_qty, 30.0)
+        self.assertEqual(proof.order_id, "oid-avax")
+
+    async def test_legacy_contract_filled_qty_must_convert_exactly(self):
+        client = _Client(
+            instruments={
+                "AVAXUSDT": {"multiplier": "0.1", "lotSize": "1", "minQty": "1"}
+            },
+            status={
+                "orderId": "oid-avax",
+                "clientOid": "bgx7-avax-owned",
+                "symbol": "AVAXUSDTM",
+                "side": "sell",
+                "isActive": False,
+                "cancelExist": False,
+                "filledSize": "300",
+            },
+            stops=[{
+                "symbol": "AVAXUSDTM",
+                "side": "buy",
+                "stopPrice": "27.5",
+                "reduceOnly": True,
+                "closeOrder": False,
+                "size": "300",
+                "isActive": True,
+                "stopTriggered": False,
+            }],
+        )
+        engine = _Engine(client)
+        _filled_order(
+            engine,
+            client_oid="bgx7-avax-owned",
+            order_id="oid-avax",
+            side="Sell",
+            qty=30.0,
+            filled_qty=299.0,
+            symbol="AVAXUSDT",
+        )
+
+        proof = await recovery.prove_restart_ownership(engine, dict(AVAX_POSITION))
+
+        self.assertFalse(proof.recovered)
+        self.assertEqual(proof.reason, "no_exact_durable_fill")
 
     async def test_symbol_side_size_without_durable_fill_is_rejected(self):
         proof = await recovery.prove_restart_ownership(_Engine(), dict(POSITION))
