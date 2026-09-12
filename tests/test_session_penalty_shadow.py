@@ -48,7 +48,7 @@ def _reset():
 
 def test_doge_asia_penalty_is_observed_without_changing_production_signal():
     _reset()
-    original_session = TradingEngine._get_market_session
+    original_session = TradingEngine.__dict__["_get_market_session"]
     original_closed = shadow.closed_mtf
     TradingEngine._get_market_session = staticmethod(lambda: "ASIA")
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
@@ -76,7 +76,7 @@ def test_doge_asia_penalty_is_observed_without_changing_production_signal():
 
 def test_signal_not_killed_by_session_penalty_is_not_enrolled():
     _reset()
-    original_session = TradingEngine._get_market_session
+    original_session = TradingEngine.__dict__["_get_market_session"]
     original_closed = shadow.closed_mtf
     TradingEngine._get_market_session = staticmethod(lambda: "LONDON")
     shadow.closed_mtf = lambda k15, k1h, k4h: (list(k15), list(k1h), list(k4h))
