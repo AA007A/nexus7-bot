@@ -23,6 +23,7 @@ _MAX_BARS = 16
 _LOCK = threading.Lock()
 _SEEN: set[str] = set()
 _ACTIVE: dict[str, dict] = {}
+_DEFERRED_NEXUS: dict[str, tuple] = {}
 _RESTORE_SCHEDULED = False
 _RESTORE_COMPLETE = False
 _METRICS = {
@@ -38,6 +39,9 @@ _METRICS = {
     "nexus_vetoed": 0,
     "nexus_timeout": 0,
     "nexus_error": 0,
+    "nexus_schedule_deferred": 0,
+    "nexus_schedule_recovered": 0,
+    "nexus_schedule_error": 0,
 }
 
 
@@ -77,15 +81,22 @@ def _runtime_engine():
 
 
 def _schedule_persist(key: str, state: dict, status: str, log) -> None:
-    """Best-effort durable write; absence of an event loop never changes trading."""
+    """Best-effort durable write; absence of a loop is explicit and non-trading."""
     try:
         loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.debug(
+            "[SESSION_PENALTY_PERSISTENCE] deferred_no_running_loop key=%s "
+            "trading_effect=NONE execution_effect=NONE",
+            key,
+        )
+        return
+
+    try:
         snapshot_state = dict(state)
         loop.create_task(
             persistence.save_state(key, snapshot_state, status=status, log=log)
         )
-    except RuntimeError:
-        return
     except Exception as exc:
         log.debug(
             "[SESSION_PENALTY_PERSISTENCE] schedule_failed error=%s "
@@ -109,8 +120,11 @@ async def _restore_persisted(log) -> None:
                     continue
                 if int(_finite(state.get("bars"), 0)) >= _MAX_BARS:
                     continue
+                restored_state = dict(state)
+                restored_state.setdefault("nexus_schedule_status", "RESTORED")
+                restored_state.setdefault("nexus_schedule_reason", "")
                 _SEEN.add(key)
-                _ACTIVE[key] = dict(state)
+                _ACTIVE[key] = restored_state
                 restored += 1
             _METRICS["restored"] += restored
         _RESTORE_COMPLETE = True
@@ -168,6 +182,7 @@ def _resolve(key: str, state: dict, outcome: str, exit_price: float, log) -> Non
     state["net_pct"] = round(net_pct, 5)
     _METRICS["resolved"] += 1
     _METRICS["outcomes"][outcome] += 1
+    _DEFERRED_NEXUS.pop(key, None)
     _schedule_persist(key, state, "RESOLVED", log)
     log.info(
         "[SESSION_PENALTY_SHADOW_OUTCOME] symbol=%s side=%s session=%s "
@@ -248,8 +263,11 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
         if not state or state.get("nexus_status") != "NOT_CHECKED":
             return
         state["nexus_status"] = "IN_PROGRESS"
+        state["nexus_schedule_status"] = "RUNNING"
+        state["nexus_schedule_reason"] = ""
         _METRICS["nexus_counterfactuals"] += 1
         persist_state = dict(state)
+    _DEFERRED_NEXUS.pop(key, None)
     _schedule_persist(key, persist_state, "OPEN", log)
 
     try:
@@ -333,10 +351,121 @@ async def observe_nexus_counterfactual(engine, sig, k15, k1h, k4h, log,
         )
 
 
+def _defer_nexus_schedule(key: str, sig, k15, k1h, k4h, reason: str, log) -> None:
+    """Keep an unscheduled counterfactual recoverable in memory and telemetry."""
+    first_defer = key not in _DEFERRED_NEXUS
+    _DEFERRED_NEXUS[key] = (
+        sig,
+        list(k15 or []),
+        list(k1h or []),
+        list(k4h or []),
+    )
+    with _LOCK:
+        state = _ACTIVE.get(key)
+        if state:
+            state["nexus_schedule_status"] = (
+                "DEFERRED_NO_LOOP" if reason == "no_running_loop"
+                else "DEFERRED_ENGINE_UNAVAILABLE" if reason == "engine_unavailable"
+                else "DEFERRED_SCHEDULE_ERROR"
+            )
+            state["nexus_schedule_reason"] = reason
+            persist_state = dict(state)
+        else:
+            persist_state = None
+        if first_defer:
+            _METRICS["nexus_schedule_deferred"] += 1
+    if persist_state:
+        _schedule_persist(key, persist_state, "OPEN", log)
+    log.warning(
+        "[SESSION_PENALTY_NEXUS_SCHEDULE] candidate=%s status=DEFERRED reason=%s "
+        "recoverable=true production_policy_unchanged=true decision_effect=NONE "
+        "execution_effect=NONE",
+        key, reason,
+    )
+
+
+def _schedule_nexus_counterfactual(key: str, sig, k15, k1h, k4h, log,
+                                   *, recovery: bool = False) -> bool:
+    """Schedule the read-only NEXUS counterfactual or retain it for retry."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _defer_nexus_schedule(key, sig, k15, k1h, k4h, "no_running_loop", log)
+        return False
+
+    engine = _runtime_engine()
+    if engine is None:
+        _defer_nexus_schedule(key, sig, k15, k1h, k4h, "engine_unavailable", log)
+        return False
+
+    coro = observe_nexus_counterfactual(
+        engine, sig, k15, k1h, k4h, log, timeout_s=10.0
+    )
+    try:
+        loop.create_task(coro)
+    except Exception as exc:
+        coro.close()
+        with _LOCK:
+            _METRICS["nexus_schedule_error"] += 1
+        _defer_nexus_schedule(
+            key, sig, k15, k1h, k4h,
+            f"schedule_error:{type(exc).__name__}", log,
+        )
+        return False
+
+    _DEFERRED_NEXUS.pop(key, None)
+    with _LOCK:
+        state = _ACTIVE.get(key)
+        if state:
+            state["nexus_schedule_status"] = (
+                "RECOVERED_SCHEDULED" if recovery else "SCHEDULED"
+            )
+            state["nexus_schedule_reason"] = ""
+            persist_state = dict(state)
+        else:
+            persist_state = None
+        if recovery:
+            _METRICS["nexus_schedule_recovered"] += 1
+    if persist_state:
+        _schedule_persist(key, persist_state, "OPEN", log)
+    log.info(
+        "[SESSION_PENALTY_NEXUS_SCHEDULE] candidate=%s status=%s "
+        "recoverable=true production_policy_unchanged=true decision_effect=NONE "
+        "execution_effect=NONE",
+        key, "RECOVERED_SCHEDULED" if recovery else "SCHEDULED",
+    )
+    return True
+
+
+def _drain_deferred_nexus(log) -> None:
+    """Retry previously deferred counterfactuals once runtime scheduling is available."""
+    if not _DEFERRED_NEXUS:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _runtime_engine() is None:
+        return
+
+    for key, payload in list(_DEFERRED_NEXUS.items()):
+        with _LOCK:
+            state = _ACTIVE.get(key)
+            pending = bool(state and state.get("nexus_status") == "NOT_CHECKED")
+        if not pending:
+            _DEFERRED_NEXUS.pop(key, None)
+            continue
+        sig, k15, k1h, k4h = payload
+        _schedule_nexus_counterfactual(
+            key, sig, k15, k1h, k4h, log, recovery=True
+        )
+
+
 def observe(symbol: str, k15, k1h, k4h, *, production_result,
             min_score: int, log) -> None:
     """Observe one canonical Analyzer evaluation and return no trading value."""
     _schedule_restore(log)
+    _drain_deferred_nexus(log)
     _update_outcomes(symbol, k15, k1h, k4h, log)
     if production_result is None:
         return
@@ -400,6 +529,8 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
             "nexus_setup_quality": 0.0,
             "nexus_confidence": 0.0,
             "nexus_regime": "UNKNOWN",
+            "nexus_schedule_status": "PENDING",
+            "nexus_schedule_reason": "",
         }
         _ACTIVE[key] = state
         _METRICS["unique"] += 1
@@ -417,17 +548,9 @@ def observe(symbol: str, k15, k1h, k4h, *, production_result,
         state["entry_type"], state["regime"], _MAX_BARS,
     )
 
-    engine = _runtime_engine()
-    if engine is not None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                observe_nexus_counterfactual(
-                    engine, production_result, k15, k1h, k4h, log, timeout_s=10.0
-                )
-            )
-        except RuntimeError:
-            pass
+    _schedule_nexus_counterfactual(
+        key, production_result, k15, k1h, k4h, log
+    )
 
 
 def snapshot() -> dict:
@@ -438,6 +561,7 @@ def snapshot() -> dict:
             "resolved": int(_METRICS["resolved"]),
             "restored": int(_METRICS["restored"]),
             "active": len(_ACTIVE),
+            "deferred_nexus": len(_DEFERRED_NEXUS),
             "outcomes": dict(_METRICS["outcomes"]),
             "sessions": dict(_METRICS["sessions"]),
             "symbols": dict(_METRICS["symbols"]),
@@ -446,5 +570,8 @@ def snapshot() -> dict:
             "nexus_vetoed": int(_METRICS["nexus_vetoed"]),
             "nexus_timeout": int(_METRICS["nexus_timeout"]),
             "nexus_error": int(_METRICS["nexus_error"]),
+            "nexus_schedule_deferred": int(_METRICS["nexus_schedule_deferred"]),
+            "nexus_schedule_recovered": int(_METRICS["nexus_schedule_recovered"]),
+            "nexus_schedule_error": int(_METRICS["nexus_schedule_error"]),
             "persistence_restore_complete": bool(_RESTORE_COMPLETE),
         }
