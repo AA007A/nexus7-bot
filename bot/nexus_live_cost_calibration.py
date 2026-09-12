@@ -9,7 +9,6 @@ to the legacy NEXUS assumptions: 6 bps taker fee and 5 bps one-way slippage.
 """
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import functools
 import math
@@ -55,12 +54,7 @@ def _is_major(symbol: str) -> bool:
 
 
 def slippage_from_ticker(ticker: dict | None, symbol: str) -> tuple[float, str, float | None]:
-    """Estimate one-way market slippage from current bid/ask, conservatively.
-
-    We model crossing half of the quoted spread plus a small market-impact floor.
-    The downstream pre-trade microstructure/depth gates remain authoritative.
-    Missing/invalid quotes return the legacy 5 bps one-way assumption.
-    """
+    """Estimate one-way market slippage from current bid/ask, conservatively."""
     fallback = DEFAULT_SLIPPAGE
     if not isinstance(ticker, dict):
         return fallback, "legacy_fallback", None
@@ -76,12 +70,8 @@ def slippage_from_ticker(ticker: dict | None, symbol: str) -> tuple[float, str, 
 
     full_spread = (ask - bid) / mid
     spread_bps = full_spread * 10_000.0
-    # Impact floors are deliberately non-zero even at a zero quoted spread.
     impact_floor = 0.00010 if _is_major(symbol) else 0.00020
     estimate = (full_spread / 2.0) + impact_floor
-
-    # Never accept a negative/zero model and never let a broken quote imply an
-    # absurd >1% one-way slippage without falling back to later safety gates.
     estimate = min(max(estimate, impact_floor), 0.01)
     return estimate, "ticker_half_spread_plus_impact", spread_bps
 
@@ -118,6 +108,28 @@ async def build_cost_context(engine, sig) -> NexusCostContext:
         slippage_source=slip_source,
         spread_bps=spread_bps,
     )
+
+
+def _attach_cost_context(decision, ctx: NexusCostContext, log) -> bool:
+    """Attach private telemetry when the returned decision supports attributes.
+
+    Production NexusDecision objects support dynamic private attributes. Some
+    compatibility/unit-test validators return plain dicts; those must keep their
+    exact return value and must never fail because observability cannot attach.
+    """
+    try:
+        setattr(decision, "_bgx_nexus_cost_context", ctx)
+        return True
+    except (AttributeError, TypeError):
+        debug = getattr(log, "debug", None)
+        if callable(debug):
+            debug(
+                "[NEXUS_COST] context_handoff_unsupported symbol=%s decision_type=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                ctx.symbol,
+                type(decision).__name__,
+            )
+        return False
 
 
 def install(TradingEngine, nexus_ai, log) -> None:
@@ -164,7 +176,6 @@ def install(TradingEngine, nexus_ai, log) -> None:
         try:
             ctx = await build_cost_context(self, sig)
         except Exception as exc:
-            # Strict fallback: never fail-open because calibration telemetry failed.
             ctx = NexusCostContext(
                 symbol=str(getattr(sig, "symbol", "UNKNOWN")),
                 taker_fee=DEFAULT_TAKER_FEE,
@@ -193,23 +204,13 @@ def install(TradingEngine, nexus_ai, log) -> None:
                 ctx.fee_source,
                 ctx.slippage_source,
             )
-            # asyncio.to_thread() inside _nexus_validate propagates contextvars
-            # on Python 3.11, so expected_value sees this exact candidate context.
             decision = await original_validate(self, sig)
 
-            # Runtime post-decision observability executes *after* this wrapper
-            # returns and therefore after the ContextVar is reset. Carry the
-            # exact frozen context on the decision as private telemetry only.
+            # Runtime post-decision observability executes after this wrapper
+            # returns and after the ContextVar is reset. Production decisions
+            # therefore carry the exact frozen context as private telemetry.
             # NexusDecision.to_dict()/asdict does not serialize dynamic attrs.
-            try:
-                setattr(decision, "_bgx_nexus_cost_context", ctx)
-            except Exception as exc:
-                log.debug(
-                    "[NEXUS_COST] context_handoff_failed symbol=%s error=%s "
-                    "decision_effect=NONE execution_effect=NONE",
-                    ctx.symbol,
-                    type(exc).__name__,
-                )
+            _attach_cost_context(decision, ctx, log)
             return decision
         finally:
             _COST_CONTEXT.reset(token)
