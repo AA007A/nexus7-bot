@@ -18,6 +18,7 @@ def install(TradingEngine, log) -> None:
     """Install passive observability plus final delegated policy semantics."""
     from bot import funnel_metrics as fm
     from bot import score as scoring
+    from bot import strategy
     from bot import derivatives_news_freshness_hardening as derivatives_hardening
     from bot import news_semantic_hardening as news_semantics
     from bot import nexus_ai
@@ -26,9 +27,15 @@ def install(TradingEngine, log) -> None:
     from bot import cross_geometry_target_policy as cross_target_policy
     from bot import operator_runtime_policy
     from bot import exit_policy_telemetry
+    from bot import entry_type_shadow_overlay
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
+
+    # Observe the fully composed Adaptive analyzer without changing its return.
+    # This measures possible false PULLBACK classifications only after LIVE logic
+    # has already decided HOLD.
+    entry_type_shadow_overlay.install(strategy.Analyzer, strategy, log)
 
     # The core CROSS-risk hardening is already installed by runtime_bootstrap.
     # This policy replaces only its module-level geometry helper: class APIs,
@@ -46,8 +53,9 @@ def install(TradingEngine, log) -> None:
     regime_transition.install(nexus_ai, log)
 
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel observability, final headline semantics, "
-        "stop-only CROSS target policy, delegated operator margin/drawdown/exit policy "
-        "and strict NEXUS regime-transition consistency are active; "
-        "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
+        "[RUNTIME_OVERLAYS] passive funnel observability, entry-type shadow diagnostics, "
+        "final headline semantics, stop-only CROSS target policy, delegated operator "
+        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency are "
+        "active; thresholds_unchanged=true leverage_unchanged=true "
+        "railway_variables_unchanged=true"
     )
