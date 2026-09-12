@@ -2,22 +2,22 @@
 
 Invariant
 ---------
-Any position that exists on the real exchange but is not explicitly created by
-this running NEXUS-7 process is external/manual and therefore read-only.
+Any real exchange position whose BGX ownership cannot be proven exactly is
+external/manual and therefore read-only.
 
-Startup exchange positions are classified EXTERNAL before legacy startup sync
-can auto-adopt them. This is deliberately conservative: after a process restart,
-a surviving position is not mutated until ownership can be proven by a stronger
-recovery mechanism. New positions opened by this process remain managed because
-they are inserted into engine.positions only after a NEXUS submission/fill.
+At startup, a surviving position may be reassociated only through the stronger
+read-only restart proof: one unique durable BGX FILLED order, independently
+confirmed by KuCoin with matching orderId/clientOid/symbol/side/base quantity,
+and currently valid native protection. Symbol similarity alone is never enough.
 
 External positions may be observed, protection-checked and counted toward
 exposure, but must never be auto-adopted, have stops changed, be reduced or be
-closed by NEXUS-7. An unprotected external position blocks new entries; a
-protected external may coexist only under the existing capacity policy.
+closed by BGX. An unprotected external position blocks new entries; a protected
+external may coexist only under the existing capacity policy.
 """
 
 from bot.conditional_stop_protection import conditional_stop_confirmed
+from bot.restart_ownership_recovery import prove_restart_ownership
 
 
 def install(TradingEngine, log):
@@ -61,8 +61,8 @@ def install(TradingEngine, log):
             if size <= 0 or not sym:
                 continue
             # Explicit EXTERNAL ownership always wins over local presence. This
-            # closes the startup-sync hole that caused the manual NEAR position
-            # to be adopted and emergency-closed on 2026-09-11.
+            # closes the startup-sync hole that caused a manual position to be
+            # adopted and emergency-closed in the historical P0 incident.
             if sym in local and sym not in explicit_external:
                 continue
 
@@ -104,10 +104,9 @@ def install(TradingEngine, log):
 
         return {"all": sorted(unexpected), "protected": protected, "unprotected": unprotected}
 
-    # P0 ownership boundary: the legacy startup loader previously inserted every
-    # exchange position into engine.positions. That made a manual position look
-    # bot-owned to every downstream lifecycle guard. Snapshot live symbols before
-    # that loader runs and force them back to EXTERNAL/read-only afterwards.
+    # P0 ownership boundary: startup exchange positions are EXTERNAL by default.
+    # A symbol is allowed to survive the legacy loader only when the dedicated
+    # restart proof independently establishes exact durable + exchange ownership.
     if original_load is not None:
         async def _load_existing_failclosed(self, *args, **kwargs):
             if not _real_exchange_mode(self):
@@ -116,6 +115,7 @@ def install(TradingEngine, log):
                 rows = await self.client.get_positions()
             except Exception as exc:
                 self._external_position_symbols = set()
+                self._recovered_position_symbols = set()
                 self._pilot_external_position_guard_blocked = True
                 log.critical(
                     "[EXTERNAL_POSITION_OWNERSHIP] result=BLOCKED reason=preload_read_failed "
@@ -124,19 +124,106 @@ def install(TradingEngine, log):
                 )
                 return None
 
-            external = set()
+            live_rows = []
+            row_counts = {}
             for row in rows or []:
                 try:
-                    if abs(float(row.get("size", 0) or 0)) > 0 and row.get("symbol"):
-                        external.add(str(row["symbol"]))
+                    size = abs(float(row.get("size", 0) or 0))
+                    sym = str(row.get("symbol", "") or "")
                 except (AttributeError, TypeError, ValueError):
                     continue
+                if size <= 0 or not sym:
+                    continue
+                live_rows.append(row)
+                row_counts[sym] = row_counts.get(sym, 0) + 1
+
+            external = set()
+            recovered = set()
+            proofs = {}
+            for row in live_rows:
+                sym = str(row.get("symbol", "") or "")
+                if row_counts.get(sym, 0) != 1:
+                    external.add(sym)
+                    log.critical(
+                        "[RESTART_OWNERSHIP] symbol=%s result=REJECTED "
+                        "reason=multiple_exchange_position_rows action=EXTERNAL_READ_ONLY",
+                        sym,
+                    )
+                    continue
+
+                proof = await prove_restart_ownership(self, row)
+                proofs[sym] = proof
+                if proof.recovered:
+                    recovered.add(sym)
+                    log.warning(
+                        "[RESTART_OWNERSHIP] symbol=%s result=RECOVERED "
+                        "reason=%s clientOid=%s orderId=%s qty=%s protection=%s "
+                        "execution_effect=NONE",
+                        sym,
+                        proof.reason,
+                        proof.client_oid[:16],
+                        proof.order_id[:16],
+                        proof.base_qty,
+                        proof.protection,
+                    )
+                else:
+                    external.add(sym)
+                    log.warning(
+                        "[RESTART_OWNERSHIP] symbol=%s result=REJECTED reason=%s "
+                        "action=EXTERNAL_READ_ONLY execution_effect=NONE",
+                        sym,
+                        proof.reason,
+                    )
+
             self._external_position_symbols = external
+            self._recovered_position_symbols = recovered
+            self._restart_ownership_proofs = proofs
 
             result = await original_load(self, *args, **kwargs)
+
+            # The legacy loader performs a fresh exchange read. Verify its local
+            # reconstruction still matches the quantity/side that was proven.
+            # Any time-of-check/time-of-use divergence is demoted to EXTERNAL.
+            for sym in list(recovered):
+                proof = proofs.get(sym)
+                local = self.positions.get(sym)
+                try:
+                    local_qty = abs(float(getattr(local, "qty", 0) or 0))
+                    local_side = str(getattr(local, "direction", "") or "").upper()
+                    expected_side = "LONG" if proof and proof.side == "Buy" else "SHORT"
+                    qty_ok = bool(
+                        proof
+                        and abs(local_qty - proof.base_qty)
+                        <= max(1e-12, proof.base_qty * 1e-9)
+                    )
+                    side_ok = bool(local and local_side == expected_side)
+                except (TypeError, ValueError):
+                    qty_ok = False
+                    side_ok = False
+                if not qty_ok or not side_ok:
+                    recovered.discard(sym)
+                    external.add(sym)
+                    self.positions.pop(sym, None)
+                    self._trade_ids.pop(sym, None)
+                    log.critical(
+                        "[RESTART_OWNERSHIP] symbol=%s result=DEMOTED_EXTERNAL "
+                        "reason=postload_proof_divergence action=no_adopt_no_mutation",
+                        sym,
+                    )
+
             for sym in external:
                 self.positions.pop(sym, None)
                 self._trade_ids.pop(sym, None)
+
+            self._external_position_symbols = external
+            self._recovered_position_symbols = recovered
+
+            if recovered:
+                log.warning(
+                    "[EXTERNAL_POSITION_OWNERSHIP] classified=BGX_RECOVERED symbols=%s "
+                    "basis=exact_durable_exchange_proof",
+                    ",".join(sorted(recovered)),
+                )
             if external:
                 log.critical(
                     "[EXTERNAL_POSITION_OWNERSHIP] classified=EXTERNAL symbols=%s "
@@ -196,7 +283,7 @@ def install(TradingEngine, log):
 
     TradingEngine._pilot_external_position_guard_patched = True
     log.warning(
-        "[EXTERNAL_POSITION_IMMUTABLE] installed: startup exchange positions are "
-        "explicitly EXTERNAL/read-only; no auto-adopt/stop-change/reduce/close; "
-        "unprotected externals block and protected externals consume capacity"
+        "[EXTERNAL_POSITION_IMMUTABLE] installed: startup positions default to "
+        "EXTERNAL/read-only; only exact durable+exchange+protection proof may "
+        "recover BGX ownership; no heuristic adoption; unprotected externals block"
     )
