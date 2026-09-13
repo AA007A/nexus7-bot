@@ -17,6 +17,16 @@ class DummyEngine:
 
 
 class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_position_does_not_skip_owned_management(self):
+        self.engine.positions = {'LTCUSDT': SimpleNamespace(qty=7.8, direction='LONG')}
+        self.engine.client.get_positions.return_value = [
+            dict(symbol='LTCUSDT', size=7.8, sizeUnit='BASE_ASSET', side='Buy', stopLoss=0),
+            dict(symbol='ADAUSDT', size=10, side='Buy', stopLoss=.5),
+        ]
+        self.assertEqual(await self.engine._guard_naked_positions(), 'guard-original')
+        self.assertEqual(await self.engine._sync_positions(), 'sync-original')
+        self.assertNotIn('ADAUSDT', self.engine.positions)
+
     async def test_external_increase_of_owned_symbol_is_quarantined(self):
         self.engine.positions = {"ADAUSDT": SimpleNamespace(qty=30., direction="LONG")}
         self.engine.client.get_positions.return_value = [dict(symbol="ADAUSDT", size=39.5,

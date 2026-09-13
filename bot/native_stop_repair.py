@@ -5,6 +5,7 @@ including stop/closeOrder parameters. Existing protection is never cancelled.
 Only a matching active conditional order read back from the exchange counts
 as success; an HTTP acknowledgement alone does not.
 """
+import asyncio
 import math
 import uuid
 
@@ -73,8 +74,15 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     await client._post("/api/v1/orders", body, single_attempt=True)
                 except Exception as exc:
                     log.warning("[NATIVE_STOP_REPAIR] symbol=%s post_unconfirmed=%s", symbol, type(exc).__name__)
-                orders = await read_stop_orders(client, symbol)
-                if orders is None or not any(_matches(order, body) for order in orders):
+                confirmed = False
+                for attempt in range(4):
+                    if attempt:
+                        await asyncio.sleep(0.25 * attempt)
+                    orders = await read_stop_orders(client, symbol)
+                    if orders is not None and any(_matches(order, body) for order in orders):
+                        confirmed = True
+                        break
+                if not confirmed:
                     log.error("[NATIVE_STOP_REPAIR] symbol=%s kind=%s readback_unconfirmed", symbol, kind)
                     return False
             log.info("[NATIVE_STOP_REPAIR] symbol=%s kind=%s trigger=%s closeOrder=true confirmed=true existing_stops_preserved=true", symbol, kind, rounded)

@@ -129,6 +129,9 @@ def install(TradingEngine, kucoin_mod, log):
             for p in positions:
                 try:
                     sym = p.get("symbol", "")
+                    if (getattr(self, "_pilot_external_position_guard_patched", False)
+                            and (sym not in self.positions or sym in getattr(self, "_external_position_symbols", set()))):
+                        continue
                     size = float(p.get("size", 0) or 0)
                     if size <= 0:
                         continue
