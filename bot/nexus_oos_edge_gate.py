@@ -7,6 +7,13 @@ The key methodological rule is that realized outcomes from *approved trades only
 cannot prove incremental AI edge. A baseline-vs-NEXUS comparison requires an
 OOS candidate set with outcomes for both approved and rejected candidates (for
 example, produced by a leakage-safe historical replay/backtest).
+
+Bootstrap inference preserves the data-generating relationship: NEXUS-approved
+candidates are a subset of the baseline candidate population. Therefore each
+bootstrap draw resamples complete baseline candidates and recomputes both the
+baseline and approved-subset expectancy from that same draw. Treating those two
+samples as independent would discard their covariance and can misstate the
+uncertainty of the uplift estimate.
 """
 from __future__ import annotations
 
@@ -61,6 +68,46 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _paired_candidate_bootstrap_ci(
+    known_base: list[CandidateOutcome],
+    *,
+    bootstrap_samples: int,
+    seed: int,
+) -> tuple[float | None, float | None]:
+    """Bootstrap uplift while preserving approved⊂baseline dependence.
+
+    Every draw samples complete baseline candidates. Baseline expectancy is the
+    mean R across that draw; NEXUS expectancy is the mean R among approved rows
+    in the *same* draw. This retains the covariance induced by selection.
+    """
+    if len(known_base) < 2 or bootstrap_samples <= 0:
+        return None, None
+    approved_total = sum(1 for row in known_base if row.approved)
+    if approved_total < 2:
+        return None, None
+
+    rng = random.Random(seed)
+    diffs: list[float] = []
+    n = len(known_base)
+    for _ in range(int(bootstrap_samples)):
+        sample = [known_base[rng.randrange(n)] for _ in range(n)]
+        base_r = [float(row.r_multiple) for row in sample]
+        approved_r = [float(row.r_multiple) for row in sample if row.approved]
+        # Vanishing approved subset is possible only in very small/highly
+        # imbalanced samples. Such a bootstrap replicate carries no uplift
+        # estimate and is conservatively discarded.
+        if not approved_r:
+            continue
+        diffs.append(_mean(approved_r) - _mean(base_r))
+
+    if len(diffs) < max(20, int(bootstrap_samples) // 10):
+        return None, None
+    diffs.sort()
+    lo_i = max(0, int(0.025 * len(diffs)))
+    hi_i = min(len(diffs) - 1, int(0.975 * len(diffs)))
+    return diffs[lo_i], diffs[hi_i]
+
+
 def build_edge_report(
     rows: Iterable[CandidateOutcome],
     *,
@@ -80,20 +127,11 @@ def build_edge_report(
     nexus_exp = _mean([float(r.r_multiple) for r in known_approved]) if known_approved else None
     uplift = (nexus_exp - base_exp) if nexus_exp is not None and base_exp is not None else None
 
-    ci_low = ci_high = None
-    if len(known_base) >= 2 and len(known_approved) >= 2 and bootstrap_samples > 0:
-        rng = random.Random(seed)
-        base_r = [float(r.r_multiple) for r in known_base]
-        approved_r = [float(r.r_multiple) for r in known_approved]
-        diffs: list[float] = []
-        for _ in range(int(bootstrap_samples)):
-            b = [base_r[rng.randrange(len(base_r))] for _ in range(len(base_r))]
-            a = [approved_r[rng.randrange(len(approved_r))] for _ in range(len(approved_r))]
-            diffs.append(_mean(a) - _mean(b))
-        diffs.sort()
-        lo_i = max(0, int(0.025 * len(diffs)))
-        hi_i = min(len(diffs) - 1, int(0.975 * len(diffs)))
-        ci_low, ci_high = diffs[lo_i], diffs[hi_i]
+    ci_low, ci_high = _paired_candidate_bootstrap_ci(
+        known_base,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
 
     return EdgeEvidenceReport(
         total_candidates=len(vals),
