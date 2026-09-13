@@ -37,6 +37,19 @@ class RuntimeContractGuardTests(unittest.TestCase):
         self.assertIn("unexpected.py", errors[0])
         self.assertIn("reviewed.py", errors[0])
 
+    def test_verify_markers_requires_exact_true(self):
+        ok, errors = guard.verify_markers(
+            (
+                guard.MarkerItem("good", True),
+                guard.MarkerItem("missing", False),
+                guard.MarkerItem("truthy_not_bool", 1),
+            )
+        )
+        self.assertIs(ok, False)
+        self.assertEqual(len(errors), 2)
+        self.assertIn("missing", errors[0])
+        self.assertIn("truthy_not_bool", errors[1])
+
     def test_install_fails_closed_when_final_runtime_source_drifted(self):
         class DummyLog:
             def critical(self, *args, **kwargs):
@@ -45,6 +58,8 @@ class RuntimeContractGuardTests(unittest.TestCase):
         class TradingEngine:
             run = _owned("wrong.py")
             _update_balance = _owned("operator_runtime_policy.py")
+            _manage_partial_tp = _owned("partial_tp_execution_hardening.py")
+            _partial_tp_execution_hardening_installed = True
 
         class PilotGuard:
             evaluate = _owned("pilot_exposure_capacity.py")
@@ -98,6 +113,29 @@ class RuntimeContractGuardTests(unittest.TestCase):
         self.assertIn("RiskManager.can_open", source)
         self.assertIn("RiskManagerV3.can_open", source)
         self.assertIn("entry_authorization_unchanged=true", source)
+
+    def test_guard_covers_live_execution_chain(self):
+        source = (ROOT / "bot" / "runtime_contract_guard.py").read_text(
+            encoding="utf-8"
+        )
+        expected = (
+            "KuCoinClient.place_order",
+            "pilot_submission_counter.py",
+            "KuCoinClient._post",
+            "partial_tp_execution_hardening.py",
+            "KuCoinClient.wait_for_fill",
+            "order_visibility_race_hardening.py",
+            "KuCoinClient.get_order_status",
+            "KuCoinClient.set_position_stops",
+            "durable_execution.reconcile_orders",
+            "durable_reconcile_hardening.py",
+            "_native_tpsl_entry_installed",
+            "_fill_normalization_installed",
+            "_pilot_durable_submission_counter_installed",
+            "execution_chain=idempotency>dispatch>fill>tpsl>reconcile",
+        )
+        for text in expected:
+            self.assertIn(text, source)
 
 
 if __name__ == "__main__":
