@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - "bot/nexus_oos_real_replay.py"
+      - "bot/nexus_oos_real_replay_corrected.py"
       - "tests/test_nexus_oos_real_replay.py"
+      - "tests/test_nexus_oos_replay_full_clock.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
 
@@ -30,12 +32,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Replay accounting unit tests
-        run: python -m unittest tests.test_nexus_oos_real_replay -v
+      - name: Replay accounting and clock-parity unit tests
+        run: |
+          python -m unittest tests.test_nexus_oos_real_replay -v
+          python -m unittest tests.test_nexus_oos_replay_full_clock -v
 
       - name: Run real public-market OOS replay
         run: |
-          python -m bot.nexus_oos_real_replay \
+          python -m bot.nexus_oos_real_replay_corrected \
             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
             --limit-15m 2500 \
             --output artifacts/nexus_oos_real_replay.json
