@@ -19,18 +19,32 @@ class ServiceReadiness:
     reason: str
 
 
+def engine_task_healthy(task, *, running: bool) -> bool:
+    """A deliberate clean pause is healthy; a lost/failed worker is not."""
+    if task is None:
+        return False
+    if not task.done():
+        return True
+    if task.cancelled():
+        return False
+    return not running and task.exception() is None
+
+
 def evaluate_service_readiness(
     *,
     bootstrap_complete: bool,
     startup_blocked: bool,
     durable_state_ok: bool,
     instrument_count: int,
+    worker_healthy: bool = True,
 ) -> ServiceReadiness:
     """Return process readiness without weakening any trading safety gate."""
     if not bootstrap_complete:
         return ServiceReadiness(False, "bootstrap_incomplete")
     if startup_blocked:
         return ServiceReadiness(False, "startup_blocked")
+    if not worker_healthy:
+        return ServiceReadiness(False, "engine_task_unhealthy")
     if not durable_state_ok:
         return ServiceReadiness(False, "durable_state_unhealthy")
     if int(instrument_count or 0) <= 0:
