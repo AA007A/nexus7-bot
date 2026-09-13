@@ -257,7 +257,7 @@ def install(TradingEngine, log):
             if not _real_exchange_mode(self):
                 return await original_guard(self, *args, **kwargs)
             state = await _unexpected_positions(self)
-            if state is None or state["all"]:
+            if state is None or (state["all"] and not self.positions):
                 return None
             return await original_guard(self, *args, **kwargs)
         TradingEngine._guard_naked_positions = _guard_failclosed
@@ -267,7 +267,7 @@ def install(TradingEngine, log):
             if not _real_exchange_mode(self):
                 return await original_sync(self, *args, **kwargs)
             state = await _unexpected_positions(self)
-            if state is None or state["all"]:
+            if state is None or (state["all"] and not self.positions):
                 return None
             return await original_sync(self, *args, **kwargs)
         TradingEngine._sync_positions = _sync_failclosed

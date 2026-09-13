@@ -5,6 +5,22 @@ from bot.native_stop_repair import set_stops
 
 
 class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_readback_does_not_resubmit(self):
+        c = self.client()
+        reads = 0
+        accepted = []
+        async def post(path, body, **kwargs):
+            accepted.append(dict(body, isActive=True))
+            raise TimeoutError('ack lost')
+        async def read(symbol):
+            nonlocal reads
+            reads += 1
+            return accepted if reads >= 3 else []
+        c._post = AsyncMock(side_effect=post)
+        c.get_stop_orders = AsyncMock(side_effect=read)
+        self.assertTrue(await set_stops(c, 'AVAXUSDT', 7.3, 0, self.module(), Mock()))
+        c._post.assert_awaited_once()
+
     def client(self, side="Buy"):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side=side, entryPrice=7.4, markPrice=7.4)]),

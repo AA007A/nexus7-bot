@@ -138,6 +138,7 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             capture = (pnl_net / mfe * 100.0) if mfe > 0 else 0.0
             log.warning(
                 "[POST_TRADE_FORENSICS] symbol=%s side=%s entry=%.8f exit=%.8f qty=%.8f "
+                "accounting_source=ESTIMATED_LOCAL_MARK_AND_FEE_RATE fills_confirmed=false "
                 "gross_pnl=%.6f net_pnl=%.6f fees=%.6f duration_min=%.1f "
                 "mfe_pnl=%.6f mae_pnl=%.6f mfe_roe_pct=%.2f mae_roe_pct=%.2f "
                 "best_price=%.8f worst_price=%.8f net_breakeven=%.8f breakeven_reached=%s "

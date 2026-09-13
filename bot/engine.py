@@ -684,7 +684,8 @@ class TradingEngine:
             log.warning(f"🛑 STOP-LOSS {label} ATINGIDO: ${self.daily_pnl:.2f}")
             asyncio.create_task(notify(
                 f"🛑 *Stop-Loss {label}*\n"
-                f"PnL: `${self.daily_pnl:.2f}` → bot pausado"
+                f"PnL calculado (realizado + em aberto): `${self.daily_pnl:.2f}`\n"
+                "Novas entradas bloqueadas; posições abertas continuam sendo gerenciadas e protegidas."
             ))
 
         # ── META: SOMENTE PnL REALIZADO ───────────────────────────
@@ -1367,6 +1368,7 @@ class TradingEngine:
                         pos.qty, pnl_gross, pos.opened_at,
                         fee_open=fee_open, fee_close=fee_close
                     )
+                    trade.accounting_source = "ESTIMATED_LOCAL_MARK_AND_FEE_RATE"
                     self.stats.add(trade)
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)
@@ -1380,7 +1382,7 @@ class TradingEngine:
                         await db.save_trade_close(
                             tid, exit_px, pnl_net, total_fee,
                             (datetime.utcnow() - pos.opened_at).total_seconds() / 60,
-                            exit_reason="EXCHANGE_SL_TP",   # fechado pela exchange
+                            exit_reason="EXCHANGE_CLOSE_UNCONFIRMED_ESTIMATE",
                         )
                     del self.positions[sym]
                     self._cooldown[sym] = time.time() + 1800
@@ -1412,11 +1414,11 @@ class TradingEngine:
                             pnl_net,
                         )
                     log.info(
-                        f"📭 {sym} fechado | Bruto=${pnl_gross:+.4f} "
+                        f"📭 {sym} fechado | ESTIMATIVA sem fills confirmados | Bruto=${pnl_gross:+.4f} "
                         f"Taxas=-${total_fee:.4f} | Líquido=${pnl_net:+.4f}"
                     )
                     _bal = await self.client.get_balance()
-                    await notify(await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px, _bal, _bal*cfg.LEVERAGE))
+                    await notify("⚠️ Valores estimados pelo último preço local e taxa prevista; fills e funding não confirmados.\n" + await close_msg(sym, pos.direction, pnl_net, pos.pnl_pct(), exit_px, _bal, _bal*cfg.LEVERAGE))
                 else:
                     # Atualiza dados da posição aberta
                     bp = open_syms[sym]
@@ -1427,6 +1429,8 @@ class TradingEngine:
 
             # Posições abertas externamente (ex: manual)
             for sym, bp in open_syms.items():
+                if (not self.paper_trade and getattr(self, "_pilot_external_position_guard_patched", False)):
+                    continue  # External adoption requires the dedicated ownership proof.
                 if sym not in self.positions:
                     # CORRIGIDO: KuCoinClient.get_positions() normaliza como
                     # "entryPrice"; "avgPrice" era o formato da Bybit e retornava
