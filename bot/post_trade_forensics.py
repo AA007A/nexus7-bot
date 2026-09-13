@@ -57,16 +57,20 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
         result = original_update(self, current_price)
         pnl = _num(getattr(self, "pnl", 0.0))
         price = _num(getattr(self, "current_price", current_price))
+        entry = _num(getattr(self, "entry", price), price)
         if not hasattr(self, "_forensic_mfe_pnl"):
-            self._forensic_mfe_pnl = pnl
-            self._forensic_mae_pnl = pnl
-            self._forensic_best_price = price
-            self._forensic_worst_price = price
+            # A trade starts at zero excursion at its entry price. This avoids
+            # biasing MAE/MFE when the first observed tick is already profitable
+            # or adverse.
+            self._forensic_mfe_pnl = max(0.0, pnl)
+            self._forensic_mae_pnl = min(0.0, pnl)
+            self._forensic_best_price = price if pnl > 0 else entry
+            self._forensic_worst_price = price if pnl < 0 else entry
         else:
-            if pnl > _num(self._forensic_mfe_pnl, pnl):
+            if pnl > _num(self._forensic_mfe_pnl, 0.0):
                 self._forensic_mfe_pnl = pnl
                 self._forensic_best_price = price
-            if pnl < _num(self._forensic_mae_pnl, pnl):
+            if pnl < _num(self._forensic_mae_pnl, 0.0):
                 self._forensic_mae_pnl = pnl
                 self._forensic_worst_price = price
         return result
