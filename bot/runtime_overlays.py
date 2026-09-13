@@ -37,66 +37,42 @@ def install(TradingEngine, log) -> None:
     from bot import market_viability_fail_closed
     from bot import post_trade_forensics
     from bot import order_visibility_race_hardening
+    from bot import policy_log_throttle
     from bot.kucoin import KuCoinClient, TAKER_FEE
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
 
-    # Correct score semantics before any downstream analyzer/shadow consumes
-    # score_tf. Thresholds remain exactly unchanged.
     scoring_safety_hardening.install(strategy, log)
-
-    # Correct trailing geometry on the canonical Position class. This changes
-    # only the trailing calculation; native exchange SL/TP remains authoritative.
     trailing_safety_hardening.install(core_engine.Position, strategy.cfg, log)
-
-    # Passive audit of the exact confirmed 15m activity ratio used by strategy.
-    # This never changes candles, thresholds, signals or execution.
     volume_ratio_diagnostics.install(strategy.Analyzer, market_data_integrity, log)
-
-    # Observe the fully composed Adaptive analyzer without changing its return.
-    # This measures possible false PULLBACK classifications only after LIVE logic
-    # has already decided HOLD.
     entry_type_shadow_overlay.install(strategy.Analyzer, strategy, log)
-
-    # Close the legacy viability exception path that could broaden the tradable
-    # universe after an unexpected market-data/instrument failure. The wrapper
-    # only removes unverified symbols; it never adds symbols or lowers gates.
     market_viability_fail_closed.install(TradingEngine, strategy.cfg, log)
 
-    # Keep the private-order websocket as fast evidence without letting a brief
-    # KuCoin REST indexing lag produce a false order-not-found warning. REST
-    # confirmation remains authoritative and the caller's timeout budget is kept.
+    # Private WS may lead KuCoin REST indexing briefly. Delay only the first
+    # authoritative REST confirmation within the existing timeout budget.
     order_visibility_race_hardening.install(KuCoinClient, log)
 
-    # The core CROSS-risk hardening is already installed by runtime_bootstrap.
-    # This policy replaces only its module-level geometry helper: class APIs,
-    # exchange routing, leverage, thresholds and sizing authorities are untouched.
     cross_target_policy.install(cross_risk_hardening, log)
 
-    # Delegated modules own these runtime hardenings. This file does not directly
-    # assign TradingEngine/RiskManager methods or mutate exchange state.
-    operator_runtime_policy.install(TradingEngine, log)
+    # Preserve the operator-requested drawdown semantics, but avoid two advisory
+    # WARNINGs every scan cycle hiding operationally significant warnings.
+    operator_runtime_policy.install(TradingEngine, policy_log_throttle.wrap(log))
     exit_policy_telemetry.install(TradingEngine, log)
     operator_loss_policy.install(TradingEngine, log)
 
-    # Telemetry-only: track MAE/MFE and emit a structured report when the final
-    # composed sync path confirms a BGX position has closed on the exchange.
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
 
-    # Install last so it observes the already-composed closed-candle/HTF regime
-    # semantics and cost-calibrated NEXUS decision path. It does not alter any
-    # class method, threshold, leverage, exchange permission or order routing.
     regime_transition.install(nexus_ai, log)
 
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
-        "viability, KuCoin order-visibility race hardening, post-trade forensics, "
-        "final headline semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
-        "are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "viability, KuCoin order-visibility race hardening, drawdown advisory log "
+        "throttling, post-trade forensics, final headline semantics, stop-only CROSS "
+        "target policy, delegated operator margin/drawdown/exit policy and strict "
+        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
+        "leverage_unchanged=true railway_variables_unchanged=true"
     )
