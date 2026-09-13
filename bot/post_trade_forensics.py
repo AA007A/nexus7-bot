@@ -1,13 +1,16 @@
-"""Passive post-trade forensic telemetry.
+"""Passive post-trade forensic telemetry and durable entry lineage.
 
 This module measures trade-path quality without changing signals, sizing,
-thresholds, protection, exchange routing, or close decisions. It tracks MFE/MAE
-on the canonical Position object and emits a structured report when a position
-disappears from the exchange during normal reconciliation.
+thresholds, protection, exchange routing, or close decisions. Entry context is
+persisted only after a confirmed local position exists and is keyed by the
+exchange opening orderId, preventing same-symbol trades from sharing lineage.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import time
 from datetime import datetime
 
 
@@ -33,8 +36,7 @@ def _minutes(opened_at) -> float:
     if not isinstance(opened_at, datetime):
         return 0.0
     try:
-        now = datetime.utcnow()
-        return max(0.0, (now - opened_at).total_seconds() / 60.0)
+        return max(0.0, (datetime.utcnow() - opened_at).total_seconds() / 60.0)
     except Exception:
         return 0.0
 
@@ -46,10 +48,137 @@ def _roe_pct(pnl: float, entry: float, qty: float, leverage: float) -> float:
     return (_num(pnl) / margin * 100.0) if margin > 0 else 0.0
 
 
+def _decision_snapshot(decision):
+    """Normalize NEXUS telemetry without changing or validating the decision."""
+    if decision is None:
+        return {}
+    if isinstance(decision, dict):
+        return dict(decision)
+    allowed = getattr(decision, "execution_allowed", None)
+    return {
+        "decision": "APPROVE" if allowed is True else "REJECT",
+        "execution_allowed": allowed,
+        "setup_quality": getattr(decision, "setup_quality", None),
+        "confidence": getattr(decision, "confidence", None),
+    }
+
+
+def _lineage(sig, nexus, order_record):
+    nexus = _decision_snapshot(nexus)
+    order_record = order_record if isinstance(order_record, dict) else {}
+    return {
+        "version": 2,
+        "symbol": str(getattr(sig, "symbol", "")),
+        "direction": str(getattr(sig, "direction", "")),
+        "entry": _num(getattr(sig, "entry", 0.0)),
+        "score": _num(getattr(sig, "score", 0.0)),
+        "regime": str(getattr(sig, "regime", "UNKNOWN") or "UNKNOWN"),
+        "entry_type": str(getattr(sig, "entry_type", "UNKNOWN") or "UNKNOWN"),
+        "nexus": str(nexus.get("decision", nexus.get("action", "UNKNOWN"))),
+        "nexus_setup_quality": nexus.get("setup_quality"),
+        "nexus_confidence": nexus.get("confidence"),
+        "order_id": str(order_record.get("order_id") or ""),
+        "client_oid": str(order_record.get("client_oid") or ""),
+        "order_created_at_ms": int(_num(order_record.get("created_at", 0.0)) * 1000),
+        "captured_at_ms": int(time.time() * 1000),
+    }
+
+
+def _opening_order_for_position(engine, symbol, opened_after_s):
+    registry = getattr(engine, "orders", None)
+    if registry is None or not hasattr(registry, "snapshot"):
+        return None
+    try:
+        rows = registry.snapshot()
+    except Exception:
+        return None
+    candidates = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("symbol", "")) != str(symbol):
+            continue
+        if str(row.get("state", "")) != "FILLED":
+            continue
+        if not row.get("order_id") or not str(row.get("client_oid", "")).startswith("bgx7-"):
+            continue
+        created = _num(row.get("created_at", 0.0))
+        if created + 2.0 < opened_after_s:
+            continue
+        candidates.append(row)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: _num(row.get("created_at", 0.0)))
+
+
+def _lineage_key(order_id):
+    from bot.durable_daily_stop import state_key
+    token = hashlib.sha256(str(order_id).encode()).hexdigest()[:32]
+    return state_key("trade_lineage_v2") + ":" + token
+
+
+async def _persist_lineage(payload, log):
+    order_id = str((payload or {}).get("order_id") or "")
+    if not order_id:
+        return False
+    try:
+        from bot import database as db
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if await db.save_key_value(_lineage_key(order_id), encoded, strict=True) is not True:
+            raise db.PersistenceError("lineage persistence unconfirmed")
+        log.info(
+            "[TRADE_LINEAGE] symbol=%s orderId=%s durable=true nexus=%s regime=%s "
+            "entry_type=%s execution_effect=NONE",
+            payload.get("symbol", "NA"), order_id, payload.get("nexus", "UNKNOWN"),
+            payload.get("regime", "UNKNOWN"), payload.get("entry_type", "UNKNOWN"),
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "[TRADE_LINEAGE] symbol=%s orderId=%s durable=false error=%s execution_effect=NONE",
+            (payload or {}).get("symbol", "NA"), order_id or "NONE", type(exc).__name__,
+        )
+        return False
+
+
 def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
-    """Install passive MFE/MAE tracking and closure reports."""
+    """Install passive entry-lineage capture, MFE/MAE tracking and closure reports."""
     if getattr(TradingEngine, "_post_trade_forensics_installed", False):
         return
+
+    original_nexus_validate = getattr(TradingEngine, "_nexus_validate", None)
+    if original_nexus_validate is not None:
+        async def _nexus_validate_with_lineage(self, sig, *args, **kwargs):
+            decision = await original_nexus_validate(self, sig, *args, **kwargs)
+            cache = getattr(self, "_post_trade_nexus_lineage", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._post_trade_nexus_lineage = cache
+            cache[str(getattr(sig, "symbol", ""))] = _decision_snapshot(decision)
+            return decision
+        TradingEngine._nexus_validate = _nexus_validate_with_lineage
+
+    original_open = getattr(TradingEngine, "_open", None)
+    if original_open is not None:
+        async def _open_with_lineage(self, sig, *args, **kwargs):
+            symbol = str(getattr(sig, "symbol", ""))
+            started = time.time()
+            nexus = dict((getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {}) or {})
+            result = await original_open(self, sig, *args, **kwargs)
+            pos = (getattr(self, "positions", {}) or {}).get(symbol)
+            if pos is not None:
+                order_record = _opening_order_for_position(self, symbol, started)
+                if order_record is not None:
+                    payload = _lineage(sig, nexus, order_record)
+                    pos._forensic_lineage = payload
+                    await _persist_lineage(payload, log)
+                else:
+                    log.warning(
+                        "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER "
+                        "execution_effect=NONE", symbol,
+                    )
+            return result
+        TradingEngine._open = _open_with_lineage
 
     original_update = Position.update_pnl
 
@@ -59,9 +188,6 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
         price = _num(getattr(self, "current_price", current_price))
         entry = _num(getattr(self, "entry", price), price)
         if not hasattr(self, "_forensic_mfe_pnl"):
-            # A trade starts at zero excursion at its entry price. This avoids
-            # biasing MAE/MFE when the first observed tick is already profitable
-            # or adverse.
             self._forensic_mfe_pnl = max(0.0, pnl)
             self._forensic_mae_pnl = min(0.0, pnl)
             self._forensic_best_price = price if pnl > 0 else entry
@@ -76,16 +202,13 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
         return result
 
     Position.update_pnl = _update_pnl_forensics
-
     original_sync = TradingEngine._sync_positions
 
     async def _sync_positions_forensics(self, *args, **kwargs):
         before = dict(getattr(self, "positions", {}) or {})
         stats = getattr(self, "stats", None)
         trades_before = len(getattr(stats, "trades", []) or []) if stats is not None else 0
-
         result = await original_sync(self, *args, **kwargs)
-
         after = set((getattr(self, "positions", {}) or {}).keys())
         removed = [sym for sym in before if sym not in after]
         new_trades = list((getattr(stats, "trades", []) or [])[trades_before:]) if stats is not None else []
@@ -94,10 +217,7 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             pos = before[sym]
             trade = next((t for t in reversed(new_trades) if getattr(t, "symbol", None) == sym), None)
             if trade is None:
-                # External/read-only quarantine or non-trade state changes are not
-                # reported as a completed BGX trade.
                 continue
-
             entry = _num(getattr(trade, "entry", getattr(pos, "entry", 0.0)))
             exit_price = _num(getattr(trade, "exit_price", getattr(pos, "current_price", 0.0)))
             qty = _num(getattr(trade, "qty", getattr(pos, "qty", 0.0)))
@@ -109,55 +229,46 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             best_price = _num(getattr(pos, "_forensic_best_price", entry))
             worst_price = _num(getattr(pos, "_forensic_worst_price", entry))
             leverage = _num(getattr(cfg, "LEVERAGE", 1.0), 1.0)
-            be_price = _net_breakeven(entry, getattr(pos, "direction", ""), fee_rate)
             direction = str(getattr(pos, "direction", "")).upper()
-            be_reached = (
-                best_price >= be_price if direction == "LONG"
-                else best_price <= be_price if direction == "SHORT"
-                else False
-            )
+            be_price = _net_breakeven(entry, direction, fee_rate)
+            be_reached = best_price >= be_price if direction == "LONG" else best_price <= be_price if direction == "SHORT" else False
             sl = _num(getattr(pos, "sl", 0.0))
             tp = _num(getattr(pos, "tp", 0.0))
             tol = max(abs(entry) * 0.0005, 1e-12)
-            if sl > 0 and abs(exit_price - sl) <= tol:
-                inferred_exit = "SL_NEAR"
-            elif tp > 0 and abs(exit_price - tp) <= tol:
-                inferred_exit = "TP_NEAR"
-            else:
-                inferred_exit = "EXCHANGE_CLOSE_OTHER"
-
-            nexus = (getattr(self, "_last_nexus", {}) or {}).get(sym, {})
-            if not isinstance(nexus, dict):
-                nexus = {}
-            nexus_decision = str(nexus.get("decision", nexus.get("action", "UNKNOWN")))
-            score = _num(getattr(pos, "score", 0.0))
-            regime = str(getattr(pos, "regime", "UNKNOWN") or "UNKNOWN")
-            entry_type = str(getattr(pos, "entry_type", "UNKNOWN") or "UNKNOWN")
-            duration_min = _minutes(getattr(pos, "opened_at", None))
-
+            inferred_exit = "SL_NEAR" if sl > 0 and abs(exit_price - sl) <= tol else "TP_NEAR" if tp > 0 and abs(exit_price - tp) <= tol else "EXCHANGE_CLOSE_OTHER"
+            lineage = getattr(pos, "_forensic_lineage", None)
+            if not isinstance(lineage, dict):
+                lineage = {
+                    "score": _num(getattr(pos, "score", 0.0)),
+                    "nexus": "UNKNOWN",
+                    "regime": str(getattr(pos, "regime", "UNKNOWN") or "UNKNOWN"),
+                    "entry_type": str(getattr(pos, "entry_type", "UNKNOWN") or "UNKNOWN"),
+                    "order_id": "",
+                }
             capture = (pnl_net / mfe * 100.0) if mfe > 0 else 0.0
             log.warning(
                 "[POST_TRADE_FORENSICS] symbol=%s side=%s entry=%.8f exit=%.8f qty=%.8f "
                 "accounting_source=ESTIMATED_LOCAL_MARK_AND_FEE_RATE fills_confirmed=false "
-                "gross_pnl=%.6f net_pnl=%.6f fees=%.6f duration_min=%.1f "
+                "opening_order_id=%s gross_pnl=%.6f net_pnl=%.6f fees=%.6f duration_min=%.1f "
                 "mfe_pnl=%.6f mae_pnl=%.6f mfe_roe_pct=%.2f mae_roe_pct=%.2f "
                 "best_price=%.8f worst_price=%.8f net_breakeven=%.8f breakeven_reached=%s "
                 "profit_capture_pct=%.2f score=%.1f nexus=%s regime=%s entry_type=%s "
                 "exit_inferred=%s sl=%.8f tp=%.8f slippage_bps=NA funding=NA "
                 "decision_effect=NONE execution_effect=NONE",
-                sym, direction, entry, exit_price, qty,
-                pnl_gross, pnl_net, fees, duration_min,
+                sym, direction, entry, exit_price, qty, lineage.get("order_id", ""),
+                pnl_gross, pnl_net, fees, _minutes(getattr(pos, "opened_at", None)),
                 mfe, mae, _roe_pct(mfe, entry, qty, leverage), _roe_pct(mae, entry, qty, leverage),
-                best_price, worst_price, be_price, str(bool(be_reached)).lower(),
-                capture, score, nexus_decision, regime, entry_type,
+                best_price, worst_price, be_price, str(bool(be_reached)).lower(), capture,
+                _num(lineage.get("score", 0.0)), lineage.get("nexus", "UNKNOWN"),
+                lineage.get("regime", "UNKNOWN"), lineage.get("entry_type", "UNKNOWN"),
                 inferred_exit, sl, tp,
             )
-
         return result
 
     TradingEngine._sync_positions = _sync_positions_forensics
     TradingEngine._post_trade_forensics_installed = True
     log.info(
-        "[POST_TRADE_FORENSICS] installed=true telemetry_only=true "
-        "thresholds_unchanged=true leverage_unchanged=true execution_effect=NONE"
+        "[POST_TRADE_FORENSICS] installed=true telemetry_only=true lineage_durable=true "
+        "lineage_key=opening_order_id nexus_source=final_validation thresholds_unchanged=true "
+        "leverage_unchanged=true execution_effect=NONE"
     )
