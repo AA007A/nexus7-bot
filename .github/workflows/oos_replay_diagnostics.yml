@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - "bot/nexus_oos_real_replay.py"
+      - "bot/nexus_oos_real_replay_corrected.py"
       - "bot/nexus_oos_replay_diagnostics.py"
+      - "bot/nexus_oos_replay_diagnostics_corrected.py"
       - ".github/workflows/oos_replay_diagnostics.yml"
   workflow_dispatch:
 
@@ -27,9 +29,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run replay diagnostics
+      - name: Run replay diagnostics with full historical clock parity
         run: |
-          python -m bot.nexus_oos_replay_diagnostics \
+          python -m bot.nexus_oos_replay_diagnostics_corrected \
             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
             --limit-15m 1600 \
             --output artifacts/nexus_oos_replay_diagnostics.json
