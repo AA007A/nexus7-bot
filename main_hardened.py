@@ -54,7 +54,7 @@ from main import app  # noqa: E402
 from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
 from bot import runtime_mode_observability as runtime_mode  # noqa: E402
 from bot.logger import log  # noqa: E402
-from bot.service_readiness import evaluate_service_readiness  # noqa: E402
+from bot.service_readiness import evaluate_service_readiness, engine_task_healthy  # noqa: E402
 
 
 @app.middleware("http")
@@ -115,6 +115,9 @@ async def readiness():
         startup_blocked=blocked,
         durable_state_ok=durable_ok,
         instrument_count=instruments,
+        worker_healthy=engine_task_healthy(
+            getattr(app.state, 'engine_task', None),
+            running=bool(getattr(engine, '_running', False))),
     )
     trading_ready = bool(snap.get("ready"))
 

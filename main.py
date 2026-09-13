@@ -31,13 +31,14 @@ from bot.status_observability import enrich_status
 # ── Autenticação ──────────────────────────────────────────────────
 _bearer = HTTPBearer(auto_error=False)
 def _require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
+    import secrets
     secret = cfg.BOT_API_SECRET
     if not secret:
         raise HTTPException(
             status_code=503,
             detail="BOT_API_SECRET não configurado — configure no Railway antes de usar a API."
         )
-    if not credentials or credentials.credentials != secret:
+    if not credentials or not secrets.compare_digest(credentials.credentials.encode(), secret.encode()):
         raise HTTPException(status_code=401, detail="Token inválido ou ausente")
 
 
@@ -276,11 +277,18 @@ async def pause(request: Request):
 
 @app.post("/api/resume", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def resume(request: Request):
+    if getattr(app.state, 'blocked', True) or not getattr(app.state, 'ready', False):
+        raise HTTPException(status_code=503, detail='Startup safety checks are not ready')
     engine=app.state.engine
     task=getattr(app.state,"engine_task",None)
     if task and not task.done():
+        # pause() clears both flags. Restore both before the existing loop's
+        # next iteration; creating a second task would duplicate its workers.
+        engine._running=True
         engine.active=True
         return {"message":"Bot reativado"}
+    if getattr(engine, '_running', False):
+        raise HTTPException(status_code=503, detail='Engine task failed; service restart required')
     app.state.engine_task=asyncio.create_task(engine.run())
     return {"message":"Bot retomado"}
 
