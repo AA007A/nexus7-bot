@@ -39,6 +39,8 @@ def install(TradingEngine, log) -> None:
     from bot import order_visibility_race_hardening
     from bot import policy_log_throttle
     from bot import partial_tp_execution_hardening
+    from bot import exchange_accounting_evidence
+    from bot import external_origin_runtime
     from bot.kucoin import KuCoinClient, TAKER_FEE
 
     fm.install(log)
@@ -70,15 +72,20 @@ def install(TradingEngine, log) -> None:
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
 
+    # Persist positive live EXTERNAL/read-only ownership observations and allow
+    # post-trade accounting to consume them only when no BGX order evidence
+    # conflicts. Telemetry only: no execution/risk authority is introduced.
+    external_origin_runtime.install(TradingEngine, exchange_accounting_evidence, log)
+
     regime_transition.install(nexus_ai, log)
 
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
         "viability, KuCoin order-visibility race hardening, fail-closed partial-TP "
-        "execution, drawdown advisory log throttling, post-trade forensics, final "
-        "headline semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
-        "are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "execution, drawdown advisory log throttling, post-trade forensics, durable "
+        "external-origin telemetry, final headline semantics, stop-only CROSS target "
+        "policy, delegated operator margin/drawdown/exit policy and strict NEXUS "
+        "regime-transition consistency are active; thresholds_unchanged=true "
+        "leverage_unchanged=true railway_variables_unchanged=true"
     )
