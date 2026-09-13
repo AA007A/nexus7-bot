@@ -16,7 +16,7 @@ closed by BGX. An unprotected external position blocks new entries; a protected
 external may coexist only under the existing capacity policy.
 """
 
-from bot.conditional_stop_protection import conditional_stop_confirmed
+from bot.conditional_stop_protection import conditional_stop_confirmed, _to_base_size, _instrument_info
 from bot.restart_ownership_recovery import prove_restart_ownership
 
 
@@ -64,7 +64,26 @@ def install(TradingEngine, log):
             # closes the startup-sync hole that caused a manual position to be
             # adopted and emergency-closed in the historical P0 incident.
             if sym in local and sym not in explicit_external:
-                continue
+                owned = engine.positions[sym]
+                base_size = _to_base_size(size, row.get("sizeUnit", "CONTRACTS"),
+                                          _instrument_info(engine.client, sym))
+                local_size = abs(float(getattr(owned, "qty", 0) or 0))
+                exchange_side = str(row.get("side", "")).upper()
+                exchange_direction = {"BUY": "LONG", "SELL": "SHORT"}.get(exchange_side, exchange_side)
+                same_direction = exchange_direction == str(getattr(owned, "direction", "")).upper()
+                # Legitimate partial exits can decrease size. An increase or
+                # reversal has no ownership proof merely because symbol matches.
+                if (base_size > 0 and local_size > 0 and same_direction
+                        and base_size <= local_size + max(1e-12, local_size * 1e-9)):
+                    continue
+                explicit_external.add(sym)
+                engine._external_position_symbols = explicit_external
+                engine.positions.pop(sym, None)
+                log.critical(
+                    "[EXTERNAL_POSITION_IMMUTABLE] symbol=%s reason=ownership_quantity_or_side_changed "
+                    "local_qty=%s exchange_base_qty=%s action=quarantine_read_only_no_mutation",
+                    sym, local_size, base_size,
+                )
 
             protected, source = await conditional_stop_confirmed(engine.client, row)
             unexpected[sym] = bool(unexpected.get(sym, False) or protected)

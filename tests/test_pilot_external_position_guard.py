@@ -17,6 +17,32 @@ class DummyEngine:
 
 
 class PilotExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_increase_of_owned_symbol_is_quarantined(self):
+        self.engine.positions = {"ADAUSDT": SimpleNamespace(qty=30., direction="LONG")}
+        self.engine.client.get_positions.return_value = [dict(symbol="ADAUSDT", size=39.5,
+            sizeUnit="BASE_ASSET", side="Buy", entryPrice=7.4, stopLoss=0)]
+        self.engine.client.get_stop_orders = AsyncMock(return_value=[])
+        self.assertIsNone(await self.engine._guard_naked_positions())
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertIn("ADAUSDT", self.engine._external_position_symbols)
+        self.assertTrue(self.engine._pilot_external_position_guard_blocked)
+        self.assertIsNone(await self.engine._reconcile_exchange_positions(only_symbol="ADAUSDT"))
+
+    async def test_same_quantity_normalized_position_remains_owned(self):
+        self.engine.positions = {"ADAUSDT": SimpleNamespace(qty=30., direction="LONG")}
+        self.engine.client.get_positions.return_value = [dict(symbol="ADAUSDT", size=30.,
+            sizeUnit="BASE_ASSET", side="Buy", entryPrice=7.4, stopLoss=7.3)]
+        self.assertEqual(await self.engine._guard_naked_positions(), "guard-original")
+        self.assertIn("ADAUSDT", self.engine.positions)
+
+    async def test_direction_reversal_is_not_implicitly_owned(self):
+        self.engine.positions = {"ADAUSDT": SimpleNamespace(qty=30., direction="LONG")}
+        self.engine.client.get_positions.return_value = [dict(symbol="ADAUSDT", size=30.,
+            sizeUnit="BASE_ASSET", side="Sell", entryPrice=7.4, stopLoss=7.5)]
+        self.assertIsNone(await self.engine._guard_naked_positions())
+        self.assertNotIn("ADAUSDT", self.engine.positions)
+        self.assertFalse(self.engine._pilot_external_position_guard_blocked)
+
     def setUp(self):
         self.log = Mock()
         guard.install(DummyEngine, self.log)

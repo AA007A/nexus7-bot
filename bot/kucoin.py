@@ -1111,106 +1111,12 @@ class KuCoinClient:
 
     async def set_position_stops(self, symbol: str, sl: float = 0,
                                   tp: float = 0) -> bool:
-        """
-        Anexa stop loss e/ou take profit a uma posição JÁ ABERTA.
+        from bot.native_stop_repair import set_stops
+        import sys
+        return await set_stops(self, symbol, sl, tp, sys.modules[__name__], log)
 
-        Endpoint correto da KuCoin Futures para stops de posição:
-          POST /api/v1/position/trading-stop
-
-        Diferente de /api/v1/orders, aqui os stops ficam ligados à posição
-        e não criam ordens condicionais de entrada.
-
-        Preços arredondados ao tickSize — a KuCoin rejeita silenciosamente
-        valores fora do múltiplo correto.
-        """
-        if PAPER_TRADE:
-            log.info("[PAPER] set_position_stops: exchange mutation skipped")
-            return False
-        if not API_KEY:
-            return False
-        kc_sym = to_kucoin(symbol)
-        body   = {"symbol": kc_sym}
-        if sl and sl > 0:
-            body["stopLoss"] = self._round_price(sl, symbol)
-        if tp and tp > 0:
-            body["takeProfit"] = self._round_price(tp, symbol)
-        if len(body) == 1:
-            return False
-        try:
-            res = await self._post("/api/v1/position/trading-stop", body)
-            if not res and res != {}:
-                return False
-            if res == {}:
-                log.error(f"set_position_stops {symbol}: exchange recusou o pedido")
-                return False
-
-            # ══════════════════════════════════════════════════════
-            # VERIFICAÇÃO REAL NA EXCHANGE (dinheiro em risco)
-            #
-            # Confiar apenas no retorno da API é insuficiente: a KuCoin
-            # pode responder 200 e não aplicar o stop (preço fora do
-            # tickSize, posição ainda não consolidada, etc).
-            #
-            # Com 50x, uma posição sem SL liquida a ~2% de movimento.
-            # Aqui consultamos a posição e confirmamos que o stop existe.
-            # ══════════════════════════════════════════════════════
-            await asyncio.sleep(0.5)
-            try:
-                positions = await self.get_positions()
-                pos = next((p for p in positions
-                            if p.get("symbol") == symbol), None)
-                if not pos:
-                    log.warning(
-                        f"set_position_stops {symbol}: posição não encontrada "
-                        f"na verificação — pode ter fechado"
-                    )
-                    return False
-
-                confirmed = float(pos.get("stopLoss", 0) or 0)
-                if sl > 0 and confirmed <= 0:
-                    log.error(
-                        f"🚨 {symbol}: API aceitou o stop mas a posição está "
-                        f"SEM STOP LOSS na exchange — posição DESPROTEGIDA"
-                    )
-                    return False
-                if sl > 0 and confirmed > 0:
-                    # Tolerância de 1% (arredondamento de tickSize)
-                    if abs(confirmed - sl) / sl > 0.01:
-                        log.warning(
-                            f"⚠️ {symbol}: SL aplicado (${confirmed:.4f}) difere "
-                            f"do solicitado (${sl:.4f}) em "
-                            f"{abs(confirmed-sl)/sl*100:.2f}%"
-                        )
-                    log.info(f"✓ {symbol}: SL confirmado na exchange @ ${confirmed:.4f}")
-            except Exception as ve:
-                # Falha na verificação não invalida o stop — mas registra
-                log.warning(f"{symbol}: não foi possível verificar o SL: {ve}")
-
-            return True
-        except Exception as e:
-            log.error(f"set_position_stops {symbol}: {e}")
-            return False
-
-    # ── Trailing Stop / Set SL ────────────────────────────────────
     async def set_sl(self, symbol: str, sl: float, instruments: dict = None) -> bool:
-        """
-        Atualiza Stop Loss de uma posição aberta.
-        KuCoin: POST /api/v1/position/trading-stop
-        SL arredondado ao tickSize correto (bug corrigido v12).
-        """
-        if PAPER_TRADE:
-            log.info("[PAPER] set_sl: exchange mutation skipped")
-            return False
-        if not API_KEY:
-            return False
-        kc_sym    = to_kucoin(symbol)
-        sl_str    = self._round_price(sl, symbol)
-        data      = await self._post("/api/v1/position/trading-stop", {
-            "symbol":   kc_sym,
-            "stopLoss": sl_str,
-        })
-        log.debug(f"set_sl {symbol}: {sl:.6f} → '{sl_str}'")
-        return bool(data)
+        return await self.set_position_stops(symbol, sl=sl)
 
     # ── Cancelar ordens ───────────────────────────────────────────
     async def cancel_all_orders(self, symbol: str = "") -> bool:

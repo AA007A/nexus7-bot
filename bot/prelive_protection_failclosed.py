@@ -23,80 +23,8 @@ def install(TradingEngine, kucoin_mod, log):
     if not getattr(KuCoinClient, "_strict_position_stops_patched", False):
         async def _strict_set_position_stops(self, symbol: str, sl: float = 0,
                                              tp: float = 0) -> bool:
-            if kucoin_mod.PAPER_TRADE:
-                log.info("[PAPER] set_position_stops: exchange mutation skipped")
-                return False
-            if not kucoin_mod.API_KEY:
-                return False
-
-            kc_sym = kucoin_mod.to_kucoin(symbol)
-            body = {"symbol": kc_sym}
-            if sl and sl > 0:
-                body["stopLoss"] = self._round_price(sl, symbol)
-            if tp and tp > 0:
-                body["takeProfit"] = self._round_price(tp, symbol)
-            if len(body) == 1:
-                return False
-
-            try:
-                res = await self._post("/api/v1/position/trading-stop", body)
-                if not res:
-                    log.error("set_position_stops %s: exchange did not confirm request", symbol)
-                    return False
-
-                await asyncio.sleep(0.5)
-                try:
-                    positions = await self.get_positions()
-                except Exception as exc:
-                    log.error(
-                        "[PROTECTION_FAIL_CLOSED] %s stop verification failed: %s",
-                        symbol, type(exc).__name__,
-                    )
-                    return False
-
-                pos = next((p for p in positions if p.get("symbol") == symbol), None)
-                if not pos:
-                    log.warning(
-                        "[PROTECTION_FAIL_CLOSED] %s position absent during stop verification",
-                        symbol,
-                    )
-                    return False
-
-                # First accept the inline field. If KuCoin keeps protection as a
-                # separate conditional order, verify it read-only instead of
-                # falsely declaring the position naked.
-                confirmed_sl = float(pos.get("stopLoss", 0) or 0)
-                if sl > 0 and confirmed_sl <= 0:
-                    protected, evidence = await conditional_stop_confirmed(self, pos)
-                    if protected:
-                        log.info(
-                            "[PROTECTION_FAIL_CLOSED] %s SL confirmed via %s",
-                            symbol, evidence,
-                        )
-                        return True
-                    log.critical(
-                        "[PROTECTION_FAIL_CLOSED] %s position is open without confirmed SL (%s)",
-                        symbol, evidence,
-                    )
-                    return False
-
-                if sl > 0 and confirmed_sl > 0:
-                    if abs(confirmed_sl - sl) / sl > 0.01:
-                        log.warning(
-                            "[PROTECTION_FAIL_CLOSED] %s confirmed SL %.8f differs from requested %.8f",
-                            symbol, confirmed_sl, sl,
-                        )
-                    log.info(
-                        "[PROTECTION_FAIL_CLOSED] %s SL confirmed at %.8f",
-                        symbol, confirmed_sl,
-                    )
-                return True
-            except Exception as exc:
-                log.error(
-                    "[PROTECTION_FAIL_CLOSED] %s stop attachment failed: %s",
-                    symbol, type(exc).__name__,
-                )
-                return False
+            from bot.native_stop_repair import set_stops
+            return await set_stops(self, symbol, sl, tp, kucoin_mod, log)
 
         KuCoinClient.set_position_stops = _strict_set_position_stops
         KuCoinClient._strict_position_stops_patched = True
