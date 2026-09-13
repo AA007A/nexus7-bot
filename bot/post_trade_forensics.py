@@ -158,28 +158,27 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             return decision
         TradingEngine._nexus_validate = _nexus_validate_with_lineage
 
-    original_open = TradingEngine._open
-
-    async def _open_with_lineage(self, sig, *args, **kwargs):
-        symbol = str(getattr(sig, "symbol", ""))
-        started = time.time()
-        nexus = dict((getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {}) or {})
-        result = await original_open(self, sig, *args, **kwargs)
-        pos = (getattr(self, "positions", {}) or {}).get(symbol)
-        if pos is not None:
-            order_record = _opening_order_for_position(self, symbol, started)
-            if order_record is not None:
-                payload = _lineage(sig, nexus, order_record)
-                pos._forensic_lineage = payload
-                await _persist_lineage(payload, log)
-            else:
-                log.warning(
-                    "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER "
-                    "execution_effect=NONE", symbol,
-                )
-        return result
-
-    TradingEngine._open = _open_with_lineage
+    original_open = getattr(TradingEngine, "_open", None)
+    if original_open is not None:
+        async def _open_with_lineage(self, sig, *args, **kwargs):
+            symbol = str(getattr(sig, "symbol", ""))
+            started = time.time()
+            nexus = dict((getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {}) or {})
+            result = await original_open(self, sig, *args, **kwargs)
+            pos = (getattr(self, "positions", {}) or {}).get(symbol)
+            if pos is not None:
+                order_record = _opening_order_for_position(self, symbol, started)
+                if order_record is not None:
+                    payload = _lineage(sig, nexus, order_record)
+                    pos._forensic_lineage = payload
+                    await _persist_lineage(payload, log)
+                else:
+                    log.warning(
+                        "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER "
+                        "execution_effect=NONE", symbol,
+                    )
+            return result
+        TradingEngine._open = _open_with_lineage
 
     original_update = Position.update_pnl
 
