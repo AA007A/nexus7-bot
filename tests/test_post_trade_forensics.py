@@ -1,4 +1,5 @@
 import asyncio
+import math
 from datetime import datetime, timedelta
 
 from bot import post_trade_forensics as pf
@@ -61,11 +62,14 @@ class _Engine:
 
 
 def test_net_breakeven_includes_both_sides_fees():
-    long_be = pf._net_breakeven(100.0, "LONG", 0.0006)
-    short_be = pf._net_breakeven(100.0, "SHORT", 0.0006)
-    assert long_be > 100.0
-    assert short_be < 100.0
-    assert round(long_be - 100.0, 4) == round(100.0 - short_be, 4)
+    fee = 0.0006
+    entry = 100.0
+    long_be = pf._net_breakeven(entry, "LONG", fee)
+    short_be = pf._net_breakeven(entry, "SHORT", fee)
+    assert long_be > entry
+    assert short_be < entry
+    assert math.isclose(long_be * (1.0 - fee), entry * (1.0 + fee), rel_tol=1e-12)
+    assert math.isclose(short_be * (1.0 + fee), entry * (1.0 - fee), rel_tol=1e-12)
 
 
 def test_mfe_mae_tracking_and_close_report_are_telemetry_only():
@@ -80,8 +84,8 @@ def test_mfe_mae_tracking_and_close_report_are_telemetry_only():
     pos.update_pnl(10.4)
     pos.update_pnl(9.9)
     pos.update_pnl(10.1)
-    assert pos._forensic_mfe_pnl == 0.8
-    assert pos._forensic_mae_pnl == -0.2
+    assert math.isclose(pos._forensic_mfe_pnl, 0.8, rel_tol=1e-12, abs_tol=1e-12)
+    assert math.isclose(pos._forensic_mae_pnl, -0.2, rel_tol=1e-12, abs_tol=1e-12)
 
     asyncio.run(engine._sync_positions())
 
