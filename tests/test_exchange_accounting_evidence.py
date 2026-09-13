@@ -1,7 +1,9 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from bot.exchange_accounting_evidence import collect, schedule, audit
+from bot.exchange_accounting_evidence import (
+    collect, schedule, audit, _classify_origin, _opening_fill_order_ids,
+)
 
 
 class AccountingTests(unittest.IsolatedAsyncioTestCase):
@@ -34,3 +36,68 @@ class AccountingTests(unittest.IsolatedAsyncioTestCase):
             await audit(SimpleNamespace(client=None))
             self.assertFalse(log.info.called)
             self.assertTrue(log.warning.called)
+
+    def test_opening_fill_order_ids_are_directional_and_deduped(self):
+        receipt = {'fills': [
+            {'side': 'buy', 'orderId': 'open-1'},
+            {'side': 'buy', 'orderId': 'open-1'},
+            {'side': 'sell', 'orderId': 'close-1'},
+        ]}
+        self.assertEqual(_opening_fill_order_ids(receipt, {'side': 'LONG'}), ['open-1'])
+
+    async def test_bgx_requires_ids_fills_and_lineage(self):
+        receipt = {
+            'ownership': 'BGX_ORDER_IDS', 'fills_reconciled': True,
+            'lineage_reconciled': True,
+        }
+        origin, reason = await _classify_origin(None, receipt, [], {'side': 'LONG'})
+        self.assertEqual(origin, 'BGX_CONFIRMED')
+        self.assertEqual(reason, 'DURABLE_IDS_FILLS_AND_LINEAGE')
+
+    async def test_non_bgx_client_oid_is_external(self):
+        client = SimpleNamespace(_get=AsyncMock(return_value={
+            'id': 'manual-1', 'symbol': 'LTCUSDTM', 'side': 'buy',
+            'clientOid': 'kucoin-app-generated-oid',
+        }))
+        receipt = {
+            'ownership': 'UNATTRIBUTED', 'fills_reconciled': False,
+            'fills': [{'side': 'buy', 'orderId': 'manual-1'}],
+        }
+        origin, reason = await _classify_origin(
+            client, receipt, [], {'side': 'LONG', 'symbol': 'LTCUSDTM'}
+        )
+        self.assertEqual(origin, 'MANUAL_EXTERNAL')
+        self.assertEqual(reason, 'NON_BGX_CLIENT_OID_CONFIRMED')
+        client._get.assert_awaited_once_with('/api/v1/orders/manual-1', auth=True)
+
+    async def test_bgx_client_oid_without_registry_stays_unknown(self):
+        client = SimpleNamespace(_get=AsyncMock(return_value={
+            'id': 'lost-1', 'symbol': 'LTCUSDTM', 'side': 'buy',
+            'clientOid': 'bgx7-lost-registry',
+        }))
+        receipt = {'fills': [{'side': 'buy', 'orderId': 'lost-1'}]}
+        origin, reason = await _classify_origin(
+            client, receipt, [], {'side': 'LONG', 'symbol': 'LTCUSDTM'}
+        )
+        self.assertEqual(origin, 'UNKNOWN_UNATTRIBUTED')
+        self.assertEqual(reason, 'BGX_CLIENT_OID_WITHOUT_DURABLE_PROOF')
+
+    async def test_durable_order_without_full_proof_stays_unknown_without_lookup(self):
+        client = SimpleNamespace(_get=AsyncMock())
+        receipt = {'fills': [{'side': 'buy', 'orderId': 'known-1'}]}
+        registry = [{'order_id': 'known-1', 'client_oid': 'bgx7-known'}]
+        origin, reason = await _classify_origin(
+            client, receipt, registry, {'side': 'LONG', 'symbol': 'LTCUSDTM'}
+        )
+        self.assertEqual(origin, 'UNKNOWN_UNATTRIBUTED')
+        self.assertEqual(reason, 'DURABLE_ORDER_PRESENT_WITHOUT_FULL_BGX_PROOF')
+        client._get.assert_not_awaited()
+
+    async def test_lookup_failure_stays_unknown(self):
+        client = SimpleNamespace(_get=AsyncMock(side_effect=RuntimeError('network')))
+        receipt = {'fills': [{'side': 'buy', 'orderId': 'x'}]}
+        origin, reason = await _classify_origin(
+            client, receipt, [], {'side': 'LONG', 'symbol': 'LTCUSDTM'}
+        )
+        self.assertEqual(origin, 'UNKNOWN_UNATTRIBUTED')
+        self.assertEqual(reason, 'ORDER_IDENTITY_LOOKUP_UNCONFIRMED')

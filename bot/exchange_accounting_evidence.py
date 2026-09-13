@@ -2,8 +2,10 @@
 
 Source: KuCoin Classic Futures GET /api/v1/history-positions. Reported PnL,
 trade fees and funding are retained verbatim. BGX attribution requires durable
-bot order IDs plus reconciled fills; entry lineage is joined only by the exact
-opening exchange orderId and can never authorize execution.
+bot order IDs plus reconciled fills and exact opening-order lineage. External
+classification requires positive exchange order identity proving that opening
+orders do not use the BGX clientOid namespace. Missing/ambiguous evidence stays
+UNKNOWN_UNATTRIBUTED and can never authorize execution.
 """
 import asyncio
 import hashlib
@@ -76,8 +78,6 @@ async def _load_lineage_for_opening_orders(opening_order_ids, row):
         open_ms = int(row.get('openTime', 0) or 0)
     except (TypeError, ValueError):
         return None
-    # Order creation and exchange position open should describe the same event.
-    # Allow up to 2 minutes for network/exchange timestamp skew, never hours/days.
     if not captured_ms or not order_created_ms or not open_ms:
         return None
     if abs(order_created_ms - open_ms) > 120000:
@@ -85,6 +85,77 @@ async def _load_lineage_for_opening_orders(opening_order_ids, row):
     if captured_ms + 120000 < open_ms:
         return None
     return value
+
+
+def _opening_fill_order_ids(receipt, row):
+    executions = receipt.get('fills')
+    if not isinstance(executions, list) or not executions:
+        return []
+    try:
+        direction = {'LONG': 'buy', 'SHORT': 'sell'}[str(row.get('side'))]
+    except KeyError:
+        return []
+    result = []
+    seen = set()
+    for fill in executions:
+        if not isinstance(fill, dict) or str(fill.get('side')).lower() != direction:
+            continue
+        order_id = str(fill.get('orderId') or '')
+        if order_id and order_id not in seen:
+            seen.add(order_id)
+            result.append(order_id)
+    return result
+
+
+async def _classify_origin(client, receipt, registry, row):
+    """Return a telemetry-only origin class; uncertainty always stays UNKNOWN."""
+    if (receipt.get('ownership') == 'BGX_ORDER_IDS'
+            and receipt.get('fills_reconciled') is True
+            and receipt.get('lineage_reconciled') is True):
+        return 'BGX_CONFIRMED', 'DURABLE_IDS_FILLS_AND_LINEAGE'
+
+    opening_ids = _opening_fill_order_ids(receipt, row)
+    if not opening_ids:
+        return 'UNKNOWN_UNATTRIBUTED', 'NO_COMPLETE_OPENING_FILL_IDENTITY'
+
+    durable = {
+        str(order.get('order_id')): order for order in registry
+        if isinstance(order, dict) and order.get('order_id')
+    }
+    if any(order_id in durable for order_id in opening_ids):
+        return 'UNKNOWN_UNATTRIBUTED', 'DURABLE_ORDER_PRESENT_WITHOUT_FULL_BGX_PROOF'
+
+    expected_symbol = str(row.get('symbol') or '')
+    expected_side = {'LONG': 'buy', 'SHORT': 'sell'}.get(str(row.get('side')))
+    if not expected_symbol or not expected_side:
+        return 'UNKNOWN_UNATTRIBUTED', 'INVALID_POSITION_IDENTITY'
+
+    for order_id in opening_ids:
+        try:
+            detail = await asyncio.wait_for(
+                client._get(f'/api/v1/orders/{order_id}', auth=True), timeout=5
+            )
+        except Exception:
+            return 'UNKNOWN_UNATTRIBUTED', 'ORDER_IDENTITY_LOOKUP_UNCONFIRMED'
+        if not isinstance(detail, dict):
+            return 'UNKNOWN_UNATTRIBUTED', 'ORDER_IDENTITY_INVALID'
+        returned_id = str(detail.get('id') or detail.get('orderId') or '')
+        if returned_id != order_id:
+            return 'UNKNOWN_UNATTRIBUTED', 'ORDER_IDENTITY_MISMATCH'
+        if str(detail.get('symbol') or '') != expected_symbol:
+            return 'UNKNOWN_UNATTRIBUTED', 'ORDER_SYMBOL_MISMATCH'
+        if str(detail.get('side') or '').lower() != expected_side:
+            return 'UNKNOWN_UNATTRIBUTED', 'ORDER_SIDE_MISMATCH'
+        client_oid = detail.get('clientOid')
+        if not isinstance(client_oid, str) or not client_oid:
+            return 'UNKNOWN_UNATTRIBUTED', 'CLIENT_OID_MISSING'
+        if client_oid.startswith('bgx7-'):
+            return 'UNKNOWN_UNATTRIBUTED', 'BGX_CLIENT_OID_WITHOUT_DURABLE_PROOF'
+
+    # Positive proof that every observed opening order belongs outside the BGX
+    # clientOid namespace. This means external/non-BGX; it does not prove which
+    # human or external automation submitted the order.
+    return 'MANUAL_EXTERNAL', 'NON_BGX_CLIENT_OID_CONFIRMED'
 
 
 async def audit(engine):
@@ -123,6 +194,12 @@ async def audit(engine):
                 else:
                     receipt['lineage_reconciled'] = False
 
+            origin_class, origin_reason = await _classify_origin(
+                engine.client, receipt, registry['orders'], row
+            )
+            receipt['origin_class'] = origin_class
+            receipt['origin_reason'] = origin_reason
+
             encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
             previous = await db.load_key_value(key, strict=True)
             if previous == encoded:
@@ -130,20 +207,20 @@ async def audit(engine):
             if await db.save_key_value(key, encoded, strict=True) is not True:
                 raise db.PersistenceError('history persistence unconfirmed')
 
-            log.info('[EXCHANGE_ACCOUNTING_EVIDENCE] symbol=%s close_id=%s exchange_pnl=%s trade_fee=%s funding_fee=%s open_time=%s close_time=%s open_price=%s close_price=%s currency=%s source=KUCOIN_POSITION_HISTORY ownership=%s fills_reconciled=%s durable=true execution_effect=NONE',
+            log.info('[EXCHANGE_ACCOUNTING_EVIDENCE] symbol=%s close_id=%s exchange_pnl=%s trade_fee=%s funding_fee=%s open_time=%s close_time=%s open_price=%s close_price=%s currency=%s source=KUCOIN_POSITION_HISTORY ownership=%s fills_reconciled=%s origin_class=%s origin_reason=%s durable=true execution_effect=NONE',
                      row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'),
                      row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'),
                      row.get('openTime', 'NA'), row.get('closeTime', 'NA'),
                      row.get('openPrice', 'NA'), row.get('closePrice', 'NA'), row.get('settleCurrency', 'NA'),
-                     receipt['ownership'], receipt['fills_reconciled'])
-            log.info('[EXCHANGE_FILL_LINK] close_id=%s ownership=%s fills_reconciled=%s reason=%s opening_order_ids=%s closing_order_ids=%s durable=true execution_effect=NONE',
+                     receipt['ownership'], receipt['fills_reconciled'], receipt['origin_class'], receipt['origin_reason'])
+            log.info('[EXCHANGE_FILL_LINK] close_id=%s ownership=%s fills_reconciled=%s reason=%s opening_order_ids=%s closing_order_ids=%s origin_class=%s durable=true execution_effect=NONE',
                      row['closeId'], receipt['ownership'], receipt['fills_reconciled'],
                      receipt.get('reconciliation_reason', 'UNKNOWN'), receipt.get('opening_order_ids', []),
-                     receipt.get('closing_order_ids', []))
+                     receipt.get('closing_order_ids', []), receipt['origin_class'])
 
-            if receipt.get('ownership') == 'BGX_ORDER_IDS' and receipt.get('fills_reconciled') is True:
+            if receipt.get('origin_class') == 'BGX_CONFIRMED':
                 lineage = receipt.get('lineage') or {}
-                log.warning('[POST_TRADE_ACCOUNTING_CONFIRMED] symbol=%s close_id=%s accounting_source=KUCOIN_RECONCILED_FILLS fills_confirmed=true exchange_pnl=%s trade_fee=%s funding_fee=%s open_price=%s close_price=%s opening_order_ids=%s closing_order_ids=%s nexus=%s regime=%s entry_type=%s score=%s lineage_reconciled=%s decision_effect=NONE execution_effect=NONE',
+                log.warning('[POST_TRADE_ACCOUNTING_CONFIRMED] symbol=%s close_id=%s accounting_source=KUCOIN_RECONCILED_FILLS fills_confirmed=true exchange_pnl=%s trade_fee=%s funding_fee=%s open_price=%s close_price=%s opening_order_ids=%s closing_order_ids=%s nexus=%s regime=%s entry_type=%s score=%s lineage_reconciled=%s origin_class=BGX_CONFIRMED decision_effect=NONE execution_effect=NONE',
                             row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'),
                             row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'),
                             row.get('openPrice', 'NA'), row.get('closePrice', 'NA'),
@@ -151,6 +228,9 @@ async def audit(engine):
                             lineage.get('nexus', 'UNKNOWN'), lineage.get('regime', 'UNKNOWN'),
                             lineage.get('entry_type', 'UNKNOWN'), lineage.get('score', 'NA'),
                             receipt.get('lineage_reconciled', False))
+            elif receipt.get('origin_class') == 'MANUAL_EXTERNAL':
+                log.info('[POST_TRADE_EXTERNAL_CONFIRMED] symbol=%s close_id=%s origin_class=MANUAL_EXTERNAL evidence=NON_BGX_CLIENT_OID bot_will_not_claim_trade=true decision_effect=NONE execution_effect=NONE',
+                         row.get('symbol', 'NA'), row['closeId'])
         log.info('[EXCHANGE_ACCOUNTING_COVERAGE] start_ms=%s end_ms=%s positions=%s complete=true scope=POSITION_HISTORY execution_effect=NONE', start, end, len(rows))
     except Exception as exc:
         log.warning('[EXCHANGE_ACCOUNTING_COVERAGE] complete=false result=UNCONFIRMED error=%s execution_effect=NONE', type(exc).__name__)
