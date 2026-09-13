@@ -13,7 +13,11 @@ from collections import Counter
 from pathlib import Path
 
 
-def _category(reason: str) -> str:
+def _category(reason: str, warnings: list[str] | None = None) -> str:
+    warning_text = " | ".join(str(x) for x in (warnings or []))
+    if "CRITICAL_CANDLE_INTEGRITY:" in warning_text:
+        detail = warning_text.split("CRITICAL_CANDLE_INTEGRITY:", 1)[1].split(" | ", 1)[0]
+        return "CANDLE_INTEGRITY:" + detail[:120]
     text = str(reason or "")
     if "REJEITADO: score" in text:
         return "SCORE_BELOW_THRESHOLD"
@@ -43,12 +47,7 @@ def _category(reason: str) -> str:
 def _stats(values: list[float]) -> dict:
     if not values:
         return {"n": 0, "min": None, "max": None, "mean": None}
-    return {
-        "n": len(values),
-        "min": min(values),
-        "max": max(values),
-        "mean": sum(values) / len(values),
-    }
+    return {"n": len(values), "min": min(values), "max": max(values), "mean": sum(values) / len(values)}
 
 
 async def run(symbols: list[str], limit_15m: int) -> dict:
@@ -64,13 +63,15 @@ async def run(symbols: list[str], limit_15m: int) -> dict:
     def instrumented(*args, **kwargs):
         decision = original(*args, **kwargs)
         reasoning = list(getattr(decision, "reasoning", []) or [])
+        warnings = [str(x) for x in (getattr(decision, "warnings", []) or [])]
         reason = reasoning[-1] if reasoning else ""
         records.append({
             "symbol": str(getattr(decision, "symbol", "")),
             "approved": getattr(decision, "execution_allowed", False) is True,
             "decision": str(getattr(decision, "decision", "")),
             "reason": str(reason),
-            "category": _category(reason),
+            "warnings": warnings,
+            "category": _category(reason, warnings),
             "setup_quality": float(getattr(decision, "setup_quality", 0.0) or 0.0),
             "data_quality": float(getattr(decision, "data_quality", 0.0) or 0.0),
             "confidence": float(getattr(decision, "confidence", 0.0) or 0.0),
