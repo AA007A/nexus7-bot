@@ -72,7 +72,7 @@ def test_stale_signal_marks_coverage_degraded_but_does_not_modify_assessment():
     assert assessment.size_multiplier == 1.0
 
 
-def test_install_only_annotates_snapshot_and_preserves_assessment_identity():
+def test_install_annotates_snapshot_logs_state_and_preserves_assessment_identity():
     assessment = SimpleNamespace(
         score=0,
         level="NORMAL",
@@ -93,11 +93,19 @@ def test_install_only_annotates_snapshot_and_preserves_assessment_identity():
             }
 
     class DummyLog:
+        def __init__(self):
+            self.info_calls = []
+            self.warning_calls = []
+
         def info(self, *args, **kwargs):
-            return None
+            self.info_calls.append(args)
+
+        def warning(self, *args, **kwargs):
+            self.warning_calls.append(args)
 
     runtime = DummyRuntime()
-    coverage.install(runtime, DummyLog())
+    log = DummyLog()
+    coverage.install(runtime, log)
     snap = runtime.snapshot()
 
     assert snap["assessment"] is assessment
@@ -105,3 +113,9 @@ def test_install_only_annotates_snapshot_and_preserves_assessment_identity():
     assert snap["coverage_execution_effect"] == "NONE"
     assert snap["assessment"].block_new_entries is False
     assert snap["assessment"].size_multiplier == 1.0
+    assert len(log.warning_calls) == 1
+    assert "[MARKET_RISK_COVERAGE_STATE]" in log.warning_calls[0][0]
+
+    # Same state is rate-limited rather than spamming every PilotGuard evaluate().
+    runtime.snapshot()
+    assert len(log.warning_calls) == 1

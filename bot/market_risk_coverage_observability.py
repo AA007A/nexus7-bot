@@ -13,6 +13,8 @@ execution policy.
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, Mapping
 
 
@@ -26,6 +28,8 @@ _DEGRADED_TOKENS = (
     "api=['401'",
     'api=["401"',
 )
+
+_LOG_INTERVAL_S = 120.0
 
 
 def _provider_degraded(name: str, status: Any) -> bool:
@@ -75,18 +79,49 @@ def classify_coverage(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def install(runtime_module, log) -> None:
-    """Annotate runtime snapshots; never alter the contained assessment."""
+    """Annotate runtime snapshots and emit rate-limited coverage telemetry."""
     if getattr(runtime_module, "_coverage_observability_installed", False):
         return
 
     original_snapshot = runtime_module.snapshot
+    lock = threading.Lock()
+    last_key = None
+    last_log_at = 0.0
 
     def snapshot_with_coverage(*args, **kwargs):
+        nonlocal last_key, last_log_at
         snap = original_snapshot(*args, **kwargs)
         if not isinstance(snap, dict):
             return snap
         out = dict(snap)
-        out.update(classify_coverage(out))
+        coverage = classify_coverage(out)
+        out.update(coverage)
+
+        key = (
+            coverage["coverage_state"],
+            coverage["coverage_reasons"],
+            coverage["degraded_providers"],
+            coverage["fresh_signal_count"],
+        )
+        now = time.monotonic()
+        should_log = False
+        with lock:
+            if key != last_key or now - last_log_at >= _LOG_INTERVAL_S:
+                last_key = key
+                last_log_at = now
+                should_log = True
+
+        if should_log:
+            logger = log.warning if coverage["coverage_state"] == "DEGRADED" else log.info
+            logger(
+                "[MARKET_RISK_COVERAGE_STATE] state=%s reasons=%s "
+                "degraded_providers=%s fresh_signal_count=%s "
+                "telemetry_only=true execution_effect=NONE",
+                coverage["coverage_state"],
+                ",".join(coverage["coverage_reasons"]) or "NONE",
+                ",".join(coverage["degraded_providers"]) or "NONE",
+                coverage["fresh_signal_count"],
+            )
         return out
 
     runtime_module.snapshot = snapshot_with_coverage
