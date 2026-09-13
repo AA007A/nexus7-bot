@@ -101,7 +101,7 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             pnl_net = _num(getattr(trade, "pnl", pnl_gross))
             fees = _num(getattr(trade, "total_fees", 0.0))
             mfe = _num(getattr(pos, "_forensic_mfe_pnl", getattr(pos, "peak_pnl", 0.0)))
-            mae = _num(getattr(pos, "_forensic_mae_pnl", min(0.0, getattr(pos, "pnl", 0.0)))
+            mae = _num(getattr(pos, "_forensic_mae_pnl", min(0.0, getattr(pos, "pnl", 0.0))))
             best_price = _num(getattr(pos, "_forensic_best_price", entry))
             worst_price = _num(getattr(pos, "_forensic_worst_price", entry))
             leverage = _num(getattr(cfg, "LEVERAGE", 1.0), 1.0)
