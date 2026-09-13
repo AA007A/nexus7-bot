@@ -34,6 +34,7 @@ def install(TradingEngine, log) -> None:
     from bot import trailing_safety_hardening
     from bot import market_data_integrity
     from bot import volume_ratio_diagnostics
+    from bot import market_viability_fail_closed
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
@@ -55,6 +56,11 @@ def install(TradingEngine, log) -> None:
     # has already decided HOLD.
     entry_type_shadow_overlay.install(strategy.Analyzer, strategy, log)
 
+    # Close the legacy viability exception path that could broaden the tradable
+    # universe after an unexpected market-data/instrument failure. The wrapper
+    # only removes unverified symbols; it never adds symbols or lowers gates.
+    market_viability_fail_closed.install(TradingEngine, strategy.cfg, log)
+
     # The core CROSS-risk hardening is already installed by runtime_bootstrap.
     # This policy replaces only its module-level geometry helper: class APIs,
     # exchange routing, leverage, thresholds and sizing authorities are untouched.
@@ -73,9 +79,9 @@ def install(TradingEngine, log) -> None:
 
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
-        "entry-type shadow diagnostics, volume-ratio diagnostics, final headline "
-        "semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
-        "are active; thresholds_unchanged=true leverage_unchanged=true "
+        "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
+        "viability, final headline semantics, stop-only CROSS target policy, delegated "
+        "operator margin/drawdown/exit policy and strict NEXUS regime-transition "
+        "consistency are active; thresholds_unchanged=true leverage_unchanged=true "
         "railway_variables_unchanged=true"
     )
