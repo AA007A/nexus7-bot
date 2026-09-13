@@ -6,6 +6,19 @@ from bot import durable_daily_stop as gate
 
 
 class DailyStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observed_stop_migration_is_scoped_and_expires(self):
+        env = {'RAILWAY_PROJECT_ID':'c3ffa9f5-8c64-4859-a722-a07105ba5e84',
+               'RAILWAY_SERVICE_ID':'751b41ee-2aef-4487-b19a-f305f15c64fe',
+               'RAILWAY_ENVIRONMENT_ID':'3f436900-ab27-4b41-9248-1a9a9f8dc80c'}
+        with patch.dict('os.environ', env), patch.object(gate.db, '_is_pg', True), patch.object(gate.db, 'configured_postgres_unavailable', return_value=False), patch.object(gate.db, 'load_key_value', new_callable=AsyncMock, return_value=None), patch.object(gate.db, 'save_key_value', new_callable=AsyncMock, return_value=True) as write:
+            self.assertTrue(await gate.entries_blocked(SimpleNamespace(daily_stopped=False), datetime(2026,9,13,tzinfo=timezone.utc)))
+            write.assert_awaited_once()
+            write.reset_mock()
+            self.assertFalse(await gate.entries_blocked(SimpleNamespace(daily_stopped=False), datetime(2026,9,14,tzinfo=timezone.utc)))
+            with patch.dict('os.environ', {'RAILWAY_SERVICE_ID':'other'}):
+                self.assertFalse(await gate.entries_blocked(SimpleNamespace(daily_stopped=False), datetime(2026,9,13,tzinfo=timezone.utc)))
+            write.assert_not_awaited()
+
     async def test_restart_and_utc_rollover(self):
         memory = {}
         async def read(key, **kw): return memory.get(key)
