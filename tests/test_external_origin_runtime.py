@@ -87,10 +87,10 @@ class ExternalOriginRuntimeTests(unittest.IsolatedAsyncioTestCase):
         log = Mock()
         proof = SimpleNamespace(recovered=False, reason='NO_DURABLE_ORDER')
         with patch.object(runtime, 'prove_restart_ownership', new_callable=AsyncMock, return_value=proof), \
-             patch.object(runtime, 'record_external_position', new_callable=AsyncMock, return_value=True) as record, \
-             patch.object(runtime.time, 'monotonic', side_effect=[100.0, 103.0]):
+             patch.object(runtime, 'record_external_position', new_callable=AsyncMock, return_value=True) as record:
             await runtime._observe_external_candidates(engine, log)
             record.assert_not_awaited()
+            engine._external_origin_pending[('ADAUSDT', 'BUY')] -= runtime._SETTLE_S + 1.0
             await runtime._observe_external_candidates(engine, log)
             record.assert_awaited_once()
 
@@ -102,12 +102,13 @@ class ExternalOriginRuntimeTests(unittest.IsolatedAsyncioTestCase):
             client=SimpleNamespace(get_positions=AsyncMock(return_value=[
                 {'symbol': 'BTCUSDT', 'side': 'Buy', 'size': 1, 'entryPrice': 60000}
             ])),
-            _external_origin_pending={('BTCUSDT', 'BUY'): 100.0},
+            _external_origin_pending={
+                ('BTCUSDT', 'BUY'): runtime.time.monotonic() - runtime._SETTLE_S - 1.0
+            },
         )
         proof = SimpleNamespace(recovered=True, reason='EXACT_PROOF')
         with patch.object(runtime, 'prove_restart_ownership', new_callable=AsyncMock, return_value=proof), \
-             patch.object(runtime, 'record_external_position', new_callable=AsyncMock) as record, \
-             patch.object(runtime.time, 'monotonic', return_value=103.0):
+             patch.object(runtime, 'record_external_position', new_callable=AsyncMock) as record:
             await runtime._observe_external_candidates(engine, Mock())
         record.assert_not_awaited()
         self.assertNotIn(('BTCUSDT', 'BUY'), engine._external_origin_pending)
