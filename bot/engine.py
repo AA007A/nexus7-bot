@@ -308,6 +308,9 @@ class Stats:
 
     def daily_pnl(self) -> float:
         """PnL realizado apenas hoje (UTC)."""
+        if hasattr(self, '_durable_daily_pnl'):
+            from bot.durable_daily_pnl import realized
+            return realized(self)
         today = datetime.now(timezone.utc).date()
         total = 0.0
         for t in self.trades:
@@ -509,13 +512,15 @@ class TradingEngine:
                         await self._manage_partial_tp()
                         await self._apply_trailing_stops()
                         await self._check_rr_double()
+                    from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
+                    daily_pnl_ok = await checkpoint_daily_pnl(self)
                     self._update_daily_pnl()
                     from bot.durable_daily_stop import entries_blocked
                     daily_state_blocked = await entries_blocked(self)
                     from bot.exchange_accounting_evidence import schedule as schedule_accounting
                     schedule_accounting(self)
                     
-                    if self.daily_stopped or daily_state_blocked:
+                    if self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
                         # FIX: logar apenas 1x — não a cada 5s em loop infinito
                         pass   # já logado em _update_daily_pnl, não repetir aqui
                     elif self.risk.can_open(len(self.positions)):
@@ -1373,6 +1378,8 @@ class TradingEngine:
                         fee_open=fee_open, fee_close=fee_close
                     )
                     trade.accounting_source = "ESTIMATED_LOCAL_MARK_AND_FEE_RATE"
+                    from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
+                    await checkpoint_daily_pnl(self, extra=trade)
                     self.stats.add(trade)
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)
@@ -1915,6 +1922,8 @@ class TradingEngine:
                         pos.qty, pnl_gross, pos.opened_at,
                         fee_open=fee_open, fee_close=fee_close,
                     )
+                    from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
+                    await checkpoint_daily_pnl(self, extra=trade)
                     self.stats.add(trade)
                     # Persiste fechamento no banco
                     tid = self._trade_ids.pop(sym, 0)

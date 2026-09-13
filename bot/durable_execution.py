@@ -37,7 +37,7 @@ def _clear(engine, reason: str):
 
 
 def can_open(engine) -> bool:
-    return bool(getattr(engine, "_durable_state_ok", False))
+    return bool(getattr(engine, "_durable_state_ok", False)) and getattr(engine, '_daily_pnl_ok', True) is True
 
 
 def _positive(value, field: str) -> float:
