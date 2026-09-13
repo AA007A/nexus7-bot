@@ -45,8 +45,23 @@ def _roe_pct(pnl: float, entry: float, qty: float, leverage: float) -> float:
     return (_num(pnl) / margin * 100.0) if margin > 0 else 0.0
 
 
+def _decision_snapshot(decision):
+    """Normalize the final NEXUS object for telemetry without influencing it."""
+    if decision is None:
+        return {}
+    if isinstance(decision, dict):
+        return dict(decision)
+    allowed = getattr(decision, "execution_allowed", None)
+    return {
+        "decision": "APPROVE" if allowed is True else "REJECT",
+        "execution_allowed": allowed,
+        "setup_quality": getattr(decision, "setup_quality", None),
+        "confidence": getattr(decision, "confidence", None),
+    }
+
+
 def _lineage(sig, nexus):
-    nexus = nexus if isinstance(nexus, dict) else {}
+    nexus = _decision_snapshot(nexus)
     return {
         "version": 1,
         "symbol": str(getattr(sig, "symbol", "")),
@@ -56,6 +71,8 @@ def _lineage(sig, nexus):
         "regime": str(getattr(sig, "regime", "UNKNOWN") or "UNKNOWN"),
         "entry_type": str(getattr(sig, "entry_type", "UNKNOWN") or "UNKNOWN"),
         "nexus": str(nexus.get("decision", nexus.get("action", "UNKNOWN"))),
+        "nexus_setup_quality": nexus.get("setup_quality"),
+        "nexus_confidence": nexus.get("confidence"),
         "captured_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
     }
 
@@ -68,11 +85,15 @@ async def _persist_lineage(symbol, payload, log):
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         if await db.save_key_value(key, encoded, strict=True) is not True:
             raise db.PersistenceError("lineage persistence unconfirmed")
-        log.info("[TRADE_LINEAGE] symbol=%s durable=true nexus=%s regime=%s entry_type=%s execution_effect=NONE",
-                 symbol, payload["nexus"], payload["regime"], payload["entry_type"])
+        log.info(
+            "[TRADE_LINEAGE] symbol=%s durable=true nexus=%s regime=%s entry_type=%s execution_effect=NONE",
+            symbol, payload["nexus"], payload["regime"], payload["entry_type"],
+        )
     except Exception as exc:
-        log.warning("[TRADE_LINEAGE] symbol=%s durable=false error=%s execution_effect=NONE",
-                    symbol, type(exc).__name__)
+        log.warning(
+            "[TRADE_LINEAGE] symbol=%s durable=false error=%s execution_effect=NONE",
+            symbol, type(exc).__name__,
+        )
 
 
 def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
@@ -80,11 +101,26 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
     if getattr(TradingEngine, "_post_trade_forensics_installed", False):
         return
 
+    # Capture the exact final NexusDecision returned by the composed validation
+    # path. This is telemetry-only: the object is returned unchanged.
+    original_nexus_validate = getattr(TradingEngine, "_nexus_validate", None)
+    if original_nexus_validate is not None:
+        async def _nexus_validate_with_lineage(self, sig, *args, **kwargs):
+            decision = await original_nexus_validate(self, sig, *args, **kwargs)
+            cache = getattr(self, "_post_trade_nexus_lineage", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._post_trade_nexus_lineage = cache
+            cache[str(getattr(sig, "symbol", ""))] = _decision_snapshot(decision)
+            return decision
+
+        TradingEngine._nexus_validate = _nexus_validate_with_lineage
+
     original_open = TradingEngine._open
 
     async def _open_with_lineage(self, sig, *args, **kwargs):
         symbol = str(getattr(sig, "symbol", ""))
-        nexus = (getattr(self, "_last_nexus", {}) or {}).get(symbol, {})
+        nexus = (getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {})
         payload = _lineage(sig, nexus)
         result = await original_open(self, sig, *args, **kwargs)
         pos = (getattr(self, "positions", {}) or {}).get(symbol)
@@ -152,16 +188,19 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
             inferred_exit = "SL_NEAR" if sl > 0 and abs(exit_price - sl) <= tol else "TP_NEAR" if tp > 0 and abs(exit_price - tp) <= tol else "EXCHANGE_CLOSE_OTHER"
             lineage = getattr(pos, "_forensic_lineage", None)
             if not isinstance(lineage, dict):
-                nexus = (getattr(self, "_last_nexus", {}) or {}).get(sym, {})
-                lineage = _lineage(pos, nexus)
+                lineage = _lineage(pos, {})
             capture = (pnl_net / mfe * 100.0) if mfe > 0 else 0.0
             log.warning(
                 "[POST_TRADE_FORENSICS] symbol=%s side=%s entry=%.8f exit=%.8f qty=%.8f accounting_source=ESTIMATED_LOCAL_MARK_AND_FEE_RATE fills_confirmed=false gross_pnl=%.6f net_pnl=%.6f fees=%.6f duration_min=%.1f mfe_pnl=%.6f mae_pnl=%.6f mfe_roe_pct=%.2f mae_roe_pct=%.2f best_price=%.8f worst_price=%.8f net_breakeven=%.8f breakeven_reached=%s profit_capture_pct=%.2f score=%.1f nexus=%s regime=%s entry_type=%s exit_inferred=%s sl=%.8f tp=%.8f slippage_bps=NA funding=NA decision_effect=NONE execution_effect=NONE",
                 sym, direction, entry, exit_price, qty, pnl_gross, pnl_net, fees, _minutes(getattr(pos, "opened_at", None)),
                 mfe, mae, _roe_pct(mfe, entry, qty, leverage), _roe_pct(mae, entry, qty, leverage), best_price, worst_price,
-                be_price, str(bool(be_reached)).lower(), capture, lineage["score"], lineage["nexus"], lineage["regime"], lineage["entry_type"], inferred_exit, sl, tp)
+                be_price, str(bool(be_reached)).lower(), capture, lineage["score"], lineage["nexus"], lineage["regime"], lineage["entry_type"], inferred_exit, sl, tp,
+            )
         return result
 
     TradingEngine._sync_positions = _sync_positions_forensics
     TradingEngine._post_trade_forensics_installed = True
-    log.info("[POST_TRADE_FORENSICS] installed=true telemetry_only=true lineage_durable=true thresholds_unchanged=true leverage_unchanged=true execution_effect=NONE")
+    log.info(
+        "[POST_TRADE_FORENSICS] installed=true telemetry_only=true lineage_durable=true "
+        "nexus_source=final_validation thresholds_unchanged=true leverage_unchanged=true execution_effect=NONE"
+    )
