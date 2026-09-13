@@ -69,21 +69,13 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
     from bot import durable_execution
 
     items = (
-        ContractItem(
-            "TradingEngine.run",
-            TradingEngine.run,
-            "operator_runtime_policy.py",
-        ),
+        ContractItem("TradingEngine.run", TradingEngine.run, "operator_runtime_policy.py"),
         ContractItem(
             "TradingEngine._update_balance",
             TradingEngine._update_balance,
             "operator_runtime_policy.py",
         ),
-        ContractItem(
-            "RiskManager.can_open",
-            RiskManager.can_open,
-            "operator_runtime_policy.py",
-        ),
+        ContractItem("RiskManager.can_open", RiskManager.can_open, "operator_runtime_policy.py"),
         ContractItem(
             "RiskManagerV3.can_open",
             RiskManagerV3.can_open,
@@ -94,30 +86,22 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             engine_module.minimum_base_quantity,
             "operator_runtime_policy.py",
         ),
-        ContractItem(
-            "PilotGuard.evaluate",
-            PilotGuard.evaluate,
-            "pilot_exposure_capacity.py",
-        ),
+        ContractItem("PilotGuard.evaluate", PilotGuard.evaluate, "pilot_exposure_capacity.py"),
         ContractItem(
             "nexus_ai.regime_compatibility",
             nexus_ai.regime_compatibility,
             "nexus_regime_transition_consistency.py",
         ),
-        # Final LIVE entry dispatch wrapper. The inner native TPSL wrapper is
-        # asserted separately by an installation marker below.
         ContractItem(
             "KuCoinClient.place_order",
             KuCoinClient.place_order,
             "pilot_submission_counter.py",
         ),
-        # Partial reduce-only semantics are the final mutation layer over _post.
         ContractItem(
             "KuCoinClient._post",
             KuCoinClient._post,
             "partial_tp_execution_hardening.py",
         ),
-        # REST fill confirmation is intentionally outermost after normalization.
         ContractItem(
             "KuCoinClient.wait_for_fill",
             KuCoinClient.wait_for_fill,
@@ -131,7 +115,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ContractItem(
             "KuCoinClient.set_position_stops",
             KuCoinClient.set_position_stops,
-            "kucoin.py",
+            "prelive_protection_failclosed.py",
         ),
         ContractItem(
             "TradingEngine._manage_partial_tp",
