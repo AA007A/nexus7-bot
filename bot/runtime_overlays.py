@@ -43,6 +43,8 @@ def install(TradingEngine, log) -> None:
     from bot import external_origin_runtime
     from bot import market_risk_runtime
     from bot import market_risk_coverage_observability
+    from bot import runtime_contract_guard
+    from bot.pilot import PilotGuard
     from bot.kucoin import KuCoinClient, TAKER_FEE
 
     fm.install(log)
@@ -85,6 +87,13 @@ def install(TradingEngine, log) -> None:
 
     regime_transition.install(nexus_ai, log)
 
+    # MUST remain the final installer in this compatibility stack. It verifies
+    # that execution-critical callables are still owned by the reviewed final
+    # wrappers and fails startup if a later patch silently replaces one.
+    runtime_contract_guard.install(
+        TradingEngine, PilotGuard, nexus_ai, core_engine, log
+    )
+
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
@@ -92,7 +101,7 @@ def install(TradingEngine, log) -> None:
         "execution, drawdown advisory log throttling, market-risk coverage telemetry, "
         "post-trade forensics, durable external-origin telemetry, final headline "
         "semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
-        "are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "margin/drawdown/exit policy, strict NEXUS regime-transition consistency "
+        "and final runtime ownership contract are active; thresholds_unchanged=true "
+        "leverage_unchanged=true railway_variables_unchanged=true"
     )
