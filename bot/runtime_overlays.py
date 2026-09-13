@@ -38,6 +38,7 @@ def install(TradingEngine, log) -> None:
     from bot import post_trade_forensics
     from bot import order_visibility_race_hardening
     from bot import policy_log_throttle
+    from bot import partial_tp_execution_hardening
     from bot.kucoin import KuCoinClient, TAKER_FEE
 
     fm.install(log)
@@ -52,6 +53,10 @@ def install(TradingEngine, log) -> None:
     # Private WS may lead KuCoin REST indexing briefly. Delay only the first
     # authoritative REST confirmation within the existing timeout budget.
     order_visibility_race_hardening.install(KuCoinClient, log)
+
+    # Partial exits are execution-critical: explicit sized reduce-only semantics,
+    # REST fill proof, exchange quantity truth and fail-closed BE protection.
+    partial_tp_execution_hardening.install(TradingEngine, KuCoinClient, TAKER_FEE, log)
 
     cross_target_policy.install(cross_risk_hardening, log)
 
@@ -70,9 +75,10 @@ def install(TradingEngine, log) -> None:
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
-        "viability, KuCoin order-visibility race hardening, drawdown advisory log "
-        "throttling, post-trade forensics, final headline semantics, stop-only CROSS "
-        "target policy, delegated operator margin/drawdown/exit policy and strict "
-        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
-        "leverage_unchanged=true railway_variables_unchanged=true"
+        "viability, KuCoin order-visibility race hardening, fail-closed partial-TP "
+        "execution, drawdown advisory log throttling, post-trade forensics, final "
+        "headline semantics, stop-only CROSS target policy, delegated operator "
+        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
+        "are active; thresholds_unchanged=true leverage_unchanged=true "
+        "railway_variables_unchanged=true"
     )
