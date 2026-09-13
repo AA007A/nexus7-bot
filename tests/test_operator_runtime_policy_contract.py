@@ -1,0 +1,30 @@
+import inspect
+
+from bot import operator_runtime_policy as policy
+
+
+def test_operator_margin_fraction_remains_fifty_percent():
+    assert policy.MARGIN_FRACTION == 0.50
+
+
+def test_operator_policy_uses_configured_leverage_without_mutating_it():
+    source = inspect.getsource(policy)
+    assert "target_margin = available * MARGIN_FRACTION" in source
+    assert "target_notional = target_margin * leverage" in source
+    assert "leverage = float(cfg.LEVERAGE)" in source
+    assert "cfg.LEVERAGE =" not in source
+
+
+def test_drawdown_policy_is_explicitly_advisory_for_new_entries():
+    source = inspect.getsource(policy._install_drawdown_advisory)
+    assert "entries_blocked=false execution_effect=NONE" in source
+    assert "active_restored=true execution_effect=NONE" in inspect.getsource(
+        policy._protect_drawdown_update
+    )
+
+
+def test_margin_policy_returns_operator_target_quantity_not_stop_risk_telemetry():
+    source = inspect.getsource(policy._install_margin_sizing)
+    assert "stop_risk_qty_advisory" in source
+    assert "authority=operator_margin_policy" in source
+    assert "return target_qty" in source
