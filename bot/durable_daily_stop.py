@@ -27,6 +27,20 @@ async def entries_blocked(engine, now=None):
         stored = await db.load_key_value(key, strict=True)
         if stored not in (None, 'STOP'):
             raise db.PersistenceError('invalid daily stop state')
+        # One-time migration of the observed 2026-09-13T06:52:01Z LIVE stop.
+        # Old code never persisted it. Scope and full UTC date prevent this
+        # evidence from affecting another service, environment or later day.
+        migrated_stop = (
+            day == '2026-09-13'
+            and os.environ.get('RAILWAY_PROJECT_ID') == 'c3ffa9f5-8c64-4859-a722-a07105ba5e84'
+            and os.environ.get('RAILWAY_SERVICE_ID') == '751b41ee-2aef-4487-b19a-f305f15c64fe'
+            and os.environ.get('RAILWAY_ENVIRONMENT_ID') == '3f436900-ab27-4b41-9248-1a9a9f8dc80c'
+        )
+        if stored is None and migrated_stop:
+            if await db.save_key_value(key, 'STOP', strict=True) is not True:
+                raise db.PersistenceError('observed stop migration unconfirmed')
+            stored = 'STOP'
+            log.warning('[DURABLE_DAILY_STOP] day=%s state=MIGRATED source=observed_065201Z_stop', day)
         if stored == 'STOP':
             engine.daily_stopped = True
             if getattr(engine, 'daily_tracker', None) is not None:
