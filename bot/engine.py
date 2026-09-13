@@ -512,6 +512,8 @@ class TradingEngine:
                     self._update_daily_pnl()
                     from bot.durable_daily_stop import entries_blocked
                     daily_state_blocked = await entries_blocked(self)
+                    from bot.exchange_accounting_evidence import schedule as schedule_accounting
+                    schedule_accounting(self)
                     
                     if self.daily_stopped or daily_state_blocked:
                         # FIX: logar apenas 1x — não a cada 5s em loop infinito
