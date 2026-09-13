@@ -35,6 +35,8 @@ def install(TradingEngine, log) -> None:
     from bot import market_data_integrity
     from bot import volume_ratio_diagnostics
     from bot import market_viability_fail_closed
+    from bot import post_trade_forensics
+    from bot.kucoin import TAKER_FEE
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
@@ -72,6 +74,12 @@ def install(TradingEngine, log) -> None:
     exit_policy_telemetry.install(TradingEngine, log)
     operator_loss_policy.install(TradingEngine, log)
 
+    # Telemetry-only: track MAE/MFE and emit a structured report when the final
+    # composed sync path confirms a BGX position has closed on the exchange.
+    post_trade_forensics.install(
+        TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
+    )
+
     # Install last so it observes the already-composed closed-candle/HTF regime
     # semantics and cost-calibrated NEXUS decision path. It does not alter any
     # class method, threshold, leverage, exchange permission or order routing.
@@ -80,8 +88,8 @@ def install(TradingEngine, log) -> None:
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
-        "viability, final headline semantics, stop-only CROSS target policy, delegated "
-        "operator margin/drawdown/exit policy and strict NEXUS regime-transition "
-        "consistency are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "viability, post-trade forensics, final headline semantics, stop-only CROSS "
+        "target policy, delegated operator margin/drawdown/exit policy and strict "
+        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
+        "leverage_unchanged=true railway_variables_unchanged=true"
     )
