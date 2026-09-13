@@ -13,6 +13,7 @@ startup whose final runtime graph is not the one that was explicitly reviewed.
 from __future__ import annotations
 
 import builtins
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,21 +22,23 @@ from typing import Any
 class ContractItem:
     name: str
     value: Any
-    expected_module: str
+    expected_source: str
 
 
-def callable_owner(value: Any) -> str:
-    return str(getattr(value, "__module__", "") or "")
+def callable_source(value: Any) -> str:
+    code = getattr(value, "__code__", None)
+    filename = str(getattr(code, "co_filename", "") or "")
+    return os.path.basename(filename)
 
 
 def verify(items: tuple[ContractItem, ...]) -> tuple[bool, tuple[str, ...]]:
     errors: list[str] = []
     for item in items:
-        owner = callable_owner(item.value)
-        if owner != item.expected_module:
+        source = callable_source(item.value)
+        if source != item.expected_source:
             errors.append(
-                f"{item.name}: owner={owner or '<unknown>'} "
-                f"expected={item.expected_module}"
+                f"{item.name}: source={source or '<unknown>'} "
+                f"expected={item.expected_source}"
             )
     return (not errors, tuple(errors))
 
@@ -52,37 +55,37 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ContractItem(
             "TradingEngine.run",
             TradingEngine.run,
-            "bot.operator_runtime_policy",
+            "operator_runtime_policy.py",
         ),
         ContractItem(
             "TradingEngine._update_balance",
             TradingEngine._update_balance,
-            "bot.operator_runtime_policy",
+            "operator_runtime_policy.py",
         ),
         ContractItem(
             "RiskManager.can_open",
             RiskManager.can_open,
-            "bot.operator_runtime_policy",
+            "operator_runtime_policy.py",
         ),
         ContractItem(
             "RiskManagerV3.can_open",
             RiskManagerV3.can_open,
-            "bot.operator_runtime_policy",
+            "operator_runtime_policy.py",
         ),
         ContractItem(
             "engine.minimum_base_quantity",
             engine_module.minimum_base_quantity,
-            "bot.operator_runtime_policy",
+            "operator_runtime_policy.py",
         ),
         ContractItem(
             "PilotGuard.evaluate",
             PilotGuard.evaluate,
-            "bot.pilot_exposure_capacity",
+            "pilot_exposure_capacity.py",
         ),
         ContractItem(
             "nexus_ai.regime_compatibility",
             nexus_ai.regime_compatibility,
-            "bot.nexus_regime_transition_consistency",
+            "nexus_regime_transition_consistency.py",
         ),
     )
 
@@ -99,7 +102,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
 
     builtins._nexus_runtime_contract_status = "ok"
     builtins._nexus_runtime_contract_snapshot = {
-        item.name: callable_owner(item.value) for item in items
+        item.name: callable_source(item.value) for item in items
     }
     log.critical(
         "[RUNTIME_CONTRACT] status=PASS protected_callables=%d "
