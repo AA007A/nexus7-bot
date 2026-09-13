@@ -1,0 +1,70 @@
+name: NEXUS Real OOS Replay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "bot/nexus_oos_real_replay.py"
+      - "bot/nexus_oos_real_replay_corrected.py"
+      - "tests/test_nexus_oos_real_replay.py"
+      - "tests/test_nexus_oos_replay_full_clock.py"
+      - ".github/workflows/oos_real_replay.yml"
+  workflow_dispatch:
+
+jobs:
+  replay:
+    name: Real historical replay evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Replay accounting and clock-parity unit tests
+        run: |
+          python -m unittest tests.test_nexus_oos_real_replay -v
+          python -m unittest tests.test_nexus_oos_replay_full_clock -v
+
+      - name: Run real public-market OOS replay
+        run: |
+          python -m bot.nexus_oos_real_replay_corrected \
+            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
+            --limit-15m 2500 \
+            --output artifacts/nexus_oos_real_replay.json
+
+      - name: Show evidence report
+        if: always()
+        run: |
+          if [ -f artifacts/nexus_oos_real_replay.json ]; then
+            python - <<'PY'
+          import json
+          p = json.load(open('artifacts/nexus_oos_real_replay.json'))
+          print(json.dumps({
+              'status': p.get('status'),
+              'blockers': p.get('blockers'),
+              'report': p.get('report'),
+              'symbols': p.get('symbols'),
+              'methodology': p.get('methodology'),
+          }, indent=2, sort_keys=True))
+          PY
+          fi
+
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-oos-real-replay
+          path: artifacts/nexus_oos_real_replay.json
+          if-no-files-found: error
