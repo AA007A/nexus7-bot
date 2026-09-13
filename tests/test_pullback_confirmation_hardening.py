@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot import pullback_confirmation_hardening as guard
 
@@ -31,14 +32,14 @@ def test_non_pullback_signal_is_unchanged_without_confirmation():
     assert result is sig
 
 
-def test_pullback_is_blocked_when_reversal_is_not_confirmed(monkeypatch):
+def test_pullback_is_blocked_when_reversal_is_not_confirmed():
     sig = _signal("PULLBACK", "LONG")
 
     class Analyzer:
         def analyze_mtf(self, *args, **kwargs):
             return sig
 
-    monkeypatch.setattr(guard, "_pullback_metrics", lambda *a, **k: {
+    metrics = {
         "ok": False,
         "reason": "opposite_structure_not_reversed",
         "votes": {"body_aligned": True, "price_progress": True},
@@ -50,22 +51,23 @@ def test_pullback_is_blocked_when_reversal_is_not_confirmed(monkeypatch):
         "macd_hist": -0.007,
         "macd_prev": -0.006,
         "ema20_side": False,
-    })
+    }
     log = _Log()
-    guard.install(Analyzer, log)
-    result = Analyzer().analyze_mtf("NEARUSDT", [{}] * 40, [], [])
+    with patch.object(guard, "_pullback_metrics", return_value=metrics):
+        guard.install(Analyzer, log)
+        result = Analyzer().analyze_mtf("NEARUSDT", [{}] * 40, [], [])
     assert result is None
     assert any("[PULLBACK_CONFIRMATION]" in str(row[0]) for row in log.rows)
 
 
-def test_pullback_passes_after_broad_reversal_confirmation(monkeypatch):
+def test_pullback_passes_after_broad_reversal_confirmation():
     sig = _signal("PULLBACK", "LONG")
 
     class Analyzer:
         def analyze_mtf(self, *args, **kwargs):
             return sig
 
-    monkeypatch.setattr(guard, "_pullback_metrics", lambda *a, **k: {
+    metrics = {
         "ok": True,
         "reason": "confirmed",
         "votes": {
@@ -80,10 +82,11 @@ def test_pullback_passes_after_broad_reversal_confirmation(monkeypatch):
         "bos": True,
         "bos_dir": "BULLISH",
         "rsi": 52.0,
-    })
+    }
     log = _Log()
-    guard.install(Analyzer, log)
-    result = Analyzer().analyze_mtf("NEARUSDT", [{}] * 40, [], [])
+    with patch.object(guard, "_pullback_metrics", return_value=metrics):
+        guard.install(Analyzer, log)
+        result = Analyzer().analyze_mtf("NEARUSDT", [{}] * 40, [], [])
     assert result is sig
 
 
