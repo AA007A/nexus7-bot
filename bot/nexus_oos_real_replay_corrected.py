@@ -56,8 +56,6 @@ async def _fetch_history_contiguous(client, symbol: str, interval: str, limit: i
         if len(by_ts) >= limit:
             break
         requested = min(page_size, limit - len(by_ts))
-        # Never ask for a window wider than the conservative futures page cap.
-        # The +1 bucket absorbs an endpoint-boundary inclusion difference.
         cursor_start = max(0, cursor_end - interval_ms * requested)
         page = await _kucoin_page(client, symbol, interval, cursor_start, cursor_end)
         if not page:
@@ -74,6 +72,8 @@ async def _fetch_history_contiguous(client, symbol: str, interval: str, limit: i
         await asyncio.sleep(0.03)
 
     result = sorted(by_ts.values(), key=lambda c: c["ts"])[-limit:]
+    if not result:
+        return []
     integrity = _historical_integrity(result, interval)
     if not integrity["ok"]:
         raise RuntimeError(f"historical integrity failed: {integrity}")
