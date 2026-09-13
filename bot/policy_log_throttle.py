@@ -29,8 +29,8 @@ class DrawdownAdvisoryLogProxy:
         key = str(message)
         now = time.monotonic()
         with self._lock:
-            previous = self._last.get(key, 0.0)
-            if now - previous < self._interval_s:
+            previous = self._last.get(key)
+            if previous is not None and now - previous < self._interval_s:
                 return None
             self._last[key] = now
         return self._delegate.warning(message, *args, **kwargs)
