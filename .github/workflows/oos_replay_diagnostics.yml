@@ -1,0 +1,42 @@
+name: NEXUS OOS Replay Diagnostics
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "bot/nexus_oos_real_replay.py"
+      - "bot/nexus_oos_replay_diagnostics.py"
+      - ".github/workflows/oos_replay_diagnostics.yml"
+  workflow_dispatch:
+
+jobs:
+  diagnostics:
+    name: Historical veto diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run replay diagnostics
+        run: |
+          python -m bot.nexus_oos_replay_diagnostics \
+            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
+            --limit-15m 1600 \
+            --output artifacts/nexus_oos_replay_diagnostics.json
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-oos-replay-diagnostics
+          path: artifacts/nexus_oos_replay_diagnostics.json
+          if-no-files-found: error
