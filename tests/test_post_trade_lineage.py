@@ -21,23 +21,15 @@ class PostTradeLineageTests(unittest.IsolatedAsyncioTestCase):
     async def test_exchange_lineage_requires_matching_symbol_and_entry(self):
         row = {'symbol': 'ETHUSDTM', 'openPrice': '2500'}
         good = dict(version=1, symbol='ETHUSDTM', entry=2500.0, nexus='APPROVE')
-        with patch('bot.exchange_accounting_evidence.db.load_key_value',
-                   new=AsyncMock(return_value=json.dumps(good))):
+        with patch('bot.exchange_accounting_evidence.db.load_key_value', new=AsyncMock(return_value=json.dumps(good))):
             self.assertEqual((await _load_lineage(row))['nexus'], 'APPROVE')
-
         stale = dict(good, entry=2400.0)
-        with patch('bot.exchange_accounting_evidence.db.load_key_value',
-                   new=AsyncMock(return_value=json.dumps(stale))):
+        with patch('bot.exchange_accounting_evidence.db.load_key_value', new=AsyncMock(return_value=json.dumps(stale))):
             self.assertIsNone(await _load_lineage(row))
 
     async def test_missing_or_invalid_lineage_never_fabricates_context(self):
         row = {'symbol': 'ETHUSDTM', 'openPrice': '2500'}
         for raw in (None, '{}', '{bad json'):
             with self.subTest(raw=raw):
-                with patch('bot.exchange_accounting_evidence.db.load_key_value',
-                           new=AsyncMock(return_value=raw)):
-                    if raw == '{bad json':
-                        with self.assertRaises(json.JSONDecodeError):
-                            await _load_lineage(row)
-                    else:
-                        self.assertIsNone(await _load_lineage(row))
+                with patch('bot.exchange_accounting_evidence.db.load_key_value', new=AsyncMock(return_value=raw)):
+                    self.assertIsNone(await _load_lineage(row))
