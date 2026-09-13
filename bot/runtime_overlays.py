@@ -36,7 +36,8 @@ def install(TradingEngine, log) -> None:
     from bot import volume_ratio_diagnostics
     from bot import market_viability_fail_closed
     from bot import post_trade_forensics
-    from bot.kucoin import TAKER_FEE
+    from bot import order_visibility_race_hardening
+    from bot.kucoin import KuCoinClient, TAKER_FEE
 
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
@@ -63,6 +64,11 @@ def install(TradingEngine, log) -> None:
     # only removes unverified symbols; it never adds symbols or lowers gates.
     market_viability_fail_closed.install(TradingEngine, strategy.cfg, log)
 
+    # Keep the private-order websocket as fast evidence without letting a brief
+    # KuCoin REST indexing lag produce a false order-not-found warning. REST
+    # confirmation remains authoritative and the caller's timeout budget is kept.
+    order_visibility_race_hardening.install(KuCoinClient, log)
+
     # The core CROSS-risk hardening is already installed by runtime_bootstrap.
     # This policy replaces only its module-level geometry helper: class APIs,
     # exchange routing, leverage, thresholds and sizing authorities are untouched.
@@ -88,8 +94,9 @@ def install(TradingEngine, log) -> None:
     log.info(
         "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
-        "viability, post-trade forensics, final headline semantics, stop-only CROSS "
-        "target policy, delegated operator margin/drawdown/exit policy and strict "
-        "NEXUS regime-transition consistency are active; thresholds_unchanged=true "
-        "leverage_unchanged=true railway_variables_unchanged=true"
+        "viability, KuCoin order-visibility race hardening, post-trade forensics, "
+        "final headline semantics, stop-only CROSS target policy, delegated operator "
+        "margin/drawdown/exit policy and strict NEXUS regime-transition consistency "
+        "are active; thresholds_unchanged=true leverage_unchanged=true "
+        "railway_variables_unchanged=true"
     )
