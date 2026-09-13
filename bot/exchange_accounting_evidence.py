@@ -22,8 +22,7 @@ async def collect(client, start_ms, end_ms):
         raise ValueError('invalid history window')
     rows = {}
     for page in range(1, 21):
-        data = await client._get('/api/v1/history-positions',
-            params={'from': start_ms, 'to': end_ms, 'limit': 100, 'pageId': page}, auth=True)
+        data = await client._get('/api/v1/history-positions', params={'from': start_ms, 'to': end_ms, 'limit': 100, 'pageId': page}, auth=True)
         if not isinstance(data, dict) or not isinstance(data.get('items'), list):
             raise ValueError('history response unconfirmed')
         if int(data.get('currentPage', 0)) != page:
@@ -52,18 +51,17 @@ async def _load_lineage(row):
     raw = await db.load_key_value(state_key('trade_lineage') + ':' + str(row['symbol']), strict=True)
     if not raw:
         return None
-    value = json.loads(raw)
-    if not isinstance(value, dict) or value.get('version') != 1:
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if str(value.get('symbol')) != str(row['symbol']):
+    if not isinstance(value, dict) or value.get('version') != 1 or str(value.get('symbol')) != str(row['symbol']):
         return None
     try:
         entry = float(value.get('entry', 0))
         exchange_entry = float(row.get('openPrice', 0))
     except (TypeError, ValueError):
         return None
-    # A symbol can be reused later. Reject stale lineage unless its entry is
-    # economically consistent with the reconciled exchange position.
     tolerance = max(abs(exchange_entry) * 0.005, 1e-12)
     if entry <= 0 or exchange_entry <= 0 or abs(entry - exchange_entry) > tolerance:
         return None
@@ -90,8 +88,7 @@ async def audit(engine):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise asyncio.TimeoutError()
-                receipt.update(await asyncio.wait_for(
-                    reconcile(engine.client, row, rows, registry['orders']), timeout=min(15, remaining)))
+                receipt.update(await asyncio.wait_for(reconcile(engine.client, row, rows, registry['orders']), timeout=min(15, remaining)))
             except asyncio.TimeoutError:
                 receipt.update(reconciliation_version=1, reconciliation_reason='FILL_QUERY_TIMEOUT')
 
@@ -107,20 +104,12 @@ async def audit(engine):
             if await db.load_key_value(key, strict=True) != encoded:
                 if await db.save_key_value(key, encoded, strict=True) is not True:
                     raise db.PersistenceError('history persistence unconfirmed')
-                log.info('[EXCHANGE_ACCOUNTING_EVIDENCE] symbol=%s close_id=%s exchange_pnl=%s trade_fee=%s funding_fee=%s open_time=%s close_time=%s open_price=%s close_price=%s currency=%s source=KUCOIN_POSITION_HISTORY ownership=%s fills_reconciled=%s durable=true execution_effect=NONE',
-                         row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'), row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'),
-                         row.get('openTime', 'NA'), row.get('closeTime', 'NA'), row.get('openPrice', 'NA'), row.get('closePrice', 'NA'), row.get('settleCurrency', 'NA'),
-                         receipt['ownership'], receipt['fills_reconciled'])
-                log.info('[EXCHANGE_FILL_LINK] close_id=%s ownership=%s fills_reconciled=%s reason=%s opening_order_ids=%s closing_order_ids=%s durable=true execution_effect=NONE',
-                         row['closeId'], receipt['ownership'], receipt['fills_reconciled'], receipt['reconciliation_reason'],
-                         receipt.get('opening_order_ids', []), receipt.get('closing_order_ids', []))
+                log.info('[EXCHANGE_ACCOUNTING_EVIDENCE] symbol=%s close_id=%s exchange_pnl=%s trade_fee=%s funding_fee=%s open_time=%s close_time=%s open_price=%s close_price=%s currency=%s source=KUCOIN_POSITION_HISTORY ownership=%s fills_reconciled=%s durable=true execution_effect=NONE', row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'), row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'), row.get('openTime', 'NA'), row.get('closeTime', 'NA'), row.get('openPrice', 'NA'), row.get('closePrice', 'NA'), row.get('settleCurrency', 'NA'), receipt['ownership'], receipt['fills_reconciled'])
+                log.info('[EXCHANGE_FILL_LINK] close_id=%s ownership=%s fills_reconciled=%s reason=%s opening_order_ids=%s closing_order_ids=%s durable=true execution_effect=NONE', row['closeId'], receipt['ownership'], receipt['fills_reconciled'], receipt['reconciliation_reason'], receipt.get('opening_order_ids', []), receipt.get('closing_order_ids', []))
 
             if receipt.get('ownership') == 'BGX_ORDER_IDS' and receipt.get('fills_reconciled') is True:
                 lineage = receipt.get('lineage') or {}
-                log.warning('[POST_TRADE_ACCOUNTING_CONFIRMED] symbol=%s close_id=%s accounting_source=KUCOIN_RECONCILED_FILLS fills_confirmed=true exchange_pnl=%s trade_fee=%s funding_fee=%s open_price=%s close_price=%s contracts=%s nexus=%s regime=%s entry_type=%s score=%s lineage_reconciled=%s decision_effect=NONE execution_effect=NONE',
-                            row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'), row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'),
-                            row.get('openPrice', 'NA'), row.get('closePrice', 'NA'), receipt.get('contracts', 'NA'), lineage.get('nexus', 'UNKNOWN'),
-                            lineage.get('regime', 'UNKNOWN'), lineage.get('entry_type', 'UNKNOWN'), lineage.get('score', 'NA'), receipt.get('lineage_reconciled', False))
+                log.warning('[POST_TRADE_ACCOUNTING_CONFIRMED] symbol=%s close_id=%s accounting_source=KUCOIN_RECONCILED_FILLS fills_confirmed=true exchange_pnl=%s trade_fee=%s funding_fee=%s open_price=%s close_price=%s contracts=%s nexus=%s regime=%s entry_type=%s score=%s lineage_reconciled=%s decision_effect=NONE execution_effect=NONE', row.get('symbol', 'NA'), row['closeId'], row.get('pnl', 'NA'), row.get('tradeFee', 'NA'), row.get('fundingFee', 'NA'), row.get('openPrice', 'NA'), row.get('closePrice', 'NA'), receipt.get('contracts', 'NA'), lineage.get('nexus', 'UNKNOWN'), lineage.get('regime', 'UNKNOWN'), lineage.get('entry_type', 'UNKNOWN'), lineage.get('score', 'NA'), receipt.get('lineage_reconciled', False))
         log.info('[EXCHANGE_ACCOUNTING_COVERAGE] start_ms=%s end_ms=%s positions=%s complete=true scope=POSITION_HISTORY execution_effect=NONE', start, end, len(rows))
     except Exception as exc:
         log.warning('[EXCHANGE_ACCOUNTING_COVERAGE] complete=false result=UNCONFIRMED error=%s execution_effect=NONE', type(exc).__name__)
