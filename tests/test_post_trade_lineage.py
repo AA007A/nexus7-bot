@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from bot.post_trade_forensics import _lineage
+from bot.post_trade_forensics import _decision_snapshot, _lineage
 from bot.exchange_accounting_evidence import _load_lineage
 
 
@@ -17,6 +17,15 @@ class PostTradeLineageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['regime'], 'TRENDING')
         self.assertEqual(result['entry_type'], 'PULLBACK')
         self.assertEqual(result['score'], 81.0)
+
+    def test_final_nexus_object_is_normalized_without_mutation(self):
+        decision = SimpleNamespace(execution_allowed=True, setup_quality=84.5, confidence=0.91)
+        snapshot = _decision_snapshot(decision)
+        self.assertEqual(snapshot['decision'], 'APPROVE')
+        self.assertIs(snapshot['execution_allowed'], True)
+        self.assertEqual(snapshot['setup_quality'], 84.5)
+        self.assertEqual(snapshot['confidence'], 0.91)
+        self.assertTrue(decision.execution_allowed)
 
     async def test_exchange_lineage_requires_matching_symbol_and_entry(self):
         row = {'symbol': 'ETHUSDTM', 'openPrice': '2500'}
