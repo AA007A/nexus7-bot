@@ -510,8 +510,10 @@ class TradingEngine:
                         await self._apply_trailing_stops()
                         await self._check_rr_double()
                     self._update_daily_pnl()
+                    from bot.durable_daily_stop import entries_blocked
+                    daily_state_blocked = await entries_blocked(self)
                     
-                    if self.daily_stopped:
+                    if self.daily_stopped or daily_state_blocked:
                         # FIX: logar apenas 1x — não a cada 5s em loop infinito
                         pass   # já logado em _update_daily_pnl, não repetir aqui
                     elif self.risk.can_open(len(self.positions)):
