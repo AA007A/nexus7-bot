@@ -1,4 +1,10 @@
-"""Persist only triggered LIVE daily stops, before the scanner can run."""
+"""Persist only triggered LIVE daily stops, before the scanner can run.
+
+Version 2 intentionally ignores the legacy v1 namespace because v1 contained a
+one-off hardcoded migration that could fabricate a STOP for 2026-09-13. Real
+daily stops are still persisted fail-closed once the runtime tracker actually
+sets ``engine.daily_stopped``.
+"""
 import hashlib
 import os
 from datetime import datetime, timezone
@@ -7,11 +13,16 @@ from bot import database as db
 from bot.logger import log
 
 
+STATE_VERSION = 2
+
+
 def state_key(day):
     # Deliberately excludes deployment/commit: a deploy is not a new day.
+    # v2 retires the contaminated v1 namespace without weakening future
+    # persistence of legitimately triggered daily stops.
     scope = '|'.join(os.environ.get(k, '') for k in (
         'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_ENVIRONMENT_ID'))
-    return 'daily_stop_v1:' + hashlib.sha256(scope.encode()).hexdigest()[:24] + ':' + day
+    return f'daily_stop_v{STATE_VERSION}:' + hashlib.sha256(scope.encode()).hexdigest()[:24] + ':' + day
 
 
 async def entries_blocked(engine, now=None):
@@ -27,20 +38,6 @@ async def entries_blocked(engine, now=None):
         stored = await db.load_key_value(key, strict=True)
         if stored not in (None, 'STOP'):
             raise db.PersistenceError('invalid daily stop state')
-        # One-time migration of the observed 2026-09-13T06:52:01Z LIVE stop.
-        # Old code never persisted it. Scope and full UTC date prevent this
-        # evidence from affecting another service, environment or later day.
-        migrated_stop = (
-            day == '2026-09-13'
-            and os.environ.get('RAILWAY_PROJECT_ID') == 'c3ffa9f5-8c64-4859-a722-a07105ba5e84'
-            and os.environ.get('RAILWAY_SERVICE_ID') == '751b41ee-2aef-4487-b19a-f305f15c64fe'
-            and os.environ.get('RAILWAY_ENVIRONMENT_ID') == '3f436900-ab27-4b41-9248-1a9a9f8dc80c'
-        )
-        if stored is None and migrated_stop:
-            if await db.save_key_value(key, 'STOP', strict=True) is not True:
-                raise db.PersistenceError('observed stop migration unconfirmed')
-            stored = 'STOP'
-            log.warning('[DURABLE_DAILY_STOP] day=%s state=MIGRATED source=observed_065201Z_stop', day)
         if stored == 'STOP':
             engine.daily_stopped = True
             if getattr(engine, 'daily_tracker', None) is not None:
