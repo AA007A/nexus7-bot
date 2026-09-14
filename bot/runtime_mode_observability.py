@@ -55,8 +55,10 @@ def startup_message(state: dict) -> str:
     """Render startup telemetry without overstating execution readiness.
 
     LIVE is a configured operating mode, not proof that the exchange execution
-    path is currently available. The banner therefore distinguishes configured
-    LIVE from a runtime that is actually connected/active/ready.
+    path is currently available. During the first seconds after ``engine.run``
+    is scheduled, ``connected`` and ``active`` may still be false while the
+    engine is completing DB/preflight/WebSocket initialization. Treat that as
+    STARTING instead of incorrectly describing the engine as disconnected.
     """
     mode = state["trading_mode"]
     if mode == "PAPER":
@@ -78,19 +80,18 @@ def startup_message(state: dict) -> str:
     if not bool(state.get("ready", False)) or not bool(
         state.get("orders_sent_to_exchange", False)
     ):
-        reasons = []
-        if not bool(state.get("connected", False)):
-            reasons.append("engine desconectado")
-        if not bool(state.get("active", False)):
-            reasons.append("engine inativo")
         if bool(state.get("blocked", False)):
-            reasons.append("bloqueio de startup")
-        detail = ", ".join(reasons) or "runtime ainda não confirmou disponibilidade de execução"
+            return (
+                "🔴 *BOT BLOQUEADO NO STARTUP*\n"
+                "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+                "🔒 *O engine não foi liberado pelos checks de inicialização.*\n"
+                "Nenhuma disponibilidade de execução é afirmada."
+            )
         return (
-            "🟠 *BOT INICIADO — LIVE CONFIGURADO / EXECUÇÃO AINDA NÃO DISPONÍVEL*\n"
+            "🟡 *BOT INICIANDO — LIVE CONFIGURADO*\n"
             "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
-            "🔒 *Nenhuma disponibilidade de envio de ordens é afirmada neste estado.*\n"
-            f"Motivo observável: _{detail}_."
+            "⏳ Engine concluindo inicialização, reconciliação e conexões com a KuCoin.\n"
+            "Este estado é transitório e não significa falha de conexão."
         )
 
     return (

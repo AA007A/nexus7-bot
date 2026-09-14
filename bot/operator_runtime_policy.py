@@ -17,6 +17,7 @@ import math
 import os
 
 from bot.config import cfg
+from bot import startup_ready_notification
 
 
 MARGIN_FRACTION = 0.50
@@ -202,7 +203,11 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                     getattr(current_bound_update, "__module__", "unknown"),
                     getattr(current_bound_update, "__name__", type(current_bound_update).__name__),
                 )
-            return await previous_run(self, *args, **kwargs)
+            watcher = startup_ready_notification.start(self, log)
+            try:
+                return await previous_run(self, *args, **kwargs)
+            finally:
+                await startup_ready_notification.cancel(watcher)
 
         TradingEngine.run = _run_with_instance_drawdown_advisory
         TradingEngine._operator_drawdown_run_binding = True

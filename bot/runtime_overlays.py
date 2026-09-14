@@ -65,76 +65,28 @@ def install(TradingEngine, log) -> None:
     entry_type_shadow_overlay.install(strategy.Analyzer, strategy, log)
     market_viability_fail_closed.install(TradingEngine, strategy.cfg, log)
 
-    # Private WS may lead KuCoin REST indexing briefly. Delay only the first
-    # authoritative REST confirmation within the existing timeout budget.
     order_visibility_race_hardening.install(KuCoinClient, log)
-
-    # Partial exits are execution-critical: explicit sized reduce-only semantics,
-    # REST fill proof, exchange quantity truth and fail-closed BE protection.
     partial_tp_execution_hardening.install(TradingEngine, KuCoinClient, TAKER_FEE, log)
-
     cross_target_policy.install(cross_risk_hardening, log)
 
-    # Keep the requested 50%-available margin target and explicit drawdown
-    # semantics. Immediately after that target wrapper, restore RiskManagerV3 as
-    # the final maximum-quantity authority so installation order cannot silently
-    # turn stop-risk sizing back into telemetry.
     operator_runtime_policy.install(TradingEngine, policy_log_throttle.wrap(log))
     final_sizing_invariants.install(core_engine, pilot_cap, log)
     exit_policy_telemetry.install(TradingEngine, log)
     operator_loss_policy.install(TradingEngine, log)
 
-    # The daily-stop override layer owns authorization semantics. This wrapper
-    # changes only the user-facing notification so it cannot falsely claim
-    # entries are blocked while an explicit override is active.
     daily_stop_override_telemetry.install(core_engine, log)
-
-    # Make external-provider degradation explicit without changing the existing
-    # fail-neutral execution policy, sizing, leverage or entry authorization.
     market_risk_coverage_observability.install(market_risk_runtime, log)
-
-    # Observe the already-emitted runtime log stream to timestamp the entry
-    # funnel. No execution-critical callable is wrapped or mutated.
     entry_latency_observability.install(log)
-
-    # A position recovered after process restart already has exact durable +
-    # exchange ownership proof. Rehydrate that proof's opening order id into the
-    # Position accounting lineage before any later close/checkpoint can occur.
-    # Missing/conflicting evidence is never invented or overwritten.
     restart_opening_order_lineage.install(TradingEngine, log)
-
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
-
-    # Any engine-owned direct close estimate must be classified and enriched
-    # before its first durable ledger write. In particular, RR_DOUBLE can close
-    # and remove a Position without passing through _sync_positions; preserve
-    # exact opening-order lineage there as accounting metadata only.
     daily_pnl_estimate_lineage_hardening.install(durable_daily_pnl, log)
-
-    # Reconcile conservative operational estimates to KuCoin-confirmed realized
-    # PnL only after the existing accounting audit proves BGX IDs + fills +
-    # durable lineage. Risk remains conservative while evidence is pending.
     daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
-
-    # Persist positive live EXTERNAL/read-only ownership observations and allow
-    # post-trade accounting to consume them only when no BGX order evidence
-    # conflicts. Telemetry only: no execution/risk authority is introduced.
     external_origin_runtime.install(TradingEngine, exchange_accounting_evidence, log)
-
     regime_transition.install(nexus_ai, log)
-
-    # The legacy CROSS guard remains fail-closed unless this module is present.
-    # With one existing pilot position, exact authorization is deferred until
-    # final quantity exists and then requires a simultaneous-stop portfolio
-    # stress projection below 90% account risk. Missing/inconsistent private
-    # exchange state, non-CROSS positions, or additional non-reduce orders block.
     cross_portfolio_stress.install(TradingEngine, log)
 
-    # MUST remain the final installer in this compatibility stack. It verifies
-    # that execution-critical callables are still owned by the reviewed final
-    # wrappers and fails startup if a later patch silently replaces one.
     runtime_contract_guard.install(
         TradingEngine, PilotGuard, nexus_ai, core_engine, log
     )
@@ -148,7 +100,7 @@ def install(TradingEngine, log) -> None:
         "restart opening-order lineage recovery, post-trade forensics, direct-close daily-PnL "
         "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
         "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
-        "stop-stress gate, delegated operator margin/drawdown/exit policy, strict NEXUS "
+        "stop-stress gate, startup readiness final notification via operator run owner, delegated operator margin/drawdown/exit policy, strict NEXUS "
         "regime-transition consistency and final runtime ownership contract are active; "
         "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
     )
