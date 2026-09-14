@@ -5,10 +5,15 @@ private account credentials, and never calls an exchange mutation method.
 
 The batch composes the corrected historical replay with the portfolio evidence
 aggregator. Portfolio inference bootstraps complete decision-timestamp clusters
-so simultaneous cross-asset candidates remain dependent. Because historical OI
-and order-book snapshots are not available in the current public replay, this
-entrypoint is fail-closed: it always retains HISTORICAL_CONTEXT_PARITY_INCOMPLETE
-until every successful symbol explicitly proves full context parity.
+so simultaneous cross-asset candidates remain dependent. Robustness diagnostics
+use the exact same requested symbol universe and have BLOCK-ONLY authority: they
+may prevent promotion when edge is temporally unstable or concentrated, but can
+never authorize AI_EDGE_PROVEN by themselves.
+
+Because historical OI and order-book snapshots are not available in the current
+public replay, this entrypoint remains fail-closed with
+HISTORICAL_CONTEXT_PARITY_INCOMPLETE until every successful symbol explicitly
+proves full context parity.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from bot.nexus_oos_portfolio import write_portfolio_evidence_bundle
 from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient
 from bot.nexus_oos_real_replay_corrected import replay_symbol
 from bot.nexus_oos_replay import ReplayEvidence
+from bot.nexus_oos_robustness import analyze_robustness, robustness_promotion_blockers
 
 DEFAULT_SYMBOLS = (
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT",
@@ -64,6 +70,7 @@ async def run_public_batch(
     require_all_symbols: bool = True,
     bootstrap_samples: int = 4000,
     seed: int = 7,
+    temporal_folds: int = 4,
 ) -> dict:
     requested = tuple(dict.fromkeys(str(s).strip().upper() for s in symbols if str(s).strip()))
     if not requested:
@@ -110,21 +117,33 @@ async def run_public_batch(
             "bootstrap_unit": "decision_timestamp_cluster",
         }
 
+    successful_reports = [report for report in reports if not report.get("error")]
+    robustness = analyze_robustness(successful_reports, temporal_folds=int(temporal_folds))
+    robustness_blockers = robustness_promotion_blockers(
+        robustness,
+        min_temporal_folds=int(temporal_folds),
+        min_temporal_positive_fraction=0.75,
+        require_all_leave_one_symbol_out_positive=True,
+    )
+
     blockers = set(payload.get("blockers") or ())
+    blockers.update(robustness_blockers)
     parity_complete = bool(replays) and all(
         bool(report.get("historical_context", {}).get("parity_complete"))
-        for report in reports if not report.get("error")
+        for report in successful_reports
     )
     if not parity_complete:
         blockers.add("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
     if failures and require_all_symbols:
         blockers.add("REQUESTED_SYMBOL_REPLAY_INCOMPLETE")
 
-    # Full context parity is a promotion prerequisite. Statistical positivity
-    # alone can never override missing historical production inputs.
+    # Full context parity, statistical positivity and robustness all have to
+    # pass. Robustness is block-only and can never promote a failing result.
     payload["proven"] = False if blockers else bool(payload.get("proven"))
     payload["status"] = "AI_EDGE_PROVEN" if payload["proven"] else "AI_EDGE_NOT_PROVEN"
     payload["blockers"] = sorted(blockers)
+    payload["robustness_blockers"] = list(robustness_blockers)
+    payload["robustness"] = robustness
     payload["historical_context_parity_complete"] = parity_complete
     payload["requested_symbols"] = list(requested)
     payload["successful_symbols"] = [replay.symbol for replay in replays]
@@ -140,6 +159,11 @@ async def run_public_batch(
         "slippage_included": True,
         "funding_included_when_public_history_available": True,
         "portfolio_bootstrap_unit": "decision_timestamp_cluster",
+        "robustness_symbol_universe": "same_as_requested_batch",
+        "robustness_temporal_folds": int(temporal_folds),
+        "robustness_min_positive_fold_fraction": 0.75,
+        "robustness_leave_one_symbol_out": "all_positive_required",
+        "robustness_promotion_role": "BLOCK_ONLY",
         "historical_open_interest": False,
         "historical_orderbook": False,
         "exchange_mutations": False,
@@ -149,6 +173,25 @@ async def run_public_batch(
     report_path = destination / "nexus_oos_portfolio_report.json"
     report_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    (destination / "nexus_oos_robustness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "ROBUSTNESS_BLOCK_ONLY",
+                "blockers": list(robustness_blockers),
+                "requested_symbols": list(requested),
+                "successful_symbols": [replay.symbol for replay in replays],
+                "robustness": robustness,
+                "execution_effect": "NONE",
+                "promotion_authority": False,
+                "promotion_role": "BLOCK_ONLY",
+            },
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n",
         encoding="utf-8",
     )
     return payload
@@ -161,6 +204,7 @@ def main() -> int:
     parser.add_argument("--output-dir", default="artifacts/nexus_oos_public")
     parser.add_argument("--bootstrap-samples", type=int, default=4000)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--temporal-folds", type=int, default=4)
     parser.add_argument("--allow-partial", action="store_true")
     args = parser.parse_args()
     payload = asyncio.run(
@@ -171,11 +215,14 @@ def main() -> int:
             require_all_symbols=not args.allow_partial,
             bootstrap_samples=args.bootstrap_samples,
             seed=args.seed,
+            temporal_folds=args.temporal_folds,
         )
     )
     print(json.dumps({
         "status": payload.get("status"),
         "blockers": payload.get("blockers"),
+        "robustness_blockers": payload.get("robustness_blockers"),
+        "robustness_summary": (payload.get("robustness") or {}).get("summary"),
         "requested_symbols": payload.get("requested_symbols"),
         "successful_symbols": payload.get("successful_symbols"),
         "failed_symbols": payload.get("failed_symbols"),
