@@ -143,20 +143,22 @@ def assert_population_parity(primary: dict, robustness: dict) -> None:
             f"OOS candidate population drift: primary={primary_symbols} robustness={robust_symbols}"
         )
     primary_total = int(primary.get("report", {}).get("baseline_candidates", 0))
+    primary_known = int(primary.get("report", {}).get("known_baseline_outcomes", 0))
     robust_total = int(
         robustness.get("robustness", {}).get("pooled", {}).get("baseline_candidates", 0)
     )
-    block_total = int(
+    block_known = int(
         robustness.get("temporal_block_bootstrap", {}).get("known_baseline_outcomes", 0)
     )
     if (
         primary_total != robust_total
         or primary_total != sum(primary_symbols.values())
-        or block_total != primary_total
+        or block_known != primary_known
     ):
         raise RuntimeError(
-            f"OOS candidate total drift: primary={primary_total} robustness={robust_total} "
-            f"temporal_block={block_total} symbols={sum(primary_symbols.values())}"
+            f"OOS candidate population drift: primary={primary_total} robustness={robust_total} "
+            f"primary_known={primary_known} temporal_block_known={block_known} "
+            f"symbols={sum(primary_symbols.values())}"
         )
 
 
