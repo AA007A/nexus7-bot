@@ -1,7 +1,11 @@
-"""Persist operational realized PnL; never infer trades from account balances.
+"""Persist operational daily PnL and reconcile estimates with exchange truth.
 
-Stores the engine's existing net PnL, including explicitly marked estimates.
-This is not a replacement for exchange fill reconciliation or performance stats.
+The execution engine may temporarily record a conservative local estimate when a
+position disappears before KuCoin fill/history indexing has caught up. That
+estimate remains valid for risk decisions until authoritative evidence arrives.
+Once KuCoin position history + fills + durable BGX lineage are reconciled, an
+idempotent adjustment converts the operational ledger from the estimate to the
+exchange-confirmed realized PnL without double counting the trade.
 """
 import asyncio
 import hashlib
@@ -13,11 +17,20 @@ from datetime import datetime, timezone
 from bot import database as db
 from bot.logger import log
 
+_ESTIMATED_SOURCE = 'ESTIMATED_LOCAL_MARK_AND_FEE_RATE'
+_CONFIRMED_ADJUSTMENT_SOURCE = 'KUCOIN_RECONCILIATION_ADJUSTMENT'
+_MATCH_WINDOW_SECONDS = 120.0
+
 
 def utc_day(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).date().isoformat()
+
+
+def _ledger_key(day):
+    from bot.durable_daily_stop import state_key
+    return state_key('pnl-ledger-v1:' + day)
 
 
 def event(trade):
@@ -30,8 +43,85 @@ def event(trade):
                 trade.closed_at.isoformat(), str(trade.qty), str(trade.entry),
                 str(trade.exit_price)]
     token = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-    return token, {'pnl': pnl, 'source': getattr(trade, 'accounting_source',
-                   'ENGINE_OPERATIONAL_NET_PNL'), 'closed_at': trade.closed_at.isoformat()}
+    return token, {
+        'pnl': pnl,
+        'source': getattr(trade, 'accounting_source', 'ENGINE_OPERATIONAL_NET_PNL'),
+        'closed_at': trade.closed_at.isoformat(),
+        'symbol': str(getattr(trade, 'symbol', '') or ''),
+        'opened_at': trade.opened_at.isoformat(),
+    }
+
+
+def _normalized_symbol(value):
+    raw = str(value or '').upper()
+    if raw == 'XBTUSDTM':
+        return 'BTCUSDT'
+    if raw.endswith('USDTM'):
+        return raw[:-1]
+    return raw
+
+
+def _confirmed_adjustment(rows, row):
+    """Return one idempotent adjustment from an estimate to confirmed KuCoin PnL.
+
+    Matching is deliberately fail-closed. Exactly one estimated event must sit
+    within the close-time window; if richer modern ledger metadata is present,
+    its symbol must also match. Ambiguous/missing matches produce no adjustment.
+    """
+    if not isinstance(rows, dict) or not isinstance(row, dict):
+        return None
+    close_id = str(row.get('closeId') or '')
+    if not close_id:
+        return None
+    try:
+        confirmed = float(row['pnl'])
+        close_ms = int(row['closeTime'])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(confirmed) or close_ms <= 0:
+        return None
+
+    confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
+    expected_symbol = _normalized_symbol(row.get('symbol'))
+    candidates = []
+    for token, value in rows.items():
+        if not isinstance(token, str) or not isinstance(value, dict):
+            continue
+        if value.get('source') != _ESTIMATED_SOURCE:
+            continue
+        value_symbol = _normalized_symbol(value.get('symbol'))
+        if value_symbol and expected_symbol and value_symbol != expected_symbol:
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(value['closed_at']))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            delta = abs((stamp.astimezone(timezone.utc) - confirmed_closed).total_seconds())
+            estimate = float(value['pnl'])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(estimate) and delta <= _MATCH_WINDOW_SECONDS:
+            candidates.append((token, estimate))
+
+    if len(candidates) != 1:
+        return None
+
+    estimate_token, estimated = candidates[0]
+    adjustment = confirmed - estimated
+    adjustment_token = hashlib.sha256(
+        ('kucoin-confirmed:' + close_id).encode()
+    ).hexdigest()
+    value = {
+        'pnl': adjustment,
+        'source': _CONFIRMED_ADJUSTMENT_SOURCE,
+        'closed_at': confirmed_closed.isoformat(),
+        'symbol': expected_symbol,
+        'close_id': close_id,
+        'estimated_event': estimate_token,
+        'estimated_pnl': estimated,
+        'confirmed_pnl': confirmed,
+    }
+    return adjustment_token, value
 
 
 def realized(stats, now=None):
@@ -42,6 +132,117 @@ def realized(stats, now=None):
             key, value = event(trade)
             rows[key] = value
     return math.fsum(float(value['pnl']) for value in rows.values())
+
+
+def evidence_breakdown(stats, now=None):
+    """Expose accounting confidence without changing the risk-effective total."""
+    day = utc_day(now or datetime.now(timezone.utc))
+    rows = dict(getattr(stats, '_durable_daily_pnl', {}).get(day, {}))
+    estimated = 0.0
+    adjustments = 0.0
+    other = 0.0
+    estimated_events = 0
+    confirmed_adjustments = 0
+    for value in rows.values():
+        if not isinstance(value, dict):
+            continue
+        pnl = float(value.get('pnl', 0.0) or 0.0)
+        source = value.get('source')
+        if source == _ESTIMATED_SOURCE:
+            estimated += pnl
+            estimated_events += 1
+        elif source == _CONFIRMED_ADJUSTMENT_SOURCE:
+            adjustments += pnl
+            confirmed_adjustments += 1
+        else:
+            other += pnl
+    return {
+        'risk_effective_pnl': math.fsum((estimated, adjustments, other)),
+        'estimated_component': estimated,
+        'confirmation_adjustment': adjustments,
+        'other_component': other,
+        'estimated_events': estimated_events,
+        'confirmed_adjustments': confirmed_adjustments,
+    }
+
+
+async def reconcile_confirmed_exchange(engine, row, receipt):
+    """Replace one conservative estimate with confirmed KuCoin PnL by adjustment.
+
+    This function never authorizes an entry. It only runs after the exchange
+    accounting pipeline proves BGX ownership, fills and durable lineage.
+    """
+    if getattr(engine, 'paper_trade', False) or getattr(engine, '_validation_safety_lock_active', False):
+        return False
+    if not isinstance(receipt, dict) or not isinstance(row, dict):
+        return False
+    if not (
+        receipt.get('ownership') == 'BGX_ORDER_IDS'
+        and receipt.get('fills_reconciled') is True
+        and receipt.get('lineage_reconciled') is True
+    ):
+        return False
+
+    try:
+        close_ms = int(row['closeTime'])
+        instant = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
+        day = utc_day(instant)
+        if db.configured_postgres_unavailable():
+            raise db.PersistenceError('configured PostgreSQL unavailable')
+        if os.environ.get('RAILWAY_SERVICE_ID') and not db._is_pg and db.SQLITE_PATH.startswith('/tmp/'):
+            raise db.PersistenceError('ephemeral daily PnL storage')
+
+        if not hasattr(engine, '_daily_pnl_lock'):
+            engine._daily_pnl_lock = asyncio.Lock()
+        async with engine._daily_pnl_lock:
+            key = _ledger_key(day)
+            raw = await db.load_key_value(key, strict=True)
+            if raw is None:
+                log.warning(
+                    '[DURABLE_DAILY_PNL_RECONCILE] close_id=%s result=NO_LEDGER adjustment=NONE',
+                    row.get('closeId', 'NA'),
+                )
+                return False
+            state = json.loads(raw)
+            if state.get('version') != 1 or state.get('day') != day or not isinstance(state.get('events'), dict):
+                raise ValueError('invalid daily PnL ledger')
+            rows = state['events']
+            match = _confirmed_adjustment(rows, row)
+            if match is None:
+                log.warning(
+                    '[DURABLE_DAILY_PNL_RECONCILE] symbol=%s close_id=%s '
+                    'result=ESTIMATE_MATCH_UNCONFIRMED adjustment=NONE risk_policy_unchanged=true',
+                    row.get('symbol', 'NA'), row.get('closeId', 'NA'),
+                )
+                return False
+            token, value = match
+            previous = rows.get(token)
+            if previous is not None and previous != value:
+                raise ValueError('conflicting confirmed PnL adjustment')
+            rows[token] = value
+            encoded = json.dumps(state, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            if encoded != raw:
+                if await db.save_key_value(key, encoded, strict=True) is not True:
+                    raise db.PersistenceError('confirmed PnL adjustment write unconfirmed')
+            engine.stats._durable_daily_pnl = {day: dict(rows)}
+            engine._daily_pnl_ok = True
+            total = math.fsum(float(v['pnl']) for v in rows.values())
+            log.warning(
+                '[DURABLE_DAILY_PNL_RECONCILED] symbol=%s close_id=%s '
+                'estimated_pnl=%s confirmed_kucoin_pnl=%s adjustment=%s '
+                'risk_effective_pnl=%s fills_confirmed=true durable=true entry_policy_unchanged=true',
+                row.get('symbol', 'NA'), row.get('closeId', 'NA'),
+                value['estimated_pnl'], value['confirmed_pnl'], value['pnl'], total,
+            )
+            return True
+    except Exception as exc:
+        engine._daily_pnl_ok = False
+        log.error(
+            '[DURABLE_DAILY_PNL_RECONCILE] symbol=%s close_id=%s result=UNCONFIRMED '
+            'adjustment=NONE entries_fail_closed=true error=%s',
+            row.get('symbol', 'NA'), row.get('closeId', 'NA'), type(exc).__name__,
+        )
+        return False
 
 
 async def checkpoint(engine, extra=None, now=None):
@@ -58,8 +259,7 @@ async def checkpoint(engine, extra=None, now=None):
             if os.environ.get('RAILWAY_SERVICE_ID') and not db._is_pg and db.SQLITE_PATH.startswith('/tmp/'):
                 raise db.PersistenceError('ephemeral daily PnL storage')
             day = utc_day(now or datetime.now(timezone.utc))
-            from bot.durable_daily_stop import state_key
-            key = state_key('pnl-ledger-v1:' + day)
+            key = _ledger_key(day)
             raw = await db.load_key_value(key, strict=True)
             state = json.loads(raw) if raw is not None else {
                 'version': 1, 'day': day, 'events': {},
@@ -77,18 +277,33 @@ async def checkpoint(engine, extra=None, now=None):
                     continue
                 token, value = event(trade)
                 if token in rows and rows[token] != value:
-                    raise ValueError('conflicting daily PnL event')
-                rows[token] = value
+                    # Older ledger rows did not persist symbol/opened_at metadata.
+                    # Their accounting value/source/timestamp remains immutable.
+                    old = rows[token]
+                    comparable = {k: value[k] for k in ('pnl', 'source', 'closed_at')}
+                    if any(old.get(k) != v for k, v in comparable.items()):
+                        raise ValueError('conflicting daily PnL event')
+                    merged = dict(old)
+                    merged.update({k: v for k, v in value.items() if k not in old})
+                    rows[token] = merged
+                else:
+                    rows[token] = value
             encoded = json.dumps(state, sort_keys=True, separators=(',', ':'), allow_nan=False)
             if encoded != raw:
                 if await db.save_key_value(key, encoded, strict=True) is not True:
                     raise db.PersistenceError('daily PnL write unconfirmed')
             engine.stats._durable_daily_pnl = {day: dict(rows)}
             engine._daily_pnl_ok = True
-            fingerprint = (day, len(rows), math.fsum(float(v['pnl']) for v in rows.values()))
+            total = math.fsum(float(v['pnl']) for v in rows.values())
+            estimates = sum(1 for v in rows.values() if v.get('source') == _ESTIMATED_SOURCE)
+            adjustments = sum(1 for v in rows.values() if v.get('source') == _CONFIRMED_ADJUSTMENT_SOURCE)
+            fingerprint = (day, len(rows), total, estimates, adjustments)
             if getattr(engine, '_daily_pnl_logged', None) != fingerprint:
-                log.info('[DURABLE_DAILY_PNL] day=%s events=%s realized_net=%s durable=true source=ENGINE_OPERATIONAL history_backfill=false coverage_started_at=%s',
-                         *fingerprint, state.get('coverage_started_at', 'UNCONFIRMED'))
+                log.info(
+                    '[DURABLE_DAILY_PNL] day=%s events=%s risk_effective_pnl=%s '
+                    'estimated_events=%s confirmed_adjustments=%s durable=true '
+                    'source=ENGINE_OPERATIONAL_WITH_EVIDENCE history_backfill=false coverage_started_at=%s',
+                    *fingerprint, state.get('coverage_started_at', 'UNCONFIRMED'))
                 engine._daily_pnl_logged = fingerprint
             return True
         except Exception as exc:
