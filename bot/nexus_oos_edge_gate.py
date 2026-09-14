@@ -58,6 +58,10 @@ class EdgeEvidenceReport:
     baseline_expectancy_r: float | None
     nexus_expectancy_r: float | None
     expectancy_uplift_r: float | None
+    baseline_profit_factor: float | None
+    nexus_profit_factor: float | None
+    baseline_win_rate: float | None
+    nexus_win_rate: float | None
     bootstrap_ci_low_r: float | None
     bootstrap_ci_high_r: float | None
 
@@ -68,18 +72,29 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _profit_factor(values: list[float]) -> float | None:
+    if not values:
+        return None
+    gross_profit = sum(v for v in values if v > 0.0)
+    gross_loss = -sum(v for v in values if v < 0.0)
+    if gross_loss == 0.0:
+        return float("inf") if gross_profit > 0.0 else None
+    return gross_profit / gross_loss
+
+
+def _win_rate(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(1 for v in values if v > 0.0) / len(values)
+
+
 def _paired_candidate_bootstrap_ci(
     known_base: list[CandidateOutcome],
     *,
     bootstrap_samples: int,
     seed: int,
 ) -> tuple[float | None, float | None]:
-    """Bootstrap uplift while preserving approved⊂baseline dependence.
-
-    Every draw samples complete baseline candidates. Baseline expectancy is the
-    mean R across that draw; NEXUS expectancy is the mean R among approved rows
-    in the *same* draw. This retains the covariance induced by selection.
-    """
+    """Bootstrap uplift while preserving approved⊂baseline dependence."""
     if len(known_base) < 2 or bootstrap_samples <= 0:
         return None, None
     approved_total = sum(1 for row in known_base if row.approved)
@@ -93,9 +108,6 @@ def _paired_candidate_bootstrap_ci(
         sample = [known_base[rng.randrange(n)] for _ in range(n)]
         base_r = [float(row.r_multiple) for row in sample]
         approved_r = [float(row.r_multiple) for row in sample if row.approved]
-        # Vanishing approved subset is possible only in very small/highly
-        # imbalanced samples. Such a bootstrap replicate carries no uplift
-        # estimate and is conservatively discarded.
         if not approved_r:
             continue
         diffs.append(_mean(approved_r) - _mean(base_r))
@@ -123,8 +135,10 @@ def build_edge_report(
     known_rejected = [r for r in rejected if r.outcome_known]
 
     coverage = (len(known_base) / len(baseline)) if baseline else 0.0
-    base_exp = _mean([float(r.r_multiple) for r in known_base]) if known_base else None
-    nexus_exp = _mean([float(r.r_multiple) for r in known_approved]) if known_approved else None
+    base_r = [float(r.r_multiple) for r in known_base]
+    nexus_r = [float(r.r_multiple) for r in known_approved]
+    base_exp = _mean(base_r) if base_r else None
+    nexus_exp = _mean(nexus_r) if nexus_r else None
     uplift = (nexus_exp - base_exp) if nexus_exp is not None and base_exp is not None else None
 
     ci_low, ci_high = _paired_candidate_bootstrap_ci(
@@ -145,9 +159,48 @@ def build_edge_report(
         baseline_expectancy_r=base_exp,
         nexus_expectancy_r=nexus_exp,
         expectancy_uplift_r=uplift,
+        baseline_profit_factor=_profit_factor(base_r),
+        nexus_profit_factor=_profit_factor(nexus_r),
+        baseline_win_rate=_win_rate(base_r),
+        nexus_win_rate=_win_rate(nexus_r),
         bootstrap_ci_low_r=ci_low,
         bootstrap_ci_high_r=ci_high,
     )
+
+
+def cost_stress_report(
+    rows: Iterable[CandidateOutcome],
+    *,
+    extra_cost_r: Iterable[float] = (0.0, 0.05, 0.10, 0.20),
+) -> tuple[dict, ...]:
+    """Return descriptive OOS economics after extra per-candidate cost shocks.
+
+    The shock is expressed in R and subtracted from every known baseline outcome,
+    including rejected counterfactuals. It is research-only and intentionally
+    has no promotion or execution authority.
+    """
+    vals = [r.validate() for r in rows]
+    known_base = [r for r in vals if r.baseline_eligible and r.outcome_known]
+    out: list[dict] = []
+    for raw_shock in extra_cost_r:
+        shock = float(raw_shock)
+        if not isfinite(shock) or shock < 0.0:
+            raise ValueError("extra_cost_r values must be finite and >= 0")
+        base_r = [float(r.r_multiple) - shock for r in known_base]
+        nexus_r = [float(r.r_multiple) - shock for r in known_base if r.approved]
+        out.append(
+            {
+                "extra_cost_r": shock,
+                "baseline_expectancy_r": _mean(base_r) if base_r else None,
+                "nexus_expectancy_r": _mean(nexus_r) if nexus_r else None,
+                "baseline_profit_factor": _profit_factor(base_r),
+                "nexus_profit_factor": _profit_factor(nexus_r),
+                "baseline_win_rate": _win_rate(base_r),
+                "nexus_win_rate": _win_rate(nexus_r),
+                "execution_effect": "NONE",
+            }
+        )
+    return tuple(out)
 
 
 def edge_promotion_decision(
