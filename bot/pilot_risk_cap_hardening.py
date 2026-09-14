@@ -178,26 +178,32 @@ def install(TradingEngine, log) -> None:
             qty=qty_f,
         )
         metrics = result.metrics or {}
+        signed_drift = float(metrics.get("signed_signal_drift_bps", 0.0) or 0.0)
+        drift_class = str(getattr(result, "drift_classification", "UNKNOWN") or "UNKNOWN")
         if not result.allowed:
             log.warning(
                 "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK blockers=%s "
-                "spread_bps=%.4f drift_bps=%.4f depth_multiple=%.4f "
-                "execution_effect=NONE",
+                "spread_bps=%.4f drift_bps=%.4f signed_drift_bps=%+.4f drift_class=%s "
+                "depth_multiple=%.4f execution_effect=NONE",
                 symbol,
                 "+".join(result.blockers) or "unknown",
                 float(metrics.get("spread_bps", 0.0) or 0.0),
                 float(metrics.get("signal_drift_bps", 0.0) or 0.0),
+                signed_drift,
+                drift_class,
                 float(metrics.get("depth_multiple", 0.0) or 0.0),
             )
             return False
 
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
-            "spread_bps=%.4f drift_bps=%.4f depth_multiple=%.4f "
-            "qty=%.12g source=fresh_rest",
+            "spread_bps=%.4f drift_bps=%.4f signed_drift_bps=%+.4f drift_class=%s "
+            "depth_multiple=%.4f qty=%.12g source=fresh_rest",
             symbol,
             float(metrics.get("spread_bps", 0.0) or 0.0),
             float(metrics.get("signal_drift_bps", 0.0) or 0.0),
+            signed_drift,
+            drift_class,
             float(metrics.get("depth_multiple", 0.0) or 0.0),
             qty_f,
         )
@@ -211,5 +217,6 @@ def install(TradingEngine, log) -> None:
     log.critical(
         "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
         "notional target; RiskManagerV3 is the maximum quantity authority; "
-        "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing"
+        "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing; "
+        "directional_drift_telemetry=true authorization_unchanged=true"
     )

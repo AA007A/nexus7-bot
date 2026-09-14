@@ -29,6 +29,7 @@ class PreDispatchResult:
     allowed: bool
     blockers: list[str] = field(default_factory=list)
     metrics: dict[str, float] = field(default_factory=dict)
+    drift_classification: str = "UNKNOWN"
 
 
 def limits_from_env() -> MicrostructureLimits:
@@ -46,6 +47,27 @@ def _num(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return out if math.isfinite(out) else default
+
+
+def _classify_directional_drift(side: str, signed_drift_bps: float) -> str:
+    """Classify raw market-minus-signal drift without changing authorization.
+
+    ``signed_drift_bps`` is positive when the current executable price is above
+    the signal price and negative when it is below. For a LONG/BUY, a positive
+    move is adverse (chasing higher); for a SHORT/SELL, a negative move is
+    adverse (chasing lower). Unknown sides remain UNKNOWN and never alter the
+    existing absolute-drift blocker semantics.
+    """
+    side_u = str(side).upper()
+    if side_u not in ("BUY", "LONG", "SELL", "SHORT"):
+        return "UNKNOWN"
+    if abs(float(signed_drift_bps)) <= 1e-12:
+        return "FLAT"
+    adverse = (
+        (side_u in ("BUY", "LONG") and signed_drift_bps > 0)
+        or (side_u in ("SELL", "SHORT") and signed_drift_bps < 0)
+    )
+    return "ADVERSE_CHASE" if adverse else "FAVORABLE_IMPROVEMENT"
 
 
 def normalize_orderbook_base_units(
@@ -118,23 +140,31 @@ def evaluate_microstructure(
     mid = (bid + ask) / 2.0
     spread_bps = (ask - bid) / mid * 10000.0
     executable = ask if str(side).upper() in ("BUY", "LONG") else bid
-    drift_bps = abs(executable - signal_entry) / signal_entry * 10000.0
-    metrics.update(spread_bps=spread_bps, signal_drift_bps=drift_bps, executable_price=executable)
+    signed_drift_bps = (executable - signal_entry) / signal_entry * 10000.0
+    drift_bps = abs(signed_drift_bps)
+    drift_classification = _classify_directional_drift(side, signed_drift_bps)
+    metrics.update(
+        spread_bps=spread_bps,
+        signal_drift_bps=drift_bps,
+        signed_signal_drift_bps=signed_drift_bps,
+        executable_price=executable,
+    )
 
     if spread_bps > limits.max_spread_bps:
         blockers.append("SPREAD_TOO_WIDE")
+    # Authorization intentionally remains based on the same absolute drift.
     if drift_bps > limits.max_signal_drift_bps:
         blockers.append("SIGNAL_PRICE_STALE")
 
     # Depth is optional in market analysis but mandatory for this execution gate.
     if not isinstance(orderbook, Mapping):
         blockers.append("ORDERBOOK_UNAVAILABLE")
-        return PreDispatchResult(not blockers, blockers, metrics)
+        return PreDispatchResult(not blockers, blockers, metrics, drift_classification)
 
     levels = orderbook.get("asks") if str(side).upper() in ("BUY", "LONG") else orderbook.get("bids")
     if not isinstance(levels, Iterable):
         blockers.append("ORDERBOOK_UNAVAILABLE")
-        return PreDispatchResult(not blockers, blockers, metrics)
+        return PreDispatchResult(not blockers, blockers, metrics, drift_classification)
 
     visible_base = 0.0
     for level in levels:
@@ -154,7 +184,7 @@ def evaluate_microstructure(
 
     if last > 0:
         metrics["last_to_executable_bps"] = abs(executable - last) / last * 10000.0
-    return PreDispatchResult(not blockers, blockers, metrics)
+    return PreDispatchResult(not blockers, blockers, metrics, drift_classification)
 
 
 async def live_microstructure_recheck(
