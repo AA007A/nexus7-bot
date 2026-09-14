@@ -53,6 +53,22 @@ class FreshMarketClient:
 
 
 class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
+    def _evaluate(self, *, side, bid, ask, max_drift=20):
+        levels_key = "asks" if side.upper() in ("BUY", "LONG") else "bids"
+        executable = ask if levels_key == "asks" else bid
+        return evaluate_microstructure(
+            signal_entry=100.0,
+            side=side,
+            qty=1.0,
+            ticker={"bestBid": bid, "bestAsk": ask, "lastPrice": executable},
+            orderbook={levels_key: [[executable, 10.0]]},
+            limits=MicrostructureLimits(
+                max_spread_bps=100,
+                max_signal_drift_bps=max_drift,
+                min_depth_multiple=1,
+            ),
+        )
+
     def test_good_microstructure_passes(self):
         out = evaluate_microstructure(
             signal_entry=100.0,
@@ -63,6 +79,50 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
             limits=MicrostructureLimits(max_spread_bps=10, max_signal_drift_bps=10, min_depth_multiple=3),
         )
         self.assertTrue(out.allowed)
+
+    def test_long_higher_price_is_adverse_chase(self):
+        out = self._evaluate(side="BUY", bid=100.24, ask=100.25, max_drift=20)
+        self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], 25.0, places=6)
+        self.assertEqual(out.drift_classification, "ADVERSE_CHASE")
+        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+
+    def test_long_lower_price_is_favorable_but_absolute_gate_unchanged(self):
+        out = self._evaluate(side="LONG", bid=99.74, ask=99.75, max_drift=20)
+        self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], -25.0, places=6)
+        self.assertEqual(out.drift_classification, "FAVORABLE_IMPROVEMENT")
+        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+
+    def test_short_lower_price_is_adverse_chase(self):
+        out = self._evaluate(side="SELL", bid=99.75, ask=99.76, max_drift=20)
+        self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], -25.0, places=6)
+        self.assertEqual(out.drift_classification, "ADVERSE_CHASE")
+        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+
+    def test_short_higher_price_is_favorable_but_absolute_gate_unchanged(self):
+        out = self._evaluate(side="SHORT", bid=100.25, ask=100.26, max_drift=20)
+        self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], 25.0, places=6)
+        self.assertEqual(out.drift_classification, "FAVORABLE_IMPROVEMENT")
+        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+
+    def test_within_absolute_drift_limit_still_passes(self):
+        long_out = self._evaluate(side="BUY", bid=100.14, ask=100.15, max_drift=20)
+        short_out = self._evaluate(side="SELL", bid=99.85, ask=99.86, max_drift=20)
+        self.assertTrue(long_out.allowed)
+        self.assertTrue(short_out.allowed)
+        self.assertNotIn("SIGNAL_PRICE_STALE", long_out.blockers)
+        self.assertNotIn("SIGNAL_PRICE_STALE", short_out.blockers)
+
+    def test_unknown_side_classification_does_not_change_absolute_gate(self):
+        out = evaluate_microstructure(
+            signal_entry=100.0,
+            side="UNKNOWN",
+            qty=1.0,
+            ticker={"bestBid": 100.25, "bestAsk": 100.26, "lastPrice": 100.25},
+            orderbook={"bids": [[100.25, 10.0]]},
+            limits=MicrostructureLimits(max_spread_bps=100, max_signal_drift_bps=20, min_depth_multiple=1),
+        )
+        self.assertEqual(out.drift_classification, "UNKNOWN")
+        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
 
     def test_spread_drift_and_depth_fail_closed(self):
         out = evaluate_microstructure(
@@ -113,6 +173,8 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.ticker_reads, 1)
         self.assertEqual(c.book_reads, 1)
         self.assertGreaterEqual(out.metrics["depth_multiple"], 3.0)
+        self.assertIn("signed_signal_drift_bps", out.metrics)
+        self.assertEqual(out.drift_classification, "ADVERSE_CHASE")
 
     async def test_live_recheck_fails_closed_on_exchange_read_error(self):
         c = FreshMarketClient(fail=True)
@@ -126,6 +188,7 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(out.allowed)
         self.assertEqual(out.blockers, ["MICROSTRUCTURE_RECHECK_FAILED"])
+        self.assertEqual(out.drift_classification, "UNKNOWN")
 
     async def test_existing_symbol_position_blocks(self):
         c = FakeClient(positions=[{"symbol": "BTCUSDT", "size": 1}], active={"items": []})
