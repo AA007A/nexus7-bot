@@ -95,7 +95,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ContractItem(
             "KuCoinClient.place_order",
             KuCoinClient.place_order,
-            "pilot_submission_counter.py",
+            "live_execution_fence.py",
         ),
         ContractItem(
             "KuCoinClient._post",
@@ -143,6 +143,10 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
             getattr(KuCoinClient, "_pilot_durable_submission_counter_installed", False),
         ),
         MarkerItem(
+            "KuCoinClient.live_execution_fence",
+            getattr(KuCoinClient, "_live_execution_fence_installed", False),
+        ),
+        MarkerItem(
             "KuCoinClient.order_visibility_race",
             getattr(KuCoinClient, "_order_visibility_race_hardening_installed", False),
         ),
@@ -176,7 +180,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
     }
     log.critical(
         "[RUNTIME_CONTRACT] status=PASS protected_callables=%d required_markers=%d "
-        "execution_chain=idempotency>dispatch>fill>tpsl>reconcile "
+        "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile "
         "late_wrapper_drift=false leverage_unchanged=true sizing_unchanged=true "
         "drawdown_policy_unchanged=true entry_authorization_unchanged=true",
         len(items), len(markers),
