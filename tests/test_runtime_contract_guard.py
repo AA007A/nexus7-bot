@@ -68,7 +68,8 @@ class RuntimeContractGuardTests(unittest.TestCase):
             regime_compatibility=_owned("nexus_regime_transition_consistency.py")
         )
         engine_module = SimpleNamespace(
-            minimum_base_quantity=_owned("operator_runtime_policy.py")
+            minimum_base_quantity=_owned("final_sizing_invariants.py"),
+            _final_sizing_invariants_installed=True,
         )
 
         import bot.risk as risk
@@ -104,14 +105,17 @@ class RuntimeContractGuardTests(unittest.TestCase):
         tail = source[guard_call + len("runtime_contract_guard.install("):]
         self.assertNotIn(".install(", tail)
 
-    def test_guard_contract_explicitly_preserves_operator_policy(self):
+    def test_guard_contract_explicitly_preserves_operator_policy_and_final_sizing(self):
         source = (ROOT / "bot" / "runtime_contract_guard.py").read_text(
             encoding="utf-8"
         )
         self.assertIn('"operator_runtime_policy.py"', source)
+        self.assertIn('"final_sizing_invariants.py"', source)
         self.assertIn("engine.minimum_base_quantity", source)
         self.assertIn("RiskManager.can_open", source)
         self.assertIn("RiskManagerV3.can_open", source)
+        self.assertIn("_final_sizing_invariants_installed", source)
+        self.assertIn("sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap", source)
         self.assertIn("entry_authorization_unchanged=true", source)
 
     def test_guard_covers_live_execution_chain(self):
