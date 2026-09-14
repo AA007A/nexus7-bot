@@ -81,6 +81,61 @@ def test_rejected_nexus_terminates_trace_without_fabricating_order_latency():
     assert "ack_to_fill_ms=NA" in summary
 
 
+def test_generic_order_without_open_dispatch_is_ignored():
+    c = EntryLatencyCollector()
+    c.observe("[NEARUSDT] ✅ SINAL LONG score=70/100 RR=2.0 entry=MOMENTUM", 1_000_000_000)
+    output = c.observe(
+        "📤 [ORDER] clientOid=bgx7-close orderId=close-1 symbol=NEARUSDT side=Sell qty=10 leverage=50x",
+        20_000_000_000,
+    )
+    assert output == []
+    assert "exchange_ack" not in c._traces["NEARUSDT"].stages
+
+
+def test_reduce_only_close_order_after_completed_entry_cannot_overwrite_ack_latency():
+    c = EntryLatencyCollector()
+    c.observe("[NEARUSDT] ✅ SINAL LONG score=70/100 RR=2.0 entry=MOMENTUM", 1_000_000_000)
+    c.observe("🔎 _open NEARUSDT LONG | entry=2 sl=1.9 tp=2.2 | qty=10", 1_010_000_000)
+    c.observe("📡 _open NEARUSDT tentativa 1/1 | side=Buy qty=10", 1_020_000_000)
+    ack = c.observe(
+        "📤 [ORDER] clientOid=bgx7-open orderId=open-1 symbol=NEARUSDT side=Buy qty=10 leverage=50x",
+        1_050_000_000,
+    )
+    assert len(ack) == 1
+    assert "stage=exchange_ack" in ack[0]
+    c.observe(
+        "✅ [FILLED] source=REST clientOid=bgx7-open orderId=open-1 symbol=NEARUSDT filledSize=10",
+        1_100_000_000,
+    )
+
+    close_ack = c.observe(
+        "📤 [ORDER] clientOid=bgx7-close orderId=close-1 symbol=NEARUSDT side=Sell qty=10 leverage=50x",
+        301_000_000_000,
+    )
+    close_fill = c.observe(
+        "✅ [FILLED] source=REST clientOid=bgx7-close orderId=close-1 symbol=NEARUSDT filledSize=10",
+        301_100_000_000,
+    )
+
+    assert close_ack == []
+    assert close_fill == []
+    assert c._traces["NEARUSDT"].stages["exchange_ack"] == 1_050_000_000
+    assert c._traces["NEARUSDT"].stages["fill"] == 1_100_000_000
+
+
+def test_fill_for_unknown_order_id_is_ignored_even_when_symbol_has_trace():
+    c = EntryLatencyCollector()
+    c.observe("[ATOMUSDT] ✅ SINAL SHORT score=70/100 RR=2.0 entry=PULLBACK", 1_000_000_000)
+    c.observe("🔎 _open ATOMUSDT SHORT | entry=1 sl=2 tp=0.5 | qty=1", 1_010_000_000)
+    c.observe("📡 _open ATOMUSDT tentativa 1/1 | side=Sell qty=1", 1_020_000_000)
+    output = c.observe(
+        "✅ [FILLED] source=REST clientOid=bgx7-other orderId=other-1 symbol=ATOMUSDT filledSize=1",
+        1_040_000_000,
+    )
+    assert output == []
+    assert "fill" not in c._traces["ATOMUSDT"].stages
+
+
 def test_unrelated_logs_are_ignored():
     c = EntryLatencyCollector()
     assert c.observe("heartbeat ok", 1_000_000_000) == []

@@ -40,7 +40,10 @@ class EntryLatencyCollector:
     def __init__(self):
         self._traces: dict[str, _Trace] = {}
         self._latest_market_ns: dict[str, int] = {}
-        self._order_to_symbol: dict[str, str] = {}
+        # Only opening-order IDs admitted after an observed _open dispatch are
+        # stored here. Reduce-only exits/partials use the same generic KuCoin
+        # [ORDER]/[FILLED] log shapes, so symbol matching alone is unsafe.
+        self._opening_order_to_symbol: dict[str, str] = {}
         self._seq = 0
         self._lock = threading.Lock()
 
@@ -164,15 +167,27 @@ class EntryLatencyCollector:
             m = _RE_ORDER.search(message)
             if m:
                 symbol = m.group("symbol")
-                trace = self._trace(symbol, now_ns)
+                trace = self._traces.get(symbol)
+                # Generic KuCoin [ORDER] logs are emitted for opening and
+                # reduce-only closing orders. Entry latency may consume an ACK
+                # only when this exact trace has an observed _open dispatch and
+                # has not already accepted an opening ACK.
+                if (
+                    trace is None
+                    or "order_sent" not in trace.stages
+                    or "exchange_ack" in trace.stages
+                ):
+                    return out
                 trace.stages["exchange_ack"] = now_ns
-                self._order_to_symbol[m.group("order_id")] = symbol
+                self._opening_order_to_symbol[m.group("order_id")] = symbol
                 out.append(self._stage_line(trace, "exchange_ack", now_ns))
                 return out
 
             m = _RE_TPSL.search(message)
             if m:
-                trace = self._trace(m.group("symbol"), now_ns)
+                trace = self._traces.get(m.group("symbol"))
+                if trace is None or "exchange_ack" not in trace.stages:
+                    return out
                 trace.stages["tpsl"] = now_ns
                 out.append(self._stage_line(trace, "tpsl", now_ns))
                 if "fill" in trace.stages:
@@ -181,12 +196,24 @@ class EntryLatencyCollector:
 
             m = _RE_FILLED.search(message)
             if m:
-                symbol = m.group("symbol") or self._order_to_symbol.get(m.group("order_id"), "")
-                if symbol:
-                    trace = self._trace(symbol, now_ns)
-                    trace.stages["fill"] = now_ns
-                    out.append(self._stage_line(trace, "fill", now_ns))
-                    out.append(self._summary_line(trace, "fill"))
+                order_id = m.group("order_id")
+                mapped_symbol = self._opening_order_to_symbol.get(order_id)
+                if not mapped_symbol:
+                    return out
+                symbol = m.group("symbol")
+                if symbol != mapped_symbol:
+                    return out
+                trace = self._traces.get(symbol)
+                if (
+                    trace is None
+                    or "exchange_ack" not in trace.stages
+                    or "fill" in trace.stages
+                ):
+                    return out
+                trace.stages["fill"] = now_ns
+                out.append(self._stage_line(trace, "fill", now_ns))
+                out.append(self._summary_line(trace, "fill"))
+                self._opening_order_to_symbol.pop(order_id, None)
                 return out
 
         return out
@@ -224,6 +251,7 @@ def install(log) -> EntryLatencyCollector:
     log.info(
         "[ENTRY_LATENCY_OBSERVABILITY] installed=true source=existing_runtime_logs "
         "correlation=latest_market_to_canonical_signal candidate_dedupe=true "
+        "opening_order_lifecycle_only=true reduce_only_orders_ignored=true "
         "critical_callables_wrapped=false thresholds_unchanged=true leverage_unchanged=true "
         "sizing_unchanged=true execution_effect=NONE"
     )
