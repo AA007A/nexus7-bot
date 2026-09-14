@@ -12,8 +12,10 @@ Safety invariants:
 - external-flow rebasing is multiplicative so the pre-flow drawdown percentage
   is preserved across deposits/withdrawals/transfers;
 - malformed/unavailable durable state fails closed when strict=True;
-- a narrowly identified 2026-09-14 corrupt HWM may be repaired only when both
-  the persisted value and live equity match the independently observed incident;
+- the narrowly identified 2026-09-14 corrupt HWM may be repaired only when the
+  persisted value exactly matches the independently observed incident signature;
+- incident repair preserves the last known-good HWM and any newer verified
+  account-equity high by choosing max(last_good_peak, current_equity);
 - no exchange mutation or execution authorization exists here.
 """
 from __future__ import annotations
@@ -28,11 +30,12 @@ _CACHE_ATTR = "_durable_account_equity_peak"
 
 # Railway evidence immediately before the 2026-09-14 deployment transition
 # showed equity=peak=28.7914. The next process restored 82,894,351,780.2826
-# without any intervening account flow. Keep this recovery signature narrow so
-# unrelated large accounts/deposits can never be silently rebased.
+# without any intervening account flow. The impossible persisted value itself is
+# the incident signature. Current equity is allowed to move after that incident;
+# repair therefore preserves whichever is higher: the last independently proven
+# HWM or current verified real-account equity.
 _INCIDENT_BAD_PEAK = 82_894_351_780.2826
 _INCIDENT_LAST_GOOD_PEAK = 28.7914
-_INCIDENT_EQUITY_TOLERANCE = 0.10
 _INCIDENT_BAD_PEAK_TOLERANCE = 1.0
 _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
 
@@ -46,11 +49,8 @@ def _positive_finite(value, label: str) -> float:
     return out
 
 
-def _matches_known_20260914_corruption(persisted: float, equity: float) -> bool:
-    return (
-        abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
-        and abs(equity - _INCIDENT_LAST_GOOD_PEAK) <= _INCIDENT_EQUITY_TOLERANCE
-    )
+def _matches_known_20260914_corruption(persisted: float) -> bool:
+    return abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
 
 
 def _validate_peak_vs_equity(peak: float, equity: float) -> None:
@@ -110,9 +110,9 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
 
     repaired = False
     if persisted is not None:
-        if _matches_known_20260914_corruption(persisted, equity):
+        if _matches_known_20260914_corruption(persisted):
             old_peak = persisted
-            persisted = _INCIDENT_LAST_GOOD_PEAK
+            persisted = max(_INCIDENT_LAST_GOOD_PEAK, equity)
             ok = await db.save_key_value(
                 DURABLE_EQUITY_PEAK_KEY,
                 format(persisted, ".17g"),
@@ -124,11 +124,12 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
             repaired = True
             log.critical(
                 "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm "
-                "old_peak=%.4f repaired_peak=%.4f equity=%.4f "
-                "evidence=railway_last_good_snapshot execution_effect=NONE",
+                "old_peak=%.4f last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
+                "evidence=exact_persisted_signature_plus_live_equity execution_effect=NONE",
                 old_peak,
-                persisted,
+                _INCIDENT_LAST_GOOD_PEAK,
                 equity,
+                persisted,
             )
         else:
             _validate_peak_vs_equity(persisted, equity)
