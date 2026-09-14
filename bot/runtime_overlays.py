@@ -45,6 +45,7 @@ def install(TradingEngine, log) -> None:
     from bot import external_origin_runtime
     from bot import market_risk_runtime
     from bot import market_risk_coverage_observability
+    from bot import entry_latency_observability
     from bot import runtime_contract_guard
     from bot.pilot import PilotGuard
     from bot.kucoin import KuCoinClient, TAKER_FEE
@@ -74,14 +75,18 @@ def install(TradingEngine, log) -> None:
     exit_policy_telemetry.install(TradingEngine, log)
     operator_loss_policy.install(TradingEngine, log)
 
-    # The one-day daily-stop override already owns authorization in the durable
-    # risk layer. This wrapper changes only the user-facing notification so it
-    # cannot falsely claim entries are blocked while that exact-day override is active.
+    # The daily-stop override layer owns authorization semantics. This wrapper
+    # changes only the user-facing notification so it cannot falsely claim
+    # entries are blocked while an explicit override is active.
     daily_stop_override_telemetry.install(core_engine, log)
 
     # Make external-provider degradation explicit without changing the existing
     # fail-neutral execution policy, sizing, leverage or entry authorization.
     market_risk_coverage_observability.install(market_risk_runtime, log)
+
+    # Observe the already-emitted runtime log stream to timestamp the entry
+    # funnel. No execution-critical callable is wrapped or mutated.
+    entry_latency_observability.install(log)
 
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
@@ -107,11 +112,11 @@ def install(TradingEngine, log) -> None:
     )
 
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel observability, scoring/trailing safety, "
-        "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
-        "viability, KuCoin order-visibility race hardening, fail-closed partial-TP "
-        "execution, drawdown advisory log throttling, truthful daily-stop override telemetry, "
-        "market-risk coverage telemetry, post-trade forensics, confirmed daily-PnL "
+        "[RUNTIME_OVERLAYS] passive funnel and entry-latency observability, "
+        "scoring/trailing safety, entry-type shadow diagnostics, volume-ratio diagnostics, "
+        "fail-closed market viability, KuCoin order-visibility race hardening, fail-closed "
+        "partial-TP execution, drawdown advisory log throttling, truthful daily-stop override "
+        "telemetry, market-risk coverage telemetry, post-trade forensics, confirmed daily-PnL "
         "reconciliation, durable external-origin telemetry, final headline semantics, "
         "stop-only CROSS target policy, delegated operator margin/drawdown/exit policy, "
         "strict NEXUS regime-transition consistency and final runtime ownership contract "
