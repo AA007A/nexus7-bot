@@ -120,7 +120,7 @@ class RuntimeContractGuardTests(unittest.TestCase):
         )
         expected = (
             "KuCoinClient.place_order",
-            "pilot_submission_counter.py",
+            "live_execution_fence.py",
             "KuCoinClient._post",
             "partial_tp_execution_hardening.py",
             "KuCoinClient.wait_for_fill",
@@ -132,10 +132,17 @@ class RuntimeContractGuardTests(unittest.TestCase):
             "_native_tpsl_entry_installed",
             "_fill_normalization_installed",
             "_pilot_durable_submission_counter_installed",
-            "execution_chain=idempotency>dispatch>fill>tpsl>reconcile",
+            "_live_execution_fence_installed",
+            "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile",
         )
         for text in expected:
             self.assertIn(text, source)
+
+    def test_bootstrap_preserves_durable_counter_inside_distributed_fence(self):
+        source = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
+        counter = source.index("_pilot_submission_counter.install(")
+        fence = source.index("_live_execution_fence.install(")
+        self.assertLess(counter, fence)
 
 
 if __name__ == "__main__":

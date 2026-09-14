@@ -64,6 +64,7 @@ def install() -> None:
     from bot import pilot_readiness_observability as _pilot_readiness_observability
     from bot import pilot_exposure_capacity as _pilot_exposure_capacity
     from bot import pilot_submission_counter as _pilot_submission_counter
+    from bot import live_execution_fence as _live_execution_fence
     from bot import shadow_mode_observability as _shadow_mode_observability
     from bot import startup_position_unit_hardening as _startup_position_unit_hardening
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
@@ -112,6 +113,7 @@ def install() -> None:
     _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
     _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
     _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
+    _live_execution_fence.install(_kucoin.KuCoinClient, _kucoin, _log)
     _durable_reconcile_hardening.install(_durable_execution, _order_state, _log)
 
     if _pilot_release_control.live_pilot_release_authorized():
