@@ -26,11 +26,14 @@ def test_risk_override_is_disabled_by_default():
     assert policy._risk_override_enabled() is False
 
 
-def test_risk_override_requires_exact_acknowledgement(monkeypatch):
-    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, "true")
+def test_risk_override_requires_explicit_true(monkeypatch):
+    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, "false")
     assert policy._risk_override_enabled() is False
 
-    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, policy.RISK_OVERRIDE_TOKEN)
+    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, "true")
+    assert policy._risk_override_enabled() is True
+
+    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, "TRUE")
     assert policy._risk_override_enabled() is True
 
 
@@ -55,7 +58,7 @@ async def test_drawdown_pause_is_preserved_without_override():
 @pytest.mark.asyncio
 async def test_drawdown_pause_can_be_explicitly_overridden(monkeypatch):
     engine = _Engine(drawdown=1.0)
-    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, policy.RISK_OVERRIDE_TOKEN)
+    monkeypatch.setenv(policy.RISK_OVERRIDE_ENV, "true")
 
     async def legacy_update():
         engine.active = False
