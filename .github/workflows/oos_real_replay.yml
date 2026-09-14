@@ -5,14 +5,17 @@ on:
     branches: [main]
     paths:
       - "bot/nexus_oos_edge_gate.py"
+      - "bot/nexus_oos_evidence_bundle.py"
       - "bot/nexus_oos_real_replay.py"
       - "bot/nexus_oos_real_replay_corrected.py"
       - "bot/nexus_oos_robustness.py"
       - "bot/nexus_oos_robustness_replay.py"
+      - "bot/nexus_oos_temporal_block_bootstrap.py"
       - "tests/test_nexus_oos_edge_gate.py"
       - "tests/test_nexus_oos_real_replay.py"
       - "tests/test_nexus_oos_replay_full_clock.py"
       - "tests/test_nexus_oos_robustness.py"
+      - "tests/test_nexus_oos_temporal_block_bootstrap.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
 
@@ -43,20 +46,15 @@ jobs:
           python -m unittest tests.test_nexus_oos_real_replay -v
           python -m unittest tests.test_nexus_oos_replay_full_clock -v
           python -m unittest tests.test_nexus_oos_robustness -v
+          python -m unittest tests.test_nexus_oos_temporal_block_bootstrap -v
 
-      - name: Run real public-market OOS replay
+      - name: Run unified public-market OOS evidence bundle
         run: |
-          python -m bot.nexus_oos_real_replay_corrected \
+          python -m bot.nexus_oos_evidence_bundle \
             --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
             --limit-15m 2500 \
-            --output artifacts/nexus_oos_real_replay.json
-
-      - name: Run paired-bootstrap robustness replay
-        run: |
-          python -m bot.nexus_oos_robustness_replay \
-            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
-            --limit-15m 2500 \
-            --output artifacts/nexus_oos_robustness.json
+            --primary-output artifacts/nexus_oos_real_replay.json \
+            --robustness-output artifacts/nexus_oos_robustness.json
 
       - name: Show evidence reports
         if: always()
@@ -86,6 +84,8 @@ jobs:
                       'symbols': p.get('symbols'),
                       'summary': (p.get('robustness') or {}).get('summary'),
                       'pooled': (p.get('robustness') or {}).get('pooled'),
+                      'temporal_block_bootstrap': p.get('temporal_block_bootstrap'),
+                      'shared_candidate_population': p.get('shared_candidate_population'),
                       'promotion_authority': p.get('promotion_authority'),
                       'execution_effect': p.get('execution_effect'),
                   }
