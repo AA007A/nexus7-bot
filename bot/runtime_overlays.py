@@ -28,6 +28,8 @@ def install(TradingEngine, log) -> None:
     from bot import cross_geometry_target_policy as cross_target_policy
     from bot import cross_portfolio_stress
     from bot import operator_runtime_policy
+    from bot import final_sizing_invariants
+    from bot import pilot_risk_cap_hardening as pilot_cap
     from bot import exit_policy_telemetry
     from bot import operator_loss_policy
     from bot import entry_type_shadow_overlay
@@ -73,9 +75,12 @@ def install(TradingEngine, log) -> None:
 
     cross_target_policy.install(cross_risk_hardening, log)
 
-    # Preserve the operator-requested drawdown semantics, but avoid two advisory
-    # WARNINGs every scan cycle hiding operationally significant warnings.
+    # Keep the requested 50%-available margin target and explicit drawdown
+    # semantics. Immediately after that target wrapper, restore RiskManagerV3 as
+    # the final maximum-quantity authority so installation order cannot silently
+    # turn stop-risk sizing back into telemetry.
     operator_runtime_policy.install(TradingEngine, policy_log_throttle.wrap(log))
+    final_sizing_invariants.install(core_engine, pilot_cap, log)
     exit_policy_telemetry.install(TradingEngine, log)
     operator_loss_policy.install(TradingEngine, log)
 
@@ -138,12 +143,12 @@ def install(TradingEngine, log) -> None:
         "[RUNTIME_OVERLAYS] passive funnel and entry-latency observability, "
         "scoring/trailing safety, entry-type shadow diagnostics, volume-ratio diagnostics, "
         "fail-closed market viability, KuCoin order-visibility race hardening, fail-closed "
-        "partial-TP execution, drawdown advisory log throttling, truthful daily-stop override "
-        "telemetry, market-risk coverage telemetry, restart opening-order lineage recovery, "
-        "post-trade forensics, direct-close daily-PnL estimate lineage, confirmed daily-PnL "
-        "reconciliation, durable external-origin telemetry, final headline semantics, stop-only "
-        "CROSS target policy, fail-closed CROSS portfolio stop-stress gate, delegated operator "
-        "margin/drawdown/exit policy, strict NEXUS regime-transition consistency and final "
-        "runtime ownership contract are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "partial-TP execution, drawdown hard-gate with explicit override, final risk-authoritative "
+        "sizing invariants, truthful daily-stop override telemetry, market-risk coverage telemetry, "
+        "restart opening-order lineage recovery, post-trade forensics, direct-close daily-PnL "
+        "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
+        "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
+        "stop-stress gate, delegated operator margin/drawdown/exit policy, strict NEXUS "
+        "regime-transition consistency and final runtime ownership contract are active; "
+        "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
     )
