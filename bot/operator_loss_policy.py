@@ -1,9 +1,26 @@
-"""Operator margin-loss geometry, applied before the normal AI entry gate."""
+"""LIVE technical-stop preservation and loss-geometry validation.
+
+The strategy already produces structure/ATR-based SL/TP levels. In controlled
+LIVE this module must not replace that technical geometry with a synthetic
+margin-loss stop. Monetary risk is controlled downstream by the final sizing
+invariant (RiskManagerV3 + operator 50% margin cap).
+
+This layer therefore:
+- preserves strategy SL/TP exactly;
+- validates orientation and finite positive distances;
+- estimates cost-adjusted net R:R and fails closed if it falls below the
+  configured execution minimum;
+- keeps the existing discretionary-loss-exit policy unchanged.
+
+It does not change leverage, the 50% operator margin cap, NEXUS thresholds,
+TPSL routing, or exchange order semantics.
+"""
 import math
 import os
 
 
 def stop_price(entry, direction, leverage, round_trip_cost):
+    """Legacy helper retained for backward compatibility; not used by install()."""
     values = (entry, leverage, round_trip_cost)
     if not all(math.isfinite(v) for v in values):
         raise ValueError("nonfinite stop input")
@@ -16,13 +33,7 @@ def stop_price(entry, direction, leverage, round_trip_cost):
 
 
 def required_target_price(entry, stop, direction, round_trip_cost, min_rr_net):
-    """Return the nearest target whose estimated net R:R meets ``min_rr_net``.
-
-    NEXUS evaluates net R:R as (target_distance - cost) /
-    (stop_distance + cost).  Reusing a technical TP after widening the operator
-    loss stop can therefore collapse a previously healthy gross R:R.  Derive
-    the minimum target from the same economics instead of weakening NEXUS.
-    """
+    """Legacy helper retained for regression compatibility; not used by install()."""
     values = (entry, stop, round_trip_cost, min_rr_net)
     if not all(math.isfinite(v) for v in values):
         raise ValueError("nonfinite target input")
@@ -39,10 +50,50 @@ def required_target_price(entry, stop, direction, round_trip_cost, min_rr_net):
 
 
 def _farther_target(current, required, entry, direction):
+    """Legacy helper retained for backward compatibility; not used by install()."""
     current = float(current or 0.0)
     if direction == "LONG":
         return max(current, required) if current > entry else required
     return min(current, required) if 0 < current < entry else required
+
+
+def validate_technical_geometry(entry, sl, tp, direction, round_trip_cost, min_rr_net):
+    """Validate the strategy's untouched technical geometry and return diagnostics."""
+    values = (entry, sl, tp, round_trip_cost, min_rr_net)
+    if not all(math.isfinite(float(v)) for v in values):
+        raise ValueError("nonfinite technical geometry")
+
+    entry = float(entry)
+    sl = float(sl)
+    tp = float(tp)
+    round_trip_cost = float(round_trip_cost)
+    min_rr_net = float(min_rr_net)
+
+    if entry <= 0 or sl <= 0 or tp <= 0 or round_trip_cost < 0 or min_rr_net <= 0:
+        raise ValueError("invalid technical geometry")
+    if direction not in ("LONG", "SHORT"):
+        raise ValueError("invalid technical direction")
+    if direction == "LONG" and not (sl < entry < tp):
+        raise ValueError("invalid long technical geometry")
+    if direction == "SHORT" and not (tp < entry < sl):
+        raise ValueError("invalid short technical geometry")
+
+    stop_distance = abs(entry - sl) / entry
+    target_distance = abs(tp - entry) / entry
+    if stop_distance <= 0 or target_distance <= 0:
+        raise ValueError("zero technical distance")
+
+    net_reward = target_distance - round_trip_cost
+    net_risk = stop_distance + round_trip_cost
+    net_rr_est = net_reward / net_risk if net_risk > 0 else 0.0
+    if not math.isfinite(net_rr_est) or net_rr_est < min_rr_net:
+        raise ValueError("technical net rr below minimum")
+
+    return {
+        "stop_distance_pct": stop_distance * 100.0,
+        "target_distance_pct": target_distance * 100.0,
+        "estimated_net_rr": net_rr_est,
+    }
 
 
 def install(TradingEngine, log):
@@ -55,9 +106,10 @@ def install(TradingEngine, log):
 
     def enabled(engine):
         return not getattr(engine, "paper_trade", True) and bool(
-            getattr(getattr(engine, "pilot", None), "enabled", False))
+            getattr(getattr(engine, "pilot", None), "enabled", False)
+        )
 
-    async def open_with_loss_geometry(self, sig, *args, **kwargs):
+    async def open_with_technical_loss_geometry(self, sig, *args, **kwargs):
         if enabled(self):
             try:
                 cost = estimated_round_trip_cost_pct(sig.symbol) / 100.0
@@ -65,39 +117,51 @@ def install(TradingEngine, log):
                     "NEXUS_MIN_RR_NET",
                     str(round(float(cfg.MIN_RR_RATIO) * 0.80, 2)),
                 ))
-                sig.sl = stop_price(float(sig.entry), sig.direction, float(cfg.LEVERAGE), cost)
-                required_tp = required_target_price(
-                    float(sig.entry), float(sig.sl), sig.direction, cost, min_rr_net
+
+                original_sl = float(sig.sl)
+                original_tp = float(sig.tp)
+                original_tp1 = float(getattr(sig, "tp1", original_tp) or original_tp)
+                original_tp2 = float(getattr(sig, "tp2", original_tp) or original_tp)
+
+                diagnostics = validate_technical_geometry(
+                    float(sig.entry),
+                    original_sl,
+                    original_tp,
+                    sig.direction,
+                    cost,
+                    min_rr_net,
                 )
-                old_tp = float(sig.tp)
-                sig.tp = _farther_target(old_tp, required_tp, float(sig.entry), sig.direction)
 
-                # Preserve a nearer technical TP1 for partial profit-taking, but
-                # ensure the final TP2 is not weaker than the execution target.
-                if hasattr(sig, "tp2"):
-                    sig.tp2 = _farther_target(
-                        getattr(sig, "tp2", 0.0), sig.tp, float(sig.entry), sig.direction
-                    )
+                # Explicit invariants: strategy geometry is observationally read-only here.
+                if (
+                    float(sig.sl) != original_sl
+                    or float(sig.tp) != original_tp
+                    or float(getattr(sig, "tp1", original_tp1) or original_tp1) != original_tp1
+                    or float(getattr(sig, "tp2", original_tp2) or original_tp2) != original_tp2
+                ):
+                    raise ValueError("technical geometry mutated unexpectedly")
 
-                distance = abs(float(sig.entry) - sig.sl)
-                sig.rr = abs(float(sig.tp) - float(sig.entry)) / distance
-                for index in (1, 2):
-                    target = getattr(sig, f"tp{index}", None)
-                    if target is not None:
-                        setattr(sig, f"rr{index}", abs(float(target) - float(sig.entry)) / distance)
-
-                target_distance = abs(float(sig.tp) - float(sig.entry)) / float(sig.entry)
-                stop_distance = distance / float(sig.entry)
-                net_rr_est = (target_distance - cost) / (stop_distance + cost)
                 log.info(
-                    "[OPERATOR_LOSS_POLICY] symbol=%s stop=%.8f tp_before=%.8f tp_final=%.8f "
-                    "margin_loss_target=50%% min_rr_net=%.3f estimated_net_rr=%.3f "
-                    "estimated_cost_pct=%.5f target_adjusted=%s native_execution_may_differ=true",
-                    sig.symbol, sig.sl, old_tp, sig.tp, min_rr_net, net_rr_est,
-                    cost * 100, str(abs(sig.tp - old_tp) > 1e-12).lower(),
+                    "[TECHNICAL_STOP_POLICY] symbol=%s result=PASS source=strategy_structure_atr "
+                    "sl=%.8f tp=%.8f stop_distance_pct=%.5f target_distance_pct=%.5f "
+                    "min_rr_net=%.3f estimated_net_rr=%.3f estimated_cost_pct=%.5f "
+                    "geometry_mutated=false sizing_authority=RiskManagerV3_plus_operator_50pct_cap",
+                    sig.symbol,
+                    original_sl,
+                    original_tp,
+                    diagnostics["stop_distance_pct"],
+                    diagnostics["target_distance_pct"],
+                    min_rr_net,
+                    diagnostics["estimated_net_rr"],
+                    cost * 100.0,
                 )
             except (ValueError, TypeError, ArithmeticError) as exc:
-                log.error("[OPERATOR_LOSS_POLICY] entry blocked: %s", type(exc).__name__)
+                log.error(
+                    "[TECHNICAL_STOP_POLICY] result=BLOCK symbol=%s reason=%s "
+                    "geometry_mutated=false",
+                    getattr(sig, "symbol", "unknown"),
+                    type(exc).__name__,
+                )
                 return None
         return await original_open(self, sig, *args, **kwargs)
 
@@ -106,6 +170,6 @@ def install(TradingEngine, log):
             return
         return await original_exit(self)
 
-    TradingEngine._open = open_with_loss_geometry
+    TradingEngine._open = open_with_technical_loss_geometry
     TradingEngine._check_stagnation_and_invalidation = no_discretionary_loss_exit
     TradingEngine._operator_loss_policy_installed = True
