@@ -4,7 +4,11 @@
 
 Default behavior is fail-closed for account drawdown breaches: new entries remain blocked by the drawdown gate.
 
-To deliberately allow new entries despite the configured account drawdown threshold, the variable must exactly equal the acknowledgement token implemented in `bot/operator_runtime_policy.py`.
+To deliberately allow new entries despite the configured account drawdown threshold, set:
+
+`LIVE_RISK_OVERRIDE_APPROVED=true`
+
+Any other value leaves the override disabled.
 
 This override does **not** bypass balance confirmation, maximum-position checks, duplicate-order protection, exchange/local reconciliation, instrument validation, protective-order requirements, or other execution-safety gates.
 
