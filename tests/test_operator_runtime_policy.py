@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from datetime import datetime, timezone
+import os
 import time
 import unittest
 
@@ -13,13 +14,14 @@ class _Log:
 
 
 class OperatorRuntimePolicyTests(unittest.TestCase):
-    def test_drawdown_is_advisory_but_position_capacity_still_blocks(self):
+    def test_drawdown_blocks_by_default_override_allows_but_capacity_still_blocks(self):
         from bot.risk import RiskManager
         from bot.risk_manager_v3 import RiskManagerV3
         from bot import operator_runtime_policy as policy
 
         old_dd = cfg.MAX_DRAWDOWN
         old_max_positions = cfg.MAX_POSITIONS
+        previous_override = os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
         try:
             policy._install_drawdown_advisory(_Log())
             cfg.MAX_DRAWDOWN = 0.10
@@ -32,6 +34,8 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             legacy.peak_balance = 100.0
             legacy.drawdown = 0.20
 
+            self.assertFalse(legacy.can_open(0))
+            os.environ[policy.RISK_OVERRIDE_ENV] = "true"
             self.assertTrue(legacy.can_open(0))
             self.assertFalse(legacy.can_open(2))
 
@@ -39,11 +43,18 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             v3.update_capital(CapitalState(equity=80.0, available_collateral=40.0))
             v3.restore_peak_equity(100.0)
             self.assertAlmostEqual(v3.drawdown, 0.20)
+
+            os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+            self.assertFalse(v3.can_open(0))
+            os.environ[policy.RISK_OVERRIDE_ENV] = "true"
             self.assertTrue(v3.can_open(0))
             self.assertFalse(v3.can_open(2))
         finally:
             cfg.MAX_DRAWDOWN = old_dd
             cfg.MAX_POSITIONS = old_max_positions
+            os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+            if previous_override is not None:
+                os.environ[policy.RISK_OVERRIDE_ENV] = previous_override
 
     def test_live_pilot_target_is_fifty_percent_available_margin(self):
         from bot import engine as engine_module
