@@ -40,6 +40,7 @@ def install(TradingEngine, log) -> None:
     from bot import policy_log_throttle
     from bot import partial_tp_execution_hardening
     from bot import exchange_accounting_evidence
+    from bot import daily_pnl_exchange_reconciliation
     from bot import external_origin_runtime
     from bot import market_risk_runtime
     from bot import market_risk_coverage_observability
@@ -80,6 +81,11 @@ def install(TradingEngine, log) -> None:
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
 
+    # Reconcile conservative operational estimates to KuCoin-confirmed realized
+    # PnL only after the existing accounting audit proves BGX IDs + fills +
+    # durable lineage. Risk remains conservative while evidence is pending.
+    daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
+
     # Persist positive live EXTERNAL/read-only ownership observations and allow
     # post-trade accounting to consume them only when no BGX order evidence
     # conflicts. Telemetry only: no execution/risk authority is introduced.
@@ -99,9 +105,9 @@ def install(TradingEngine, log) -> None:
         "entry-type shadow diagnostics, volume-ratio diagnostics, fail-closed market "
         "viability, KuCoin order-visibility race hardening, fail-closed partial-TP "
         "execution, drawdown advisory log throttling, market-risk coverage telemetry, "
-        "post-trade forensics, durable external-origin telemetry, final headline "
-        "semantics, stop-only CROSS target policy, delegated operator "
-        "margin/drawdown/exit policy, strict NEXUS regime-transition consistency "
+        "post-trade forensics, confirmed daily-PnL reconciliation, durable external-origin "
+        "telemetry, final headline semantics, stop-only CROSS target policy, delegated "
+        "operator margin/drawdown/exit policy, strict NEXUS regime-transition consistency "
         "and final runtime ownership contract are active; thresholds_unchanged=true "
         "leverage_unchanged=true railway_variables_unchanged=true"
     )
