@@ -1,8 +1,12 @@
-"""Require lower-timeframe reversal evidence before emitting PULLBACK entries.
+"""Require reversal evidence before emitting PULLBACK entries.
 
-This guard only removes premature PULLBACK candidates. BOS_BREAK and MOMENTUM
-are unchanged. It is installed inside market-data integrity so the analyzer
-receives the same prepared closed-candle view as the canonical strategy stack.
+The canonical path remains closed-candle and requires >=4/5 reversal votes.
+To reduce avoidable latency, a blocked PULLBACK may use the current 15m bar only
+as a stricter acceleration path: 5/5 votes, price on the correct EMA20 side,
+and no opposite structure/BOS. BOS_BREAK and MOMENTUM remain unchanged.
+
+The intrabar path never bypasses NEXUS, risk, ownership, market-risk, sizing,
+liquidation, TPSL, idempotency or final pre-dispatch market checks.
 """
 from __future__ import annotations
 
@@ -23,13 +27,12 @@ def _direction(value: Any) -> str:
 
 
 def _confirmed_15m(k15: list) -> list:
-    """Drop the disposable final bar/sentinel used by the strategy stack."""
+    """Drop the disposable/current final bar used by the strategy stack."""
     data = list(k15 or [])
     return data[:-1] if len(data) > 20 else data
 
 
-def _pullback_metrics(k15: list, direction: str) -> dict:
-    data = _confirmed_15m(k15)
+def _metrics_from_data(data: list, direction: str) -> dict:
     if len(data) < 30:
         return {"ok": False, "reason": "insufficient_15m_history"}
 
@@ -97,6 +100,9 @@ def _pullback_metrics(k15: list, direction: str) -> dict:
         "votes": votes,
         "vote_count": vote_count,
         "structure": str(smc.get("structure", "UNKNOWN")),
+        "opposite_structure": bool(opposite_structure),
+        "opposite_bos": bool(opposite_bos),
+        "aligned_bos": bool(aligned_bos),
         "bos": bool(smc.get("bos", False)),
         "bos_dir": str(smc.get("bos_dir", "NONE")),
         "choch": bool(smc.get("choch", False)),
@@ -110,6 +116,32 @@ def _pullback_metrics(k15: list, direction: str) -> dict:
     }
 
 
+def _pullback_metrics(k15: list, direction: str) -> dict:
+    return _metrics_from_data(_confirmed_15m(k15), direction)
+
+
+def _intrabar_fast_metrics(k15: list, direction: str) -> dict:
+    """Use current 15m bar only for a stricter 5/5 acceleration decision."""
+    data = list(k15 or [])
+    # A current/disposable bar must actually exist in addition to enough history.
+    if len(data) < 31:
+        return {"ok": False, "reason": "insufficient_intrabar_history"}
+    metrics = _metrics_from_data(data, direction)
+    if not metrics.get("ok"):
+        return metrics
+
+    strict = (
+        int(metrics.get("vote_count", 0)) == 5
+        and bool(metrics.get("ema20_side"))
+        and not bool(metrics.get("opposite_structure"))
+        and not bool(metrics.get("opposite_bos"))
+    )
+    out = dict(metrics)
+    out["ok"] = strict
+    out["reason"] = "intrabar_5of5_confirmed" if strict else "intrabar_not_strict_enough"
+    return out
+
+
 def install(Analyzer, log) -> None:
     if getattr(Analyzer, "_pullback_confirmation_installed", False):
         return
@@ -121,45 +153,61 @@ def install(Analyzer, log) -> None:
         if signal is None or str(getattr(signal, "entry_type", "")).upper() != "PULLBACK":
             return signal
 
-        metrics = _pullback_metrics(k15, getattr(signal, "direction", ""))
-        if not metrics.get("ok"):
+        direction = getattr(signal, "direction", "")
+        metrics = _pullback_metrics(k15, direction)
+        if metrics.get("ok"):
             log.info(
-                "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=BLOCKED reason=%s "
+                "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=PASS path=closed_15m "
                 "votes=%s vote_count=%s structure=%s bos=%s bos_dir=%s rsi=%s "
-                "macd=%s/%s ema20_side=%s execution_effect=SIGNAL_FILTER_ONLY",
-                symbol,
-                getattr(signal, "direction", "UNKNOWN"),
-                metrics.get("reason"),
-                metrics.get("votes", {}),
-                metrics.get("vote_count", 0),
-                metrics.get("structure", "UNKNOWN"),
-                metrics.get("bos", False),
-                metrics.get("bos_dir", "NONE"),
-                metrics.get("rsi", "N/A"),
-                metrics.get("macd_hist", "N/A"),
-                metrics.get("macd_prev", "N/A"),
-                metrics.get("ema20_side", "N/A"),
+                "execution_effect=SIGNAL_FILTER_ONLY",
+                symbol, direction, metrics.get("votes", {}), metrics.get("vote_count", 0),
+                metrics.get("structure", "UNKNOWN"), metrics.get("bos", False),
+                metrics.get("bos_dir", "NONE"), metrics.get("rsi", "N/A"),
             )
-            return None
+            return signal
+
+        # Acceleration is intentionally narrower than the canonical 4/5 rule.
+        # Never use it to bypass an explicit opposite structure/BOS diagnosis.
+        fast = {"ok": False, "reason": "not_eligible"}
+        if metrics.get("reason") == "insufficient_reversal_votes":
+            fast = _intrabar_fast_metrics(k15, direction)
+            if fast.get("ok"):
+                log.warning(
+                    "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=PASS path=intrabar_fast "
+                    "closed_votes=%s intrabar_votes=%s ema20_side=true structure=%s "
+                    "strict=5/5 NEXUS_and_risk_gates_preserved=true execution_effect=SIGNAL_FILTER_ONLY",
+                    symbol, direction, metrics.get("vote_count", 0), fast.get("vote_count", 0),
+                    fast.get("structure", "UNKNOWN"),
+                )
+                return signal
 
         log.info(
-            "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=PASS votes=%s vote_count=%s "
-            "structure=%s bos=%s bos_dir=%s rsi=%s execution_effect=SIGNAL_FILTER_ONLY",
+            "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=BLOCKED reason=%s "
+            "votes=%s vote_count=%s structure=%s bos=%s bos_dir=%s rsi=%s "
+            "macd=%s/%s ema20_side=%s intrabar_reason=%s intrabar_votes=%s "
+            "execution_effect=SIGNAL_FILTER_ONLY",
             symbol,
-            getattr(signal, "direction", "UNKNOWN"),
+            direction or "UNKNOWN",
+            metrics.get("reason"),
             metrics.get("votes", {}),
             metrics.get("vote_count", 0),
             metrics.get("structure", "UNKNOWN"),
             metrics.get("bos", False),
             metrics.get("bos_dir", "NONE"),
             metrics.get("rsi", "N/A"),
+            metrics.get("macd_hist", "N/A"),
+            metrics.get("macd_prev", "N/A"),
+            metrics.get("ema20_side", "N/A"),
+            fast.get("reason", "not_evaluated"),
+            fast.get("vote_count", 0),
         )
-        return signal
+        return None
 
     Analyzer.analyze_mtf = analyze_mtf_confirmed_pullback
     Analyzer._pullback_confirmation_installed = True
     log.warning(
-        "[PULLBACK_CONFIRMATION] installed closed_15m_reversal_required=true min_votes=4/5 "
+        "[PULLBACK_CONFIRMATION] installed closed_15m_min_votes=4/5 "
+        "intrabar_fast_path=5/5_plus_ema20_no_opposite_structure_or_bos "
         "opposite_structure_requires_aligned_bos=true opposite_bos=BLOCK "
         "BOS_BREAK_and_MOMENTUM_unchanged=true NEXUS_and_risk_gates_unchanged=true"
     )
