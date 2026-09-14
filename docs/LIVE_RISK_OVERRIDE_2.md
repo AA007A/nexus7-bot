@@ -1,1 +1,0 @@
-This branch introduces an explicit, auditable drawdown override while preserving the existing 50% margin target and configured leverage. See `docs/LIVE_RISK_OVERRIDE.md` for the full policy.
