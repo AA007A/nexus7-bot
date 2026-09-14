@@ -45,14 +45,21 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(risk.drawdown, (30.0 - 28.0) / 30.0)
         save.assert_not_awaited()
 
-    async def test_incident_signature_requires_live_equity_match(self):
+    async def test_incident_signature_allows_live_equity_to_move_and_preserves_new_high(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
+        moved_equity = 100.0
         with patch.object(
             db, "load_key_value", AsyncMock(return_value=str(dd._INCIDENT_BAD_PEAK))
         ), patch.object(db, "save_key_value", AsyncMock(return_value=True)) as save:
-            with self.assertRaises(db.PersistenceError):
-                await dd.restore_update_real_account_peak(risk, 100.0, strict=True)
-        save.assert_not_awaited()
+            peak = await dd.restore_update_real_account_peak(risk, moved_equity, strict=True)
+
+        self.assertEqual(peak, moved_equity)
+        self.assertEqual(risk.peak_balance, moved_equity)
+        self.assertEqual(risk.drawdown, 0.0)
+        save.assert_awaited_once()
+        saved_args = save.await_args.args
+        self.assertEqual(saved_args[0], dd.DURABLE_EQUITY_PEAK_KEY)
+        self.assertAlmostEqual(float(saved_args[1]), moved_equity, places=6)
 
 
 if __name__ == "__main__":
