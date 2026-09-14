@@ -388,10 +388,22 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         if validation_error is not None or initial.execution_allowed is not True:
             return initial
 
-        # The existing liquidation model is intentionally fail-closed for a
-        # second simultaneous CROSS position because shared-margin liquidation
-        # has not been proven. Do not spend another private request in that case.
+        # Multi-position CROSS risk needs the exact final quantity. The legacy
+        # behavior remains fail-closed unless the reviewed portfolio stress
+        # gate is actually installed. When available, defer only this specific
+        # veto to its final post-sizing boundary; all other NEXUS/risk gates are
+        # unchanged and authoritative.
         if len(getattr(self, "positions", {}) or {}) >= 1:
+            if bool(getattr(self.__class__, "_cross_portfolio_stress_capable", False)):
+                setattr(sig, "_cross_multi_position_requires_stress", True)
+                log.warning(
+                    "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=DEFER "
+                    "reason=cross_multi_position_requires_final_qty_stress "
+                    "stage=POST_NEXUS_PRE_SIZING final_authority=CROSS_PORTFOLIO_STRESS "
+                    "execution_effect=NONE",
+                    sig.symbol,
+                )
+                return initial
             log.warning(
                 "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
                 "reason=cross_multi_position_liquidation_unmodeled "
