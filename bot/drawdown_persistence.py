@@ -12,6 +12,8 @@ Safety invariants:
 - external-flow rebasing is multiplicative so the pre-flow drawdown percentage
   is preserved across deposits/withdrawals/transfers;
 - malformed/unavailable durable state fails closed when strict=True;
+- a narrowly identified 2026-09-14 corrupt HWM may be repaired only when both
+  the persisted value and live equity match the independently observed incident;
 - no exchange mutation or execution authorization exists here.
 """
 from __future__ import annotations
@@ -24,6 +26,16 @@ from bot.logger import log
 DURABLE_EQUITY_PEAK_KEY = "risk:account_equity_peak:v1"
 _CACHE_ATTR = "_durable_account_equity_peak"
 
+# Railway evidence immediately before the 2026-09-14 deployment transition
+# showed equity=peak=28.7914. The next process restored 82,894,351,780.2826
+# without any intervening account flow. Keep this recovery signature narrow so
+# unrelated large accounts/deposits can never be silently rebased.
+_INCIDENT_BAD_PEAK = 82_894_351_780.2826
+_INCIDENT_LAST_GOOD_PEAK = 28.7914
+_INCIDENT_EQUITY_TOLERANCE = 0.10
+_INCIDENT_BAD_PEAK_TOLERANCE = 1.0
+_MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
+
 
 def _positive_finite(value, label: str) -> float:
     if isinstance(value, bool):
@@ -32,6 +44,21 @@ def _positive_finite(value, label: str) -> float:
     if not math.isfinite(out) or out <= 0:
         raise ValueError(f"{label} must be positive and finite")
     return out
+
+
+def _matches_known_20260914_corruption(persisted: float, equity: float) -> bool:
+    return (
+        abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
+        and abs(equity - _INCIDENT_LAST_GOOD_PEAK) <= _INCIDENT_EQUITY_TOLERANCE
+    )
+
+
+def _validate_peak_vs_equity(peak: float, equity: float) -> None:
+    ratio = peak / equity
+    if not math.isfinite(ratio) or ratio > _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO:
+        raise db.PersistenceError(
+            "durable equity peak is implausible relative to current account equity"
+        )
 
 
 def _apply_peak(risk, peak: float, current_equity: float, *, allow_lower: bool = False) -> None:
@@ -44,10 +71,6 @@ def _apply_peak(risk, peak: float, current_equity: float, *, allow_lower: bool =
         if allow_lower and hasattr(v3, "rebase_peak_equity"):
             v3.rebase_peak_equity(peak)
         elif hasattr(v3, "restore_peak_equity"):
-            # restore_peak_equity intentionally never lowers an existing HWM.
-            # For cash-flow rebases on adapters whose V3 does not yet expose a
-            # lower-capital rebase hook, update its private peak only after the
-            # flow has been explicitly verified by the caller.
             if allow_lower and hasattr(v3, "_peak_equity"):
                 v3._peak_equity = peak
             else:
@@ -85,6 +108,31 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
     equity = _positive_finite(equity, "account equity")
     persisted, _ = await _load_peak(risk, strict=strict)
 
+    repaired = False
+    if persisted is not None:
+        if _matches_known_20260914_corruption(persisted, equity):
+            old_peak = persisted
+            persisted = _INCIDENT_LAST_GOOD_PEAK
+            ok = await db.save_key_value(
+                DURABLE_EQUITY_PEAK_KEY,
+                format(persisted, ".17g"),
+                strict=strict,
+            )
+            if strict and not ok:
+                raise db.PersistenceError("durable equity peak incident repair not confirmed")
+            setattr(risk, _CACHE_ATTR, persisted)
+            repaired = True
+            log.critical(
+                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm "
+                "old_peak=%.4f repaired_peak=%.4f equity=%.4f "
+                "evidence=railway_last_good_snapshot execution_effect=NONE",
+                old_peak,
+                persisted,
+                equity,
+            )
+        else:
+            _validate_peak_vs_equity(persisted, equity)
+
     peak = max(equity, persisted or equity)
     needs_write = persisted is None or peak > persisted
     if needs_write:
@@ -97,7 +145,7 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
             raise db.PersistenceError("durable equity peak write not confirmed")
 
     setattr(risk, _CACHE_ATTR, peak)
-    _apply_peak(risk, peak, equity)
+    _apply_peak(risk, peak, equity, allow_lower=repaired)
 
     log.info(
         "[DURABLE_DRAWDOWN] equity=%.4f peak_equity=%.4f drawdown=%.2f%% "
@@ -105,8 +153,8 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
         equity,
         peak,
         max(0.0, (peak - equity) / peak) * 100.0,
-        "bootstrap" if persisted is None else "restored",
-        "updated" if needs_write else "unchanged",
+        "bootstrap" if persisted is None else ("incident_repair" if repaired else "restored"),
+        "repaired" if repaired else ("updated" if needs_write else "unchanged"),
     )
     return peak
 
