@@ -1,4 +1,5 @@
 import asyncio
+import os
 from types import SimpleNamespace
 
 from bot.config import cfg
@@ -7,6 +8,9 @@ from bot import operator_runtime_policy as policy
 
 class _Log:
     def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
         return None
 
     def critical(self, *args, **kwargs):
@@ -56,80 +60,114 @@ async def _late_legacy_replacement(self):
     self.active = False
 
 
-def test_drawdown_advisory_restores_only_drawdown_originated_active_state():
-    policy._install_drawdown_advisory(_Engine, _Log())
-
-    engine = _Engine()
-    engine.active = True
-    engine.risk = SimpleNamespace(drawdown=0.0)
-    asyncio.run(engine._update_balance())
-    assert engine.active is True
-
-
-def test_drawdown_advisory_does_not_reenable_preexisting_inactive_engine():
-    policy._install_drawdown_advisory(_Engine, _Log())
-
-    engine = _Engine()
-    engine.active = False
-    engine.risk = SimpleNamespace(drawdown=0.0)
-    asyncio.run(engine._update_balance())
-    assert engine.active is False
-
-
-def test_drawdown_advisory_does_not_depend_on_alert_telemetry_state():
-    policy._install_drawdown_advisory(_EngineWithoutAlertFlag, _Log())
-
-    engine = _EngineWithoutAlertFlag()
-    engine.active = True
-    engine.risk = SimpleNamespace(drawdown=0.0)
-    asyncio.run(engine._update_balance())
-    assert engine.active is True
-
-
-def test_drawdown_advisory_restores_engine_even_when_legacy_update_raises():
-    policy._install_drawdown_advisory(_EngineRaisesAfterLegacyPause, _Log())
-
-    engine = _EngineRaisesAfterLegacyPause()
-    engine.active = True
-    engine.risk = SimpleNamespace(drawdown=0.0)
-
-    try:
-        asyncio.run(engine._update_balance())
-    except RuntimeError as exc:
-        assert "notification failure" in str(exc)
+def _with_override(enabled: bool):
+    previous = os.environ.get(policy.RISK_OVERRIDE_ENV)
+    if enabled:
+        os.environ[policy.RISK_OVERRIDE_ENV] = "true"
     else:
-        raise AssertionError("expected RuntimeError")
-
-    assert engine.active is True
-
-
-def test_drawdown_advisory_preempts_legacy_pause_when_already_above_threshold():
-    policy._install_drawdown_advisory(_LegacyFlagAwareEngine, _Log())
-
-    engine = _LegacyFlagAwareEngine()
-    engine.active = True
-    engine._dd_alerted = False
-    engine.risk = SimpleNamespace(drawdown=float(cfg.MAX_DRAWDOWN) + 0.01)
-
-    asyncio.run(engine._update_balance())
-
-    assert engine.active is True
-    assert engine._dd_alerted is True
+        os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+    return previous
 
 
-def test_run_binds_instance_advisory_even_if_class_update_is_replaced_late():
-    policy._install_drawdown_advisory(_LateReplaceEngine, _Log())
+def _restore_override(previous):
+    os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
+    if previous is not None:
+        os.environ[policy.RISK_OVERRIDE_ENV] = previous
 
-    # Reproduce a late runtime hardening/rebinding after the class-level policy.
-    # The run wrapper must capture this actual method and protect the instance.
-    _LateReplaceEngine._update_balance = _late_legacy_replacement
 
-    engine = _LateReplaceEngine()
-    engine.active = True
-    engine.risk = SimpleNamespace(drawdown=0.0)
+def test_drawdown_hard_gate_preserves_drawdown_originated_pause_by_default():
+    previous = _with_override(False)
+    try:
+        policy._install_drawdown_advisory(_Engine, _Log())
+        engine = _Engine()
+        engine.active = True
+        engine.risk = SimpleNamespace(drawdown=0.0)
+        asyncio.run(engine._update_balance())
+        assert engine.active is False
+    finally:
+        _restore_override(previous)
 
-    result = asyncio.run(engine.run())
 
-    assert result is True
-    assert engine.active is True
-    assert engine.__dict__.get("_operator_drawdown_instance_advisory") is True
+def test_drawdown_gate_does_not_reenable_preexisting_inactive_engine():
+    previous = _with_override(False)
+    try:
+        policy._install_drawdown_advisory(_Engine, _Log())
+        engine = _Engine()
+        engine.active = False
+        engine.risk = SimpleNamespace(drawdown=0.0)
+        asyncio.run(engine._update_balance())
+        assert engine.active is False
+    finally:
+        _restore_override(previous)
+
+
+def test_drawdown_hard_gate_does_not_depend_on_alert_telemetry_state():
+    previous = _with_override(False)
+    try:
+        policy._install_drawdown_advisory(_EngineWithoutAlertFlag, _Log())
+        engine = _EngineWithoutAlertFlag()
+        engine.active = True
+        engine.risk = SimpleNamespace(drawdown=0.0)
+        asyncio.run(engine._update_balance())
+        assert engine.active is False
+    finally:
+        _restore_override(previous)
+
+
+def test_drawdown_hard_gate_remains_paused_even_when_legacy_update_raises():
+    previous = _with_override(False)
+    try:
+        policy._install_drawdown_advisory(_EngineRaisesAfterLegacyPause, _Log())
+        engine = _EngineRaisesAfterLegacyPause()
+        engine.active = True
+        engine.risk = SimpleNamespace(drawdown=0.0)
+
+        try:
+            asyncio.run(engine._update_balance())
+        except RuntimeError as exc:
+            assert "notification failure" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+        assert engine.active is False
+    finally:
+        _restore_override(previous)
+
+
+def test_drawdown_override_preempts_legacy_pause_when_explicitly_enabled():
+    previous = _with_override(True)
+    try:
+        policy._install_drawdown_advisory(_LegacyFlagAwareEngine, _Log())
+        engine = _LegacyFlagAwareEngine()
+        engine.active = True
+        engine._dd_alerted = False
+        engine.risk = SimpleNamespace(drawdown=float(cfg.MAX_DRAWDOWN) + 0.01)
+
+        asyncio.run(engine._update_balance())
+
+        assert engine.active is True
+        assert engine._dd_alerted is True
+    finally:
+        _restore_override(previous)
+
+
+def test_run_binds_instance_gate_even_if_class_update_is_replaced_late():
+    previous = _with_override(False)
+    try:
+        policy._install_drawdown_advisory(_LateReplaceEngine, _Log())
+
+        # Reproduce a late runtime hardening/rebinding after the class-level policy.
+        # The run wrapper must capture this actual method and keep the hard gate.
+        _LateReplaceEngine._update_balance = _late_legacy_replacement
+
+        engine = _LateReplaceEngine()
+        engine.active = True
+        engine.risk = SimpleNamespace(drawdown=0.0)
+
+        result = asyncio.run(engine.run())
+
+        assert result is False
+        assert engine.active is False
+        assert engine.__dict__.get("_operator_drawdown_instance_advisory") is True
+    finally:
+        _restore_override(previous)
