@@ -70,6 +70,20 @@ class NexusOOSEdgeGateTests(unittest.TestCase):
         self.assertGreater(rep.expectancy_uplift_r, 0)
         self.assertGreater(rep.bootstrap_ci_low_r, 0)
 
+    def test_paired_bootstrap_preserves_approved_subset_dependence(self):
+        # When every baseline row is approved, the two estimands are literally
+        # the same population in every bootstrap draw. A correct paired
+        # candidate bootstrap must therefore return an exactly zero-width CI at
+        # zero even though the individual R outcomes have large dispersion.
+        rows = [
+            _row(i, approved=True, known=True, r=(-2.0 + (i % 9) * 0.5))
+            for i in range(180)
+        ]
+        rep = build_edge_report(rows, bootstrap_samples=1000, seed=17)
+        self.assertAlmostEqual(rep.expectancy_uplift_r, 0.0, places=12)
+        self.assertAlmostEqual(rep.bootstrap_ci_low_r, 0.0, places=12)
+        self.assertAlmostEqual(rep.bootstrap_ci_high_r, 0.0, places=12)
+
     def test_no_uplift_fails_closed(self):
         rows = [_row(i, approved=(i % 2 == 0), known=True, r=0.2) for i in range(240)]
         rep = build_edge_report(rows, bootstrap_samples=500)
