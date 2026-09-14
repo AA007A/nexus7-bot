@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from bot.runtime_mode_observability import snapshot, startup_message
+from bot.runtime_mode_observability import (
+    final_runtime_message,
+    snapshot,
+    startup_message,
+)
 
 
 def _engine(**kwargs):
@@ -63,7 +67,7 @@ def test_blocked_runtime_is_not_ready():
     assert state["blocked"] is True
 
 
-def test_unlocked_live_reports_orders_only_when_operational():
+def test_unlocked_live_reports_transitional_then_operational_state():
     not_ready = snapshot(
         paper_trade=False,
         engine=_engine(connected=False, active=False),
@@ -72,10 +76,10 @@ def test_unlocked_live_reports_orders_only_when_operational():
     assert not_ready["trading_mode"] == "LIVE"
     assert not_ready["orders_sent_to_exchange"] is False
     banner = startup_message(not_ready)
-    assert "LIVE CONFIGURADO" in banner
-    assert "EXECUÇÃO AINDA NÃO DISPONÍVEL" in banner
-    assert "engine desconectado" in banner
-    assert "engine inativo" in banner
+    assert "NEXUS-7 INICIALIZANDO" in banner
+    assert "Nenhuma falha de conexão é afirmada" in banner
+    assert "engine desconectado" not in banner
+    assert "engine inativo" not in banner
 
     ready = snapshot(
         paper_trade=False,
@@ -86,17 +90,37 @@ def test_unlocked_live_reports_orders_only_when_operational():
     assert ready["ready"] is True
     ready_banner = startup_message(ready)
     assert "LIVE OPERACIONAL" in ready_banner
-    assert "Gates dinâmicos de risco" in ready_banner
 
 
-def test_live_startup_block_is_reported_as_not_available():
+def test_live_startup_block_stays_transitional_not_false_disconnect():
     blocked = snapshot(
         paper_trade=False,
-        engine=_engine(connected=True, active=True),
+        engine=_engine(connected=False, active=False),
         blocked=True,
     )
     assert blocked["ready"] is False
     assert blocked["orders_sent_to_exchange"] is False
     banner = startup_message(blocked)
-    assert "LIVE CONFIGURADO" in banner
-    assert "bloqueio de startup" in banner
+    assert "NEXUS-7 INICIALIZANDO" in banner
+    assert "engine desconectado" not in banner
+
+
+def test_final_runtime_message_reports_drawdown_gate(monkeypatch):
+    from bot.config import cfg
+
+    monkeypatch.setattr(cfg, "MAX_DRAWDOWN", 0.10)
+    monkeypatch.delenv("LIVE_RISK_OVERRIDE_APPROVED", raising=False)
+    engine = _engine(
+        connected=True,
+        active=True,
+        paper_trade=False,
+        risk=SimpleNamespace(drawdown=0.7218, balance=14.19),
+        viable_symbols=["BTCUSDT"],
+        pilot=None,
+    )
+
+    banner = final_runtime_message(engine)
+    assert "LIVE BLOQUEADO" in banner
+    assert "DRAWDOWN_HARD_GATE" in banner
+    assert "72.18%" in banner
+    assert "10.00%" in banner
