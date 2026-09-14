@@ -5,11 +5,15 @@ flag could be persisted as ``STOP`` without recording what PnL breached which
 limit. A fresh stop requires confirmed durable daily-PnL state plus current
 realized+unrealized PnL at or below the configured loss limit.
 
-An operator may explicitly allow new entries for one exact UTC calendar day via
-``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD``. The stop evidence and PnL ledger are
-never deleted or rewritten. The override applies only to a valid daily-stop
-breach; persistence/storage integrity failures remain fail-closed. The override
-automatically expires when the UTC day changes.
+An operator may explicitly allow new entries despite a proven daily-stop breach
+in either of two ways:
+
+* ``DAILY_STOP_OPERATOR_OVERRIDE=true`` enables a persistent operator override;
+* ``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD`` keeps the legacy exact-day mode.
+
+The stop evidence and PnL ledger are never deleted or rewritten. The override
+applies only to a valid daily-stop breach; persistence/storage integrity failures
+remain fail-closed. All unrelated risk and execution protections stay active.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from bot.logger import log
 STATE_VERSION = 3
 _STATE_SOURCE = "RUNTIME_DAILY_STOP"
 _OVERRIDE_ENV = "DAILY_STOP_OVERRIDE_UTC_DAY"
+_PERSISTENT_OVERRIDE_ENV = "DAILY_STOP_OPERATOR_OVERRIDE"
 
 
 def state_key(day):
@@ -70,24 +75,38 @@ def _clear_unproven_flag(engine):
         tracker.daily_stopped = False
 
 
-def _operator_override_active(engine, day, *, state=None, combined=None, stop_limit=None):
+def _persistent_override_enabled():
+    """Persistent bypass is deliberately opt-in with one exact boolean value."""
+    return str(os.environ.get(_PERSISTENT_OVERRIDE_ENV, '') or '').strip().lower() == 'true'
+
+
+def _operator_override_mode(day):
+    if _persistent_override_enabled():
+        return 'persistent'
     configured_day = str(os.environ.get(_OVERRIDE_ENV, '') or '').strip()
-    if not configured_day or configured_day != day:
+    if configured_day and configured_day == day:
+        return 'date_scoped'
+    return None
+
+
+def _operator_override_active(engine, day, *, state=None, combined=None, stop_limit=None):
+    mode = _operator_override_mode(day)
+    if mode is None:
         return False
 
     # Only the daily stop flag is bypassed. The durable evidence and PnL ledger
     # remain intact, and any unrelated storage/integrity failure is handled
     # earlier by entries_blocked() and therefore stays fail-closed.
     _clear_unproven_flag(engine)
-    marker = f'{day}:{configured_day}'
+    marker = f'{mode}:{day}'
     if getattr(engine, '_daily_stop_override_logged', None) != marker:
         trigger_pnl = state.get('trigger_pnl') if isinstance(state, dict) else combined
         effective_limit = state.get('stop_limit') if isinstance(state, dict) else stop_limit
         log.critical(
-            '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s active=true entries_blocked=false '
+            '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s mode=%s active=true entries_blocked=false '
             'trigger_pnl=%s stop_limit=%s evidence_preserved=true pnl_preserved=true '
-            'auto_expires_utc=true leverage_unchanged=true sizing_unchanged=true',
-            day, trigger_pnl, effective_limit,
+            'auto_expires_utc=%s leverage_unchanged=true sizing_unchanged=true',
+            day, mode, trigger_pnl, effective_limit, mode == 'date_scoped',
         )
         engine._daily_stop_override_logged = marker
     return True
