@@ -88,6 +88,9 @@ jobs:
       - name: NEXUS OOS incremental-edge evidence gate
         run: python -m unittest tests.test_nexus_oos_edge_gate -v
 
+      - name: NEXUS OOS temporal block-bootstrap evidence
+        run: python -m unittest tests.test_nexus_oos_temporal_block_bootstrap -v
+
       - name: NEXUS OOS replay evidence dataset contract
         run: python -m unittest tests.test_nexus_oos_evidence_dataset -v
 
