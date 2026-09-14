@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from bot import daily_stop_override_telemetry as telemetry
@@ -34,6 +35,7 @@ def test_persistent_override_enabled_independent_of_utc_day():
 
 
 def test_persistent_override_is_explicit_true_only():
+    now = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
     for value in ("", "false", "0", "yes", "TRUE-ish"):
         engine = _Engine()
         with patch.dict(
@@ -47,12 +49,13 @@ def test_persistent_override_is_explicit_true_only():
             assert daily_stop._operator_override_active(
                 engine, "2026-09-15", state=_state()
             ) is False
-            assert telemetry.override_mode_now() is None
+            assert telemetry.override_mode_now(now=now) is None
         assert engine.daily_stopped is True
 
 
 def test_legacy_exact_day_override_remains_backward_compatible():
     engine = _Engine()
+    now = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
     with patch.dict(
         os.environ,
         {
@@ -64,7 +67,7 @@ def test_legacy_exact_day_override_remains_backward_compatible():
         assert daily_stop._operator_override_active(
             engine, "2026-09-15", state=_state()
         ) is True
-        assert telemetry.override_mode_now() == "date_scoped"
+        assert telemetry.override_mode_now(now=now) == "date_scoped"
 
 
 def test_persistent_telemetry_rewrites_daily_stop_without_changing_pnl():
