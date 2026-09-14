@@ -215,9 +215,6 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         self._cross_mmr_symbols = set()
         self._cross_mmr_cache = {}
 
-        # Public maintainMargin is useful audit/reference metadata, but it is
-        # deliberately NOT registered as execution authority because LIVE uses
-        # CROSS margin and KuCoin exposes a separate smooth-curve CROSS MMR.
         try:
             raw = await self._get("/api/v1/contracts/active")
             contracts = _contract_list(raw)
@@ -355,7 +352,6 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         return {"mmr": mmr, "age": age}
 
     async def _open_with_cross_context(self, sig, *args, **kwargs):
-        # Context only. Private CROSS risk remains forbidden before NEXUS.
         if getattr(self, "paper_trade", True) or not bool(
             getattr(getattr(self, "pilot", None), "enabled", False)
         ):
@@ -370,9 +366,6 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             _ENGINE.reset(token_engine)
 
     async def _nexus_validate_with_exact_cross_geometry(self, sig, *args, **kwargs):
-        # This wrapper is installed only when the engine exposes the NEXUS
-        # boundary. The first evaluation is unchanged and spends no private
-        # CROSS-risk request unless it grants exact execution approval.
         initial = await original_nexus_validate(self, sig, *args, **kwargs)
         if getattr(self, "paper_trade", True) or not bool(
             getattr(getattr(self, "pilot", None), "enabled", False)
@@ -388,10 +381,17 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         if validation_error is not None or initial.execution_allowed is not True:
             return initial
 
-        # The existing liquidation model is intentionally fail-closed for a
-        # second simultaneous CROSS position because shared-margin liquidation
-        # has not been proven. Do not spend another private request in that case.
         if len(getattr(self, "positions", {}) or {}) >= 1:
+            if bool(getattr(type(self), "_cross_portfolio_stress_capable", False)):
+                setattr(sig, "_cross_multi_position_requires_stress", True)
+                log.warning(
+                    "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=DEFER "
+                    "reason=cross_multi_position_requires_final_qty_stress "
+                    "stage=POST_NEXUS_PRE_SIZING final_authority=CROSS_PORTFOLIO_STRESS "
+                    "execution_effect=NONE",
+                    sig.symbol,
+                )
+                return initial
             log.warning(
                 "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=BLOCK "
                 "reason=cross_multi_position_liquidation_unmodeled "
@@ -403,9 +403,7 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             )
 
         try:
-            await _refresh_cross_risk(
-                self, sig.symbol, "POST_NEXUS_PRE_SIZING"
-            )
+            await _refresh_cross_risk(self, sig.symbol, "POST_NEXUS_PRE_SIZING")
         except Exception as exc:
             log.warning(
                 "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "
@@ -413,21 +411,16 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
                 "stage=POST_NEXUS_PRE_SIZING execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 sig.symbol, type(exc).__name__,
             )
-            return NexusDecision.wait(
-                sig.symbol, "official_cross_mmr_unavailable"
-            )
+            return NexusDecision.wait(sig.symbol, "official_cross_mmr_unavailable")
 
-        geometry = _geometry_from_exact_mmr(
-            liquidation, sig, int(cfg.LEVERAGE)
-        )
+        geometry = _geometry_from_exact_mmr(liquidation, sig, int(cfg.LEVERAGE))
         if geometry.get("status") == "BLOCK":
             log.warning(
                 "[KUCOIN_CROSS_GEOMETRY] symbol=%s direction=%s result=BLOCK "
                 "reason=%s leverage=%sx original_stop=%.3f%% safe_stop=%.3f%% "
                 "retained=%.1f%% execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 sig.symbol, sig.direction, geometry.get("reason"),
-                int(cfg.LEVERAGE),
-                float(geometry.get("original_stop_pct", 0.0)),
+                int(cfg.LEVERAGE), float(geometry.get("original_stop_pct", 0.0)),
                 float(geometry.get("safe_stop_pct", 0.0)),
                 float(geometry.get("retained_fraction", 0.0)) * 100.0,
             )
@@ -446,10 +439,6 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             )
             return initial
 
-        # Exact CROSS MMR says the original stop is unsafe, but it can be made
-        # compatible without discarding more than 60% of the strategy risk
-        # distance. Preserve R:R and then force a second NEXUS decision on the
-        # exact new trade levels before sizing can occur.
         old_sl = float(sig.sl)
         old_tp = float(sig.tp)
         sig.sl = round(float(geometry["sl"]), 8)
@@ -471,9 +460,7 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
                 "required=%.3f%% execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 sig.symbol, move_to_tp_pct, min_move_pct,
             )
-            return NexusDecision.wait(
-                sig.symbol, "post_compression_fee_viability"
-            )
+            return NexusDecision.wait(sig.symbol, "post_compression_fee_viability")
 
         sig.expected_pnl = round(move_to_tp_pct - total_fees_pct, 3)
         sig.reason = (
@@ -488,8 +475,7 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             "extra_liq_headroom=%.2fpp nexus_recheck=REQUIRED",
             sig.symbol, sig.direction, int(cfg.LEVERAGE),
             float(geometry["original_stop_pct"]),
-            float(geometry["final_stop_pct"]),
-            float(geometry["rr"]),
+            float(geometry["final_stop_pct"]), float(geometry["rr"]),
             float(geometry["retained_fraction"]) * 100.0,
             _EXTRA_LIQ_HEADROOM_PCT,
         )
@@ -504,9 +490,7 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
                 "reason=nexus_recheck_invalid_%s execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 sig.symbol, revised_error,
             )
-            return NexusDecision.wait(
-                sig.symbol, f"nexus_recheck_invalid_{revised_error}"
-            )
+            return NexusDecision.wait(sig.symbol, f"nexus_recheck_invalid_{revised_error}")
         if revised.execution_allowed is not True:
             log.info(
                 "[KUCOIN_CROSS_GEOMETRY] symbol=%s result=REJECT "
@@ -529,7 +513,6 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
         engine = _ENGINE.get()
         sig = _SIGNAL.get()
 
-        # Outside the controlled LIVE opening task, scoring is untouched.
         if engine is None or sig is None:
             return await original_calculate(
                 symbol, direction, closes, highs, lows, volumes, client
@@ -549,9 +532,7 @@ def install(KuCoinClient, TradingEngine, scoring, liquidation, log) -> None:
             )
         else:
             try:
-                await _refresh_cross_risk(
-                    engine, symbol, "POST_NEXUS_PRETRADE"
-                )
+                await _refresh_cross_risk(engine, symbol, "POST_NEXUS_PRETRADE")
             except Exception as exc:
                 log.warning(
                     "[KUCOIN_CROSS_RISK] symbol=%s result=BLOCK type=%s "

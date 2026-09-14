@@ -26,6 +26,7 @@ def install(TradingEngine, log) -> None:
     from bot import nexus_regime_transition_consistency as regime_transition
     from bot import kucoin_contract_risk_hardening as cross_risk_hardening
     from bot import cross_geometry_target_policy as cross_target_policy
+    from bot import cross_portfolio_stress
     from bot import operator_runtime_policy
     from bot import exit_policy_telemetry
     from bot import operator_loss_policy
@@ -104,6 +105,13 @@ def install(TradingEngine, log) -> None:
 
     regime_transition.install(nexus_ai, log)
 
+    # The legacy CROSS guard remains fail-closed unless this module is present.
+    # With one existing pilot position, exact authorization is deferred until
+    # final quantity exists and then requires a simultaneous-stop portfolio
+    # stress projection below 90% account risk. Missing/inconsistent private
+    # exchange state, non-CROSS positions, or additional non-reduce orders block.
+    cross_portfolio_stress.install(TradingEngine, log)
+
     # MUST remain the final installer in this compatibility stack. It verifies
     # that execution-critical callables are still owned by the reviewed final
     # wrappers and fails startup if a later patch silently replaces one.
@@ -118,8 +126,8 @@ def install(TradingEngine, log) -> None:
         "partial-TP execution, drawdown advisory log throttling, truthful daily-stop override "
         "telemetry, market-risk coverage telemetry, post-trade forensics, confirmed daily-PnL "
         "reconciliation, durable external-origin telemetry, final headline semantics, "
-        "stop-only CROSS target policy, delegated operator margin/drawdown/exit policy, "
-        "strict NEXUS regime-transition consistency and final runtime ownership contract "
-        "are active; thresholds_unchanged=true leverage_unchanged=true "
-        "railway_variables_unchanged=true"
+        "stop-only CROSS target policy, fail-closed CROSS portfolio stop-stress gate, "
+        "delegated operator margin/drawdown/exit policy, strict NEXUS regime-transition "
+        "consistency and final runtime ownership contract are active; "
+        "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
     )
