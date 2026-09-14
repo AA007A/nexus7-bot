@@ -51,6 +51,12 @@ def snapshot(*, paper_trade: bool, engine=None, blocked: bool = False,
 
 
 def startup_message(state: dict) -> str:
+    """Render startup telemetry without overstating execution readiness.
+
+    LIVE is a configured operating mode, not proof that the exchange execution
+    path is currently available. The banner therefore distinguishes configured
+    LIVE from a runtime that is actually connected/active/ready.
+    """
     mode = state["trading_mode"]
     if mode == "PAPER":
         reason = state.get("mode_reason") or "PAPER_TRADE ativo"
@@ -67,9 +73,28 @@ def startup_message(state: dict) -> str:
             "🔒 *Mutações na KuCoin estão bloqueadas pelo VALIDATION_LOCK*\n"
             "Dados de mercado/conta são reais, mas `execution_effect=NONE`."
         )
+
+    if not bool(state.get("ready", False)) or not bool(
+        state.get("orders_sent_to_exchange", False)
+    ):
+        reasons = []
+        if not bool(state.get("connected", False)):
+            reasons.append("engine desconectado")
+        if not bool(state.get("active", False)):
+            reasons.append("engine inativo")
+        if bool(state.get("blocked", False)):
+            reasons.append("bloqueio de startup")
+        detail = ", ".join(reasons) or "runtime ainda não confirmou disponibilidade de execução"
+        return (
+            "🟠 *BOT INICIADO — LIVE CONFIGURADO / EXECUÇÃO AINDA NÃO DISPONÍVEL*\n"
+            "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
+            "🔒 *Nenhuma disponibilidade de envio de ordens é afirmada neste estado.*\n"
+            f"Motivo observável: _{detail}_."
+        )
+
     return (
-        "🔴 *BOT ONLINE — LIVE*\n"
+        "🔴 *BOT ONLINE — LIVE OPERACIONAL*\n"
         "`━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
-        "Execução na exchange só é considerada disponível enquanto o engine "
-        "estiver conectado, ativo e sem bloqueio de startup."
+        "Engine conectado e ativo; o modo LIVE está operacional neste instante.\n"
+        "⚠️ Gates dinâmicos de risco e pré-trade continuam podendo bloquear novas entradas."
     )
