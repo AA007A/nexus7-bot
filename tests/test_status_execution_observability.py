@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot.status_observability import execution_observability
 
@@ -23,6 +24,9 @@ class StatusExecutionObservabilityTests(unittest.TestCase):
             "_validation_safety_lock_active": False,
             "pilot": None,
             "client": object(),
+            "connected": True,
+            "active": True,
+            "risk": SimpleNamespace(drawdown=0.0),
         }
         defaults.update(kwargs)
         return SimpleNamespace(**defaults)
@@ -31,6 +35,7 @@ class StatusExecutionObservabilityTests(unittest.TestCase):
         state = execution_observability(self._engine(paper_trade=True))
         self.assertEqual(state["effective_execution_mode"], "PAPER")
         self.assertFalse(state["orders_sent_to_exchange"])
+        self.assertFalse(state["new_entries_allowed"])
 
     def test_validation_lock_reports_shadow_live(self):
         state = execution_observability(
@@ -58,7 +63,35 @@ class StatusExecutionObservabilityTests(unittest.TestCase):
         )
         self.assertEqual(state["effective_execution_mode"], "LIVE")
         self.assertTrue(state["orders_sent_to_exchange"])
+        self.assertTrue(state["new_entries_allowed"])
         self.assertEqual(state["execution_effect"], "REAL")
+
+    def test_drawdown_hard_gate_reports_live_blocked(self):
+        from bot.config import cfg
+
+        engine = self._engine(
+            pilot=_Pilot(release_approved=True),
+            risk=SimpleNamespace(drawdown=0.7218),
+        )
+        with patch.object(cfg, "MAX_DRAWDOWN", 0.10), patch.dict(
+            "os.environ", {"LIVE_RISK_OVERRIDE_APPROVED": "false"}, clear=False
+        ):
+            state = execution_observability(engine)
+
+        self.assertEqual(state["effective_execution_mode"], "LIVE_BLOCKED")
+        self.assertFalse(state["orders_sent_to_exchange"])
+        self.assertFalse(state["new_entries_allowed"])
+        self.assertIn("DRAWDOWN_HARD_GATE", state["execution_blockers"])
+        self.assertEqual(state["drawdown_pct"], 72.18)
+        self.assertEqual(state["drawdown_limit_pct"], 10.0)
+
+    def test_disconnected_live_reports_blocked(self):
+        state = execution_observability(
+            self._engine(pilot=_Pilot(release_approved=True), connected=False)
+        )
+        self.assertEqual(state["effective_execution_mode"], "LIVE_BLOCKED")
+        self.assertIn("ENGINE_DISCONNECTED", state["execution_blockers"])
+        self.assertFalse(state["new_entries_allowed"])
 
 
 if __name__ == "__main__":
