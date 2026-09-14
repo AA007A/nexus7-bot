@@ -19,6 +19,7 @@ from bot.nexus_oos_edge_gate import build_edge_report, edge_promotion_decision
 from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient
 from bot.nexus_oos_real_replay_corrected import replay_symbol
 from bot.nexus_oos_robustness import analyze_robustness
+from bot.nexus_oos_temporal_block_bootstrap import temporal_block_bootstrap_dict
 
 
 REPLAY_SOURCE = "nexus_oos_real_replay_corrected"
@@ -36,12 +37,16 @@ async def collect(symbols: Iterable[str], *, limit_15m: int) -> list[dict]:
     return reports
 
 
-def build_primary_report(symbol_reports: list[dict]) -> dict:
-    all_rows = [
+def _all_rows(symbol_reports: list[dict]) -> list:
+    return [
         row
         for rep in symbol_reports
         for row in (rep.get("candidates", []) or [])
     ]
+
+
+def build_primary_report(symbol_reports: list[dict]) -> dict:
+    all_rows = _all_rows(symbol_reports)
     edge = build_edge_report(all_rows)
     statistically_ok, blockers = edge_promotion_decision(edge)
     valid_reports = [rep for rep in symbol_reports if "error" not in rep]
@@ -85,7 +90,16 @@ def build_primary_report(symbol_reports: list[dict]) -> dict:
 
 
 def build_robustness_bundle(symbol_reports: list[dict]) -> dict:
+    all_rows = _all_rows(symbol_reports)
     robustness = analyze_robustness(symbol_reports, temporal_folds=4)
+    temporal_dependence = temporal_block_bootstrap_dict(
+        all_rows,
+        bucket_seconds=86_400,
+        block_buckets=3,
+        bootstrap_samples=4_000,
+        seed=29,
+        min_unique_buckets=8,
+    )
     valid_reports = [rep for rep in symbol_reports if "error" not in rep]
     compact_symbols = [
         {
@@ -105,6 +119,7 @@ def build_robustness_bundle(symbol_reports: list[dict]) -> dict:
         "shared_candidate_population": True,
         "symbols": compact_symbols,
         "robustness": robustness,
+        "temporal_block_bootstrap": temporal_dependence,
         "historical_context_parity_complete": bool(valid_reports) and all(
             bool(rep.get("historical_context", {}).get("parity_complete"))
             for rep in valid_reports
@@ -131,10 +146,17 @@ def assert_population_parity(primary: dict, robustness: dict) -> None:
     robust_total = int(
         robustness.get("robustness", {}).get("pooled", {}).get("baseline_candidates", 0)
     )
-    if primary_total != robust_total or primary_total != sum(primary_symbols.values()):
+    block_total = int(
+        robustness.get("temporal_block_bootstrap", {}).get("known_baseline_outcomes", 0)
+    )
+    if (
+        primary_total != robust_total
+        or primary_total != sum(primary_symbols.values())
+        or block_total != primary_total
+    ):
         raise RuntimeError(
             f"OOS candidate total drift: primary={primary_total} robustness={robust_total} "
-            f"symbols={sum(primary_symbols.values())}"
+            f"temporal_block={block_total} symbols={sum(primary_symbols.values())}"
         )
 
 
@@ -168,6 +190,7 @@ def main() -> int:
 
     pooled = robustness["robustness"].get("pooled") or {}
     summary = robustness["robustness"]["summary"]
+    block = robustness.get("temporal_block_bootstrap", {})
     print(json.dumps({
         "status": primary["status"],
         "blockers": primary["blockers"],
@@ -179,6 +202,10 @@ def main() -> int:
         "bootstrap_ci_high_r": primary["report"]["bootstrap_ci_high_r"],
         "robustness_candidate_count": pooled.get("baseline_candidates"),
         "stable_positive_point_estimate": summary.get("stable_positive_point_estimate"),
+        "temporal_block_available": block.get("available"),
+        "temporal_block_ci_low_r": block.get("ci_low_r"),
+        "temporal_block_ci_high_r": block.get("ci_high_r"),
+        "temporal_block_ci_strictly_positive": block.get("ci_strictly_positive"),
         "shared_candidate_population": True,
         "promotion_authority": False,
         "execution_effect": "NONE",
