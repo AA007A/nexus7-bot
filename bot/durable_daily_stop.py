@@ -5,15 +5,15 @@ flag could be persisted as ``STOP`` without recording what PnL breached which
 limit. A fresh stop requires confirmed durable daily-PnL state plus current
 realized+unrealized PnL at or below the configured loss limit.
 
-An operator may explicitly allow new entries despite a proven daily-stop breach
-in either of two ways:
+A proven LIVE daily-stop breach may be bypassed only with the exact-day
+``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD`` break-glass control. The historical
+``DAILY_STOP_OPERATOR_OVERRIDE=true`` persistent bypass is intentionally
+retired: when present it is logged as rejected and cannot authorize entries.
 
-* ``DAILY_STOP_OPERATOR_OVERRIDE=true`` enables a persistent operator override;
-* ``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD`` keeps the legacy exact-day mode.
-
-The stop evidence and PnL ledger are never deleted or rewritten. The override
-applies only to a valid daily-stop breach; persistence/storage integrity failures
-remain fail-closed. All unrelated risk and execution protections stay active.
+The stop evidence and PnL ledger are never deleted or rewritten. The date-scoped
+override applies only to a valid daily-stop breach; persistence/storage integrity
+failures remain fail-closed. All unrelated risk and execution protections stay
+active.
 """
 from __future__ import annotations
 
@@ -76,22 +76,38 @@ def _clear_unproven_flag(engine):
 
 
 def _persistent_override_enabled():
-    """Persistent bypass is deliberately opt-in with one exact boolean value."""
+    """Return whether the retired persistent bypass was explicitly requested."""
     return str(os.environ.get(_PERSISTENT_OVERRIDE_ENV, '') or '').strip().lower() == 'true'
 
 
 def _operator_override_mode(day):
-    if _persistent_override_enabled():
-        return 'persistent'
+    # Permanent bypasses are intentionally not authorization. A break-glass
+    # override must name the exact UTC day so it expires automatically.
     configured_day = str(os.environ.get(_OVERRIDE_ENV, '') or '').strip()
     if configured_day and configured_day == day:
         return 'date_scoped'
     return None
 
 
+def _warn_rejected_persistent_override(engine, day):
+    if not _persistent_override_enabled():
+        return
+    marker = f'rejected:{day}'
+    if getattr(engine, '_daily_stop_persistent_override_rejected_logged', None) == marker:
+        return
+    log.critical(
+        '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s mode=persistent active=false '
+        'entries_blocked=true retired=true reason=persistent_bypass_not_permitted '
+        'use=%s evidence_preserved=true pnl_preserved=true leverage_unchanged=true sizing_unchanged=true',
+        day, _OVERRIDE_ENV,
+    )
+    engine._daily_stop_persistent_override_rejected_logged = marker
+
+
 def _operator_override_active(engine, day, *, state=None, combined=None, stop_limit=None):
     mode = _operator_override_mode(day)
     if mode is None:
+        _warn_rejected_persistent_override(engine, day)
         return False
 
     # Only the daily stop flag is bypassed. The durable evidence and PnL ledger
@@ -105,8 +121,8 @@ def _operator_override_active(engine, day, *, state=None, combined=None, stop_li
         log.critical(
             '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s mode=%s active=true entries_blocked=false '
             'trigger_pnl=%s stop_limit=%s evidence_preserved=true pnl_preserved=true '
-            'auto_expires_utc=%s leverage_unchanged=true sizing_unchanged=true',
-            day, mode, trigger_pnl, effective_limit, mode == 'date_scoped',
+            'auto_expires_utc=true leverage_unchanged=true sizing_unchanged=true',
+            day, mode, trigger_pnl, effective_limit,
         )
         engine._daily_stop_override_logged = marker
     return True
