@@ -142,20 +142,25 @@ def build_nexus_oos_candidates(
         if decision_ts <= 0:
             raise ValueError("baseline trade missing decision timestamp")
 
-        # NEXUS production minimum history is stricter than the legacy strategy.
+        # Recover strategy geometry with the exact historical windows used by
+        # bot.backtest. NEXUS itself receives its stricter 60/40/20 history.
+        base15 = _closed_window(klines_15, ts15, decision_ts, 15, 60)
+        base1h = _closed_window(klines_1h, ts1h, decision_ts, 60, 20)
+        base4h = _closed_window(klines_4h, ts4h, decision_ts, 240, 15)
         k15 = _closed_window(klines_15, ts15, decision_ts, 15, 60)
         k1h = _closed_window(klines_1h, ts1h, decision_ts, 60, 40)
         k4h = _closed_window(klines_4h, ts4h, decision_ts, 240, 20)
-        if len(k15) < 60 or len(k1h) < 40 or len(k4h) < 20:
-            warmup_excluded += 1
-            rows.append(CandidateOutcome(float(decision_ts), False, False, 0.0, True, 0.0))
-            continue
+
+        if len(base15) < 30 or len(base1h) < 10 or len(base4h) < 5:
+            raise RuntimeError(
+                f"baseline replay mismatch at ts={decision_ts}: insufficient strategy history"
+            )
 
         sig = analyzer.analyze_mtf(
             symbol,
-            k15,
-            k1h,
-            k4h,
+            base15,
+            base1h,
+            base4h,
             min_score=int(strategy_min_score),
             fee_mult=getattr(cfg, "FEE_MULTIPLIER", 2.0),
             vol_mult=getattr(cfg, "MIN_VOLUME_MULT", 1.2),
@@ -164,6 +169,22 @@ def build_nexus_oos_candidates(
             raise RuntimeError(
                 f"baseline replay mismatch at ts={decision_ts}: strategy signal not reproducible"
             )
+
+        r_multiple = _candidate_r_multiple(trade, float(sig.entry), float(sig.sl))
+
+        if len(k15) < 60 or len(k1h) < 40 or len(k4h) < 20:
+            warmup_excluded += 1
+            rows.append(
+                CandidateOutcome(
+                    timestamp=float(decision_ts),
+                    approved=False,
+                    baseline_eligible=False,
+                    confidence=0.0,
+                    outcome_known=True,
+                    r_multiple=float(r_multiple),
+                ).validate()
+            )
+            continue
 
         nk15, nk1h, nk4h = clock_normalized_windows(
             k15, k1h, k4h, decision_ts,
@@ -181,7 +202,6 @@ def build_nexus_oos_candidates(
         )
         approved = bool(getattr(decision, "execution_allowed", False))
         confidence = _confidence01(decision)
-        r_multiple = _candidate_r_multiple(trade, float(sig.entry), float(sig.sl))
         rows.append(
             CandidateOutcome(
                 timestamp=float(decision_ts),
