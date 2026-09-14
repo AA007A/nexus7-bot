@@ -32,7 +32,6 @@ class OperatorRuntimeContractTests(unittest.TestCase):
         self.assertIn("operator contract ok", proc.stdout)
 
     def test_drawdown_remains_advisory_for_new_entries(self):
-        """The requested hardening must not turn drawdown into an entry veto."""
         source = (ROOT / "bot" / "operator_runtime_policy.py").read_text(
             encoding="utf-8"
         )
