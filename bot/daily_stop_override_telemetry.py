@@ -3,6 +3,10 @@
 This module changes notification wording only. It does not clear stop state,
 authorize entries, alter PnL, change risk limits, or mutate exchange state.
 Actual entry authorization remains owned by ``bot.durable_daily_stop``.
+
+The historical persistent override is intentionally not considered active here;
+only an exact UTC-day break-glass override may change the operator-facing daily
+stop notification.
 """
 from __future__ import annotations
 
@@ -21,12 +25,12 @@ _ALLOWED_TEXT = (
 )
 
 
-def override_mode_now(*, now: datetime | None = None) -> str | None:
-    """Return persistent/date-scoped mode when the operator override is active."""
-    persistent = str(os.environ.get(_PERSISTENT_OVERRIDE_ENV, "") or "").strip().lower()
-    if persistent == "true":
-        return "persistent"
+def persistent_override_requested() -> bool:
+    return str(os.environ.get(_PERSISTENT_OVERRIDE_ENV, "") or "").strip().lower() == "true"
 
+
+def override_mode_now(*, now: datetime | None = None) -> str | None:
+    """Return date-scoped mode only when the exact UTC-day override is active."""
     raw = str(os.environ.get(_OVERRIDE_ENV, "") or "").strip()
     if not raw:
         return None
@@ -83,6 +87,6 @@ def install(core_engine, log) -> None:
     core_engine._daily_stop_override_telemetry_installed = True
     log.info(
         "[DAILY_STOP_OVERRIDE_TELEMETRY] installed=true notification_only=true "
-        "persistent_mode_supported=true pnl_unchanged=true risk_policy_unchanged=true "
-        "entry_authorization_unchanged=true execution_effect=NONE"
+        "persistent_mode_retired=true date_scoped_mode_supported=true pnl_unchanged=true "
+        "risk_policy_unchanged=true entry_authorization_unchanged=true execution_effect=NONE"
     )
