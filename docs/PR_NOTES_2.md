@@ -1,0 +1,1 @@
+This temporary note documents branch validation only.
