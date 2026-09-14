@@ -7,8 +7,8 @@ The controlled LIVE pilot keeps the operator-requested execution geometry:
 * stop-risk sizing remains telemetry under this operator margin policy.
 
 A drawdown breach is fail-closed by default. It may be bypassed only when the
-operator explicitly acknowledges the elevated-risk mode via the exact
-LIVE_RISK_OVERRIDE_APPROVED token. The override never bypasses balance,
+operator explicitly acknowledges the elevated-risk mode via
+LIVE_RISK_OVERRIDE_APPROVED=true. The override never bypasses balance,
 position-count, protection, duplicate-order, reconciliation, instrument or
 other execution-safety gates.
 """
@@ -22,12 +22,11 @@ from bot.config import cfg
 
 MARGIN_FRACTION = 0.50
 RISK_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"
-RISK_OVERRIDE_TOKEN = "I_ACKNOWLEDGE_50X_50PCT_RISK"
 
 
 def _risk_override_enabled() -> bool:
-    """Return True only for an exact, explicit operator acknowledgement."""
-    return os.environ.get(RISK_OVERRIDE_ENV, "") == RISK_OVERRIDE_TOKEN
+    """Return True only for an explicit boolean operator acknowledgement."""
+    return os.environ.get(RISK_OVERRIDE_ENV, "").strip().lower() == "true"
 
 
 def _protect_drawdown_update(self, bound_update, log, *, source: str):
