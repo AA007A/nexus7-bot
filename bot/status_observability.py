@@ -88,7 +88,7 @@ def execution_observability(engine) -> dict:
     if blockers:
         return {
             "effective_execution_mode": "LIVE_BLOCKED",
-            "orders_sent_to_exchange": True,
+            "orders_sent_to_exchange": False,
             "new_entries_allowed": False,
             "execution_blockers": tuple(blockers),
             "drawdown_pct": round(drawdown * 100.0, 2),
