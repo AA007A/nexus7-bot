@@ -7,9 +7,9 @@ still imports successfully.
 
 This guard runs *last* in ``runtime_overlays.install`` and proves ownership of
 execution-critical final callables plus required inner hardening markers. It
-does not change thresholds, leverage, sizing, drawdown semantics, entry
-authorization or exchange behavior. It only refuses startup when the final
-runtime graph is not the one explicitly reviewed.
+does not change thresholds, leverage, drawdown semantics, entry authorization
+or exchange behavior. It refuses startup when the reviewed runtime graph,
+including final risk-authoritative sizing, is not intact.
 """
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
         ContractItem(
             "engine.minimum_base_quantity",
             engine_module.minimum_base_quantity,
-            "operator_runtime_policy.py",
+            "final_sizing_invariants.py",
         ),
         ContractItem("PilotGuard.evaluate", PilotGuard.evaluate, "pilot_exposure_capacity.py"),
         ContractItem(
@@ -130,6 +130,10 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
     )
 
     markers = (
+        MarkerItem(
+            "engine.final_sizing_invariants",
+            getattr(engine_module, "_final_sizing_invariants_installed", False),
+        ),
         MarkerItem(
             "KuCoinClient.native_tpsl",
             getattr(KuCoinClient, "_native_tpsl_entry_installed", False),
@@ -181,7 +185,8 @@ def install(TradingEngine, PilotGuard, nexus_ai, engine_module, log) -> None:
     log.critical(
         "[RUNTIME_CONTRACT] status=PASS protected_callables=%d required_markers=%d "
         "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile "
-        "late_wrapper_drift=false leverage_unchanged=true sizing_unchanged=true "
+        "late_wrapper_drift=false leverage_unchanged=true "
+        "sizing_authority=RiskManagerV3_plus_operator_50pct_margin_cap "
         "drawdown_policy_unchanged=true entry_authorization_unchanged=true",
         len(items), len(markers),
     )
