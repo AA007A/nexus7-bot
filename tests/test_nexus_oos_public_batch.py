@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 
 from bot.nexus_oos_edge_gate import CandidateOutcome
 import bot.nexus_oos_public_batch as batch
@@ -13,7 +14,7 @@ class _PublicClient:
         return None
 
 
-def _report(symbol, *, parity=False, approved=True, r=1.0):
+def _report(symbol, *, parity=False, approved=True, r=1.0, ts=1000.0):
     return {
         "symbol": symbol,
         "candles_15m": 2500,
@@ -21,8 +22,37 @@ def _report(symbol, *, parity=False, approved=True, r=1.0):
         "approved": int(approved),
         "rejected": int(not approved),
         "candidates": [
-            CandidateOutcome(1000.0, approved, True, 0.8 if approved else 0.4, True, r)
+            CandidateOutcome(ts, approved, True, 0.8 if approved else 0.4, True, r)
         ],
+        "historical_context": {
+            "candles": True,
+            "ticker_proxy": True,
+            "funding_history": True,
+            "historical_open_interest": parity,
+            "historical_orderbook": parity,
+            "parity_complete": parity,
+        },
+    }
+
+
+def _stable_report(symbol, offset, *, parity=True):
+    rows = []
+    for i in range(160):
+        approved = i % 2 == 0
+        rows.append(
+            CandidateOutcome(
+                float(offset + i), approved, True,
+                0.8 if approved else 0.4, True,
+                1.0 if approved else -0.8,
+            )
+        )
+    return {
+        "symbol": symbol,
+        "candles_15m": 2500,
+        "funding_events": 10,
+        "approved": sum(1 for row in rows if row.approved),
+        "rejected": sum(1 for row in rows if not row.approved),
+        "candidates": rows,
         "historical_context": {
             "candles": True,
             "ticker_proxy": True,
@@ -99,6 +129,28 @@ class NexusOOSPublicBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["historical_context_parity_complete"])
         self.assertEqual(payload["status"], "AI_EDGE_NOT_PROVEN")
         self.assertIn("INSUFFICIENT_BASELINE_OOS_SAMPLE", payload["blockers"])
+
+    async def test_robustness_uses_same_requested_symbol_universe(self):
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+        offsets = {symbol: idx * 1000 for idx, symbol in enumerate(symbols)}
+
+        async def replay(client, symbol, *, limit_15m):
+            return _stable_report(symbol, offsets[symbol], parity=True)
+
+        batch.replay_symbol = replay
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = await batch.run_public_batch(
+                symbols,
+                output_dir=tmp,
+                bootstrap_samples=300,
+                temporal_folds=4,
+            )
+            self.assertTrue((Path(tmp) / "nexus_oos_robustness.json").is_file())
+        summary = payload["robustness"]["summary"]
+        self.assertEqual(summary["symbols_evaluated"], len(symbols))
+        self.assertEqual(summary["promotion_role"], "BLOCK_ONLY")
+        self.assertEqual(payload["methodology"]["robustness_symbol_universe"], "same_as_requested_batch")
+        self.assertEqual(payload["robustness_blockers"], [])
 
 
 if __name__ == "__main__":
