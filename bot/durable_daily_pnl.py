@@ -63,17 +63,10 @@ def _normalized_symbol(value):
     return raw
 
 
-def _candidate_estimates(rows, row):
-    try:
-        close_ms = int(row['closeTime'])
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return []
-    if close_ms <= 0:
-        return []
-    confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
-    expected_symbol = _normalized_symbol(row.get('symbol'))
-    candidates = []
-    for token, value in rows.items():
+def _iter_estimates(rows, row):
+    """Yield same-symbol finite estimated events with parsed close timestamps."""
+    expected_symbol = _normalized_symbol(row.get('symbol')) if isinstance(row, dict) else ''
+    for token, value in (rows or {}).items():
         if not isinstance(token, str) or not isinstance(value, dict):
             continue
         if value.get('source') != _ESTIMATED_SOURCE:
@@ -85,22 +78,55 @@ def _candidate_estimates(rows, row):
             stamp = datetime.fromisoformat(str(value['closed_at']))
             if stamp.tzinfo is None:
                 stamp = stamp.replace(tzinfo=timezone.utc)
-            delta = abs((stamp.astimezone(timezone.utc) - confirmed_closed).total_seconds())
             estimate = float(value['pnl'])
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        if math.isfinite(estimate) and delta <= _MATCH_WINDOW_SECONDS:
-            candidates.append((token, estimate, str(value.get('opening_order_id') or '')))
+        if not math.isfinite(estimate):
+            continue
+        yield token, estimate, str(value.get('opening_order_id') or ''), stamp.astimezone(timezone.utc)
+
+
+def _candidate_estimates(rows, row):
+    """Legacy fallback candidates constrained by symbol and close-time proximity."""
+    try:
+        close_ms = int(row['closeTime'])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return []
+    if close_ms <= 0:
+        return []
+    confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
+    candidates = []
+    for token, estimate, opening_order_id, stamp in _iter_estimates(rows, row):
+        delta = abs((stamp - confirmed_closed).total_seconds())
+        if delta <= _MATCH_WINDOW_SECONDS:
+            candidates.append((token, estimate, opening_order_id))
     return candidates
+
+
+def _lineage_candidates(rows, row, opening_order_id):
+    """Return exact same-symbol opening-order matches regardless of close-time drift.
+
+    Exchange history indexing, restart recovery, websocket delay and direct-close
+    accounting can move the local estimate timestamp outside the legacy 120-second
+    proximity window. Once both sides carry the same durable opening order ID, that
+    identity is stronger than time proximity and must be authoritative.
+    """
+    target = str(opening_order_id or '')
+    if not target:
+        return []
+    matches = []
+    for token, estimate, candidate_opening_id, _stamp in _iter_estimates(rows, row):
+        if candidate_opening_id == target:
+            matches.append((token, estimate, candidate_opening_id))
+    return matches
 
 
 def _confirmed_adjustment(rows, row, receipt=None):
     """Return one idempotent estimate->confirmed adjustment.
 
-    Prefer exact opening-order lineage when both sides carry it. This is stronger
-    than symbol/time proximity and safely disambiguates multiple same-symbol
-    closures. Legacy events without lineage retain the original fail-closed
-    symbol+time fallback: exactly one candidate is required.
+    Exact opening-order lineage is authoritative and intentionally independent of
+    timestamp proximity. Legacy events without lineage retain the conservative
+    symbol+time fallback and require exactly one candidate.
     """
     if not isinstance(rows, dict) or not isinstance(row, dict):
         return None
@@ -115,7 +141,6 @@ def _confirmed_adjustment(rows, row, receipt=None):
     if not math.isfinite(confirmed) or close_ms <= 0:
         return None
 
-    candidates = _candidate_estimates(rows, row)
     opening_ids = []
     if isinstance(receipt, dict):
         raw_ids = receipt.get('opening_order_ids')
@@ -124,13 +149,20 @@ def _confirmed_adjustment(rows, row, receipt=None):
 
     selected = []
     if len(opening_ids) == 1:
-        selected = [item for item in candidates if item[2] == opening_ids[0]]
-        if len(selected) > 1:
-            return None
+        selected = _lineage_candidates(rows, row, opening_ids[0])
+        if len(selected) != 1:
+            # A contradictory or ambiguous modern lineage event must never fall
+            # back to fuzzy matching. Exact lineage is either unique or unproven.
+            if selected or any(
+                candidate_opening_id
+                for _, _, candidate_opening_id, _ in _iter_estimates(rows, row)
+            ):
+                return None
+
     if not selected:
-        # Never fall back across a contradictory modern lineage event. If at
-        # least one candidate carries lineage and an exact exchange opening ID
-        # is available, absence of an exact match is unconfirmed.
+        candidates = _candidate_estimates(rows, row)
+        # Legacy estimates without opening-order lineage may still use the old
+        # unique symbol+time fallback. Modern lineage never degrades to time.
         if len(opening_ids) == 1 and any(item[2] for item in candidates):
             return None
         if len(candidates) != 1:
@@ -228,11 +260,16 @@ async def reconcile_confirmed_exchange(engine, row, receipt):
             match = _confirmed_adjustment(rows, row, receipt)
             if match is None:
                 candidates = _candidate_estimates(rows, row)
-                result = 'NO_MATCHING_ESTIMATE' if not candidates else 'ESTIMATE_MATCH_UNCONFIRMED'
+                opening_ids = receipt.get('opening_order_ids') if isinstance(receipt, dict) else None
+                lineage_count = 0
+                if isinstance(opening_ids, list) and len(opening_ids) == 1:
+                    lineage_count = len(_lineage_candidates(rows, row, opening_ids[0]))
+                result = 'NO_MATCHING_ESTIMATE' if not candidates and not lineage_count else 'ESTIMATE_MATCH_UNCONFIRMED'
                 log.warning(
                     '[DURABLE_DAILY_PNL_RECONCILE] symbol=%s close_id=%s result=%s '
-                    'candidate_count=%s adjustment=NONE risk_policy_unchanged=true',
-                    row.get('symbol', 'NA'), row.get('closeId', 'NA'), result, len(candidates),
+                    'candidate_count=%s lineage_candidate_count=%s adjustment=NONE risk_policy_unchanged=true',
+                    row.get('symbol', 'NA'), row.get('closeId', 'NA'), result,
+                    len(candidates), lineage_count,
                 )
                 return False
             token, value = match
