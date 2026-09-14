@@ -1,7 +1,7 @@
 """Passive end-to-end entry latency observability.
 
 This module never wraps execution-critical callables and never changes trading
-state.  It observes existing log records and emits timing telemetry directly to
+state. It observes existing log records and emits timing telemetry directly to
 stdout so the measurements cannot recurse through the application logger.
 """
 from __future__ import annotations
@@ -39,17 +39,22 @@ class EntryLatencyCollector:
 
     def __init__(self):
         self._traces: dict[str, _Trace] = {}
+        self._latest_market_ns: dict[str, int] = {}
         self._order_to_symbol: dict[str, str] = {}
         self._seq = 0
         self._lock = threading.Lock()
 
-    def _trace(self, symbol: str, now_ns: int, *, restart: bool = False) -> _Trace:
+    def _new_trace(self, symbol: str, now_ns: int) -> _Trace:
+        self._seq += 1
+        trace = _Trace(symbol=symbol, trace_id=f"{symbol}-{self._seq}")
+        trace.stages["market_data"] = self._latest_market_ns.get(symbol, now_ns)
+        self._traces[symbol] = trace
+        return trace
+
+    def _trace(self, symbol: str, now_ns: int) -> _Trace:
         trace = self._traces.get(symbol)
-        if trace is None or restart:
-            self._seq += 1
-            trace = _Trace(symbol=symbol, trace_id=f"{symbol}-{self._seq}")
-            self._traces[symbol] = trace
-        trace.stages.setdefault("market_data", now_ns)
+        if trace is None:
+            trace = self._new_trace(symbol, now_ns)
         return trace
 
     @staticmethod
@@ -95,27 +100,34 @@ class EntryLatencyCollector:
             f"telemetry_only=true execution_effect=NONE"
         )
 
+    def _start_signal(self, symbol: str, now_ns: int) -> list[str]:
+        trace = self._new_trace(symbol, now_ns)
+        trace.stages["signal"] = now_ns
+        return [self._stage_line(trace, "signal", now_ns)]
+
     def observe(self, message: str, now_ns: int | None = None) -> list[str]:
         now_ns = int(now_ns if now_ns is not None else time.monotonic_ns())
         out: list[str] = []
         with self._lock:
             m = _RE_WS.search(message)
             if m:
-                symbol = m.group("symbol")
-                trace = self._traces.get(symbol)
-                if trace is None or "signal" not in trace.stages:
-                    trace = self._trace(symbol, now_ns, restart=trace is not None)
-                    trace.stages["market_data"] = now_ns
+                self._latest_market_ns[m.group("symbol")] = now_ns
                 return out
 
-            for regex in (_RE_SIGNAL, _RE_CANDIDATE):
-                m = regex.search(message)
-                if m:
-                    trace = self._trace(m.group("symbol"), now_ns, restart=True)
-                    # The latest market-data observation belongs to this signal.
-                    trace.stages["signal"] = now_ns
-                    out.append(self._stage_line(trace, "signal", now_ns))
+            m = _RE_SIGNAL.search(message)
+            if m:
+                return self._start_signal(m.group("symbol"), now_ns)
+
+            m = _RE_CANDIDATE.search(message)
+            if m:
+                symbol = m.group("symbol")
+                trace = self._traces.get(symbol)
+                # CANDIDATO is downstream of the canonical strategy SINAL log.
+                # If that signal was already observed, it belongs to the same
+                # setup and must not create a second trace or reset timing.
+                if trace is not None and "signal" in trace.stages:
                     return out
+                return self._start_signal(symbol, now_ns)
 
             m = _RE_PULLBACK.search(message)
             if m:
@@ -211,6 +223,7 @@ def install(log) -> EntryLatencyCollector:
     log._entry_latency_collector = collector
     log.info(
         "[ENTRY_LATENCY_OBSERVABILITY] installed=true source=existing_runtime_logs "
+        "correlation=latest_market_to_canonical_signal candidate_dedupe=true "
         "critical_callables_wrapped=false thresholds_unchanged=true leverage_unchanged=true "
         "sizing_unchanged=true execution_effect=NONE"
     )
