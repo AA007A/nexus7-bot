@@ -1,0 +1,1 @@
+Validation target for this branch: explicit audited drawdown override, default fail-closed behavior, unchanged 50% margin target, unchanged configured leverage, and regression coverage for both blocked and explicitly overridden drawdown paths.
