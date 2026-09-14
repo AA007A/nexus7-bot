@@ -37,19 +37,21 @@ def event(trade):
     pnl = float(trade.pnl)
     if not math.isfinite(pnl):
         raise ValueError('nonfinite realized PnL')
-    # Do not round timestamps/quantities: repeated reads of a trade must match,
-    # but distinct fills/closures must not be collapsed by a coarse time bucket.
     identity = [trade.symbol, trade.direction, trade.opened_at.isoformat(),
                 trade.closed_at.isoformat(), str(trade.qty), str(trade.entry),
                 str(trade.exit_price)]
     token = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-    return token, {
+    value = {
         'pnl': pnl,
         'source': getattr(trade, 'accounting_source', 'ENGINE_OPERATIONAL_NET_PNL'),
         'closed_at': trade.closed_at.isoformat(),
         'symbol': str(getattr(trade, 'symbol', '') or ''),
         'opened_at': trade.opened_at.isoformat(),
     }
+    opening_order_id = str(getattr(trade, 'opening_order_id', '') or '')
+    if opening_order_id:
+        value['opening_order_id'] = opening_order_id
+    return token, value
 
 
 def _normalized_symbol(value):
@@ -61,26 +63,13 @@ def _normalized_symbol(value):
     return raw
 
 
-def _confirmed_adjustment(rows, row):
-    """Return one idempotent adjustment from an estimate to confirmed KuCoin PnL.
-
-    Matching is deliberately fail-closed. Exactly one estimated event must sit
-    within the close-time window; if richer modern ledger metadata is present,
-    its symbol must also match. Ambiguous/missing matches produce no adjustment.
-    """
-    if not isinstance(rows, dict) or not isinstance(row, dict):
-        return None
-    close_id = str(row.get('closeId') or '')
-    if not close_id:
-        return None
+def _candidate_estimates(rows, row):
     try:
-        confirmed = float(row['pnl'])
         close_ms = int(row['closeTime'])
     except (KeyError, TypeError, ValueError, OverflowError):
-        return None
-    if not math.isfinite(confirmed) or close_ms <= 0:
-        return None
-
+        return []
+    if close_ms <= 0:
+        return []
     confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
     expected_symbol = _normalized_symbol(row.get('symbol'))
     candidates = []
@@ -101,16 +90,58 @@ def _confirmed_adjustment(rows, row):
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
         if math.isfinite(estimate) and delta <= _MATCH_WINDOW_SECONDS:
-            candidates.append((token, estimate))
+            candidates.append((token, estimate, str(value.get('opening_order_id') or '')))
+    return candidates
 
-    if len(candidates) != 1:
+
+def _confirmed_adjustment(rows, row, receipt=None):
+    """Return one idempotent estimate->confirmed adjustment.
+
+    Prefer exact opening-order lineage when both sides carry it. This is stronger
+    than symbol/time proximity and safely disambiguates multiple same-symbol
+    closures. Legacy events without lineage retain the original fail-closed
+    symbol+time fallback: exactly one candidate is required.
+    """
+    if not isinstance(rows, dict) or not isinstance(row, dict):
+        return None
+    close_id = str(row.get('closeId') or '')
+    if not close_id:
+        return None
+    try:
+        confirmed = float(row['pnl'])
+        close_ms = int(row['closeTime'])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(confirmed) or close_ms <= 0:
         return None
 
-    estimate_token, estimated = candidates[0]
+    candidates = _candidate_estimates(rows, row)
+    opening_ids = []
+    if isinstance(receipt, dict):
+        raw_ids = receipt.get('opening_order_ids')
+        if isinstance(raw_ids, list):
+            opening_ids = [str(x or '') for x in raw_ids if str(x or '')]
+
+    selected = []
+    if len(opening_ids) == 1:
+        selected = [item for item in candidates if item[2] == opening_ids[0]]
+        if len(selected) > 1:
+            return None
+    if not selected:
+        # Never fall back across a contradictory modern lineage event. If at
+        # least one candidate carries lineage and an exact exchange opening ID
+        # is available, absence of an exact match is unconfirmed.
+        if len(opening_ids) == 1 and any(item[2] for item in candidates):
+            return None
+        if len(candidates) != 1:
+            return None
+        selected = candidates
+
+    estimate_token, estimated, matched_opening_order_id = selected[0]
+    confirmed_closed = datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc)
+    expected_symbol = _normalized_symbol(row.get('symbol'))
     adjustment = confirmed - estimated
-    adjustment_token = hashlib.sha256(
-        ('kucoin-confirmed:' + close_id).encode()
-    ).hexdigest()
+    adjustment_token = hashlib.sha256(('kucoin-confirmed:' + close_id).encode()).hexdigest()
     value = {
         'pnl': adjustment,
         'source': _CONFIRMED_ADJUSTMENT_SOURCE,
@@ -121,6 +152,8 @@ def _confirmed_adjustment(rows, row):
         'estimated_pnl': estimated,
         'confirmed_pnl': confirmed,
     }
+    if matched_opening_order_id:
+        value['opening_order_id'] = matched_opening_order_id
     return adjustment_token, value
 
 
@@ -135,14 +168,10 @@ def realized(stats, now=None):
 
 
 def evidence_breakdown(stats, now=None):
-    """Expose accounting confidence without changing the risk-effective total."""
     day = utc_day(now or datetime.now(timezone.utc))
     rows = dict(getattr(stats, '_durable_daily_pnl', {}).get(day, {}))
-    estimated = 0.0
-    adjustments = 0.0
-    other = 0.0
-    estimated_events = 0
-    confirmed_adjustments = 0
+    estimated = adjustments = other = 0.0
+    estimated_events = confirmed_adjustments = 0
     for value in rows.values():
         if not isinstance(value, dict):
             continue
@@ -167,20 +196,13 @@ def evidence_breakdown(stats, now=None):
 
 
 async def reconcile_confirmed_exchange(engine, row, receipt):
-    """Replace one conservative estimate with confirmed KuCoin PnL by adjustment.
-
-    This function never authorizes an entry. It only runs after the exchange
-    accounting pipeline proves BGX ownership, fills and durable lineage.
-    """
     if getattr(engine, 'paper_trade', False) or getattr(engine, '_validation_safety_lock_active', False):
         return False
     if not isinstance(receipt, dict) or not isinstance(row, dict):
         return False
-    if not (
-        receipt.get('ownership') == 'BGX_ORDER_IDS'
-        and receipt.get('fills_reconciled') is True
-        and receipt.get('lineage_reconciled') is True
-    ):
+    if not (receipt.get('ownership') == 'BGX_ORDER_IDS'
+            and receipt.get('fills_reconciled') is True
+            and receipt.get('lineage_reconciled') is True):
         return False
 
     try:
@@ -191,28 +213,26 @@ async def reconcile_confirmed_exchange(engine, row, receipt):
             raise db.PersistenceError('configured PostgreSQL unavailable')
         if os.environ.get('RAILWAY_SERVICE_ID') and not db._is_pg and db.SQLITE_PATH.startswith('/tmp/'):
             raise db.PersistenceError('ephemeral daily PnL storage')
-
         if not hasattr(engine, '_daily_pnl_lock'):
             engine._daily_pnl_lock = asyncio.Lock()
         async with engine._daily_pnl_lock:
             key = _ledger_key(day)
             raw = await db.load_key_value(key, strict=True)
             if raw is None:
-                log.warning(
-                    '[DURABLE_DAILY_PNL_RECONCILE] close_id=%s result=NO_LEDGER adjustment=NONE',
-                    row.get('closeId', 'NA'),
-                )
+                log.warning('[DURABLE_DAILY_PNL_RECONCILE] close_id=%s result=NO_LEDGER adjustment=NONE', row.get('closeId', 'NA'))
                 return False
             state = json.loads(raw)
             if state.get('version') != 1 or state.get('day') != day or not isinstance(state.get('events'), dict):
                 raise ValueError('invalid daily PnL ledger')
             rows = state['events']
-            match = _confirmed_adjustment(rows, row)
+            match = _confirmed_adjustment(rows, row, receipt)
             if match is None:
+                candidates = _candidate_estimates(rows, row)
+                result = 'NO_MATCHING_ESTIMATE' if not candidates else 'ESTIMATE_MATCH_UNCONFIRMED'
                 log.warning(
-                    '[DURABLE_DAILY_PNL_RECONCILE] symbol=%s close_id=%s '
-                    'result=ESTIMATE_MATCH_UNCONFIRMED adjustment=NONE risk_policy_unchanged=true',
-                    row.get('symbol', 'NA'), row.get('closeId', 'NA'),
+                    '[DURABLE_DAILY_PNL_RECONCILE] symbol=%s close_id=%s result=%s '
+                    'candidate_count=%s adjustment=NONE risk_policy_unchanged=true',
+                    row.get('symbol', 'NA'), row.get('closeId', 'NA'), result, len(candidates),
                 )
                 return False
             token, value = match
@@ -228,11 +248,12 @@ async def reconcile_confirmed_exchange(engine, row, receipt):
             engine._daily_pnl_ok = True
             total = math.fsum(float(v['pnl']) for v in rows.values())
             log.warning(
-                '[DURABLE_DAILY_PNL_RECONCILED] symbol=%s close_id=%s '
-                'estimated_pnl=%s confirmed_kucoin_pnl=%s adjustment=%s '
-                'risk_effective_pnl=%s fills_confirmed=true durable=true entry_policy_unchanged=true',
-                row.get('symbol', 'NA'), row.get('closeId', 'NA'),
-                value['estimated_pnl'], value['confirmed_pnl'], value['pnl'], total,
+                '[DURABLE_DAILY_PNL_RECONCILED] symbol=%s close_id=%s estimated_pnl=%s '
+                'confirmed_kucoin_pnl=%s adjustment=%s risk_effective_pnl=%s '
+                'match_basis=%s fills_confirmed=true durable=true entry_policy_unchanged=true',
+                row.get('symbol', 'NA'), row.get('closeId', 'NA'), value['estimated_pnl'],
+                value['confirmed_pnl'], value['pnl'], total,
+                'OPENING_ORDER_ID' if value.get('opening_order_id') else 'SYMBOL_TIME_UNIQUE',
             )
             return True
     except Exception as exc:
@@ -277,8 +298,6 @@ async def checkpoint(engine, extra=None, now=None):
                     continue
                 token, value = event(trade)
                 if token in rows and rows[token] != value:
-                    # Older ledger rows did not persist symbol/opened_at metadata.
-                    # Their accounting value/source/timestamp remains immutable.
                     old = rows[token]
                     comparable = {k: value[k] for k in ('pnl', 'source', 'closed_at')}
                     if any(old.get(k) != v for k, v in comparable.items()):
@@ -300,9 +319,9 @@ async def checkpoint(engine, extra=None, now=None):
             fingerprint = (day, len(rows), total, estimates, adjustments)
             if getattr(engine, '_daily_pnl_logged', None) != fingerprint:
                 log.info(
-                    '[DURABLE_DAILY_PNL] day=%s events=%s risk_effective_pnl=%s '
-                    'estimated_events=%s confirmed_adjustments=%s durable=true '
-                    'source=ENGINE_OPERATIONAL_WITH_EVIDENCE history_backfill=false coverage_started_at=%s',
+                    '[DURABLE_DAILY_PNL] day=%s events=%s risk_effective_pnl=%s estimated_events=%s '
+                    'confirmed_adjustments=%s durable=true source=ENGINE_OPERATIONAL_WITH_EVIDENCE '
+                    'history_backfill=false coverage_started_at=%s',
                     *fingerprint, state.get('coverage_started_at', 'UNCONFIRMED'))
                 engine._daily_pnl_logged = fingerprint
             return True

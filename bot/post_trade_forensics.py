@@ -49,7 +49,6 @@ def _roe_pct(pnl: float, entry: float, qty: float, leverage: float) -> float:
 
 
 def _decision_snapshot(decision):
-    """Normalize NEXUS telemetry without changing or validating the decision."""
     if decision is None:
         return {}
     if isinstance(decision, dict):
@@ -127,8 +126,7 @@ async def _persist_lineage(payload, log):
         if await db.save_key_value(_lineage_key(order_id), encoded, strict=True) is not True:
             raise db.PersistenceError("lineage persistence unconfirmed")
         log.info(
-            "[TRADE_LINEAGE] symbol=%s orderId=%s durable=true nexus=%s regime=%s "
-            "entry_type=%s execution_effect=NONE",
+            "[TRADE_LINEAGE] symbol=%s orderId=%s durable=true nexus=%s regime=%s entry_type=%s execution_effect=NONE",
             payload.get("symbol", "NA"), order_id, payload.get("nexus", "UNKNOWN"),
             payload.get("regime", "UNKNOWN"), payload.get("entry_type", "UNKNOWN"),
         )
@@ -142,7 +140,6 @@ async def _persist_lineage(payload, log):
 
 
 def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
-    """Install passive entry-lineage capture, MFE/MAE tracking and closure reports."""
     if getattr(TradingEngine, "_post_trade_forensics_installed", False):
         return
 
@@ -174,8 +171,7 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
                     await _persist_lineage(payload, log)
                 else:
                     log.warning(
-                        "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER "
-                        "execution_effect=NONE", symbol,
+                        "[TRADE_LINEAGE] symbol=%s durable=false reason=NO_CONFIRMED_OPENING_ORDER execution_effect=NONE", symbol,
                     )
             return result
         TradingEngine._open = _open_with_lineage
@@ -245,6 +241,11 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
                     "entry_type": str(getattr(pos, "entry_type", "UNKNOWN") or "UNKNOWN"),
                     "order_id": "",
                 }
+            opening_order_id = str(lineage.get("order_id") or "")
+            if opening_order_id:
+                # Accounting-only metadata: the durable daily-PnL ledger can later
+                # bind KuCoin's confirmed close to this exact opening lineage.
+                trade.opening_order_id = opening_order_id
             capture = (pnl_net / mfe * 100.0) if mfe > 0 else 0.0
             log.warning(
                 "[POST_TRADE_FORENSICS] symbol=%s side=%s entry=%.8f exit=%.8f qty=%.8f "
@@ -255,7 +256,7 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
                 "profit_capture_pct=%.2f score=%.1f nexus=%s regime=%s entry_type=%s "
                 "exit_inferred=%s sl=%.8f tp=%.8f slippage_bps=NA funding=NA "
                 "decision_effect=NONE execution_effect=NONE",
-                sym, direction, entry, exit_price, qty, lineage.get("order_id", ""),
+                sym, direction, entry, exit_price, qty, opening_order_id,
                 pnl_gross, pnl_net, fees, _minutes(getattr(pos, "opened_at", None)),
                 mfe, mae, _roe_pct(mfe, entry, qty, leverage), _roe_pct(mae, entry, qty, leverage),
                 best_price, worst_price, be_price, str(bool(be_reached)).lower(), capture,

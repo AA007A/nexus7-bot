@@ -32,10 +32,78 @@ class DailyPnlExchangeReconciliationTests(unittest.TestCase):
 
         total = sum(v["pnl"] for v in rows.values()) + value["pnl"]
         self.assertAlmostEqual(total, -3.0559949)
-
-        # Same closeId always derives the same adjustment identity/payload.
         again = pnl._confirmed_adjustment(rows, row)
         self.assertEqual(result, again)
+
+    def test_opening_order_lineage_disambiguates_same_symbol_estimates(self):
+        rows = {
+            "a" * 64: {
+                "pnl": -1.0,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-09-14T15:00:40+00:00",
+                "symbol": "ATOMUSDT",
+                "opening_order_id": "111",
+            },
+            "b" * 64: {
+                "pnl": -2.0,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-09-14T15:00:42+00:00",
+                "symbol": "ATOMUSDT",
+                "opening_order_id": "222",
+            },
+        }
+        row = {
+            "closeId": "close-atom",
+            "symbol": "ATOMUSDTM",
+            "closeTime": int(datetime(2026, 9, 14, 15, 0, 41, tzinfo=timezone.utc).timestamp() * 1000),
+            "pnl": "-2.5",
+        }
+        receipt = {"opening_order_ids": ["222"]}
+        result = pnl._confirmed_adjustment(rows, row, receipt)
+        self.assertIsNotNone(result)
+        _, value = result
+        self.assertEqual(value["estimated_event"], "b" * 64)
+        self.assertEqual(value["opening_order_id"], "222")
+        self.assertAlmostEqual(value["pnl"], -0.5)
+
+    def test_contradictory_modern_lineage_never_falls_back_by_time(self):
+        rows = {
+            "a" * 64: {
+                "pnl": -1.0,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-09-14T15:00:41+00:00",
+                "symbol": "ATOMUSDT",
+                "opening_order_id": "111",
+            }
+        }
+        row = {
+            "closeId": "close-atom-2",
+            "symbol": "ATOMUSDTM",
+            "closeTime": int(datetime(2026, 9, 14, 15, 0, 41, tzinfo=timezone.utc).timestamp() * 1000),
+            "pnl": "-2.0",
+        }
+        self.assertIsNone(pnl._confirmed_adjustment(rows, row, {"opening_order_ids": ["999"]}))
+
+    def test_legacy_single_estimate_still_uses_unique_symbol_time_fallback(self):
+        rows = {
+            "a" * 64: {
+                "pnl": -1.0,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-09-14T15:00:41+00:00",
+                "symbol": "ATOMUSDT",
+            }
+        }
+        row = {
+            "closeId": "legacy-close",
+            "symbol": "ATOMUSDTM",
+            "closeTime": int(datetime(2026, 9, 14, 15, 0, 41, tzinfo=timezone.utc).timestamp() * 1000),
+            "pnl": "-1.5",
+        }
+        result = pnl._confirmed_adjustment(rows, row, {"opening_order_ids": ["222"]})
+        self.assertIsNotNone(result)
+        _, value = result
+        self.assertNotIn("opening_order_id", value)
+        self.assertAlmostEqual(value["pnl"], -0.5)
 
     def test_ambiguous_estimates_fail_closed_without_adjustment(self):
         rows = {
