@@ -7,7 +7,23 @@ permission.
 """
 from __future__ import annotations
 
+import os
+
 from bot.logger import log
+
+
+def _drawdown_blocked(engine) -> tuple[bool, float, float]:
+    """Return observational drawdown-block state without mutating risk policy."""
+    try:
+        from bot.config import cfg
+
+        drawdown = float(getattr(getattr(engine, "risk", None), "drawdown", 0.0) or 0.0)
+        limit = float(getattr(cfg, "MAX_DRAWDOWN", 0.0) or 0.0)
+        override = str(os.environ.get("LIVE_RISK_OVERRIDE_APPROVED", "")).strip().lower() == "true"
+        blocked = bool(limit > 0.0 and drawdown >= limit and not override)
+        return blocked, drawdown, limit
+    except Exception:
+        return False, 0.0, 0.0
 
 
 def execution_observability(engine) -> dict:
@@ -15,7 +31,8 @@ def execution_observability(engine) -> dict:
 
     ``paper_trade=False`` alone is not enough to claim that exchange mutations
     are possible: VALIDATION_LOCK intentionally keeps the runtime in read-only
-    SHADOW LIVE, and the controlled pilot also has an explicit release gate.
+    SHADOW LIVE, the controlled pilot has an explicit release gate, and runtime
+    risk gates may block new entries even while the process remains online.
     This helper is observational only and defaults to the safe/blocked side
     whenever release state cannot be proven.
     """
@@ -23,6 +40,8 @@ def execution_observability(engine) -> dict:
         return {
             "effective_execution_mode": "PAPER",
             "orders_sent_to_exchange": False,
+            "new_entries_allowed": False,
+            "execution_blockers": ("PAPER_MODE",),
             "execution_effect": "SIMULATED",
         }
 
@@ -30,6 +49,8 @@ def execution_observability(engine) -> dict:
         return {
             "effective_execution_mode": "SHADOW_LIVE",
             "orders_sent_to_exchange": False,
+            "new_entries_allowed": False,
+            "execution_blockers": ("VALIDATION_LOCK",),
             "execution_effect": "NONE",
         }
 
@@ -41,18 +62,45 @@ def execution_observability(engine) -> dict:
             return {
                 "effective_execution_mode": "LIVE_LOCKED",
                 "orders_sent_to_exchange": False,
+                "new_entries_allowed": False,
+                "execution_blockers": ("PILOT_STATUS_UNAVAILABLE",),
                 "execution_effect": "NONE",
             }
         if not bool(status.get("release_approved", False)):
             return {
                 "effective_execution_mode": "LIVE_LOCKED",
                 "orders_sent_to_exchange": False,
+                "new_entries_allowed": False,
+                "execution_blockers": ("PILOT_RELEASE_NOT_APPROVED",),
                 "execution_effect": "NONE",
             }
+
+    blockers: list[str] = []
+    if not bool(getattr(engine, "connected", True)):
+        blockers.append("ENGINE_DISCONNECTED")
+    if not bool(getattr(engine, "active", True)):
+        blockers.append("ENGINE_INACTIVE")
+
+    drawdown_blocked, drawdown, drawdown_limit = _drawdown_blocked(engine)
+    if drawdown_blocked:
+        blockers.append("DRAWDOWN_HARD_GATE")
+
+    if blockers:
+        return {
+            "effective_execution_mode": "LIVE_BLOCKED",
+            "orders_sent_to_exchange": True,
+            "new_entries_allowed": False,
+            "execution_blockers": tuple(blockers),
+            "drawdown_pct": round(drawdown * 100.0, 2),
+            "drawdown_limit_pct": round(drawdown_limit * 100.0, 2),
+            "execution_effect": "BLOCK_NEW_ENTRIES",
+        }
 
     return {
         "effective_execution_mode": "LIVE",
         "orders_sent_to_exchange": True,
+        "new_entries_allowed": True,
+        "execution_blockers": (),
         "execution_effect": "REAL",
     }
 
@@ -100,9 +148,6 @@ def enrich_status(engine, base_status):
             "decision_effect=NONE execution_effect=NONE",
             type(exc).__name__,
         )
-        # Execution observability is safety-significant to operators even though
-        # it never changes execution. Preserve a fail-closed diagnostic when the
-        # broader best-effort enrichment path fails.
         try:
             out.update(execution_observability(engine))
         except Exception:
@@ -110,6 +155,8 @@ def enrich_status(engine, base_status):
                 {
                     "effective_execution_mode": "UNKNOWN_LOCKED",
                     "orders_sent_to_exchange": False,
+                    "new_entries_allowed": False,
+                    "execution_blockers": ("STATUS_UNAVAILABLE",),
                     "execution_effect": "NONE",
                 }
             )
