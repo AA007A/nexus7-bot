@@ -138,6 +138,12 @@ class RuntimeContractGuardTests(unittest.TestCase):
         for text in expected:
             self.assertIn(text, source)
 
+    def test_bootstrap_preserves_durable_counter_inside_distributed_fence(self):
+        source = (ROOT / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")
+        counter = source.index("_pilot_submission_counter.install(")
+        fence = source.index("_live_execution_fence.install(")
+        self.assertLess(counter, fence)
+
 
 if __name__ == "__main__":
     unittest.main()
