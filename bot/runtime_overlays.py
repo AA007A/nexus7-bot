@@ -36,6 +36,7 @@ def install(TradingEngine, log) -> None:
     from bot import market_data_integrity
     from bot import volume_ratio_diagnostics
     from bot import market_viability_fail_closed
+    from bot import restart_opening_order_lineage
     from bot import post_trade_forensics
     from bot import daily_pnl_estimate_lineage_hardening
     from bot import durable_daily_pnl
@@ -91,6 +92,12 @@ def install(TradingEngine, log) -> None:
     # funnel. No execution-critical callable is wrapped or mutated.
     entry_latency_observability.install(log)
 
+    # A position recovered after process restart already has exact durable +
+    # exchange ownership proof. Rehydrate that proof's opening order id into the
+    # Position accounting lineage before any later close/checkpoint can occur.
+    # Missing/conflicting evidence is never invented or overwritten.
+    restart_opening_order_lineage.install(TradingEngine, log)
+
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
@@ -132,10 +139,11 @@ def install(TradingEngine, log) -> None:
         "scoring/trailing safety, entry-type shadow diagnostics, volume-ratio diagnostics, "
         "fail-closed market viability, KuCoin order-visibility race hardening, fail-closed "
         "partial-TP execution, drawdown advisory log throttling, truthful daily-stop override "
-        "telemetry, market-risk coverage telemetry, post-trade forensics, direct-close daily-PnL "
-        "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
-        "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
-        "stop-stress gate, delegated operator margin/drawdown/exit policy, strict NEXUS "
-        "regime-transition consistency and final runtime ownership contract are active; "
-        "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
+        "telemetry, market-risk coverage telemetry, restart opening-order lineage recovery, "
+        "post-trade forensics, direct-close daily-PnL estimate lineage, confirmed daily-PnL "
+        "reconciliation, durable external-origin telemetry, final headline semantics, stop-only "
+        "CROSS target policy, fail-closed CROSS portfolio stop-stress gate, delegated operator "
+        "margin/drawdown/exit policy, strict NEXUS regime-transition consistency and final "
+        "runtime ownership contract are active; thresholds_unchanged=true leverage_unchanged=true "
+        "railway_variables_unchanged=true"
     )
