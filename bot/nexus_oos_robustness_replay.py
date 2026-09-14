@@ -1,8 +1,9 @@
 """Run read-only historical NEXUS replay and robustness decomposition.
 
 This command uses KuCoin public endpoints only and has no trading authority.
-It reuses the leakage-aware replay implementation, then evaluates symbol,
-chronological-fold and leave-one-symbol-out stability.
+It deliberately imports the canonical *corrected* replay adapter so robustness
+statistics are computed from the exact same contiguous-history/full-clock
+candidate population as the primary OOS evidence report.
 """
 from __future__ import annotations
 
@@ -11,13 +12,15 @@ import asyncio
 import json
 from pathlib import Path
 
-from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient, replay_symbol
+from bot.nexus_oos_real_replay import PublicKuCoinFuturesClient
+from bot.nexus_oos_real_replay_corrected import replay_symbol
 from bot.nexus_oos_robustness import analyze_robustness
 
 
+REPLAY_SOURCE = "nexus_oos_real_replay_corrected"
+
+
 async def run(symbols: list[str], *, limit_15m: int) -> dict:
-    # Runtime wrappers are installed in PAPER-safe research mode by the same
-    # replay stack. Only public market-data endpoints are used below.
     reports = []
     async with PublicKuCoinFuturesClient() as client:
         for symbol in symbols:
@@ -37,6 +40,7 @@ async def run(symbols: list[str], *, limit_15m: int) -> dict:
 
     return {
         "status": "ROBUSTNESS_RESEARCH_ONLY",
+        "replay_source": REPLAY_SOURCE,
         "symbols": compact_symbols,
         "robustness": robustness,
         "historical_context_parity_complete": all(
@@ -68,6 +72,7 @@ def main() -> int:
     pooled = report["robustness"].get("pooled") or {}
     print(json.dumps({
         "status": report["status"],
+        "replay_source": report["replay_source"],
         "historical_context_parity_complete": report["historical_context_parity_complete"],
         "candidate_count": pooled.get("baseline_candidates", 0),
         "uplift_r": pooled.get("expectancy_uplift_r"),
