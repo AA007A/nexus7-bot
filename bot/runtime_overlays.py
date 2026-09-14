@@ -52,6 +52,7 @@ def install(TradingEngine, log) -> None:
     from bot import market_risk_runtime
     from bot import market_risk_coverage_observability
     from bot import entry_latency_observability
+    from bot import startup_ready_notification
     from bot import runtime_contract_guard
     from bot.pilot import PilotGuard
     from bot.kucoin import KuCoinClient, TAKER_FEE
@@ -132,6 +133,11 @@ def install(TradingEngine, log) -> None:
     # exchange state, non-CROSS positions, or additional non-reduce orders block.
     cross_portfolio_stress.install(TradingEngine, log)
 
+    # Observability-only wrapper: the first startup message may be emitted while
+    # the async engine is still connecting. This watcher sends the definitive
+    # Telegram state only after connected+active has actually been reached.
+    startup_ready_notification.install(TradingEngine, log)
+
     # MUST remain the final installer in this compatibility stack. It verifies
     # that execution-critical callables are still owned by the reviewed final
     # wrappers and fails startup if a later patch silently replaces one.
@@ -148,7 +154,7 @@ def install(TradingEngine, log) -> None:
         "restart opening-order lineage recovery, post-trade forensics, direct-close daily-PnL "
         "estimate lineage, confirmed daily-PnL reconciliation, durable external-origin telemetry, "
         "final headline semantics, stop-only CROSS target policy, fail-closed CROSS portfolio "
-        "stop-stress gate, delegated operator margin/drawdown/exit policy, strict NEXUS "
+        "stop-stress gate, startup readiness final notification, delegated operator margin/drawdown/exit policy, strict NEXUS "
         "regime-transition consistency and final runtime ownership contract are active; "
         "thresholds_unchanged=true leverage_unchanged=true railway_variables_unchanged=true"
     )
