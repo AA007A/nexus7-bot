@@ -16,6 +16,7 @@ from __future__ import annotations
 
 def install(TradingEngine, log) -> None:
     """Install passive observability plus final delegated policy semantics."""
+    from bot import auth_log_redaction
     from bot import funnel_metrics as fm
     from bot import score as scoring
     from bot import strategy
@@ -56,6 +57,10 @@ def install(TradingEngine, log) -> None:
     from bot.pilot import PilotGuard
     from bot.kucoin import KuCoinClient, TAKER_FEE
 
+    # Install before any KuCoinClient instance is created by FastAPI lifespan.
+    # This is logging-only and cannot affect exchange request semantics.
+    auth_log_redaction.install(log)
+
     fm.install(log)
     news_semantics.install(scoring, derivatives_hardening, log)
 
@@ -92,7 +97,7 @@ def install(TradingEngine, log) -> None:
     )
 
     log.info(
-        "[RUNTIME_OVERLAYS] passive funnel and entry-latency observability, "
+        "[RUNTIME_OVERLAYS] authentication-log redaction, passive funnel and entry-latency observability, "
         "scoring/trailing safety, entry-type shadow diagnostics, volume-ratio diagnostics, "
         "fail-closed market viability, KuCoin order-visibility race hardening, fail-closed "
         "partial-TP execution, drawdown hard-gate with explicit override, final risk-authoritative "
