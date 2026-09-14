@@ -10,13 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class OperatorRuntimeContractTests(unittest.TestCase):
     def test_live_operator_contract_remains_50x_and_50pct(self):
-        """Regression guard: hardening work must not silently change operator sizing.
-
-        The production environment owns LEVERAGE, while the operator runtime policy
-        owns the controlled-LIVE margin fraction. Exercise both in a clean child
-        interpreter so this test cannot inherit module-level config cached by the
-        rest of the suite.
-        """
+        """Hardening must not silently change the requested LIVE sizing contract."""
         env = dict(os.environ)
         env["LEVERAGE"] = "50"
         code = (
