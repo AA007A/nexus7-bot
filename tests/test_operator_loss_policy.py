@@ -17,13 +17,13 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_latest_source_row(rows)["buySellRatio"], 2)
         self.assertEqual(_latest_source_row(list(reversed(rows)))["buySellRatio"], 2)
 
-    async def test_stop_reaches_normal_entry_gate(self):
+    async def test_technical_stop_reaches_normal_entry_gate_unchanged(self):
         from unittest.mock import patch
         from bot.config import cfg
         calls = []
         class Engine:
             async def _open(self, sig):
-                calls.append((sig.sl, sig.tp))
+                calls.append((sig.sl, sig.tp, sig.tp1, sig.tp2))
                 return "normal_gate"
             _check_stagnation_and_invalidation = AsyncMock()
         log = SimpleNamespace(info=lambda *a: None, error=lambda *a: None)
@@ -31,12 +31,20 @@ class LossPolicyTests(unittest.IsolatedAsyncioTestCase):
         engine = Engine()
         engine.paper_trade = False
         engine.pilot = SimpleNamespace(enabled=True)
-        sig = SimpleNamespace(symbol="ETHUSDT", entry=2500., direction="LONG", sl=2499., tp=2600., tp1=2550., tp2=2600.)
+        sig = SimpleNamespace(
+            symbol="ETHUSDT",
+            entry=2500.,
+            direction="LONG",
+            sl=2450.,
+            tp=2625.,
+            tp1=2575.,
+            tp2=2625.,
+        )
+        before = (sig.sl, sig.tp, sig.tp1, sig.tp2)
         with patch.object(cfg, "LEVERAGE", 50):
             self.assertEqual(await engine._open(sig), "normal_gate")
-        self.assertLess(calls[0][0], 2499.)
-        self.assertGreaterEqual(calls[0][1], 2600.)
-        self.assertAlmostEqual(sig.rr, abs(sig.tp - 2500.) / (2500. - calls[0][0]))
+        self.assertEqual(calls[0], before)
+        self.assertEqual((sig.sl, sig.tp, sig.tp1, sig.tp2), before)
 
     def test_long_short_cost_budget(self):
         for side in ("LONG", "SHORT"):
