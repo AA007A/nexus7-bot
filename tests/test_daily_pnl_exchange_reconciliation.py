@@ -66,6 +66,31 @@ class DailyPnlExchangeReconciliationTests(unittest.TestCase):
         self.assertEqual(value["opening_order_id"], "222")
         self.assertAlmostEqual(value["pnl"], -0.5)
 
+    def test_exact_opening_order_lineage_ignores_close_time_drift(self):
+        rows = {
+            "a" * 64: {
+                "pnl": -4.0,
+                "source": "ESTIMATED_LOCAL_MARK_AND_FEE_RATE",
+                "closed_at": "2026-09-14T15:00:00+00:00",
+                "symbol": "NEARUSDT",
+                "opening_order_id": "open-near-1",
+            }
+        }
+        row = {
+            "closeId": "close-near-late-index",
+            "symbol": "NEARUSDTM",
+            "closeTime": int(datetime(2026, 9, 14, 15, 8, 0, tzinfo=timezone.utc).timestamp() * 1000),
+            "pnl": "-4.75",
+        }
+        result = pnl._confirmed_adjustment(
+            rows, row, {"opening_order_ids": ["open-near-1"]}
+        )
+        self.assertIsNotNone(result)
+        _, value = result
+        self.assertEqual(value["opening_order_id"], "open-near-1")
+        self.assertEqual(value["estimated_event"], "a" * 64)
+        self.assertAlmostEqual(value["pnl"], -0.75)
+
     def test_contradictory_modern_lineage_never_falls_back_by_time(self):
         rows = {
             "a" * 64: {
