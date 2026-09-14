@@ -1,45 +1,61 @@
-"""Operator-requested LIVE sizing and drawdown semantics.
+"""Operator LIVE sizing and explicit risk-override policy.
 
-This policy intentionally changes two execution semantics for the controlled
-LIVE pilot while leaving leverage, entry thresholds, AI approval, integrity,
-ownership, protection and duplicate-order guards untouched:
+The controlled LIVE pilot keeps the operator-requested execution geometry:
 
 * target initial margin = 50% of freshly authenticated available collateral;
-* account drawdown remains calculated/persisted/logged but is advisory only and
-  no longer vetoes a new entry by itself.
+* leverage is read from the existing configuration (production currently uses 50x);
+* stop-risk sizing remains telemetry under this operator margin policy.
 
-The margin target is applied after the existing pilot sizing wrappers have been
-installed so the old 50%-of-available *position-notional* target and the
-stop-risk quantity cap cannot silently shrink the operator's requested margin
-allocation. Stop geometry is still calculated and logged by the risk stack, but
-it is telemetry rather than the final quantity cap in this policy.
+A drawdown breach is fail-closed by default. It may be bypassed only when the
+operator explicitly acknowledges the elevated-risk mode via the exact
+LIVE_RISK_OVERRIDE_APPROVED token. The override never bypasses balance,
+position-count, protection, duplicate-order, reconciliation, instrument or
+other execution-safety gates.
 """
 from __future__ import annotations
 
 import math
+import os
 
 from bot.config import cfg
 
 
 MARGIN_FRACTION = 0.50
+RISK_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"
+RISK_OVERRIDE_TOKEN = "I_ACKNOWLEDGE_50X_50PCT_RISK"
+
+
+def _risk_override_enabled() -> bool:
+    """Return True only for an exact, explicit operator acknowledgement."""
+    return os.environ.get(RISK_OVERRIDE_ENV, "") == RISK_OVERRIDE_TOKEN
 
 
 def _protect_drawdown_update(self, bound_update, log, *, source: str):
-    """Return an instance-safe advisory wrapper around one bound balance update."""
-    async def _advisory_update(*args, **kwargs):
+    """Wrap one balance update without silently neutralizing drawdown safety."""
+    async def _guarded_update(*args, **kwargs):
         was_active = bool(getattr(self, "active", False))
         risk_before = getattr(self, "risk", None)
         drawdown_before = float(getattr(risk_before, "drawdown", 0.0) or 0.0)
+        override = _risk_override_enabled()
 
         if was_active and drawdown_before >= float(cfg.MAX_DRAWDOWN):
             self._dd_alerted = True
-            log.warning(
-                "[DRAWDOWN_ADVISORY_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                "legacy_pause_preempted=true active_preserved=true execution_effect=NONE",
-                source,
-                drawdown_before * 100.0,
-                float(cfg.MAX_DRAWDOWN) * 100.0,
-            )
+            if override:
+                log.critical(
+                    "[DRAWDOWN_OVERRIDE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "override=true entries_blocked=false execution_effect=ALLOW_NEW_ENTRIES",
+                    source,
+                    drawdown_before * 100.0,
+                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                )
+            else:
+                log.error(
+                    "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "override=false entries_blocked=true execution_effect=BLOCK_NEW_ENTRIES",
+                    source,
+                    drawdown_before * 100.0,
+                    float(cfg.MAX_DRAWDOWN) * 100.0,
+                )
 
         try:
             return await bound_update(*args, **kwargs)
@@ -48,21 +64,30 @@ def _protect_drawdown_update(self, bound_update, log, *, source: str):
             drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
             became_inactive = was_active and not bool(getattr(self, "active", False))
             if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
-                self.active = True
-                self._dd_alerted = True
-                log.warning(
-                    "[DRAWDOWN_ADVISORY_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "legacy_pause_neutralized=true active_restored=true execution_effect=NONE",
-                    source,
-                    drawdown * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
+                if _risk_override_enabled():
+                    self.active = True
+                    self._dd_alerted = True
+                    log.critical(
+                        "[DRAWDOWN_OVERRIDE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "legacy_pause_neutralized=true active_restored=true override=true",
+                        source,
+                        drawdown * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
+                else:
+                    log.error(
+                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "legacy_pause_preserved=true active_restored=false override=false",
+                        source,
+                        drawdown * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
 
-    return _advisory_update
+    return _guarded_update
 
 
 def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
-    """Install advisory drawdown semantics.
+    """Install drawdown hard-gate with an explicit, auditable operator override.
 
     Backward compatible with the previous private helper signature
     ``_install_drawdown_advisory(log)`` used by regression tests. The engine
@@ -89,9 +114,17 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 log.warning("[BALANCE] new entries blocked: zero or unconfirmed balance")
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
-                log.warning(
-                    "[DRAWDOWN_ADVISORY] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "entries_blocked=false execution_effect=NONE",
+                if not _risk_override_enabled():
+                    log.error(
+                        "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=false entries_blocked=true",
+                        float(self.drawdown) * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
+                    return False
+                log.critical(
+                    "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
                     float(cfg.MAX_DRAWDOWN) * 100.0,
                 )
@@ -110,9 +143,17 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             if self.equity <= 0 or self.available_collateral <= 0:
                 return False
             if self.drawdown >= cfg.MAX_DRAWDOWN:
-                log.warning(
-                    "[DRAWDOWN_ADVISORY_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "entries_blocked=false execution_effect=NONE",
+                if not _risk_override_enabled():
+                    log.error(
+                        "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                        "override=false entries_blocked=true",
+                        float(self.drawdown) * 100.0,
+                        float(cfg.MAX_DRAWDOWN) * 100.0,
+                    )
+                    return False
+                log.critical(
+                    "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "override=true entries_blocked=false",
                     float(self.drawdown) * 100.0,
                     float(cfg.MAX_DRAWDOWN) * 100.0,
                 )
@@ -126,9 +167,6 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
     if TradingEngine is None:
         return
 
-    # Class-level compatibility layer. This remains useful for direct method
-    # calls in tests and auxiliary runtimes, but production additionally binds
-    # an instance-level wrapper immediately before TradingEngine.run() begins.
     if not TradingEngine.__dict__.get("_operator_drawdown_engine_advisory", False):
         previous_update_balance = TradingEngine._update_balance
 
@@ -144,11 +182,6 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         TradingEngine._update_balance = _update_balance_advisory
         TradingEngine._operator_drawdown_engine_advisory = True
 
-    # Production-authoritative binding: capture whatever _update_balance is
-    # actually present on the concrete engine instance at run-time, then place
-    # the advisory wrapper directly on that instance. This survives a later
-    # class-level replacement/re-wrap and guarantees that run()'s
-    # ``self._update_balance()`` resolves to the advisory policy.
     if (hasattr(TradingEngine, "run") and
             not TradingEngine.__dict__.get("_operator_drawdown_run_binding", False)):
         previous_run = TradingEngine.run
@@ -164,9 +197,9 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 )
                 self._operator_drawdown_instance_advisory = True
                 log.critical(
-                    "[DRAWDOWN_ADVISORY_INSTANCE] installed=true class=%s "
+                    "[DRAWDOWN_POLICY_INSTANCE] installed=true class=%s "
                     "bound_update_module=%s bound_update_name=%s "
-                    "drawdown=advisory_only execution_effect=NONE",
+                    "default=hard_gate explicit_override_supported=true",
                     type(self).__name__,
                     getattr(current_bound_update, "__module__", "unknown"),
                     getattr(current_bound_update, "__name__", type(current_bound_update).__name__),
@@ -178,7 +211,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
 
 
 def _install_margin_sizing(log) -> None:
-    """Make 50% of fresh available collateral the LIVE pilot margin target."""
+    """Keep 50% of fresh available collateral as the LIVE pilot margin target."""
     from bot import engine as engine_module
     from bot import pilot_live_runtime
     from bot import pilot_risk_cap_hardening as pilot_cap
@@ -280,7 +313,8 @@ def install(TradingEngine, log) -> None:
     _install_margin_sizing(log)
     log.critical(
         "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
-        "leverage=%sx drawdown=advisory_only instance_binding=true "
-        "railway_variables_unchanged=true",
+        "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
+        "override_enabled=%s railway_variables_unchanged=true",
         cfg.LEVERAGE,
+        _risk_override_enabled(),
     )
