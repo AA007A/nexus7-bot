@@ -14,14 +14,20 @@ permissions:
 
 jobs:
   security:
-    name: Dependency, source and SBOM audit
+    name: Dependency, source, secrets and SBOM audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+      - name: Detect committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install project and audit tools
         run: |
           python -m pip install --upgrade pip
