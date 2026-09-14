@@ -1,9 +1,9 @@
 """Post-startup Telegram status notification for NEXUS-7.
 
 Observability only. This module never grants execution permission, changes risk,
-modifies leverage/sizing, or mutates exchange state. It waits until the engine
-has actually reached its connected+active runtime state before sending the
-final operator-facing status.
+modifies leverage/sizing, or mutates exchange state. The existing reviewed
+TradingEngine.run owner may start this watcher without transferring callable
+ownership to this module.
 """
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ async def _notify_when_runtime_ready(engine, log, *, timeout_s: float = 90.0) ->
     deadline = loop.time() + max(1.0, float(timeout_s))
     while loop.time() < deadline:
         if bool(getattr(engine, "connected", False)) and bool(getattr(engine, "active", False)):
-            # Give startup reconciliation/private-WS/preflight a short settle window.
             await asyncio.sleep(2.0)
             try:
                 from bot.notifier import notify
@@ -80,26 +79,15 @@ async def _notify_when_runtime_ready(engine, log, *, timeout_s: float = 90.0) ->
     )
 
 
-def install(TradingEngine, log) -> None:
-    if bool(getattr(TradingEngine, "_startup_ready_notification_installed", False)):
+def start(engine, log):
+    return asyncio.create_task(_notify_when_runtime_ready(engine, log))
+
+
+async def cancel(task) -> None:
+    if task is None or task.done():
         return
-
-    original_run = TradingEngine.run
-
-    async def _run_with_ready_notification(self, *args, **kwargs):
-        watcher = asyncio.create_task(_notify_when_runtime_ready(self, log))
-        try:
-            return await original_run(self, *args, **kwargs)
-        finally:
-            if not watcher.done():
-                watcher.cancel()
-                try:
-                    await watcher
-                except asyncio.CancelledError:
-                    pass
-
-    TradingEngine.run = _run_with_ready_notification
-    TradingEngine._startup_ready_notification_installed = True
-    log.info(
-        "[STARTUP_READY_NOTIFICATION] installed=true waits_for_connected_and_active=true settle_s=2 execution_effect=NONE"
-    )
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
