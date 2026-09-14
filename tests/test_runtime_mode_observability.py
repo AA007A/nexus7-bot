@@ -72,10 +72,11 @@ def test_unlocked_live_reports_orders_only_when_operational():
     assert not_ready["trading_mode"] == "LIVE"
     assert not_ready["orders_sent_to_exchange"] is False
     banner = startup_message(not_ready)
+    assert "BOT INICIANDO" in banner
     assert "LIVE CONFIGURADO" in banner
-    assert "EXECUÇÃO AINDA NÃO DISPONÍVEL" in banner
-    assert "engine desconectado" in banner
-    assert "engine inativo" in banner
+    assert "estado é transitório" in banner
+    assert "engine desconectado" not in banner
+    assert "engine inativo" not in banner
 
     ready = snapshot(
         paper_trade=False,
@@ -89,7 +90,7 @@ def test_unlocked_live_reports_orders_only_when_operational():
     assert "Gates dinâmicos de risco" in ready_banner
 
 
-def test_live_startup_block_is_reported_as_not_available():
+def test_live_startup_block_is_reported_as_blocked():
     blocked = snapshot(
         paper_trade=False,
         engine=_engine(connected=True, active=True),
@@ -98,5 +99,5 @@ def test_live_startup_block_is_reported_as_not_available():
     assert blocked["ready"] is False
     assert blocked["orders_sent_to_exchange"] is False
     banner = startup_message(blocked)
-    assert "LIVE CONFIGURADO" in banner
-    assert "bloqueio de startup" in banner
+    assert "BOT BLOQUEADO NO STARTUP" in banner
+    assert "não foi liberado pelos checks" in banner
