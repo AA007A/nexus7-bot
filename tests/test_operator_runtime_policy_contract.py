@@ -15,12 +15,13 @@ def test_operator_policy_uses_configured_leverage_without_mutating_it():
     assert "cfg.LEVERAGE =" not in source
 
 
-def test_drawdown_policy_is_explicitly_advisory_for_new_entries():
+def test_drawdown_policy_is_fail_closed_by_default_with_explicit_override():
     source = inspect.getsource(policy._install_drawdown_advisory)
-    assert "entries_blocked=false execution_effect=NONE" in source
-    assert "active_restored=true execution_effect=NONE" in inspect.getsource(
-        policy._protect_drawdown_update
-    )
+    protected = inspect.getsource(policy._protect_drawdown_update)
+    assert "override=false entries_blocked=true" in source
+    assert "override=true entries_blocked=false" in source
+    assert "legacy_pause_preserved=true active_restored=false override=false" in protected
+    assert "legacy_pause_neutralized=true active_restored=true override=true" in protected
 
 
 def test_margin_policy_returns_operator_target_quantity_not_stop_risk_telemetry():

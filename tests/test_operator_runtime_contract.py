@@ -31,13 +31,15 @@ class OperatorRuntimeContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("operator contract ok", proc.stdout)
 
-    def test_drawdown_remains_advisory_for_new_entries(self):
+    def test_drawdown_is_hard_gate_by_default_with_explicit_override(self):
         source = (ROOT / "bot" / "operator_runtime_policy.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("entries_blocked=false", source)
-        self.assertIn("active_restored=true", source)
-        self.assertIn("drawdown=advisory_only", source)
+        self.assertIn("drawdown_default=hard_gate", source)
+        self.assertIn('RISK_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"', source)
+        self.assertIn("override=false entries_blocked=true", source)
+        self.assertIn("override=true entries_blocked=false", source)
+        self.assertIn("active_restored=true override=true", source)
 
 
 if __name__ == "__main__":
