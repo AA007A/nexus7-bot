@@ -1,0 +1,2 @@
+This branch intentionally changes CI/security workflows only.
+No trading runtime, order authorization, leverage, sizing, thresholds, or live-entry policy is modified.
