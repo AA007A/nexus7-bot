@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import database as db
+from bot import hwm_provenance
 from bot.drawdown_persistence import (
     DURABLE_EQUITY_PEAK_KEY,
     rebase_real_account_peak_for_external_flow,
@@ -21,6 +22,14 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.risk = ProfessionalRiskAdapter(self.legacy)
         self.risk.update_capital(CapitalState(100.0, 80.0))
 
+    @staticmethod
+    def _assert_hwm_and_provenance_writes(save, expected_peak: float):
+        assert save.await_count == 2
+        calls = save.await_args_list
+        assert calls[0].args[0] == DURABLE_EQUITY_PEAK_KEY
+        assert math.isclose(float(calls[0].args[1]), expected_peak, rel_tol=0.0, abs_tol=1e-9)
+        assert calls[1].args[0] == hwm_provenance.HWM_PROVENANCE_KEY
+
     async def test_missing_state_bootstraps_verified_equity(self):
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)) as load, \
              patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
@@ -30,7 +39,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.legacy.peak_balance, 100.0)
         self.assertEqual(self.legacy.drawdown, 0.0)
         load.assert_awaited_once_with(DURABLE_EQUITY_PEAK_KEY, strict=True)
-        save.assert_awaited_once()
+        self._assert_hwm_and_provenance_writes(save, 100.0)
 
     async def test_restart_restores_higher_peak_and_nonzero_drawdown(self):
         fresh_legacy = RiskManager()
@@ -54,7 +63,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(peak, 125.0)
         self.assertEqual(self.legacy.peak_balance, 125.0)
-        save.assert_awaited_once()
+        self._assert_hwm_and_provenance_writes(save, 125.0)
 
     async def test_cached_peak_never_decreases_and_avoids_reloading(self):
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="120")) as load, \
@@ -93,7 +102,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(expected_dd, pre_flow_dd, places=6)
         self.assertLess(legacy.drawdown, 0.10)
         self.assertAlmostEqual(risk.professional_snapshot.drawdown, expected_dd, places=6)
-        save.assert_awaited_once()
+        self._assert_hwm_and_provenance_writes(save, expected_peak)
 
     async def test_verified_deposit_preserves_pre_flow_drawdown(self):
         legacy = RiskManager()
@@ -102,7 +111,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         risk.update_capital(CapitalState(120.0, 120.0))
 
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="100")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
             peak = await rebase_real_account_peak_for_external_flow(
                 risk,
                 120.0,
@@ -117,6 +126,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(peak, 150.0)
         self.assertAlmostEqual(legacy.drawdown, 0.20)
         self.assertAlmostEqual(risk.professional_snapshot.drawdown, 0.20)
+        self._assert_hwm_and_provenance_writes(save, 150.0)
 
     async def test_malformed_durable_state_fails_closed(self):
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="nan")), \

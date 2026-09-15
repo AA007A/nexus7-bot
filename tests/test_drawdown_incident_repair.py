@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import database as db
+from bot import hwm_provenance
 from bot.drawdown_persistence import (
     DURABLE_EQUITY_PEAK_KEY,
     restore_update_real_account_peak,
@@ -37,11 +38,10 @@ class DurableDrawdownIncidentRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(peak, 32.0573, places=6)
         self.assertAlmostEqual(legacy.peak_balance, 32.0573, places=6)
         self.assertAlmostEqual(legacy.drawdown, 0.0, places=9)
-        save.assert_awaited_once_with(
-            DURABLE_EQUITY_PEAK_KEY,
-            format(32.0573, ".17g"),
-            strict=True,
-        )
+        self.assertEqual(save.await_count, 2)
+        self.assertEqual(save.await_args_list[0].args[0], DURABLE_EQUITY_PEAK_KEY)
+        self.assertAlmostEqual(float(save.await_args_list[0].args[1]), 32.0573, places=6)
+        self.assertEqual(save.await_args_list[1].args[0], hwm_provenance.HWM_PROVENANCE_KEY)
 
     async def test_exact_incident_signature_never_repairs_below_last_good_peak(self):
         legacy, risk = self._risk(23.0)
