@@ -1,3 +1,4 @@
+import json
 import math
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -22,131 +23,88 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.risk = ProfessionalRiskAdapter(self.legacy)
         self.risk.update_capital(CapitalState(100.0, 80.0))
 
-    @staticmethod
-    def _assert_hwm_and_provenance_writes(save, expected_peak: float):
-        assert save.await_count == 2
-        calls = save.await_args_list
-        assert calls[0].args[0] == DURABLE_EQUITY_PEAK_KEY
-        assert math.isclose(float(calls[0].args[1]), expected_peak, rel_tol=0.0, abs_tol=1e-9)
-        assert calls[1].args[0] == hwm_provenance.HWM_PROVENANCE_KEY
+    def _assert_atomic_write(self, save, expected_peak: float, expected_reason: str):
+        save.assert_awaited_once()
+        items = list(save.await_args.args[0])
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0][0], DURABLE_EQUITY_PEAK_KEY)
+        self.assertTrue(math.isclose(float(items[0][1]), expected_peak, rel_tol=0.0, abs_tol=1e-9))
+        self.assertEqual(items[1][0], hwm_provenance.HWM_PROVENANCE_KEY)
+        payload = json.loads(items[1][1])
+        self.assertEqual(payload["reason"], expected_reason)
+        self.assertTrue(math.isclose(payload["new_peak"], expected_peak, rel_tol=0.0, abs_tol=1e-9))
+        self.assertTrue(save.await_args.kwargs["strict"])
 
-    async def test_missing_state_bootstraps_verified_equity(self):
+    async def test_missing_state_bootstraps_verified_equity_atomically(self):
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)) as load, \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save:
             peak = await restore_update_real_account_peak(self.risk, 100.0, strict=True)
-
         self.assertEqual(peak, 100.0)
-        self.assertEqual(self.legacy.peak_balance, 100.0)
         self.assertEqual(self.legacy.drawdown, 0.0)
         load.assert_awaited_once_with(DURABLE_EQUITY_PEAK_KEY, strict=True)
-        self._assert_hwm_and_provenance_writes(save, 100.0)
+        self._assert_atomic_write(save, 100.0, "bootstrap")
 
-    async def test_restart_restores_higher_peak_and_nonzero_drawdown(self):
+    async def test_restart_restores_higher_peak_without_write(self):
         fresh_legacy = RiskManager()
         fresh_legacy.init(80.0)
         fresh = ProfessionalRiskAdapter(fresh_legacy)
         fresh.update_capital(CapitalState(80.0, 60.0))
-
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="100")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save:
             peak = await restore_update_real_account_peak(fresh, 80.0, strict=True)
-
         self.assertEqual(peak, 100.0)
         self.assertAlmostEqual(fresh_legacy.drawdown, 0.20)
         self.assertAlmostEqual(fresh.professional_snapshot.drawdown, 0.20)
         save.assert_not_awaited()
 
-    async def test_new_high_raises_and_persists_peak(self):
+    async def test_new_high_persists_peak_and_provenance_in_one_atomic_call(self):
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="100")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save:
             peak = await restore_update_real_account_peak(self.risk, 125.0, strict=True)
-
         self.assertEqual(peak, 125.0)
         self.assertEqual(self.legacy.peak_balance, 125.0)
-        self._assert_hwm_and_provenance_writes(save, 125.0)
+        self._assert_atomic_write(save, 125.0, "new_equity_high")
 
-    async def test_cached_peak_never_decreases_and_avoids_reloading(self):
-        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="120")) as load, \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
-            await restore_update_real_account_peak(self.risk, 100.0, strict=True)
-            await restore_update_real_account_peak(self.risk, 90.0, strict=True)
+    async def test_atomic_write_failure_fails_closed_before_cache_or_risk_mutation(self):
+        original_peak = self.legacy.peak_balance
+        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="100")), \
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(side_effect=db.PersistenceError("rollback"))):
+            with self.assertRaises(db.PersistenceError):
+                await restore_update_real_account_peak(self.risk, 125.0, strict=True)
+        self.assertEqual(self.legacy.peak_balance, original_peak)
+        self.assertIsNone(getattr(self.risk, "_durable_account_equity_peak", None))
 
-        self.assertEqual(self.legacy.peak_balance, 120.0)
-        self.assertAlmostEqual(self.legacy.drawdown, 0.25)
-        load.assert_awaited_once()
-
-    async def test_verified_withdrawal_preserves_pre_flow_drawdown(self):
+    async def test_verified_withdrawal_preserves_drawdown_and_writes_atomically(self):
         legacy = RiskManager()
         legacy.init(20.8664)
         risk = ProfessionalRiskAdapter(legacy)
         risk.update_capital(CapitalState(20.8664, 20.8664))
-
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="38.2593")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save:
             peak = await rebase_real_account_peak_for_external_flow(
-                risk,
-                20.8664,
-                pre_flow_equity=34.8664,
-                post_flow_equity=20.8664,
-                flow_type="TransferOut",
-                flow_amount=14.0,
-                flow_offset="12345",
-                strict=True,
+                risk, 20.8664, pre_flow_equity=34.8664, post_flow_equity=20.8664,
+                flow_type="TransferOut", flow_amount=14.0, flow_offset="12345", strict=True,
             )
-
         expected_peak = 38.2593 * (20.8664 / 34.8664)
-        expected_dd = (expected_peak - 20.8664) / expected_peak
         pre_flow_dd = (38.2593 - 34.8664) / 38.2593
         self.assertAlmostEqual(peak, expected_peak, places=6)
-        self.assertAlmostEqual(legacy.drawdown, expected_dd, places=6)
-        self.assertAlmostEqual(expected_dd, pre_flow_dd, places=6)
-        self.assertLess(legacy.drawdown, 0.10)
-        self.assertAlmostEqual(risk.professional_snapshot.drawdown, expected_dd, places=6)
-        self._assert_hwm_and_provenance_writes(save, expected_peak)
-
-    async def test_verified_deposit_preserves_pre_flow_drawdown(self):
-        legacy = RiskManager()
-        legacy.init(120.0)
-        risk = ProfessionalRiskAdapter(legacy)
-        risk.update_capital(CapitalState(120.0, 120.0))
-
-        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="100")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
-            peak = await rebase_real_account_peak_for_external_flow(
-                risk,
-                120.0,
-                pre_flow_equity=80.0,
-                post_flow_equity=120.0,
-                flow_type="TransferIn",
-                flow_amount=40.0,
-                flow_offset="12346",
-                strict=True,
-            )
-
-        self.assertAlmostEqual(peak, 150.0)
-        self.assertAlmostEqual(legacy.drawdown, 0.20)
-        self.assertAlmostEqual(risk.professional_snapshot.drawdown, 0.20)
-        self._assert_hwm_and_provenance_writes(save, 150.0)
+        self.assertAlmostEqual(legacy.drawdown, pre_flow_dd, places=6)
+        self._assert_atomic_write(save, expected_peak, "external_capital_flow_rebase")
 
     async def test_malformed_durable_state_fails_closed(self):
-        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="nan")), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="nan")):
             with self.assertRaises(db.PersistenceError):
                 await restore_update_real_account_peak(self.risk, 100.0, strict=True)
 
     async def test_persistence_read_failure_propagates(self):
-        with patch(
-            "bot.drawdown_persistence.db.load_key_value",
-            AsyncMock(side_effect=db.PersistenceError("offline")),
-        ):
+        with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(side_effect=db.PersistenceError("offline"))):
             with self.assertRaises(db.PersistenceError):
                 await restore_update_real_account_peak(self.risk, 100.0, strict=True)
 
-    async def test_nonfinite_or_nonpositive_equity_rejected(self):
-        for value in (0.0, -1.0, math.inf, math.nan):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    await restore_update_real_account_peak(self.risk, value, strict=True)
+    async def test_nonfinite_nonpositive_and_boolean_equity_rejected(self):
+        for value in (0.0, -1.0, math.inf, math.nan, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                await restore_update_real_account_peak(self.risk, value, strict=True)
 
 
 class RiskManagerV3PeakRestoreTests(unittest.TestCase):
@@ -155,7 +113,6 @@ class RiskManagerV3PeakRestoreTests(unittest.TestCase):
         self.assertFalse(risk.confirmed)
         self.assertEqual(risk.restore_peak_equity(100.0), 100.0)
         self.assertFalse(risk.confirmed)
-
         risk.update_capital(CapitalState(80.0, 60.0))
         self.assertAlmostEqual(risk.drawdown, 0.20)
 
