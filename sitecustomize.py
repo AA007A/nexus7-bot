@@ -17,6 +17,11 @@ import sys
 builtins._nexus_sitecustomize_status = "installing"
 
 try:
+    # Install logging-only semantic normalization before bootstrap so even
+    # legacy startup wrappers cannot emit contradictory sizing authority text.
+    from bot.sizing_semantics_log_hardening import install as _install_sizing_semantics
+    _install_sizing_semantics()
+
     from bot.runtime_bootstrap import install as _install_runtime_bootstrap
 
     _install_runtime_bootstrap()
