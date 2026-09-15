@@ -1,48 +1,47 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
 
 from bot import hwm_provenance as hp
 
 
-class HwmProvenanceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_persists_non_secret_auditable_snapshot(self):
-        with patch.object(hp.db, "save_key_value", AsyncMock(return_value=True)) as save:
-            ok = await hp.persist_hwm_provenance(
-                reason="new_equity_high",
-                old_peak=30.0,
-                new_peak=31.0,
-                account_equity=31.0,
-                evidence_ref="authenticated_account_equity",
-                strict=True,
-            )
-        self.assertTrue(ok)
-        self.assertEqual(save.await_args.args[0], hp.HWM_PROVENANCE_KEY)
-        payload = json.loads(save.await_args.args[1])
+class HwmProvenanceTests(unittest.TestCase):
+    def test_builds_non_secret_auditable_snapshot(self):
+        payload = json.loads(hp.build_hwm_provenance(
+            reason="new_equity_high",
+            old_peak=30.0,
+            new_peak=31.0,
+            account_equity=31.0,
+            evidence_ref="authenticated_account_equity",
+        ))
         self.assertEqual(payload["reason"], "new_equity_high")
         self.assertEqual(payload["old_peak"], 30.0)
         self.assertEqual(payload["new_peak"], 31.0)
         self.assertEqual(payload["execution_effect"], "NONE")
+        self.assertIn("recorded_at", payload)
 
-    async def test_rejects_unknown_reason(self):
+    def test_rejects_unknown_reason(self):
         with self.assertRaises(ValueError):
-            await hp.persist_hwm_provenance(
-                reason="manual_reset",
-                old_peak=30.0,
-                new_peak=20.0,
-                account_equity=20.0,
-                evidence_ref="operator",
+            hp.build_hwm_provenance(
+                reason="manual_reset", old_peak=30.0, new_peak=20.0,
+                account_equity=20.0, evidence_ref="operator",
             )
 
-    async def test_rejects_empty_evidence(self):
+    def test_rejects_empty_evidence(self):
         with self.assertRaises(ValueError):
-            await hp.persist_hwm_provenance(
-                reason="bootstrap",
-                old_peak=None,
-                new_peak=20.0,
-                account_equity=20.0,
-                evidence_ref="",
+            hp.build_hwm_provenance(
+                reason="bootstrap", old_peak=None, new_peak=20.0,
+                account_equity=20.0, evidence_ref="",
             )
+
+    def test_rejects_boolean_numeric_fields(self):
+        for field in ("new_peak", "account_equity", "old_peak"):
+            kwargs = dict(
+                reason="new_equity_high", old_peak=30.0, new_peak=31.0,
+                account_equity=31.0, evidence_ref="authenticated_account_equity",
+            )
+            kwargs[field] = True
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                hp.build_hwm_provenance(**kwargs)
 
 
 if __name__ == "__main__":

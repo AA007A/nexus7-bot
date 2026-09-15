@@ -55,9 +55,6 @@ def _engine_for_update(paper_trade=False, locked=True):
 
 
 def _install_patch_once():
-    # In the offline suite sitecustomize may already have installed the patch.
-    # If not, install it explicitly so this test validates the runtime wrapper,
-    # not the unpatched engine implementation.
     if not getattr(TradingEngine, "_validation_safety_lock_patched", False):
         validation_safety_lock.install(_Log())
 
@@ -76,7 +73,7 @@ def test_nonpaper_periodic_refresh_uses_equity_not_available():
     _install_patch_once()
     engine = _engine_for_update(False, True)
     with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)), \
-         patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+         patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)):
         state = asyncio.run(TradingEngine._update_balance(engine))
     assert state["equity"] == 20.0
     assert state["available"] == 0.4
@@ -95,8 +92,6 @@ def test_nonpaper_without_validation_lock_fails_closed():
 
 
 def test_paper_delegates_to_original_update():
-    # Static invariant: the wrapper explicitly delegates PAPER to the original
-    # method rather than applying SHADOW-only account-equity semantics.
     source = inspect.getsource(validation_safety_lock)
     assert 'if getattr(self, "paper_trade", False):' in source
     assert 'return await original_update_balance(self, *args, **kwargs)' in source

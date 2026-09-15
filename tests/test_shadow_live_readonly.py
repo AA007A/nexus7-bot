@@ -83,7 +83,7 @@ class ShadowLiveReadOnlyTests(unittest.IsolatedAsyncioTestCase):
 
         engine._filter_viable_symbols = _filter_viable_symbols
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)), \
-             patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+             patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)):
             ok = await shadow_live.connect_readonly(engine)
         self.assertTrue(ok)
         self.assertTrue(engine.connected)

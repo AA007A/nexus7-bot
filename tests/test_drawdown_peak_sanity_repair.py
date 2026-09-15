@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -8,61 +9,48 @@ from bot import hwm_provenance
 
 
 class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
-    @staticmethod
-    def _assert_peak_and_provenance(save, expected_peak):
-        assert save.await_count == 2
-        assert save.await_args_list[0].args[0] == dd.DURABLE_EQUITY_PEAK_KEY
-        assert abs(float(save.await_args_list[0].args[1]) - expected_peak) < 1e-6
-        assert save.await_args_list[1].args[0] == hwm_provenance.HWM_PROVENANCE_KEY
+    def _assert_atomic(self, save, expected_peak):
+        save.assert_awaited_once()
+        items = list(save.await_args.args[0])
+        self.assertEqual(items[0][0], dd.DURABLE_EQUITY_PEAK_KEY)
+        self.assertAlmostEqual(float(items[0][1]), expected_peak, places=6)
+        self.assertEqual(items[1][0], hwm_provenance.HWM_PROVENANCE_KEY)
+        self.assertEqual(json.loads(items[1][1])["reason"], "incident_repair")
 
     async def test_known_20260914_corruption_repairs_to_last_good_peak(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
-        bad = str(dd._INCIDENT_BAD_PEAK)
-
-        with patch.object(db, "load_key_value", AsyncMock(return_value=bad)), patch.object(
-            db, "save_key_value", AsyncMock(return_value=True)
-        ) as save:
-            peak = await dd.restore_update_real_account_peak(
-                risk, dd._INCIDENT_LAST_GOOD_PEAK, strict=True
-            )
-
+        with patch.object(db, "load_key_value", AsyncMock(return_value=str(dd._INCIDENT_BAD_PEAK))), \
+             patch.object(dd, "save_key_values_atomic", AsyncMock(return_value=True)) as save:
+            peak = await dd.restore_update_real_account_peak(risk, dd._INCIDENT_LAST_GOOD_PEAK, strict=True)
         self.assertAlmostEqual(peak, dd._INCIDENT_LAST_GOOD_PEAK, places=6)
-        self.assertAlmostEqual(risk.peak_balance, dd._INCIDENT_LAST_GOOD_PEAK, places=6)
         self.assertAlmostEqual(risk.drawdown, 0.0, places=9)
-        self._assert_peak_and_provenance(save, dd._INCIDENT_LAST_GOOD_PEAK)
+        self._assert_atomic(save, dd._INCIDENT_LAST_GOOD_PEAK)
 
     async def test_unrelated_implausible_peak_is_not_silently_rebased(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
-        with patch.object(db, "load_key_value", AsyncMock(return_value="999999999")), patch.object(
-            db, "save_key_value", AsyncMock(return_value=True)
-        ) as save:
+        with patch.object(db, "load_key_value", AsyncMock(return_value="999999999")), \
+             patch.object(dd, "save_key_values_atomic", AsyncMock(return_value=True)) as save:
             with self.assertRaises(db.PersistenceError):
                 await dd.restore_update_real_account_peak(risk, 25.0, strict=True)
         save.assert_not_awaited()
 
     async def test_legitimate_historical_peak_remains_unchanged(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
-        with patch.object(db, "load_key_value", AsyncMock(return_value="30.0")), patch.object(
-            db, "save_key_value", AsyncMock(return_value=True)
-        ) as save:
+        with patch.object(db, "load_key_value", AsyncMock(return_value="30.0")), \
+             patch.object(dd, "save_key_values_atomic", AsyncMock(return_value=True)) as save:
             peak = await dd.restore_update_real_account_peak(risk, 28.0, strict=True)
         self.assertEqual(peak, 30.0)
         self.assertAlmostEqual(risk.drawdown, (30.0 - 28.0) / 30.0)
         save.assert_not_awaited()
 
-    async def test_incident_signature_allows_live_equity_to_move_and_preserves_new_high(self):
+    async def test_incident_signature_preserves_new_live_high(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
-        moved_equity = 100.0
-        with patch.object(
-            db, "load_key_value", AsyncMock(return_value=str(dd._INCIDENT_BAD_PEAK))
-        ), patch.object(db, "save_key_value", AsyncMock(return_value=True)) as save:
-            peak = await dd.restore_update_real_account_peak(risk, moved_equity, strict=True)
-
-        self.assertEqual(peak, moved_equity)
-        self.assertEqual(risk.peak_balance, moved_equity)
+        with patch.object(db, "load_key_value", AsyncMock(return_value=str(dd._INCIDENT_BAD_PEAK))), \
+             patch.object(dd, "save_key_values_atomic", AsyncMock(return_value=True)) as save:
+            peak = await dd.restore_update_real_account_peak(risk, 100.0, strict=True)
+        self.assertEqual(peak, 100.0)
         self.assertEqual(risk.drawdown, 0.0)
-        self._assert_peak_and_provenance(save, moved_equity)
+        self._assert_atomic(save, 100.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()

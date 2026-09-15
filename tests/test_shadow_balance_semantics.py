@@ -32,7 +32,7 @@ def test_equity_not_available_drives_drawdown():
     engine = SimpleNamespace(client=_Client(), risk=risk)
 
     with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value=None)), \
-         patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)):
+         patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)):
         state = asyncio.run(semantics.refresh_shadow_risk(engine))
 
     assert state["equity"] == 20.0
@@ -49,7 +49,7 @@ def test_restart_restores_durable_peak_in_shadow():
     engine = SimpleNamespace(client=_Client(equity="15.0"), risk=risk)
 
     with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="20.0")), \
-         patch("bot.drawdown_persistence.db.save_key_value", AsyncMock(return_value=True)) as save:
+         patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save:
         asyncio.run(semantics.refresh_shadow_risk(engine))
 
     assert risk.peak_balance == 20.0

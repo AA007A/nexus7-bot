@@ -3,7 +3,7 @@
 Safety invariants: ordinary trading never lowers the peak; only verified external
 capital flow may rebase it lower; malformed persistence fails closed; the known
 2026-09-14 corrupt HWM has a narrowly evidence-bound repair; every HWM write is
-paired with durable provenance. No execution authorization exists here.
+atomically paired with durable provenance. No execution authorization exists here.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import math
 
 from bot import database as db
 from bot import hwm_provenance
+from bot.atomic_key_value import save_key_values_atomic
 from bot.logger import log
 
 DURABLE_EQUITY_PEAK_KEY = "risk:account_equity_peak:v1"
@@ -79,15 +80,22 @@ async def _load_peak(risk, *, strict: bool) -> tuple[float | None, str]:
 
 
 async def _write_peak_with_provenance(*, old_peak, new_peak, equity, reason, evidence_ref, strict):
-    ok = await db.save_key_value(DURABLE_EQUITY_PEAK_KEY, format(new_peak, ".17g"), strict=strict)
-    if strict and not ok:
-        raise db.PersistenceError("durable equity peak write not confirmed")
-    prov_ok = await hwm_provenance.persist_hwm_provenance(
-        reason=reason, old_peak=old_peak, new_peak=new_peak,
-        account_equity=equity, evidence_ref=evidence_ref, strict=strict,
+    provenance = hwm_provenance.build_hwm_provenance(
+        reason=reason,
+        old_peak=old_peak,
+        new_peak=new_peak,
+        account_equity=equity,
+        evidence_ref=evidence_ref,
     )
-    if strict and not prov_ok:
-        raise db.PersistenceError("durable equity peak provenance write not confirmed")
+    ok = await save_key_values_atomic(
+        (
+            (DURABLE_EQUITY_PEAK_KEY, format(new_peak, ".17g")),
+            (hwm_provenance.HWM_PROVENANCE_KEY, provenance),
+        ),
+        strict=strict,
+    )
+    if strict and not ok:
+        raise db.PersistenceError("atomic HWM/provenance write not confirmed")
 
 
 async def restore_update_real_account_peak(risk, equity: float, *, strict: bool = True) -> float:
@@ -109,7 +117,7 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
             log.critical(
                 "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm old_peak=%.4f "
                 "last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
-                "provenance=durable execution_effect=NONE",
+                "provenance=durable_atomic execution_effect=NONE",
                 old_peak, _INCIDENT_LAST_GOOD_PEAK, equity, persisted,
             )
         else:
@@ -133,7 +141,7 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
         equity, peak, max(0.0, (peak - equity) / peak) * 100.0,
         "bootstrap" if persisted is None else ("incident_repair" if repaired else "restored"),
         "repaired" if repaired else ("updated" if needs_write else "unchanged"),
-        "updated" if (repaired or needs_write) else "unchanged",
+        "updated_atomic" if (repaired or needs_write) else "unchanged",
     )
     return peak
 
@@ -162,7 +170,7 @@ async def rebase_real_account_peak_for_external_flow(
     _apply_peak(risk, rebased_peak, current_equity, allow_lower=True)
     log.warning(
         "[CAPITAL_FLOW_REBASE] type=%s amount=%.4f offset=%s pre_equity=%.4f post_equity=%.4f "
-        "old_peak=%.4f new_peak=%.4f drawdown=%.2f%% provenance=durable execution_effect=NONE",
+        "old_peak=%.4f new_peak=%.4f drawdown=%.2f%% provenance=durable_atomic execution_effect=NONE",
         flow_type, flow_amount, flow_offset, pre_flow_equity, post_flow_equity,
         persisted, rebased_peak, max(0.0, (rebased_peak-current_equity)/rebased_peak)*100.0,
     )
