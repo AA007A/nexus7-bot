@@ -4,9 +4,17 @@ from unittest.mock import AsyncMock, patch
 
 from bot import database as db
 from bot import drawdown_persistence as dd
+from bot import hwm_provenance
 
 
 class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _assert_peak_and_provenance(save, expected_peak):
+        assert save.await_count == 2
+        assert save.await_args_list[0].args[0] == dd.DURABLE_EQUITY_PEAK_KEY
+        assert abs(float(save.await_args_list[0].args[1]) - expected_peak) < 1e-6
+        assert save.await_args_list[1].args[0] == hwm_provenance.HWM_PROVENANCE_KEY
+
     async def test_known_20260914_corruption_repairs_to_last_good_peak(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
         bad = str(dd._INCIDENT_BAD_PEAK)
@@ -21,10 +29,7 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(peak, dd._INCIDENT_LAST_GOOD_PEAK, places=6)
         self.assertAlmostEqual(risk.peak_balance, dd._INCIDENT_LAST_GOOD_PEAK, places=6)
         self.assertAlmostEqual(risk.drawdown, 0.0, places=9)
-        save.assert_awaited()
-        saved_args = save.await_args.args
-        self.assertEqual(saved_args[0], dd.DURABLE_EQUITY_PEAK_KEY)
-        self.assertAlmostEqual(float(saved_args[1]), dd._INCIDENT_LAST_GOOD_PEAK, places=6)
+        self._assert_peak_and_provenance(save, dd._INCIDENT_LAST_GOOD_PEAK)
 
     async def test_unrelated_implausible_peak_is_not_silently_rebased(self):
         risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
@@ -56,10 +61,7 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peak, moved_equity)
         self.assertEqual(risk.peak_balance, moved_equity)
         self.assertEqual(risk.drawdown, 0.0)
-        save.assert_awaited_once()
-        saved_args = save.await_args.args
-        self.assertEqual(saved_args[0], dd.DURABLE_EQUITY_PEAK_KEY)
-        self.assertAlmostEqual(float(saved_args[1]), moved_equity, places=6)
+        self._assert_peak_and_provenance(save, moved_equity)
 
 
 if __name__ == "__main__":
