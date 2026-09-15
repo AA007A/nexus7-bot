@@ -52,24 +52,23 @@ class FinalSizingInvariantTests(unittest.TestCase):
             pilot_cap._PILOT_SYMBOL.reset(token_symbol)
             pilot_cap._PILOT_ENGINE.reset(token_engine)
 
-    def test_risk_quantity_is_final_cap_below_operator_target(self):
+    def test_operator_50pct_margin_target_is_authoritative_when_risk_validates_smaller_qty(self):
         module, engine = self._install(risk_size=lambda *a, **k: 0.25)
         qty, stored = self._call(module, engine)
-        self.assertAlmostEqual(qty, 0.25)
-        self.assertAlmostEqual(stored, 0.25)
+        self.assertAlmostEqual(qty, 5.0)
+        self.assertAlmostEqual(stored, 5.0)
+        self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
 
-    def test_operator_50pct_margin_target_remains_cap_when_risk_allows_more(self):
+    def test_operator_50pct_margin_target_remains_authoritative_when_risk_allows_more(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0)
         qty, stored = self._call(module, engine)
         self.assertAlmostEqual(qty, 5.0)
         self.assertAlmostEqual(stored, 5.0)
-        # available=20; 50%=10 margin; 5 qty*$100/50x=$10 margin.
         self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
 
     def test_risk_sizing_exception_fails_closed(self):
         def _raise(*args, **kwargs):
             raise RuntimeError("risk unavailable")
-
         module, engine = self._install(risk_size=_raise)
         qty, stored = self._call(module, engine)
         self.assertEqual(qty, 0.0)
@@ -82,12 +81,7 @@ class FinalSizingInvariantTests(unittest.TestCase):
         self.assertEqual(stored, 0.0)
 
     def test_margin_above_50pct_target_fails_closed(self):
-        # Deliberately inconsistent upstream target: 6 qty at $100/50x = $12,
-        # above the $10 operator margin cap. Risk allows it, final invariant blocks.
-        module, engine = self._install(
-            risk_size=lambda *a, **k: 10.0,
-            target_qty=6.0,
-        )
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, target_qty=6.0)
         qty, stored = self._call(module, engine)
         self.assertEqual(qty, 0.0)
         self.assertEqual(stored, 0.0)
