@@ -1,14 +1,14 @@
-"""Durable, non-secret provenance for LIVE account-equity HWM transitions.
+"""Durable, non-secret provenance payloads for LIVE account-equity HWM transitions.
 
 This module is accounting/observability only. It does not authorize execution,
 change risk thresholds, leverage, sizing, strategy, orders, or exchange state.
+Persistence is performed atomically with the HWM by drawdown_persistence.
 """
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
-
-from bot import database as db
 
 HWM_PROVENANCE_KEY = "risk:account_equity_peak:provenance:v1"
 _ALLOWED_REASONS = {
@@ -20,22 +20,23 @@ _ALLOWED_REASONS = {
 
 
 def _finite_positive(value, label: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} boolean")
     value = float(value)
-    if not (value > 0.0) or value == float("inf") or value != value:
+    if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f"{label} must be positive and finite")
     return value
 
 
-async def persist_hwm_provenance(
+def build_hwm_provenance(
     *,
     reason: str,
     old_peak: float | None,
     new_peak: float,
     account_equity: float,
     evidence_ref: str,
-    strict: bool = True,
-) -> bool:
-    """Persist one compact provenance snapshot alongside an HWM transition."""
+) -> str:
+    """Build one validated, compact, non-secret provenance snapshot."""
     if reason not in _ALLOWED_REASONS:
         raise ValueError("unsupported HWM provenance reason")
     new_peak = _finite_positive(new_peak, "new_peak")
@@ -55,10 +56,4 @@ async def persist_hwm_provenance(
         "evidence_ref": evidence_ref,
         "execution_effect": "NONE",
     }
-    return bool(
-        await db.save_key_value(
-            HWM_PROVENANCE_KEY,
-            json.dumps(payload, sort_keys=True, separators=(",", ":")),
-            strict=strict,
-        )
-    )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
