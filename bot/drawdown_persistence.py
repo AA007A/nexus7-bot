@@ -109,14 +109,14 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
             await _write_peak_with_provenance(
                 old_peak=old_peak, new_peak=persisted, equity=equity,
                 reason="incident_repair",
-                evidence_ref="2026-09-14:exact_corrupt_persisted_signature+authenticated_equity",
+                evidence_ref="2026-09-14:exact_corrupt_hwm_signature+authenticated_equity",
                 strict=strict,
             )
             setattr(risk, _CACHE_ATTR, persisted)
             repaired = True
             log.critical(
-                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm old_peak=%.4f "
-                "last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
+                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm kind=exact_signature "
+                "old_peak=%.4f last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
                 "provenance=durable_atomic execution_effect=NONE",
                 old_peak, _INCIDENT_LAST_GOOD_PEAK, equity, persisted,
             )
