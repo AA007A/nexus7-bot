@@ -19,11 +19,6 @@ _CACHE_ATTR = "_durable_account_equity_peak"
 _INCIDENT_BAD_PEAK = 82_894_351_780.2826
 _INCIDENT_LAST_GOOD_PEAK = 28.7914
 _INCIDENT_BAD_PEAK_TOLERANCE = 1.0
-# Before the exact corrupt signature was independently identified, older runtime
-# paths could persist a different but still impossible peak. Railway evidence
-# for this account bounds legitimate pre-incident equity below this value.
-_INCIDENT_MAX_LEGITIMATE_PEAK = 51.0055
-_INCIDENT_LEGACY_CORRUPTION_FLOOR = 1_000_000.0
 _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
 
 
@@ -38,20 +33,6 @@ def _positive_finite(value, label: str) -> float:
 
 def _matches_known_20260914_corruption(persisted: float) -> bool:
     return abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
-
-
-def _matches_proven_legacy_corruption(persisted: float, equity: float) -> bool:
-    """Recognize only impossible legacy values from the proven HWM incident.
-
-    This is intentionally much narrower than the generic plausibility guard:
-    it requires a seven-figure persisted peak while both authenticated current
-    equity and the independently observed legitimate account peak are sub-$100.
-    A merely high drawdown never qualifies for repair.
-    """
-    return (
-        persisted >= _INCIDENT_LEGACY_CORRUPTION_FLOOR
-        and 0.0 < equity <= _INCIDENT_MAX_LEGITIMATE_PEAK
-    )
 
 
 def _validate_peak_vs_equity(peak: float, equity: float) -> None:
@@ -121,29 +102,23 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
     equity = _positive_finite(equity, "account equity")
     persisted, _ = await _load_peak(risk, strict=strict)
     repaired = False
-    repair_kind = None
     if persisted is not None:
         if _matches_known_20260914_corruption(persisted):
-            repair_kind = "exact_signature"
-        elif _matches_proven_legacy_corruption(persisted, equity):
-            repair_kind = "legacy_variant"
-
-        if repair_kind is not None:
             old_peak = persisted
-            persisted = max(_INCIDENT_MAX_LEGITIMATE_PEAK, equity)
+            persisted = max(_INCIDENT_LAST_GOOD_PEAK, equity)
             await _write_peak_with_provenance(
                 old_peak=old_peak, new_peak=persisted, equity=equity,
                 reason="incident_repair",
-                evidence_ref=f"2026-09-14:{repair_kind}+railway_observed_peak+authenticated_equity",
+                evidence_ref="2026-09-14:exact_corrupt_hwm_signature+authenticated_equity",
                 strict=strict,
             )
             setattr(risk, _CACHE_ATTR, persisted)
             repaired = True
             log.critical(
-                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm kind=%s old_peak=%.4f "
-                "observed_legitimate_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
+                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-14-corrupt-hwm kind=exact_signature "
+                "old_peak=%.4f last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
                 "provenance=durable_atomic execution_effect=NONE",
-                repair_kind, old_peak, _INCIDENT_MAX_LEGITIMATE_PEAK, equity, persisted,
+                old_peak, _INCIDENT_LAST_GOOD_PEAK, equity, persisted,
             )
         else:
             _validate_peak_vs_equity(persisted, equity)
