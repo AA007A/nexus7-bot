@@ -38,6 +38,16 @@ def _matches_known_20260914_corruption(persisted: float) -> bool:
 def _validate_peak_vs_equity(peak: float, equity: float) -> None:
     ratio = peak / equity
     if not math.isfinite(ratio) or ratio > _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO:
+        log.critical(
+            "[DURABLE_DRAWDOWN_ANOMALY] kind=implausible_hwm persisted_peak=%.17g "
+            "current_equity=%.17g peak_to_equity_ratio=%.9g threshold=%.9g "
+            "known_incident_match=%s execution_effect=BLOCK_FAIL_CLOSED",
+            peak,
+            equity,
+            ratio,
+            _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO,
+            _matches_known_20260914_corruption(peak),
+        )
         raise db.PersistenceError("durable equity peak is implausible relative to current account equity")
 
 
