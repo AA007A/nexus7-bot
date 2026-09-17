@@ -8,7 +8,8 @@ from bot.risk import RiskManager
 
 class DurableDrawdownAnomalyDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_implausible_hwm_logs_evidence_and_still_fails_closed(self):
-        risk = RiskManager(14.2)
+        risk = RiskManager()
+        risk.init(14.2)
         with patch("bot.drawdown_persistence.db.load_key_value", AsyncMock(return_value="90000000000")), \
              patch("bot.drawdown_persistence.save_key_values_atomic", AsyncMock(return_value=True)) as save, \
              patch("bot.drawdown_persistence.log.critical") as critical:
