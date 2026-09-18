@@ -51,8 +51,7 @@ async def read_account_state(client):
         available = _finite_number(data.get("availableBalance"), "availableBalance")
         available_source = "availableBalance"
 
-    if equity < 0 or available < 0:
-        raise RuntimeError("negative account balance")
+    # A zero equity snapshot is not a valid capital-health observation for a\n    # funded LIVE account. Treat it as unavailable and fail closed before HWM\n    # validation; never let a transient/partial KuCoin snapshot mutate risk or\n    # durable drawdown state. Zero available collateral remains valid (e.g. fully\n    # committed margin) and is handled by affordability/risk gates downstream.\n    if equity <= 0:\n        raise RuntimeError("non-positive account equity snapshot")\n    if available < 0:\n        raise RuntimeError("negative available collateral")
 
     state = {key: data.get(key) for key in _FIELDS}
     state["equity"] = equity
