@@ -1019,6 +1019,13 @@ class KuCoinClient:
         # ══════════════════════════════════════════════════════════════
 
         submitted_oid = body["clientOid"]
+        registry = getattr(self, "_order_registry", None)
+        managed_order = None
+        if registry is not None and submitted_oid.startswith("bgx7-"):
+            managed_order, _created = registry.get_or_create(submitted_oid, symbol, side, float(contracts))
+            if managed_order.state == OrderState.CREATED:
+                managed_order.transition(OrderState.SUBMITTING, source="LOCAL")
+
         post_options = {"single_attempt": True} if single_submission and not reduce_only else {}
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
@@ -1034,6 +1041,12 @@ class KuCoinClient:
                 order_id = data["orderId"]
 
         if order_id:
+            if registry is not None and managed_order is not None:
+                registry.index_order_id(str(order_id), submitted_oid)
+                try:
+                    managed_order.transition(OrderState.SUBMITTED, order_id=str(order_id), source="REST")
+                except InvalidTransition as exc:
+                    log.warning("[ORDER_REGISTRY_ACK] clientOid=%s orderId=%s conflict=%s", submitted_oid, order_id, exc)
             # ══════════════════════════════════════════════════════
             # GAP DE OBSERVABILIDADE CORRIGIDO
             #
