@@ -60,7 +60,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 continue
             rounded = client._round_price(price, symbol)
             below = long if kind == "SL" else not long
-            if (_number(rounded) >= reference if below else _number(rounded) <= reference):
+            # A break-even SL is intentionally allowed at the position entry.\n            # Validate protective side against entry for ordinary stops, while\n            # permitting equality at entry; mark price may already be beyond BE.\n            entry = _number(pos.get("entryPrice") or reference)\n            trigger = _number(rounded)\n            if kind == "SL":\n                invalid = (long and trigger > entry) or ((not long) and trigger < entry)\n            else:\n                invalid = (long and trigger <= entry) or ((not long) and trigger >= entry)\n            if invalid:
                 log.error("[NATIVE_STOP_REPAIR] symbol=%s kind=%s invalid_trigger_side", symbol, kind)
                 return False
             body = dict(symbol=kucoin_mod.to_kucoin(symbol), side="sell" if long else "buy",
