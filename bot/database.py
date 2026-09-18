@@ -60,7 +60,16 @@ async def init():
             log.info("✅ PostgreSQL conectado")
             return
         except Exception as e:
-            log.warning(f"PostgreSQL falhou ({e}) → usando SQLite")
+            # LIVE risk-critical state must never silently fall back to
+            # ephemeral SQLite when PostgreSQL was explicitly configured.
+            live_confirmed = os.environ.get("LIVE_TRADING_CONFIRMED", "") == "I_UNDERSTAND_THE_RISK"
+            paper = os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
+            if live_confirmed and not paper:
+                log.critical("PostgreSQL indisponível em LIVE — persistência fail-closed")
+                _conn = None
+                _is_pg = False
+                raise PersistenceError("configured PostgreSQL unavailable in LIVE") from e
+            log.warning(f"PostgreSQL falhou ({e}) → usando SQLite fora de LIVE")
     # SQLite fallback
     try:
         import aiosqlite, os as _os

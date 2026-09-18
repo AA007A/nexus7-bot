@@ -83,3 +83,24 @@ class NativeStopBreakEvenTests(unittest.IsolatedAsyncioTestCase):
         c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Sell", entryPrice=7.4, markPrice=7.2)])
         self.assertTrue(await set_stops(c, "AVAXUSDT", 7.4, 0, base.module(), Mock()))
         self.assertEqual(c._post.call_args.args[1]["stopPrice"], "7.4")
+
+
+class NativeStopTrailingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_profitable_trailing_stop_is_allowed_below_mark(self):
+        base = NativeStopRepairTests()
+        c = base.client("Buy")
+        c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Buy", entryPrice=7.4, markPrice=7.8)])
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.6, 0, base.module(), Mock()))
+
+    async def test_short_profitable_trailing_stop_is_allowed_above_mark(self):
+        base = NativeStopRepairTests()
+        c = base.client("Sell")
+        c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Sell", entryPrice=7.4, markPrice=7.0)])
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.2, 0, base.module(), Mock()))
+
+    async def test_crossed_long_stop_is_rejected(self):
+        base = NativeStopRepairTests()
+        c = base.client("Buy")
+        c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Buy", entryPrice=7.4, markPrice=7.6)])
+        self.assertFalse(await set_stops(c, "AVAXUSDT", 7.6, 0, base.module(), Mock()))
+        c._post.assert_not_called()

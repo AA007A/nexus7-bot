@@ -112,6 +112,13 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             if not self.balance_confirmed or self.balance <= 0:
                 log.warning("[BALANCE] new entries blocked: zero or unconfirmed balance")
                 return False
+            log.info(
+                "[ENTRY_RISK_STATE] drawdown=%.2f%% configured_limit=%.2f%% entry_authorization=%s override=%s",
+                float(self.drawdown) * 100.0,
+                float(cfg.MAX_DRAWDOWN) * 100.0,
+                "BLOCK_DRAWDOWN" if (self.drawdown >= cfg.MAX_DRAWDOWN and not _risk_override_enabled()) else "ALLOW",
+                _risk_override_enabled(),
+            )
             if self.drawdown >= cfg.MAX_DRAWDOWN:
                 if not _risk_override_enabled():
                     log.error(
