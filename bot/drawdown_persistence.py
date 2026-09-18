@@ -10,11 +10,13 @@ from __future__ import annotations
 import math
 
 from bot import database as db
-from bot import hwm_provenance\nfrom bot import hwm_namespace
+from bot import hwm_provenance
+from bot import hwm_namespace
 from bot.atomic_key_value import save_key_values_atomic
 from bot.logger import log
 
-LEGACY_DURABLE_EQUITY_PEAK_KEY = "risk:account_equity_peak:v1"\nDURABLE_EQUITY_PEAK_KEY = hwm_namespace.equity_peak_key()
+LEGACY_DURABLE_EQUITY_PEAK_KEY = "risk:account_equity_peak:v1"
+DURABLE_EQUITY_PEAK_KEY = hwm_namespace.equity_peak_key()
 _CACHE_ATTR = "_durable_account_equity_peak"
 _INCIDENT_BAD_PEAK = 82_894_351_780.2826
 _INCIDENT_LAST_GOOD_PEAK = 28.7914
