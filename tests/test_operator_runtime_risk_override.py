@@ -77,3 +77,10 @@ class OperatorRuntimeRiskOverrideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DrawdownTelemetryTests(unittest.TestCase):
+    def test_config_accepts_fifty_percent_drawdown(self):
+        from bot.config import cfg
+        self.assertGreater(cfg.MAX_DRAWDOWN, 0)
+        self.assertLessEqual(cfg.MAX_DRAWDOWN, 1.0)
