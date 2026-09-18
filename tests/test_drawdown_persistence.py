@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot import database as db
 from bot import hwm_provenance
+from bot import hwm_namespace
 from bot.drawdown_persistence import (
     DURABLE_EQUITY_PEAK_KEY,
     rebase_real_account_peak_for_external_flow,
@@ -29,7 +30,7 @@ class DurableDrawdownPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0][0], DURABLE_EQUITY_PEAK_KEY)
         self.assertTrue(math.isclose(float(items[0][1]), expected_peak, rel_tol=0.0, abs_tol=1e-9))
-        self.assertEqual(items[1][0], hwm_provenance.HWM_PROVENANCE_KEY)
+        self.assertEqual(items[1][0], hwm_namespace.provenance_key())
         payload = json.loads(items[1][1])
         self.assertEqual(payload["reason"], expected_reason)
         self.assertTrue(math.isclose(payload["new_peak"], expected_peak, rel_tol=0.0, abs_tol=1e-9))
