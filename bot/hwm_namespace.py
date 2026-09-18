@@ -26,7 +26,7 @@ def hwm_namespace() -> str:
     env = _clean(os.environ.get("RAILWAY_ENVIRONMENT_NAME") or os.environ.get("RAILWAY_ENVIRONMENT"), "unknown")
     account = account_fingerprint()
     authority = database_authority_fingerprint()
-    return f"{HWM_NAMESPACE_VERSION}:production={env}:exchange=kucoin:account={account}:db={authority}"
+    return f"{HWM_NAMESPACE_VERSION}:environment={env}:exchange=kucoin:account={account}:db={authority}"
 
 
 def equity_peak_key() -> str:
