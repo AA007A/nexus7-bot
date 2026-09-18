@@ -66,9 +66,11 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             entry = _number(pos.get("entryPrice") or reference)
             trigger = _number(rounded)
             if kind == "SL":
-                invalid = (long and trigger > entry) or ((not long) and trigger < entry)
+                # Validate against current mark so BE and profitable trailing
+                # stops are both valid while already-crossed stops fail closed.
+                invalid = (long and trigger >= reference) or ((not long) and trigger <= reference)
             else:
-                invalid = (long and trigger <= entry) or ((not long) and trigger >= entry)
+                invalid = (long and trigger <= reference) or ((not long) and trigger >= reference)
             if invalid:
                 log.error("[NATIVE_STOP_REPAIR] symbol=%s kind=%s invalid_trigger_side", symbol, kind)
                 return False
