@@ -67,3 +67,19 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
         m=self.module(); m.PAPER_TRADE=True
         self.assertFalse(await set_stops(c,"AVAXUSDT",7.3,0,m,Mock()))
         c._post.assert_not_called()
+
+
+class NativeStopBreakEvenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_break_even_stop_is_allowed_when_mark_above_entry(self):
+        base = NativeStopRepairTests()
+        c = base.client("Buy")
+        c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Buy", entryPrice=7.4, markPrice=7.6)])
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.4, 0, base.module(), Mock()))
+        self.assertEqual(c._post.call_args.args[1]["stopPrice"], "7.4")
+
+    async def test_short_break_even_stop_is_allowed_when_mark_below_entry(self):
+        base = NativeStopRepairTests()
+        c = base.client("Sell")
+        c.get_positions = AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side="Sell", entryPrice=7.4, markPrice=7.2)])
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.4, 0, base.module(), Mock()))
+        self.assertEqual(c._post.call_args.args[1]["stopPrice"], "7.4")
