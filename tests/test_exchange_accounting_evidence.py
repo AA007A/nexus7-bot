@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from bot.exchange_accounting_evidence import (
-    collect, schedule, audit, _classify_origin, _opening_fill_order_ids,
+    collect, schedule, audit, collect_ledger, audit_ledger, _classify_origin, _opening_fill_order_ids,
 )
 
 
@@ -101,3 +101,49 @@ class AccountingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(origin, 'UNKNOWN_UNATTRIBUTED')
         self.assertEqual(reason, 'ORDER_IDENTITY_LOOKUP_UNCONFIRMED')
+
+
+class LedgerAccountingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ledger_paginates_by_offset_and_preserves_zero_fee(self):
+        client = SimpleNamespace(_get=AsyncMock(side_effect=[
+            {'dataList': [{'offset': 20, 'time': 2, 'type': 'RealisedPNL', 'amount': '-1.2', 'fee': '0'}], 'hasMore': True},
+            {'dataList': [{'offset': 10, 'time': 3, 'type': 'TransferIn', 'amount': '5'}], 'hasMore': False},
+        ]))
+        rows = await collect_ledger(client, 1, 4)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['fee'], '0')
+        self.assertEqual(client._get.await_args_list[1].kwargs['params']['offset'], 20)
+        for call in client._get.await_args_list:
+            self.assertEqual(call.args[0], '/api/v1/transaction-history')
+            self.assertTrue(call.kwargs['auth'])
+
+    async def test_ledger_rejects_window_over_24_hours(self):
+        client = SimpleNamespace(_get=AsyncMock())
+        with self.assertRaises(ValueError):
+            await collect_ledger(client, 1, 86400002)
+        client._get.assert_not_awaited()
+
+    async def test_ledger_rejects_rows_outside_window(self):
+        client = SimpleNamespace(_get=AsyncMock(return_value={
+            'dataList': [{'offset': 1, 'time': 9}], 'hasMore': False,
+        }))
+        with self.assertRaises(ValueError):
+            await collect_ledger(client, 1, 4)
+
+    async def test_ledger_stalled_pagination_fails_closed(self):
+        client = SimpleNamespace(_get=AsyncMock(side_effect=[
+            {'dataList': [{'offset': 20, 'time': 2}], 'hasMore': True},
+            {'dataList': [{'offset': 20, 'time': 2}], 'hasMore': True},
+        ]))
+        with self.assertRaises(ValueError):
+            await collect_ledger(client, 1, 4)
+
+    async def test_ledger_failed_persistence_never_logs_durable_receipt(self):
+        with patch('bot.exchange_accounting_evidence.collect_ledger', new_callable=AsyncMock, return_value=[{'offset': '1', 'time': 2}]), \
+             patch('bot.exchange_accounting_evidence.db.load_key_value', new_callable=AsyncMock, return_value=None), \
+             patch('bot.exchange_accounting_evidence.db.save_key_value', new_callable=AsyncMock, return_value=False), \
+             patch('bot.exchange_accounting_evidence.log') as log:
+            await audit_ledger(SimpleNamespace(client=None))
+            self.assertFalse(log.info.called)
+            self.assertTrue(log.warning.called)
+            self.assertIn('complete=false', log.warning.call_args.args[0])
