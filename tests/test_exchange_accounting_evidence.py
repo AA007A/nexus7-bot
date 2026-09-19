@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from bot.exchange_accounting_evidence import (
-    collect, schedule, audit, collect_ledger, audit_ledger, _classify_origin, _opening_fill_order_ids,
+    collect, schedule, audit, collect_ledger, audit_ledger, cashflow_drawdown_shadow, _classify_origin, _opening_fill_order_ids,
 )
 
 
@@ -147,3 +147,45 @@ class LedgerAccountingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(log.info.called)
             self.assertTrue(log.warning.called)
             self.assertIn('complete=false', log.warning.call_args.args[0])
+
+
+class CashflowDrawdownShadowTests(unittest.TestCase):
+    def test_deposit_before_peak_does_not_rebase_existing_peak(self):
+        out = cashflow_drawdown_shadow([
+            {'offset': 1, 'time': 1000, 'type': 'TransferIn', 'amount': '38.16805178', 'fee': '0'},
+            {'offset': 2, 'time': 2000, 'type': 'RealisedPNL', 'amount': '-9', 'fee': '0'},
+        ], 20.6452, 44.6737, peak_recorded_ms=3000)
+        self.assertAlmostEqual(out['shadow_peak'], 44.6737)
+        self.assertAlmostEqual(out['post_peak_external_net'], 0.0)
+        self.assertAlmostEqual(out['external_net'], 38.16805178)
+        self.assertAlmostEqual(out['realised_pnl'], -9.0)
+
+    def test_deposit_after_peak_adds_to_shadow_peak(self):
+        out = cashflow_drawdown_shadow([
+            {'offset': 1, 'time': 4000, 'type': 'TransferIn', 'amount': '10', 'fee': '0'},
+        ], 40, 50, peak_recorded_ms=3000)
+        self.assertAlmostEqual(out['shadow_peak'], 60.0)
+        self.assertAlmostEqual(out['shadow_drawdown'], 1/3)
+
+    def test_withdrawal_after_peak_reduces_shadow_peak_but_not_below_equity(self):
+        out = cashflow_drawdown_shadow([
+            {'offset': 1, 'time': 4000, 'type': 'TransferOut', 'amount': '30', 'fee': '0'},
+        ], 25, 50, peak_recorded_ms=3000)
+        self.assertAlmostEqual(out['shadow_peak'], 25.0)
+        self.assertAlmostEqual(out['shadow_drawdown'], 0.0)
+
+    def test_realised_pnl_never_rebases_peak(self):
+        out = cashflow_drawdown_shadow([
+            {'offset': 1, 'time': 4000, 'type': 'RealisedPNL', 'amount': '-20', 'fee': '1.25'},
+        ], 30, 50, peak_recorded_ms=3000)
+        self.assertAlmostEqual(out['shadow_peak'], 50.0)
+        self.assertAlmostEqual(out['realised_pnl'], -20.0)
+        self.assertAlmostEqual(out['fee_observed_not_applied'], 1.25)
+
+    def test_duplicate_offset_is_deduped_and_conflict_fails_closed(self):
+        row = {'offset': 1, 'time': 1000, 'type': 'TransferIn', 'amount': '10'}
+        out = cashflow_drawdown_shadow([row, dict(row)], 20, 20, peak_recorded_ms=2000)
+        self.assertEqual(out['rows'], 1)
+        bad = dict(row, amount='11')
+        with self.assertRaises(ValueError):
+            cashflow_drawdown_shadow([row, bad], 20, 20, peak_recorded_ms=2000)

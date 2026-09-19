@@ -86,6 +86,50 @@ async def collect_ledger(client, start_ms, end_ms):
     raise ValueError('ledger coverage exceeds budget')
 
 
+def cashflow_drawdown_shadow(rows, current_equity, persisted_peak, peak_recorded_ms=None):
+    """Pure diagnostic: cash-flow-adjust a persisted HWM without granting authority."""
+    current_equity = float(current_equity)
+    persisted_peak = float(persisted_peak)
+    if current_equity <= 0 or persisted_peak <= 0:
+        raise ValueError('equity and peak must be positive')
+    deduped = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('offset') is None:
+            raise ValueError('ledger row missing offset')
+        token = str(row['offset'])
+        if token in deduped and deduped[token] != row:
+            raise ValueError('conflicting duplicate ledger row across windows')
+        deduped[token] = row
+    ordered = sorted(deduped.values(), key=lambda r: (int(r.get('time', 0) or 0), int(r['offset'])))
+    external_net = 0.0
+    realised = 0.0
+    fee_observed = 0.0
+    post_peak_external_net = 0.0
+    for row in ordered:
+        kind = str(row.get('type') or '')
+        amount = float(row.get('amount', 0) or 0)
+        fee_observed += float(row.get('fee', 0) or 0)
+        if kind == 'TransferIn':
+            signed = abs(amount)
+            external_net += signed
+            if peak_recorded_ms is not None and int(row.get('time', 0) or 0) > peak_recorded_ms:
+                post_peak_external_net += signed
+        elif kind == 'TransferOut':
+            signed = -abs(amount)
+            external_net += signed
+            if peak_recorded_ms is not None and int(row.get('time', 0) or 0) > peak_recorded_ms:
+                post_peak_external_net += signed
+        elif kind == 'RealisedPNL':
+            realised += amount
+    shadow_peak = max(current_equity, persisted_peak + post_peak_external_net)
+    shadow_drawdown = max(0.0, (shadow_peak - current_equity) / shadow_peak)
+    return {
+        'rows': len(ordered), 'external_net': external_net, 'realised_pnl': realised,
+        'fee_observed_not_applied': fee_observed, 'post_peak_external_net': post_peak_external_net,
+        'shadow_peak': shadow_peak, 'shadow_drawdown': shadow_drawdown,
+    }
+
+
 async def audit_ledger(engine):
     from bot.durable_daily_stop import state_key
     end = int(time.time() * 1000)
@@ -93,9 +137,14 @@ async def audit_ledger(engine):
     windows = [(end - 48 * 3600000, end - 24 * 3600000),
                (end - 24 * 3600000, end)]
     try:
-        rows = []
+        rows_by_offset = {}
         for start_ms, end_ms in windows:
-            rows.extend(await asyncio.wait_for(collect_ledger(engine.client, start_ms, end_ms), timeout=20))
+            for row in await asyncio.wait_for(collect_ledger(engine.client, start_ms, end_ms), timeout=20):
+                token = str(row['offset'])
+                if token in rows_by_offset and rows_by_offset[token] != row:
+                    raise ValueError('conflicting duplicate ledger row across windows')
+                rows_by_offset[token] = row
+        rows = list(rows_by_offset.values())
         for row in rows:
             key = state_key('ledger') + ':' + hashlib.sha256(str(row['offset']).encode()).hexdigest()[:24]
             receipt = dict(row, source='KUCOIN_FUTURES_LEDGER')
@@ -108,6 +157,29 @@ async def audit_ledger(engine):
                      row.get('time','NA'), row.get('type','NA'), row.get('amount','NA'), row.get('fee','NA'),
                      row.get('accountEquity','NA'), row.get('status','NA'), row.get('offset','NA'), row.get('currency','NA'))
         log.info('[ACCOUNT_LEDGER_COVERAGE] start_ms=%s end_ms=%s rows=%s complete=true scope=FUTURES_LEDGER execution_effect=NONE', windows[0][0], windows[-1][1], len(rows))
+
+        # Shadow-only drawdown reconstruction. It reads authenticated account equity
+        # and durable HWM provenance but never writes risk state or authorizes entry.
+        from datetime import datetime
+        from bot import drawdown_persistence, hwm_namespace
+        overview = await engine.client._get('/api/v1/account-overview', params={'currency': 'USDT'}, auth=True)
+        if not isinstance(overview, dict) or overview.get('accountEquity') is None:
+            raise ValueError('account overview unconfirmed')
+        current_equity = float(overview['accountEquity'])
+        raw_peak = await db.load_key_value(drawdown_persistence.DURABLE_EQUITY_PEAK_KEY, strict=True)
+        raw_provenance = await db.load_key_value(hwm_namespace.provenance_key(), strict=True)
+        if raw_peak is None or raw_provenance is None:
+            raise db.PersistenceError('durable HWM/provenance missing')
+        provenance = json.loads(raw_provenance)
+        recorded_at = str(provenance.get('recorded_at') or '')
+        peak_recorded_ms = int(datetime.fromisoformat(recorded_at.replace('Z', '+00:00')).timestamp() * 1000)
+        shadow = cashflow_drawdown_shadow(rows, current_equity, float(raw_peak), peak_recorded_ms)
+        log.warning('[CASHFLOW_DRAWDOWN_SHADOW] equity=%.8f persisted_peak=%.8f shadow_peak=%.8f nominal_drawdown=%.4f%% shadow_drawdown=%.4f%% external_net=%.8f post_peak_external_net=%.8f realised_pnl=%.8f ledger_fee_observed=%.8f rows=%s authority=false execution_effect=NONE',
+                    current_equity, float(raw_peak), shadow['shadow_peak'],
+                    max(0.0, (float(raw_peak)-current_equity)/float(raw_peak))*100.0,
+                    shadow['shadow_drawdown']*100.0, shadow['external_net'],
+                    shadow['post_peak_external_net'], shadow['realised_pnl'],
+                    shadow['fee_observed_not_applied'], shadow['rows'])
     except Exception as exc:
         log.warning('[ACCOUNT_LEDGER_COVERAGE] complete=false result=UNCONFIRMED error=%s execution_effect=NONE', type(exc).__name__)
 
