@@ -50,6 +50,68 @@ async def collect(client, start_ms, end_ms):
     raise ValueError('history incomplete')
 
 
+async def collect_ledger(client, start_ms, end_ms):
+    """Read-only KuCoin Futures ledger evidence for a <=24h window."""
+    if not 0 < end_ms - start_ms <= 86400000:
+        raise ValueError('invalid ledger window')
+    rows, offset = {}, None
+    for _ in range(100):
+        params = {'currency': 'USDT', 'startAt': start_ms, 'endAt': end_ms,
+                  'maxCount': 50, 'forward': False}
+        if offset is not None:
+            params['offset'] = offset
+        data = await client._get('/api/v1/transaction-history', params=params, auth=True)
+        if not isinstance(data, dict) or not isinstance(data.get('dataList'), list):
+            raise ValueError('ledger response unconfirmed')
+        items = data['dataList']
+        for row in items:
+            if not isinstance(row, dict) or row.get('offset') is None:
+                raise ValueError('ledger missing offset')
+            timestamp = int(row.get('time', 0) or 0)
+            if not start_ms <= timestamp <= end_ms:
+                raise ValueError('ledger row outside requested window')
+            safe = {k: row[k] for k in ('time','type','amount','fee','accountEquity','status','remark','offset','currency') if k in row}
+            token = str(row['offset'])
+            if token in rows and rows[token] != safe:
+                raise ValueError('conflicting duplicate ledger row')
+            rows[token] = safe
+        if data.get('hasMore') is False:
+            return list(rows.values())
+        if not items:
+            raise ValueError('ledger pagination stalled')
+        next_offset = min(int(row['offset']) for row in items)
+        if offset is not None and next_offset == offset:
+            raise ValueError('ledger offset stalled')
+        offset = next_offset
+    raise ValueError('ledger coverage exceeds budget')
+
+
+async def audit_ledger(engine):
+    from bot.durable_daily_stop import state_key
+    end = int(time.time() * 1000)
+    # KuCoin transaction-history permits at most one day per query.
+    windows = [(end - 48 * 3600000, end - 24 * 3600000),
+               (end - 24 * 3600000, end)]
+    try:
+        rows = []
+        for start_ms, end_ms in windows:
+            rows.extend(await asyncio.wait_for(collect_ledger(engine.client, start_ms, end_ms), timeout=20))
+        for row in rows:
+            key = state_key('ledger') + ':' + hashlib.sha256(str(row['offset']).encode()).hexdigest()[:24]
+            receipt = dict(row, source='KUCOIN_FUTURES_LEDGER')
+            encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
+            if await db.load_key_value(key, strict=True) == encoded:
+                continue
+            if await db.save_key_value(key, encoded, strict=True) is not True:
+                raise db.PersistenceError('ledger persistence unconfirmed')
+            log.info('[ACCOUNT_LEDGER_EVIDENCE] time=%s type=%s amount=%s fee=%s account_equity=%s status=%s offset=%s currency=%s source=KUCOIN_FUTURES_LEDGER durable=true execution_effect=NONE',
+                     row.get('time','NA'), row.get('type','NA'), row.get('amount','NA'), row.get('fee','NA'),
+                     row.get('accountEquity','NA'), row.get('status','NA'), row.get('offset','NA'), row.get('currency','NA'))
+        log.info('[ACCOUNT_LEDGER_COVERAGE] start_ms=%s end_ms=%s rows=%s complete=true scope=FUTURES_LEDGER execution_effect=NONE', windows[0][0], windows[-1][1], len(rows))
+    except Exception as exc:
+        log.warning('[ACCOUNT_LEDGER_COVERAGE] complete=false result=UNCONFIRMED error=%s execution_effect=NONE', type(exc).__name__)
+
+
 async def _load_lineage_for_opening_orders(opening_order_ids, row):
     from bot.post_trade_forensics import _lineage_key
     if not isinstance(opening_order_ids, list) or len(opening_order_ids) != 1:
@@ -246,4 +308,10 @@ def schedule(engine):
     if now < getattr(engine, '_accounting_evidence_next', 0):
         return
     engine._accounting_evidence_next = now + 600
-    engine._accounting_evidence_task = asyncio.create_task(audit(engine))
+    engine._accounting_evidence_task = asyncio.create_task(_audit_all(engine))
+
+
+async def _audit_all(engine):
+    # Both collectors are passive/read-only and never authorize execution.
+    await audit(engine)
+    await audit_ledger(engine)
