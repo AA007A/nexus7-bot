@@ -25,7 +25,7 @@ def _matches(order, body):
             _order_active(order)
             and _normalized_symbol(order.get("symbol", "")) == _normalized_symbol(body["symbol"])
             and str(order.get("side", "")).lower() == body["side"]
-            and order.get("closeOrder") is True
+            and (order.get("closeOrder") is True or order.get("reduceOnly") is True)
             and str(order.get("stop", "")).lower() == body["stop"]
             and str(order.get("stopPriceType", "")).upper() == body["stopPriceType"]
             and math.isclose(_number(order.get("stopPrice")), float(body["stopPrice"]), rel_tol=1e-12)
