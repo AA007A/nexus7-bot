@@ -39,6 +39,8 @@ _HORIZONS = ((900, "p15_net_pct"), (1800, "p30_net_pct"),
              (14400, "p240_net_pct"))
 _RECORDED_KEYS: set[str] = set()
 _NEAR_MISS_LOGGED: set[str] = set()
+_FUNNEL = {"nexus_total": 0, "nexus_approved": 0, "nexus_rejected": 0}
+_FUNNEL_LAST_LOG_MONO = 0.0
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -338,15 +340,32 @@ async def _record(engine, sig, decision, log) -> None:
     inserted = await db._exec(sql, params)
     _RECORDED_KEYS.add(key)
     if inserted:
+        global _FUNNEL_LAST_LOG_MONO
+        _FUNNEL["nexus_total"] += 1
+        _FUNNEL["nexus_approved" if approved else "nexus_rejected"] += 1
+        compact_reason = " ".join(str(reason).split())[:240]
         log.info(
             "[OPPORTUNITY_AUDIT] candidate=%s symbol=%s side=%s approved=%s "
-            "blocker=%s strategy_score=%.1f nexus_score=%.1f cost=%.3f%% "
-            "entry=%.8f execution_effect=NONE",
+            "blocker=%s strategy_score=%.1f nexus_score=%.1f nexus_confidence=%.3f "
+            "nexus_regime=%s reason=%s cost=%.3f%% entry=%.8f "
+            "decision_effect=NONE execution_effect=NONE",
             key, sig.symbol, sig.direction, bool(approved), blocker,
             _finite(getattr(sig, "score", 0.0)),
             _finite(getattr(decision, "setup_quality", 0.0)),
-            estimated_cost, _finite(sig.entry),
+            _finite(getattr(decision, "confidence", 0.0)),
+            str(getattr(decision, "market_regime", "UNKNOWN")),
+            compact_reason, estimated_cost, _finite(sig.entry),
         )
+        now_mono = time.monotonic()
+        if now_mono - _FUNNEL_LAST_LOG_MONO >= 60.0:
+            _FUNNEL_LAST_LOG_MONO = now_mono
+            log.info(
+                "[DECISION_FUNNEL] nexus_total=%d nexus_approved=%d nexus_rejected=%d "
+                "scope=process_lifetime telemetry_only=true decision_effect=NONE "
+                "execution_effect=NONE",
+                _FUNNEL["nexus_total"], _FUNNEL["nexus_approved"],
+                _FUNNEL["nexus_rejected"],
+            )
         if structure_conflict:
             log.info(
                 "[NEXUS_STRUCTURE_CONFLICT_SHADOW] symbol=%s side=%s class=%s "
