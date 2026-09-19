@@ -1,9 +1,9 @@
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from bot.accounting_fill_link import fills, reconcile
+from bot.accounting_fill_link import fills, reconcile, recent_fills
 
 
 class FillLinkTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +32,31 @@ class FillLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['opening_order_ids'], ['open'])
         self.assertEqual(result['closing_order_ids'], ['native-stop'])
         self.assertEqual(result['contracts'], '2')
+        self.assertEqual(client._get.call_args.args[0], '/api/v1/fills')
+
+    async def test_recent_fills_fast_path_requires_complete_exchange_accounting(self):
+        now_ms = 1_800_000_000_000
+        row = dict(self.row, openTime=now_ms-10000, closeTime=now_ms,
+                   openPrice='100', closePrice='90', tradeFee='0.12')
+        recent = copy.deepcopy(self.executions)
+        recent[0]['tradeTime'] = (now_ms-10000) * 1000000
+        recent[1]['tradeTime'] = now_ms * 1000000
+        client = SimpleNamespace(_get=AsyncMock(return_value=recent))
+        with patch('time.time', return_value=now_ms/1000):
+            result = await recent_fills(client, row)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(client._get.call_args.args[0], '/api/v1/recentFills')
+
+    async def test_incomplete_recent_fills_falls_back_to_paginated_history(self):
+        now_ms = 1_800_000_000_000
+        row = dict(self.row, openTime=now_ms-10000, closeTime=now_ms)
+        partial = copy.deepcopy(self.executions[:1])
+        partial[0]['tradeTime'] = (now_ms-10000) * 1000000
+        history = dict(currentPage=1, totalPage=1, totalNum=2, items=self.executions)
+        client = SimpleNamespace(_get=AsyncMock(side_effect=[partial, history]))
+        with patch('time.time', return_value=now_ms/1000):
+            result = await fills(client, row)
+        self.assertEqual(len(result), 2)
         self.assertEqual(client._get.call_args.args[0], '/api/v1/fills')
 
     async def test_external_increase_never_attributed(self):
