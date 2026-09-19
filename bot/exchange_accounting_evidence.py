@@ -130,12 +130,45 @@ def cashflow_drawdown_shadow(rows, current_equity, persisted_peak, peak_recorded
     }
 
 
+def ledger_windows(end_ms, lookback_days=14):
+    """Return contiguous <=24h windows for passive historical reconciliation."""
+    days = int(lookback_days)
+    if days < 1 or days > 90:
+        raise ValueError('ledger lookback outside safety bounds')
+    day_ms = 86400000
+    start_ms = end_ms - days * day_ms
+    return [(cursor, min(cursor + day_ms, end_ms))
+            for cursor in range(start_ms, end_ms, day_ms)]
+
+
+def ledger_reconciliation_summary(rows):
+    """Classify ledger cash movements without inventing accounting semantics."""
+    deduped = {}
+    by_type = {}
+    fee_observed = 0.0
+    for row in rows:
+        if not isinstance(row, dict) or row.get('offset') is None:
+            raise ValueError('ledger row missing offset')
+        token = str(row['offset'])
+        if token in deduped and deduped[token] != row:
+            raise ValueError('conflicting duplicate ledger row across windows')
+        deduped[token] = row
+    for row in deduped.values():
+        kind = str(row.get('type') or 'UNKNOWN')
+        amount = float(row.get('amount', 0) or 0)
+        fee_observed += float(row.get('fee', 0) or 0)
+        slot = by_type.setdefault(kind, {'count': 0, 'amount': 0.0})
+        slot['count'] += 1
+        slot['amount'] += amount
+    return {'rows': len(deduped), 'by_type': by_type, 'fee_observed': fee_observed}
+
+
 async def audit_ledger(engine):
     from bot.durable_daily_stop import state_key
     end = int(time.time() * 1000)
-    # KuCoin transaction-history permits at most one day per query.
-    windows = [(end - 48 * 3600000, end - 24 * 3600000),
-               (end - 24 * 3600000, end)]
+    # KuCoin transaction-history permits at most one day per query. Use bounded
+    # daily windows so older transfers/PnL are visible without changing trading.
+    windows = ledger_windows(end, 14)
     try:
         rows_by_offset = {}
         for start_ms, end_ms in windows:
@@ -156,7 +189,16 @@ async def audit_ledger(engine):
             log.info('[ACCOUNT_LEDGER_EVIDENCE] time=%s type=%s amount=%s fee=%s account_equity=%s status=%s offset=%s currency=%s source=KUCOIN_FUTURES_LEDGER durable=true execution_effect=NONE',
                      row.get('time','NA'), row.get('type','NA'), row.get('amount','NA'), row.get('fee','NA'),
                      row.get('accountEquity','NA'), row.get('status','NA'), row.get('offset','NA'), row.get('currency','NA'))
-        log.info('[ACCOUNT_LEDGER_COVERAGE] start_ms=%s end_ms=%s rows=%s complete=true scope=FUTURES_LEDGER execution_effect=NONE', windows[0][0], windows[-1][1], len(rows))
+        summary = ledger_reconciliation_summary(rows)
+        type_summary = ','.join(
+            f"{kind}:count={values['count']}:amount={values['amount']:.8f}"
+            for kind, values in sorted(summary['by_type'].items())
+        )
+        log.info('[ACCOUNT_LEDGER_RECONCILIATION] start_ms=%s end_ms=%s days=%s rows=%s types=%s fee_observed=%.8f authority=false execution_effect=NONE',
+                 windows[0][0], windows[-1][1], len(windows), summary['rows'],
+                 type_summary or 'NONE', summary['fee_observed'])
+        log.info('[ACCOUNT_LEDGER_COVERAGE] start_ms=%s end_ms=%s rows=%s complete=true scope=FUTURES_LEDGER days=%s execution_effect=NONE',
+                 windows[0][0], windows[-1][1], len(rows), len(windows))
 
         # Shadow-only drawdown reconstruction. It reads authenticated account equity
         # and durable HWM provenance but never writes risk state or authorizes entry.
