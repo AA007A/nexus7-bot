@@ -24,8 +24,7 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
     def client(self, side="Buy"):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[dict(symbol="AVAXUSDT", size=30, side=side, entryPrice=7.4, markPrice=7.4)]),
-            _round_price=lambda price, symbol: str(price),
-            get_stop_orders=AsyncMock(return_value=[]),
+            _round_price=lambda price, symbol: str(price),\n            get_stop_orders=AsyncMock(return_value=[]),\n            get_instruments=lambda: {"AVAXUSDT": {"multiplier": "0.1", "lotSize": "1", "minQty": "1"}},
         )
         async def post(path, body, **kwargs):
             self.assertEqual(path, "/api/v1/orders")
@@ -56,13 +55,26 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
         async def post(path, body, **kwargs):
             native = dict(body, isActive=True)
             native.pop("closeOrder", None)
-            native["reduceOnly"] = True
-            accepted.append(native)
+            native["reduceOnly"] = True\n            native["size"] = 30\n            accepted.append(native)
             return {"orderId": "native"}
         c._post = AsyncMock(side_effect=post)
         c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
         self.assertTrue(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
         c._post.assert_awaited_once()
+
+    async def test_undersized_reduce_only_readback_fails_closed(self):
+        c = self.client()
+        accepted = []
+        async def post(path, body, **kwargs):
+            native = dict(body, isActive=True)
+            native.pop("closeOrder", None)
+            native["reduceOnly"] = True
+            native["size"] = 29
+            accepted.append(native)
+            return {"orderId": "native"}
+        c._post = AsyncMock(side_effect=post)
+        c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
+        self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
 
     async def test_readback_without_close_or_reduce_only_fails_closed(self):
         c = self.client()
