@@ -48,7 +48,8 @@ class PaperMutationTests(EngineFixture):
     async def test_live_protection_still_works(self):
         self.replace('bot.kucoin.PAPER_TRADE',False)
         self.replace('bot.kucoin.API_KEY','offline-test')
-        self.client.get_positions.return_value = [dict(symbol='TESTUSDT',size=1,side='Buy',markPrice=100)]
+        self.client.get_positions.return_value = [dict(symbol='TESTUSDT',size=1,sizeUnit='CONTRACTS',side='Buy',markPrice=100)]
+        self.client.get_instruments = lambda: {'TESTUSDT': {'multiplier': '1', 'lotSize': '1', 'minQty': '1'}}
         self.client.get_stop_orders = AsyncMock(return_value=[])
         async def confirm_native(path, body, **kwargs):
             self.assertEqual(path, '/api/v1/orders')
