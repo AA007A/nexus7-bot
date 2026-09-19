@@ -349,6 +349,17 @@ async def audit(engine):
         deadline = time.monotonic() + 60
         for row in rows:
             key = state_key('accounting') + ':' + hashlib.sha256(str(row['closeId']).encode()).hexdigest()[:24]
+            previous = await db.load_key_value(key, strict=True)
+            if previous:
+                try:
+                    prior = json.loads(previous)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    prior = {}
+                if (isinstance(prior, dict)
+                        and prior.get('origin_class') in ('BGX_CONFIRMED', 'MANUAL_EXTERNAL')
+                        and (prior.get('origin_class') == 'MANUAL_EXTERNAL'
+                             or prior.get('fills_reconciled') is True)):
+                    continue
             receipt = dict(row, source='KUCOIN_POSITION_HISTORY',
                            ownership='UNATTRIBUTED', fills_reconciled=False)
             try:
@@ -377,7 +388,6 @@ async def audit(engine):
             receipt['origin_reason'] = origin_reason
 
             encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
-            previous = await db.load_key_value(key, strict=True)
             if previous == encoded:
                 continue
             if await db.save_key_value(key, encoded, strict=True) is not True:
