@@ -9,7 +9,9 @@ import asyncio
 import math
 import uuid
 
-from bot.conditional_stop_protection import (read_stop_orders, _normalized_symbol, _order_active,\n    _instrument_info, _protective_order)\n
+from bot.conditional_stop_protection import (read_stop_orders, _normalized_symbol, _order_active,
+    _instrument_info, _protective_order)
+
 
 def _number(value):
     value = float(value or 0)
