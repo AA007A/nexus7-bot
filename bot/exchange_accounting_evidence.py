@@ -421,11 +421,16 @@ def schedule(engine):
     now = time.monotonic()
     if now < getattr(engine, '_accounting_evidence_next', 0):
         return
-    engine._accounting_evidence_next = now + 600
+    engine._accounting_evidence_next = now + 60
     engine._accounting_evidence_task = asyncio.create_task(_audit_all(engine))
 
 
 async def _audit_all(engine):
-    # Both collectors are passive/read-only and never authorize execution.
+    # Position accounting is intentionally polled every minute so newly closed
+    # positions can leave estimated state quickly. The expensive 14-day ledger
+    # remains on its original ten-minute cadence.
     await audit(engine)
-    await audit_ledger(engine)
+    now = time.monotonic()
+    if now >= getattr(engine, '_accounting_ledger_next', 0):
+        engine._accounting_ledger_next = now + 600
+        await audit_ledger(engine)
