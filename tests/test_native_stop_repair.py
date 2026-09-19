@@ -50,6 +50,33 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await set_stops(c, "AVAXUSDT", price, 0, self.module(), Mock()))
             c._post.assert_not_called()
 
+    async def test_reduce_only_equivalent_readback_confirms_without_close_order(self):
+        c = self.client()
+        accepted = []
+        async def post(path, body, **kwargs):
+            native = dict(body, isActive=True)
+            native.pop("closeOrder", None)
+            native["reduceOnly"] = True
+            accepted.append(native)
+            return {"orderId": "native"}
+        c._post = AsyncMock(side_effect=post)
+        c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+        c._post.assert_awaited_once()
+
+    async def test_readback_without_close_or_reduce_only_fails_closed(self):
+        c = self.client()
+        accepted = []
+        async def post(path, body, **kwargs):
+            native = dict(body, isActive=True)
+            native.pop("closeOrder", None)
+            native["reduceOnly"] = False
+            accepted.append(native)
+            return {"orderId": "native"}
+        c._post = AsyncMock(side_effect=post)
+        c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
+        self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+
     async def test_acknowledgement_without_readback_fails(self):
         c=self.client()
         c._post=AsyncMock(return_value={"orderId":"ack"})
