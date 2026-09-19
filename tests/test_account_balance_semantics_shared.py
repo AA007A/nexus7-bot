@@ -55,6 +55,7 @@ class AccountBalanceSemanticsSharedTests(unittest.IsolatedAsyncioTestCase):
             {"accountEquity": None, "availableBalance": "1"},
             {"accountEquity": "nan", "availableBalance": "1"},
             {"accountEquity": "10", "availableBalance": "-1"},
+            {"accountEquity": "0", "availableBalance": "0"},
         )
         for payload in bad_payloads:
             client = SimpleNamespace(_get=AsyncMock(return_value=payload))
