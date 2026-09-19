@@ -18,10 +18,90 @@ def symbol(value):
     return str(value).removesuffix('M').replace('XBT', 'BTC')
 
 
+def _safe_fill(item):
+    return {k: item[k] for k in ('tradeId', 'orderId', 'symbol', 'side',
+            'size', 'price', 'fee', 'feeCurrency', 'tradeTime', 'tradeType')}
+
+
+def _recent_complete(rows, row):
+    """Accept recentFills only when it independently proves full position coverage."""
+    if not rows:
+        return False
+    try:
+        start, end = int(row['openTime']), int(row['closeTime'])
+        direction = {'LONG': 'buy', 'SHORT': 'sell'}[row['side']]
+        ordered = sorted(rows, key=lambda f: (int(f['tradeTime']), str(f['tradeId'])))
+        balance = Decimal(0)
+        opening, closing = [], []
+        for i, fill in enumerate(ordered):
+            ts = int(fill['tradeTime']) // 1000000
+            if not start - 2000 <= ts <= end + 2000 or fill['symbol'] != row['symbol']:
+                return False
+            if fill['feeCurrency'] != row['settleCurrency'] or fill['tradeType'] != 'trade':
+                return False
+            size, price = number(fill['size']), number(fill['price'])
+            if size <= 0 or price <= 0 or fill['side'] not in ('buy', 'sell'):
+                return False
+            if fill['side'] == direction:
+                opening.append(fill)
+                balance += size
+            else:
+                closing.append(fill)
+                balance -= size
+            if balance < 0 or (balance == 0 and i != len(ordered) - 1):
+                return False
+        if balance != 0 or not opening or not closing:
+            return False
+        if abs(int(ordered[0]['tradeTime']) // 1000000 - start) > 2000:
+            return False
+        if abs(int(ordered[-1]['tradeTime']) // 1000000 - end) > 2000:
+            return False
+        for subset, field in ((opening, 'openPrice'), (closing, 'closePrice')):
+            qty = sum(number(x['size']) for x in subset)
+            avg = sum(number(x['size']) * number(x['price']) for x in subset) / qty
+            if abs(avg - number(row[field])) > Decimal('0.00000001'):
+                return False
+        fees = sum(number(x['fee']) for x in ordered)
+        return abs(fees - number(row['tradeFee'])) <= Decimal('0.00000001')
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
+
+async def recent_fills(client, row):
+    """Low-latency 24h fast path; incomplete evidence deliberately falls back."""
+    import time
+    start, end = int(row['openTime']), int(row['closeTime'])
+    now_ms = int(time.time() * 1000)
+    if end > now_ms + 5000 or end < now_ms - 24 * 3600000:
+        return None
+    data = await client._get('/api/v1/recentFills', params={'symbol': row['symbol']}, auth=True)
+    if not isinstance(data, list):
+        return None
+    found = {}
+    for item in data:
+        try:
+            safe = _safe_fill(item)
+            ts = int(safe['tradeTime']) // 1000000
+        except (KeyError, TypeError, ValueError):
+            return None
+        if start - 2000 <= ts <= end + 2000:
+            token = str(safe['tradeId'])
+            if not token or not safe['orderId']:
+                return None
+            if token in found and found[token] != safe:
+                return None
+            found[token] = safe
+    rows = sorted(found.values(), key=lambda x: (int(x['tradeTime']), str(x['tradeId'])))
+    return rows if _recent_complete(rows, row) else None
+
+
 async def fills(client, row):
     start, end = int(row['openTime']), int(row['closeTime'])
     if not 0 <= end - start <= 7 * 86400000:
         raise ValueError('unsupported fill window')
+    fast = await recent_fills(client, row)
+    if fast is not None:
+        return fast
     found = {}
     expected = None
     for page in range(1, 11):
@@ -39,8 +119,7 @@ async def fills(client, row):
         if expected != (total, count):
             raise ValueError('fills changed during pagination')
         for item in data['items']:
-            safe = {k: item[k] for k in ('tradeId', 'orderId', 'symbol', 'side',
-                    'size', 'price', 'fee', 'feeCurrency', 'tradeTime', 'tradeType')}
+            safe = _safe_fill(item)
             token = str(safe['tradeId'])
             if not token or not safe['orderId']:
                 raise ValueError('missing fill identity')
