@@ -57,6 +57,7 @@ class PaperMutationTests(EngineFixture):
             native = dict(body, isActive=True)
             native['size'] = 1
             self.client.get_stop_orders.return_value.append(native)
+            self.client._stop_orders_cache = (0, [])
             return {'orderId': 'offline-native'}
         self.client._post.side_effect = confirm_native
         self.assertTrue(await self.client.set_position_stops('TESTUSDT',sl=99.,tp=103.))
