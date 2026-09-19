@@ -9,8 +9,14 @@ import asyncio
 import math
 import uuid
 
-from bot.conditional_stop_protection import (read_stop_orders, _normalized_symbol, _order_active,
-    _instrument_info, _protective_order)
+from bot.conditional_stop_protection import (
+    _instrument_info,
+    _normalized_symbol,
+    _order_active,
+    _protective_order,
+    _to_base_size,
+    read_stop_orders,
+)
 
 
 def _number(value):
@@ -48,7 +54,6 @@ def _matches(order, body, position=None, instrument_info=None):
         position_qty = abs(_number(position.get("size")))
         if position_qty <= 0:
             return False
-        from bot.conditional_stop_protection import _to_base_size
         position_base = _to_base_size(
             position_qty, position.get("sizeUnit", "CONTRACTS"), instrument_info
         )
@@ -87,7 +92,6 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             # A break-even SL is intentionally allowed at the position entry.
             # Validate protective side against entry for ordinary stops, while
             # permitting equality at entry; mark price may already be beyond BE.
-            entry = _number(pos.get("entryPrice") or reference)
             trigger = _number(rounded)
             if kind == "SL":
                 # Validate against current mark so BE and profitable trailing
@@ -114,7 +118,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     if attempt:
                         await asyncio.sleep(0.25 * attempt)
                     orders = await read_stop_orders(client, symbol)
-                    if orders is not None and any(_matches(order, body) for order in orders):
+                    if orders is not None and any(_matches(order, body, pos, instrument_info) for order in orders):
                         confirmed = True
                         break
                 if not confirmed:
