@@ -86,11 +86,12 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.drift_classification, "ADVERSE_CHASE")
         self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
 
-    def test_long_lower_price_is_favorable_but_absolute_gate_unchanged(self):
+    def test_long_lower_price_is_favorable_and_does_not_stale_block(self):
         out = self._evaluate(side="LONG", bid=99.74, ask=99.75, max_drift=20)
         self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], -25.0, places=6)
         self.assertEqual(out.drift_classification, "FAVORABLE_IMPROVEMENT")
-        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+        self.assertNotIn("SIGNAL_PRICE_STALE", out.blockers)
+        self.assertTrue(out.allowed)
 
     def test_short_lower_price_is_adverse_chase(self):
         out = self._evaluate(side="SELL", bid=99.75, ask=99.76, max_drift=20)
@@ -98,11 +99,12 @@ class PreDispatchGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.drift_classification, "ADVERSE_CHASE")
         self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
 
-    def test_short_higher_price_is_favorable_but_absolute_gate_unchanged(self):
+    def test_short_higher_price_is_favorable_and_does_not_stale_block(self):
         out = self._evaluate(side="SHORT", bid=100.25, ask=100.26, max_drift=20)
         self.assertAlmostEqual(out.metrics["signed_signal_drift_bps"], 25.0, places=6)
         self.assertEqual(out.drift_classification, "FAVORABLE_IMPROVEMENT")
-        self.assertIn("SIGNAL_PRICE_STALE", out.blockers)
+        self.assertNotIn("SIGNAL_PRICE_STALE", out.blockers)
+        self.assertTrue(out.allowed)
 
     def test_within_absolute_drift_limit_still_passes(self):
         long_out = self._evaluate(side="BUY", bid=100.14, ask=100.15, max_drift=20)
