@@ -13,7 +13,6 @@ from bot.conditional_stop_protection import (
     _instrument_info,
     _normalized_symbol,
     _order_active,
-    _protective_order,
     _to_base_size,
     read_stop_orders,
 )
@@ -41,21 +40,23 @@ def _matches(order, body, position=None, instrument_info=None):
             return False
         if position is None:
             return False
-        qualifies, full_close, covered = _protective_order(
-            order, position, body["symbol"], instrument_info
-        )
-        if not qualifies:
-            return False
-        if full_close:
+        # closeOrder is full-side protection by exchange semantics and carries
+        # no quantity requirement. For a reduceOnly-only representation, this
+        # exact order must independently cover the entire remaining position.
+        # Do not reuse the SL-only protective-order price-direction predicate
+        # here: this readback function validates both SL and TP orders.
+        if order.get("closeOrder") is True:
             return True
-        # A reduceOnly representation is equivalent only when this exact stop
-        # independently covers the full remaining position. Do not aggregate
-        # unrelated stops for readback confirmation.
         position_qty = abs(_number(position.get("size")))
         if position_qty <= 0:
             return False
         position_base = _to_base_size(
             position_qty, position.get("sizeUnit", "CONTRACTS"), instrument_info
+        )
+        covered = _to_base_size(
+            order.get("size", order.get("qty", 0)),
+            order.get("sizeUnit", "CONTRACTS"),
+            instrument_info,
         )
         return position_base > 0 and covered + max(1e-12, position_base * 1e-9) >= position_base
     except (ValueError, TypeError, AttributeError):
