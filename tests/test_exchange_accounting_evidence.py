@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from bot.exchange_accounting_evidence import (
-    collect, schedule, audit, collect_ledger, audit_ledger, cashflow_drawdown_shadow, _classify_origin, _opening_fill_order_ids,
+    collect, schedule, audit, collect_ledger, audit_ledger, cashflow_drawdown_shadow, ledger_windows, ledger_reconciliation_summary, _classify_origin, _opening_fill_order_ids,
 )
 
 
@@ -147,6 +147,30 @@ class LedgerAccountingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(log.info.called)
             self.assertTrue(log.warning.called)
             self.assertIn('complete=false', log.warning.call_args.args[0])
+
+    def test_extended_ledger_windows_are_daily_contiguous_and_bounded(self):
+        windows = ledger_windows(14 * 86400000, 14)
+        self.assertEqual(len(windows), 14)
+        self.assertEqual(windows[0], (0, 86400000))
+        self.assertEqual(windows[-1], (13 * 86400000, 14 * 86400000))
+        for left, right in windows:
+            self.assertGreater(right, left)
+            self.assertLessEqual(right - left, 86400000)
+        with self.assertRaises(ValueError):
+            ledger_windows(86400000, 91)
+
+    def test_reconciliation_summary_classifies_types_without_netting_unknowns(self):
+        rows = [
+            {'offset': 1, 'type': 'TransferIn', 'amount': '38.1', 'fee': '0'},
+            {'offset': 2, 'type': 'RealisedPNL', 'amount': '-9', 'fee': '0.2'},
+            {'offset': 3, 'type': 'FundingFee', 'amount': '-1.5', 'fee': '0'},
+        ]
+        out = ledger_reconciliation_summary(rows)
+        self.assertEqual(out['rows'], 3)
+        self.assertAlmostEqual(out['by_type']['TransferIn']['amount'], 38.1)
+        self.assertAlmostEqual(out['by_type']['RealisedPNL']['amount'], -9.0)
+        self.assertAlmostEqual(out['by_type']['FundingFee']['amount'], -1.5)
+        self.assertAlmostEqual(out['fee_observed'], 0.2)
 
 
 class CashflowDrawdownShadowTests(unittest.TestCase):
