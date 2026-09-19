@@ -9,7 +9,13 @@ import asyncio
 import math
 import uuid
 
-from bot.conditional_stop_protection import read_stop_orders, _normalized_symbol, _order_active
+from bot.conditional_stop_protection import (
+    _instrument_info,
+    _normalized_symbol,
+    _order_active,
+    _to_base_size,
+    read_stop_orders,
+)
 
 
 def _number(value):
@@ -19,9 +25,9 @@ def _number(value):
     return value
 
 
-def _matches(order, body):
+def _matches(order, body, position=None, instrument_info=None):
     try:
-        return (
+        semantic_match = (
             _order_active(order)
             and _normalized_symbol(order.get("symbol", "")) == _normalized_symbol(body["symbol"])
             and str(order.get("side", "")).lower() == body["side"]
@@ -30,6 +36,29 @@ def _matches(order, body):
             and str(order.get("stopPriceType", "")).upper() == body["stopPriceType"]
             and math.isclose(_number(order.get("stopPrice")), float(body["stopPrice"]), rel_tol=1e-12)
         )
+        if not semantic_match:
+            return False
+        if position is None:
+            return False
+        # closeOrder is full-side protection by exchange semantics and carries
+        # no quantity requirement. For a reduceOnly-only representation, this
+        # exact order must independently cover the entire remaining position.
+        # Do not reuse the SL-only protective-order price-direction predicate
+        # here: this readback function validates both SL and TP orders.
+        if order.get("closeOrder") is True:
+            return True
+        position_qty = abs(_number(position.get("size")))
+        if position_qty <= 0:
+            return False
+        position_base = _to_base_size(
+            position_qty, position.get("sizeUnit", "CONTRACTS"), instrument_info
+        )
+        covered = _to_base_size(
+            order.get("size", order.get("qty", 0)),
+            order.get("sizeUnit", "CONTRACTS"),
+            instrument_info,
+        )
+        return position_base > 0 and covered + max(1e-12, position_base * 1e-9) >= position_base
     except (ValueError, TypeError, AttributeError):
         return False
 
@@ -53,6 +82,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         if reference <= 0:
             return False
         orders = await read_stop_orders(client, symbol)
+        instrument_info = _instrument_info(client, symbol)
         if orders is None:
             return False
         for kind, price in (("SL", sl), ("TP", tp)):
@@ -63,7 +93,6 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             # A break-even SL is intentionally allowed at the position entry.
             # Validate protective side against entry for ordinary stops, while
             # permitting equality at entry; mark price may already be beyond BE.
-            entry = _number(pos.get("entryPrice") or reference)
             trigger = _number(rounded)
             if kind == "SL":
                 # Validate against current mark so BE and profitable trailing
@@ -77,7 +106,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             body = dict(symbol=kucoin_mod.to_kucoin(symbol), side="sell" if long else "buy",
                         type="market", stop="down" if below else "up", stopPrice=rounded,
                         stopPriceType="MP", closeOrder=True, reduceOnly=True)
-            if not any(_matches(order, body) for order in orders):
+            if not any(_matches(order, body, pos, instrument_info) for order in orders):
                 body["clientOid"] = "bgx-stop-" + uuid.uuid4().hex[:30]
                 # Preserve this ID across transport retries. On an ambiguous
                 # response, the independent stop read below remains authority.
@@ -90,7 +119,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     if attempt:
                         await asyncio.sleep(0.25 * attempt)
                     orders = await read_stop_orders(client, symbol)
-                    if orders is not None and any(_matches(order, body) for order in orders):
+                    if orders is not None and any(_matches(order, body, pos, instrument_info) for order in orders):
                         confirmed = True
                         break
                 if not confirmed:
