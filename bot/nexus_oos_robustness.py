@@ -1,9 +1,13 @@
 """Robustness diagnostics for NEXUS OOS incremental-edge evidence.
 
-Research-only.  These helpers decompose an already leakage-safe candidate replay
+Research-only. These helpers decompose an already leakage-safe candidate replay
 without changing live thresholds, execution permissions, leverage, sizing or
-exchange state.  The objective is to expose concentration: a pooled uplift can
+exchange state. The objective is to expose concentration: a pooled uplift can
 look attractive while being driven by one symbol or one short market window.
+
+Robustness has BLOCK-ONLY promotion authority: it may prevent AI_EDGE_PROVEN,
+but can never authorize promotion by itself. Statistical evidence, historical
+context parity and all other promotion prerequisites still have to pass.
 """
 from __future__ import annotations
 
@@ -81,10 +85,6 @@ def analyze_robustness(symbol_reports: list[dict], *, temporal_folds: int = 4) -
     loo_positive = sum(1 for rep in leave_one_out.values() if rep.get("positive_uplift"))
     loo_ci_positive = sum(1 for rep in leave_one_out.values() if rep.get("ci_strictly_positive"))
 
-    # Descriptive stability flag, deliberately not a live/promotion authority.
-    # It asks for positive point-estimate uplift in every leave-one-symbol-out
-    # sample and at least 75% of chronological folds. CI stability is reported
-    # separately because subgroup sample sizes can be much smaller.
     required_positive_folds = ceil(0.75 * len(folds)) if folds else 0
     stable_point_estimate = bool(
         pooled
@@ -112,6 +112,54 @@ def analyze_robustness(symbol_reports: list[dict], *, temporal_folds: int = 4) -
             "leave_one_symbol_out_ci_strictly_positive": loo_ci_positive,
             "stable_positive_point_estimate": stable_point_estimate,
             "promotion_authority": False,
+            "promotion_role": "BLOCK_ONLY",
             "execution_effect": "NONE",
         },
     }
+
+
+def robustness_promotion_blockers(
+    robustness: dict,
+    *,
+    min_temporal_folds: int = 4,
+    min_temporal_positive_fraction: float = 0.75,
+    require_all_leave_one_symbol_out_positive: bool = True,
+) -> tuple[str, ...]:
+    """Return predeclared fail-closed robustness blockers.
+
+    These checks never authorize promotion. They only prevent a pooled result
+    from being promoted when it is temporally unstable, concentrated in one
+    symbol, or too incomplete to evaluate robustly.
+    """
+    if not 0.0 < float(min_temporal_positive_fraction) <= 1.0:
+        raise ValueError("min_temporal_positive_fraction must be in (0,1]")
+    if int(min_temporal_folds) < 2:
+        raise ValueError("min_temporal_folds must be >= 2")
+
+    summary = dict(robustness.get("summary") or {})
+    pooled = robustness.get("pooled")
+    blockers: list[str] = []
+
+    if not pooled:
+        blockers.append("ROBUSTNESS_EVIDENCE_INCOMPLETE")
+        return tuple(blockers)
+    if not bool(pooled.get("positive_uplift")):
+        blockers.append("ROBUSTNESS_POOLED_UPLIFT_NOT_POSITIVE")
+
+    fold_count = int(summary.get("temporal_folds_evaluated", 0) or 0)
+    fold_positive = int(summary.get("temporal_folds_positive_uplift", 0) or 0)
+    if fold_count < int(min_temporal_folds):
+        blockers.append("ROBUSTNESS_TEMPORAL_SAMPLE_INCOMPLETE")
+    else:
+        required = ceil(float(min_temporal_positive_fraction) * fold_count)
+        if fold_positive < required:
+            blockers.append("TEMPORAL_EDGE_UNSTABLE")
+
+    loo_count = int(summary.get("leave_one_symbol_out_evaluated", 0) or 0)
+    loo_positive = int(summary.get("leave_one_symbol_out_positive_uplift", 0) or 0)
+    if loo_count < 2:
+        blockers.append("SYMBOL_ROBUSTNESS_INCOMPLETE")
+    elif require_all_leave_one_symbol_out_positive and loo_positive != loo_count:
+        blockers.append("SYMBOL_CONCENTRATION_RISK")
+
+    return tuple(blockers)

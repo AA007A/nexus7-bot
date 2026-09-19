@@ -7,11 +7,29 @@ on:
       - "bot/nexus_oos_edge_gate.py"
       - "bot/nexus_oos_real_replay.py"
       - "bot/nexus_oos_real_replay_corrected.py"
+      - "bot/nexus_oos_replay.py"
+      - "bot/nexus_oos_portfolio.py"
+      - "bot/nexus_oos_public_batch.py"
       - "bot/nexus_oos_robustness.py"
-      - "bot/nexus_oos_robustness_replay.py"
       - "tests/test_nexus_oos_edge_gate.py"
       - "tests/test_nexus_oos_real_replay.py"
+      - "tests/test_nexus_oos_replay.py"
       - "tests/test_nexus_oos_replay_full_clock.py"
+      - "tests/test_nexus_oos_portfolio.py"
+      - "tests/test_nexus_oos_public_batch.py"
+      - "tests/test_nexus_oos_robustness.py"
+      - ".github/workflows/oos_real_replay.yml"
+  push:
+    branches: [main]
+    paths:
+      - "bot/nexus_oos_edge_gate.py"
+      - "bot/nexus_oos_real_replay.py"
+      - "bot/nexus_oos_real_replay_corrected.py"
+      - "bot/nexus_oos_replay.py"
+      - "bot/nexus_oos_portfolio.py"
+      - "bot/nexus_oos_public_batch.py"
+      - "bot/nexus_oos_robustness.py"
+      - "tests/test_nexus_oos_public_batch.py"
       - "tests/test_nexus_oos_robustness.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
@@ -20,7 +38,7 @@ jobs:
   replay:
     name: Real historical replay evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       PAPER_TRADE: "true"
       LIVE_TRADING_CONFIRMED: ""
@@ -37,26 +55,49 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Replay accounting, clock-parity and robustness unit tests
+      - name: Replay accounting, clock-parity, portfolio and robustness unit tests
         run: |
           python -m unittest tests.test_nexus_oos_edge_gate -v
           python -m unittest tests.test_nexus_oos_real_replay -v
+          python -m unittest tests.test_nexus_oos_replay -v
           python -m unittest tests.test_nexus_oos_replay_full_clock -v
+          python -m unittest tests.test_nexus_oos_portfolio -v
+          python -m unittest tests.test_nexus_oos_public_batch -v
           python -m unittest tests.test_nexus_oos_robustness -v
 
-      - name: Run real public-market OOS replay
+      - name: Run 12-symbol public-market OOS evidence batch
         run: |
-          python -m bot.nexus_oos_real_replay_corrected \
-            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
+          python -m bot.nexus_oos_public_batch \
+            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT ADAUSDT DOGEUSDT LINKUSDT AVAXUSDT DOTUSDT LTCUSDT NEARUSDT ATOMUSDT \
             --limit-15m 2500 \
-            --output artifacts/nexus_oos_real_replay.json
+            --output-dir artifacts/nexus_oos_public \
+            --bootstrap-samples 4000 \
+            --temporal-folds 4
 
-      - name: Run paired-bootstrap robustness replay
+      - name: Validate full-universe robustness evidence
         run: |
-          python -m bot.nexus_oos_robustness_replay \
-            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
-            --limit-15m 2500 \
-            --output artifacts/nexus_oos_robustness.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('artifacts/nexus_oos_public/nexus_oos_portfolio_report.json')
+          payload = json.loads(path.read_text())
+          requested = payload.get('requested_symbols') or []
+          summary = (payload.get('robustness') or {}).get('summary') or {}
+          evaluated = int(summary.get('symbols_evaluated', 0) or 0)
+          if evaluated != len(requested):
+              raise SystemExit(
+                  f'robustness universe mismatch: requested={len(requested)} evaluated={evaluated}'
+              )
+          if summary.get('promotion_role') != 'BLOCK_ONLY':
+              raise SystemExit('robustness promotion role drifted from BLOCK_ONLY')
+          print(json.dumps({
+              'requested_symbols': requested,
+              'robustness_symbols_evaluated': evaluated,
+              'robustness_blockers': payload.get('robustness_blockers'),
+              'robustness_summary': summary,
+          }, indent=2, sort_keys=True))
+          PY
 
       - name: Show evidence reports
         if: always()
@@ -64,29 +105,40 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          for name in ('nexus_oos_real_replay.json', 'nexus_oos_robustness.json'):
-              path = Path('artifacts') / name
+          paths = [
+              Path('artifacts/nexus_oos_public/nexus_oos_portfolio_report.json'),
+              Path('artifacts/nexus_oos_public/nexus_oos_robustness.json'),
+          ]
+          for path in paths:
               if not path.exists():
-                  print(f'{name}: MISSING')
+                  print(f'{path}: MISSING')
                   continue
               p = json.loads(path.read_text())
-              print(f'===== {name} =====')
-              if name == 'nexus_oos_real_replay.json':
+              print(f'===== {path.name} =====')
+              if path.name == 'nexus_oos_portfolio_report.json':
                   view = {
                       'status': p.get('status'),
                       'blockers': p.get('blockers'),
-                      'report': p.get('report'),
-                      'symbols': p.get('symbols'),
+                      'robustness_blockers': p.get('robustness_blockers'),
+                      'robustness_summary': (p.get('robustness') or {}).get('summary'),
+                      'portfolio_report': p.get('portfolio_report'),
+                      'requested_symbols': p.get('requested_symbols'),
+                      'successful_symbols': p.get('successful_symbols'),
+                      'failed_symbols': p.get('failed_symbols'),
+                      'historical_context_parity_complete': p.get('historical_context_parity_complete'),
+                      'bootstrap_unit': p.get('bootstrap_unit'),
+                      'dataset_sha256': p.get('dataset_sha256'),
                       'methodology': p.get('methodology'),
                   }
               else:
                   view = {
                       'status': p.get('status'),
-                      'historical_context_parity_complete': p.get('historical_context_parity_complete'),
-                      'symbols': p.get('symbols'),
+                      'blockers': p.get('blockers'),
+                      'requested_symbols': p.get('requested_symbols'),
+                      'successful_symbols': p.get('successful_symbols'),
                       'summary': (p.get('robustness') or {}).get('summary'),
-                      'pooled': (p.get('robustness') or {}).get('pooled'),
                       'promotion_authority': p.get('promotion_authority'),
+                      'promotion_role': p.get('promotion_role'),
                       'execution_effect': p.get('execution_effect'),
                   }
               print(json.dumps(view, indent=2, sort_keys=True))
@@ -98,6 +150,7 @@ jobs:
         with:
           name: nexus-oos-real-replay
           path: |
-            artifacts/nexus_oos_real_replay.json
-            artifacts/nexus_oos_robustness.json
+            artifacts/nexus_oos_public/nexus_oos_portfolio_candidates.csv
+            artifacts/nexus_oos_public/nexus_oos_portfolio_report.json
+            artifacts/nexus_oos_public/nexus_oos_robustness.json
           if-no-files-found: error
