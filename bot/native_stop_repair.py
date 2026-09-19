@@ -9,8 +9,7 @@ import asyncio
 import math
 import uuid
 
-from bot.conditional_stop_protection import read_stop_orders, _normalized_symbol, _order_active
-
+from bot.conditional_stop_protection import (read_stop_orders, _normalized_symbol, _order_active,\n    _instrument_info, _protective_order)\n
 
 def _number(value):
     value = float(value or 0)
@@ -19,9 +18,9 @@ def _number(value):
     return value
 
 
-def _matches(order, body):
+def _matches(order, body, position=None, instrument_info=None):
     try:
-        return (
+        semantic_match = (
             _order_active(order)
             and _normalized_symbol(order.get("symbol", "")) == _normalized_symbol(body["symbol"])
             and str(order.get("side", "")).lower() == body["side"]
@@ -30,6 +29,28 @@ def _matches(order, body):
             and str(order.get("stopPriceType", "")).upper() == body["stopPriceType"]
             and math.isclose(_number(order.get("stopPrice")), float(body["stopPrice"]), rel_tol=1e-12)
         )
+        if not semantic_match:
+            return False
+        if position is None:
+            return False
+        qualifies, full_close, covered = _protective_order(
+            order, position, body["symbol"], instrument_info
+        )
+        if not qualifies:
+            return False
+        if full_close:
+            return True
+        # A reduceOnly representation is equivalent only when this exact stop
+        # independently covers the full remaining position. Do not aggregate
+        # unrelated stops for readback confirmation.
+        position_qty = abs(_number(position.get("size")))
+        if position_qty <= 0:
+            return False
+        from bot.conditional_stop_protection import _to_base_size
+        position_base = _to_base_size(
+            position_qty, position.get("sizeUnit", "CONTRACTS"), instrument_info
+        )
+        return position_base > 0 and covered + max(1e-12, position_base * 1e-9) >= position_base
     except (ValueError, TypeError, AttributeError):
         return False
 
@@ -53,6 +74,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         if reference <= 0:
             return False
         orders = await read_stop_orders(client, symbol)
+        instrument_info = _instrument_info(client, symbol)
         if orders is None:
             return False
         for kind, price in (("SL", sl), ("TP", tp)):
@@ -77,7 +99,7 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             body = dict(symbol=kucoin_mod.to_kucoin(symbol), side="sell" if long else "buy",
                         type="market", stop="down" if below else "up", stopPrice=rounded,
                         stopPriceType="MP", closeOrder=True, reduceOnly=True)
-            if not any(_matches(order, body) for order in orders):
+            if not any(_matches(order, body, pos, instrument_info) for order in orders):
                 body["clientOid"] = "bgx-stop-" + uuid.uuid4().hex[:30]
                 # Preserve this ID across transport retries. On an ambiguous
                 # response, the independent stop read below remains authority.
