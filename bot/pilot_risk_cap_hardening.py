@@ -180,6 +180,47 @@ def install(TradingEngine, log) -> None:
         metrics = result.metrics or {}
         signed_drift = float(metrics.get("signed_signal_drift_bps", 0.0) or 0.0)
         drift_class = str(getattr(result, "drift_classification", "UNKNOWN") or "UNKNOWN")
+        # A beyond-threshold favorable drift is not a free pass. Revalidate the
+        # fixed protective geometry at the fresh executable price and ensure
+        # the already-quantized quantity still fits the operator's 50%-of-
+        # available initial-margin ceiling. Any missing/inconsistent context
+        # remains fail-closed.
+        if drift_class == "FAVORABLE_IMPROVEMENT" and abs(signed_drift) > float(
+            __import__("bot.pre_dispatch_guard", fromlist=["limits_from_env"]).limits_from_env().max_signal_drift_bps
+        ):
+            executable = float(metrics.get("executable_price", 0.0) or 0.0)
+            sl = float(getattr(sig, "sl", 0.0) or 0.0)
+            tp = float(getattr(sig, "tp", 0.0) or 0.0)
+            available = float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
+            leverage = float(getattr(__import__("bot.config", fromlist=["cfg"]).cfg, "LEVERAGE", 0.0) or 0.0)
+            geometry_ok = (
+                executable > 0 and sl > 0 and tp > 0
+                and ((direction == "LONG" and sl < executable < tp)
+                     or (direction == "SHORT" and tp < executable < sl))
+            )
+            margin = (qty_f * executable / leverage) if leverage > 0 else float("inf")
+            margin_ceiling = available * 0.50
+            collateral_ok = (
+                available > 0 and math.isfinite(margin)
+                and margin > 0 and margin <= margin_ceiling + 1e-9
+            )
+            if not geometry_ok or not collateral_ok:
+                log.warning(
+                    "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK "
+                    "blockers=FAVORABLE_REVALIDATION_FAILED executable=%.8f sl=%.8f tp=%.8f "
+                    "margin=%.8f margin_ceiling=%.8f geometry_ok=%s collateral_ok=%s "
+                    "execution_effect=NONE",
+                    symbol, executable, sl, tp, margin, margin_ceiling,
+                    str(geometry_ok).lower(), str(collateral_ok).lower(),
+                )
+                return False
+            log.info(
+                "[LIVE_PREDISPATCH_FAVORABLE_REVALIDATION] symbol=%s result=PASS "
+                "executable=%.8f sl=%.8f tp=%.8f margin=%.8f margin_ceiling=%.8f "
+                "geometry_improved=true collateral_within_target=true",
+                symbol, executable, sl, tp, margin, margin_ceiling,
+            )
+
         if not result.allowed:
             log.warning(
                 "[LIVE_PREDISPATCH_MARKET] symbol=%s result=BLOCK blockers=%s "

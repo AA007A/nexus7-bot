@@ -152,8 +152,13 @@ def evaluate_microstructure(
 
     if spread_bps > limits.max_spread_bps:
         blockers.append("SPREAD_TOO_WIDE")
-    # Authorization intentionally remains based on the same absolute drift.
-    if drift_bps > limits.max_signal_drift_bps:
+    # Adverse beyond-threshold movement means chasing price and remains fail-closed.
+    # Favorable movement may continue only to final geometry/collateral
+    # revalidation; spread, depth and every other blocker remain authoritative.
+    if (
+        drift_bps > limits.max_signal_drift_bps
+        and drift_classification != "FAVORABLE_IMPROVEMENT"
+    ):
         blockers.append("SIGNAL_PRICE_STALE")
 
     # Depth is optional in market analysis but mandatory for this execution gate.
