@@ -80,7 +80,7 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
              patch.object(kucoin, "API_KEY", "test-key"), \
              patch("bot.critical_state.critical_state.assert_available_for_new_risk", side_effect=RuntimeError("db")), \
              patch.object(self.client, "_post", AsyncMock(return_value={"orderId":"reduce-1"})) as post:
-            out=await self.client.place_order("BTCUSDT","Sell",0.001,reduce_only=True)
+            out=await self.client.place_order("BTCUSDT","Sell",0.001,reduce_only=True,sl=0,tp=0)
         self.assertEqual(out.get("orderId"),"reduce-1")
         post.assert_awaited_once()
 
