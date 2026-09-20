@@ -1,5 +1,4 @@
 """
-from contextlib import asynccontextmanager
 BGX Capital — KuCoin Futures Client v1.0
 Substitui bot/bybit.py completamente.
 
@@ -36,6 +35,7 @@ Diferenças-chave KuCoin vs Bybit:
 import asyncio, hashlib, hmac, json, math, os, time
 from base64 import b64encode
 from collections import deque
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import aiohttp
