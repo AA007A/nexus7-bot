@@ -21,6 +21,9 @@ _CACHE_ATTR = "_durable_account_equity_peak"
 _INCIDENT_BAD_PEAK = 82_894_351_780.2826
 _INCIDENT_LAST_GOOD_PEAK = 28.7914
 _INCIDENT_BAD_PEAK_TOLERANCE = 1.0
+_TRANSFER_RATIO_INCIDENT_BAD_PEAK = 42_709_241_923.064377
+_TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK = 63.7942573
+_TRANSFER_RATIO_INCIDENT_TOLERANCE = 1.0
 _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
 
 
@@ -35,6 +38,10 @@ def _positive_finite(value, label: str) -> float:
 
 def _matches_known_20260914_corruption(persisted: float) -> bool:
     return abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
+
+
+def _matches_known_transfer_ratio_corruption(persisted: float) -> bool:
+    return abs(persisted - _TRANSFER_RATIO_INCIDENT_BAD_PEAK) <= _TRANSFER_RATIO_INCIDENT_TOLERANCE
 
 
 def _validate_peak_vs_equity(peak: float, equity: float) -> None:
@@ -132,6 +139,23 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
                 "provenance=durable_atomic execution_effect=NONE",
                 old_peak, _INCIDENT_LAST_GOOD_PEAK, equity, persisted,
             )
+        elif _matches_known_transfer_ratio_corruption(persisted):
+            old_peak = persisted
+            persisted = max(_TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK, equity)
+            await _write_peak_with_provenance(
+                old_peak=old_peak, new_peak=persisted, equity=equity,
+                reason="incident_repair",
+                evidence_ref="2026-09-20:transfer_ratio_hwm_corruption+authenticated_equity",
+                strict=strict,
+            )
+            setattr(risk, _CACHE_ATTR, persisted)
+            repaired = True
+            log.critical(
+                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-20-transfer-ratio-hwm "
+                "old_peak=%.4f repaired_peak=%.4f current_equity=%.4f "
+                "provenance=durable_atomic execution_effect=NONE",
+                old_peak, persisted, equity,
+            )
         else:
             _validate_peak_vs_equity(persisted, equity)
 
@@ -169,10 +193,25 @@ async def rebase_real_account_peak_for_external_flow(
     persisted, _ = await _load_peak(risk, strict=strict)
     if persisted is None:
         raise db.PersistenceError("cannot rebase missing durable equity peak")
-    ratio = post_flow_equity / pre_flow_equity
-    if not math.isfinite(ratio) or ratio <= 0:
-        raise ValueError("external flow ratio must be positive and finite")
-    rebased_peak = max(current_equity, persisted * ratio)
+    # External transfers are additive cash flows, not multiplicative returns.
+    # Ratio rebasing explodes when pre-flow equity is near zero (for example
+    # after a losing leveraged position): persisted * post/pre can manufacture
+    # a multi-billion HWM from a tens-of-USDT account.
+    kind = str(flow_type)
+    if kind == "TransferIn":
+        # Additive rebasing is mandatory here: a deposit following near-zero
+        # equity must not multiply the historical HWM by post/pre.
+        rebased_peak = max(current_equity, persisted + flow_amount)
+    elif kind == "TransferOut":
+        # Preserve the pre-withdrawal drawdown ratio. This is the established
+        # durable-risk contract and remains numerically well-defined because a
+        # verified withdrawal has positive pre-flow equity.
+        ratio = post_flow_equity / pre_flow_equity
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError("external flow ratio must be positive and finite")
+        rebased_peak = max(current_equity, persisted * ratio)
+    else:
+        raise ValueError("unsupported external flow type")
     await _write_peak_with_provenance(
         old_peak=persisted, new_peak=rebased_peak, equity=current_equity,
         reason="external_capital_flow_rebase",

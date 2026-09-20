@@ -54,4 +54,53 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         self._assert_atomic(save, 100.0)
 
 
+    async def test_transfer_in_near_zero_equity_rebases_additively(self):
+        risk = SimpleNamespace(peak_balance=44.6737442789, drawdown=0.0)
+        with patch.object(dd, "_load_peak", AsyncMock(return_value=(44.6737442789, "database"))), \
+             patch.object(dd, "_write_peak_with_provenance", AsyncMock()) as write:
+            peak = await dd.rebase_real_account_peak_for_external_flow(
+                risk,
+                19.1205130211,
+                pre_flow_equity=2.11e-08,
+                post_flow_equity=19.1205130211,
+                flow_type="TransferIn",
+                flow_amount=19.120513,
+                flow_offset="91678290",
+                strict=True,
+            )
+        self.assertAlmostEqual(peak, 63.7942572789, places=6)
+        self.assertLess(peak, 100.0)
+        write.assert_awaited_once()
+
+
+    async def test_known_transfer_ratio_corruption_repairs_to_additive_peak(self):
+        risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
+        with patch.object(
+            db, "load_key_value",
+            AsyncMock(return_value=str(dd._TRANSFER_RATIO_INCIDENT_BAD_PEAK))
+        ), patch.object(
+            dd, "save_key_values_atomic", AsyncMock(return_value=True)
+        ) as save:
+            peak = await dd.restore_update_real_account_peak(risk, 19.1205130211, strict=True)
+        self.assertAlmostEqual(peak, dd._TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK, places=6)
+        self.assertLess(peak, 100.0)
+        self._assert_atomic(save, dd._TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK)
+
+
+    async def test_transfer_out_preserves_preflow_drawdown_ratio(self):
+        risk = SimpleNamespace(peak_balance=38.2593, drawdown=0.0)
+        with patch.object(dd, "_load_peak", AsyncMock(return_value=(38.2593, "database"))), \
+             patch.object(dd, "_write_peak_with_provenance", AsyncMock()):
+            peak = await dd.rebase_real_account_peak_for_external_flow(
+                risk, 20.8664,
+                pre_flow_equity=34.8664,
+                post_flow_equity=20.8664,
+                flow_type="TransferOut",
+                flow_amount=14.0,
+                flow_offset="withdrawal-regression",
+                strict=True,
+            )
+        self.assertAlmostEqual(peak, 38.2593 * (20.8664 / 34.8664), places=6)
+
+
 if __name__ == "__main__": unittest.main()
