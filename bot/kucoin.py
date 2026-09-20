@@ -1146,6 +1146,7 @@ class KuCoinClient:
         KuCoin Futures: DELETE /api/v1/orders
         CORRIGIDO: removido código duplicado (POST + DELETE ao mesmo tempo).
         """
+        assert_exchange_mutation_allowed("DELETE", "/api/v1/orders")
         if PAPER_TRADE:
             log.info("[PAPER] cancel_all_orders: exchange mutation skipped")
             return False
