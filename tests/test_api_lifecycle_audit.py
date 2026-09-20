@@ -32,7 +32,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_fast_pause_resume_keeps_existing_loop_alive(self):
         task = Mock()
         task.done.return_value = False
-        engine = SimpleNamespace(_running=False, active=False)
+        engine = SimpleNamespace(_running=True, active=True, resume_entries=Mock())
         fn, loop = self.endpoint(SimpleNamespace(blocked=False, ready=True, engine=engine, engine_task=task))
         await fn(None)
         self.assertTrue(engine._running)

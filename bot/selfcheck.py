@@ -78,7 +78,8 @@ def _collect_scope(node: ast.AST) -> set:
 
 
 def _module_globals(tree: ast.AST) -> set:
-    g = set()
+    # All inspected paths are source modules loaded by Python.
+    g = {"__file__", "__name__", "__package__", "__spec__", "__loader__", "__builtins__"}
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             g.add(n.name)
@@ -142,8 +143,19 @@ def check_duplicate_methods(paths: List[str]) -> List[str]:
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
                 seen = {}
+                property_accessors = {}
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        decorators = item.decorator_list
+                        accessor = None
+                        if len(decorators) == 1:
+                            d = decorators[0]
+                            if isinstance(d, ast.Attribute) and isinstance(d.value, ast.Name) and d.value.id == item.name and d.attr in ("setter", "deleter"):
+                                accessor = d.attr
+                        previous = property_accessors.get(item.name)
+                        if accessor and previous is not None and accessor not in previous:
+                            previous.add(accessor)
+                            continue
                         if item.name in seen:
                             issues.append(
                                 f"{os.path.basename(p)}:{item.lineno} "
@@ -151,6 +163,10 @@ def check_duplicate_methods(paths: List[str]) -> List[str]:
                                 f"(1ª definição na linha {seen[item.name]})"
                             )
                         seen[item.name] = item.lineno
+                        if len(decorators) == 1 and isinstance(decorators[0], ast.Name) and decorators[0].id == "property":
+                            property_accessors[item.name] = {"getter"}
+                        else:
+                            property_accessors.pop(item.name, None)
     return issues
 
 

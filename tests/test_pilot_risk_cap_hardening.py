@@ -158,6 +158,7 @@ class PilotRiskCapLiveParityTests(unittest.IsolatedAsyncioTestCase):
         class Sig:
             symbol = "DOTUSDT"
             entry = 100.0
+            sl = 99.6  # Explicit stop required by final projected-loss contract.
             direction = "LONG"
 
         try:
@@ -252,6 +253,7 @@ class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
         class Sig:
             symbol = "ADAUSDT"
             entry = 0.20461
+            sl = 0.2054  # Costs plus stop remain within 50% entry margin.
             direction = "SHORT"
 
         try:

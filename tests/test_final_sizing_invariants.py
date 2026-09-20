@@ -52,11 +52,13 @@ class FinalSizingInvariantTests(unittest.TestCase):
         token_engine = pilot_cap._PILOT_ENGINE.set(engine)
         token_symbol = pilot_cap._PILOT_SYMBOL.set("TESTUSDT")
         token_qty = pilot_cap._PILOT_FINAL_QTY.set(None)
+        token_signal = pilot_cap._PILOT_SIGNAL.set(SimpleNamespace(sl=price * .996, direction='LONG'))
         try:
             qty = module.minimum_base_quantity(info, price)
             stored = pilot_cap._PILOT_FINAL_QTY.get()
             return qty, stored
         finally:
+            pilot_cap._PILOT_SIGNAL.reset(token_signal)
             pilot_cap._PILOT_FINAL_QTY.reset(token_qty)
             pilot_cap._PILOT_SYMBOL.reset(token_symbol)
             pilot_cap._PILOT_ENGINE.reset(token_engine)

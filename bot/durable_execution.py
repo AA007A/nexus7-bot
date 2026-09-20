@@ -37,6 +37,8 @@ def _clear(engine, reason: str):
 
 
 def can_open(engine) -> bool:
+    if getattr(engine, 'entries_paused', False) or getattr(engine, '_pending_partial_symbols', set()):
+        return False
     return bool(getattr(engine, "_durable_state_ok", False)) and getattr(engine, '_daily_pnl_ok', True) is True
 
 

@@ -188,7 +188,8 @@ async def lifespan(app: FastAPI):
         task=getattr(app.state,t,None)
         if task and not task.done():
             task.cancel()
-    await asyncio.sleep(1.0)
+    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task')]
+    await asyncio.gather(*(t for t in tasks if t is not None), return_exceptions=True)
     try:
         await client.close()
     except Exception as e:
@@ -272,8 +273,8 @@ async def positions():
 # ── Controle ──────────────────────────────────────────────────────
 @app.post("/api/pause", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def pause(request: Request):
-    app.state.engine.stop()
-    return {"message": "Bot pausado"}
+    app.state.engine.pause_entries()
+    return {"message": "Novas entradas pausadas; posições continuam sendo gerenciadas"}
 
 @app.post("/api/resume", dependencies=[Depends(_require_auth), Depends(_rate_limit)])
 async def resume(request: Request):
@@ -282,13 +283,14 @@ async def resume(request: Request):
     engine=app.state.engine
     task=getattr(app.state,"engine_task",None)
     if task and not task.done():
-        # pause() clears both flags. Restore both before the existing loop's
-        # next iteration; creating a second task would duplicate its workers.
-        engine._running=True
+        if not getattr(engine, '_running', False):
+            raise HTTPException(status_code=503, detail='Engine shutdown in progress')
         engine.active=True
+        engine.resume_entries()
         return {"message":"Bot reativado"}
     if getattr(engine, '_running', False):
         raise HTTPException(status_code=503, detail='Engine task failed; service restart required')
+    engine.resume_entries()
     app.state.engine_task=asyncio.create_task(engine.run())
     return {"message":"Bot retomado"}
 

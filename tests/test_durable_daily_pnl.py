@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot.durable_daily_pnl import checkpoint, realized
 from bot.durable_execution import can_open
+from bot import daily_pnl_storage
 
 
 class DailyPnlTests(unittest.IsolatedAsyncioTestCase):
@@ -101,3 +102,47 @@ class DailyPnlTests(unittest.IsolatedAsyncioTestCase):
         t.pnl = -.2
         self.assertFalse(await checkpoint(e, extra=t, now=self.now))
         self.assertFalse(can_open(e))
+
+    async def test_legacy_versions_merge_without_reset_or_double_count(self):
+        e = self.engine()
+        await checkpoint(e, extra=self.trade(-10), now=self.now)
+        day = self.now.date().isoformat()
+        canonical = daily_pnl_storage.ledger_key(day)
+        old = self.store.pop(canonical)
+        for key in daily_pnl_storage.legacy_keys(day):
+            self.store[key] = old
+        restarted = self.engine()
+        with patch('bot.durable_daily_stop.STATE_VERSION', 99):
+            self.assertTrue(await checkpoint(restarted, now=self.now))
+        self.assertEqual(realized(restarted.stats, self.now), -10)
+        self.assertIn(canonical, self.store)
+        for key in daily_pnl_storage.legacy_keys(day):
+            self.assertEqual(self.store[key], old)
+        self.assertTrue(await checkpoint(restarted, now=self.now))
+        self.assertEqual(realized(restarted.stats, self.now), -10)
+
+    async def test_legacy_conflict_blocks_without_rewriting_any_evidence(self):
+        e = self.engine()
+        await checkpoint(e, extra=self.trade(-10), now=self.now)
+        day = self.now.date().isoformat()
+        old = json.loads(self.store[daily_pnl_storage.ledger_key(day)])
+        next(iter(old['events'].values()))['pnl'] = -20
+        self.store[daily_pnl_storage.legacy_keys(day)[1]] = json.dumps(old)
+        before = copy.deepcopy(self.store)
+        self.assertFalse(await checkpoint(self.engine(), now=self.now))
+        self.assertEqual(self.store, before)
+
+    async def test_late_legacy_writer_imported_on_next_checkpoint(self):
+        from bot.durable_daily_pnl import event
+        e = self.engine()
+        await checkpoint(e, extra=self.trade(-10), now=self.now)
+        day = self.now.date().isoformat()
+        token, value = event(self.trade(-20))
+        # Change the event identity to model a distinct completed trade.
+        later = self.trade(-20)
+        later.closed_at += timedelta(seconds=1)
+        token, value = event(later)
+        self.store[daily_pnl_storage.legacy_keys(day)[2]] = json.dumps(
+            {'version': 1, 'day': day, 'events': {token: value}})
+        self.assertTrue(await checkpoint(e, now=self.now))
+        self.assertEqual(realized(e.stats, self.now), -30)

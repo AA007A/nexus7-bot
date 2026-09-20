@@ -171,28 +171,9 @@ async def _build_execution_context(client, symbol: str, k15: list) -> tuple[dict
     }, complete
 
 
-async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300) -> dict:
-    if not OPTUNA_AVAILABLE:
-        log.error("Optuna não instalado no runtime")
-        return {"error": "optuna not installed"}
-
-    log.info(f"🔬 Iniciando otimização sem leakage — {symbol} | {n_trials} trials")
+def optimize_snapshot(k15, k1h, k4h, symbol, n_trials, execution_context):
+    """CPU-only research entry point, executed in a credential-free child."""
     t0 = time.time()
-    k15 = await fetch_history(client, symbol, "15", 8640)
-    k1h = await fetch_history(client, symbol, "60", 2160)
-    k4h = await fetch_history(client, symbol, "240", 540)
-    if len(k15) < 500 or len(k1h) < 100 or len(k4h) < 30:
-        return {"error": "Dados insuficientes para otimização institucional"}
-
-    execution_context, cost_data_complete = await _build_execution_context(client, symbol, k15)
-    if not cost_data_complete:
-        log.error(f"[OPTIMIZER] {symbol}: funding history unavailable; promotion blocked")
-        return {
-            "error": "execution cost data incomplete",
-            "promoted": False,
-            "runtime_applied": False,
-        }
-
     splits = _split_by_time(k15, k1h, k4h)
     k15_train, k1h_train, k4h_train = splits["train"]
     k15_val, k1h_val, k4h_val = splits["validation"]
@@ -246,6 +227,38 @@ async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300)
         "funding_events_loaded": len(execution_context["funding_events"]),
         "elapsed_s": round(time.time() - t0, 1),
     }
+
+    return {'best_params': best_params, 'metadata': metadata}
+
+
+async def run_optimization(client, symbol: str = "BTCUSDT", n_trials: int = 300) -> dict:
+    if not OPTUNA_AVAILABLE:
+        log.error("Optuna não instalado no runtime")
+        return {"error": "optuna not installed"}
+
+    log.info(f"🔬 Iniciando otimização sem leakage — {symbol} | {n_trials} trials")
+    k15 = await fetch_history(client, symbol, "15", 8640)
+    k1h = await fetch_history(client, symbol, "60", 2160)
+    k4h = await fetch_history(client, symbol, "240", 540)
+    if len(k15) < 500 or len(k1h) < 100 or len(k4h) < 30:
+        return {"error": "Dados insuficientes para otimização institucional"}
+
+    execution_context, cost_data_complete = await _build_execution_context(client, symbol, k15)
+    if not cost_data_complete:
+        log.error(f"[OPTIMIZER] {symbol}: funding history unavailable; promotion blocked")
+        return {
+            "error": "execution cost data incomplete",
+            "promoted": False,
+            "runtime_applied": False,
+        }
+
+    from bot.research_process import run_snapshot
+    result = await run_snapshot(dict(k15=k15, k1h=k1h, k4h=k4h,
+        symbol=symbol, n_trials=n_trials, execution_context=execution_context))
+    best_params, metadata = result['best_params'], result['metadata']
+    promote = metadata['promotion_allowed']
+    gate_reasons = metadata['promotion_block_reasons']
+    val_metrics, test_metrics = metadata['validation_metrics'], metadata['test_metrics']
 
     if promote:
         save_optimized_params(best_params, metadata)
