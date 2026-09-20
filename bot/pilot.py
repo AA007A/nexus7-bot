@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 from bot.logger import log
+from bot.financial_state import FinancialStateInvalid, validate_financial_state
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
@@ -100,6 +101,16 @@ class PilotGuard:
             bal = float(getattr(engine.risk, "balance", 0) or 0)
             if bal <= 0:
                 r.append(f"3_BALANCE: saldo Futures USDT = {bal}")
+
+            try:
+                risk_state = getattr(engine, "risk", None)
+                peak = float(getattr(risk_state, "peak_balance", 0) or 0)
+                drawdown = float(getattr(risk_state, "drawdown", 0) or 0)
+                available_margin = float(getattr(risk_state, "available_margin", None) or getattr(risk_state, "available_balance", None) or bal)
+                validate_financial_state(equity=bal, available_margin=available_margin, hwm=peak, drawdown=drawdown)
+            except (FinancialStateInvalid, TypeError, ValueError) as exc:
+                log.critical("[FINANCIAL_STATE_INVALID] symbol=%s evidence=%r execution_effect=BLOCK_NEW_ENTRIES reconciliation_required=true", symbol, str(exc))
+                r.append(f"3B_FINANCIAL_STATE_INVALID: {exc}")
 
             if not getattr(engine, "viable_symbols", None):
                 r.append("4_VIABLE: viable_symbols vazio")
