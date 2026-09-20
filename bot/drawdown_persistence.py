@@ -169,10 +169,17 @@ async def rebase_real_account_peak_for_external_flow(
     persisted, _ = await _load_peak(risk, strict=strict)
     if persisted is None:
         raise db.PersistenceError("cannot rebase missing durable equity peak")
-    ratio = post_flow_equity / pre_flow_equity
-    if not math.isfinite(ratio) or ratio <= 0:
-        raise ValueError("external flow ratio must be positive and finite")
-    rebased_peak = max(current_equity, persisted * ratio)
+    # External transfers are additive cash flows, not multiplicative returns.
+    # Ratio rebasing explodes when pre-flow equity is near zero (for example
+    # after a losing leveraged position): persisted * post/pre can manufacture
+    # a multi-billion HWM from a tens-of-USDT account.
+    kind = str(flow_type)
+    if kind == "TransferIn":
+        rebased_peak = max(current_equity, persisted + flow_amount)
+    elif kind == "TransferOut":
+        rebased_peak = max(current_equity, persisted - flow_amount)
+    else:
+        raise ValueError("unsupported external flow type")
     await _write_peak_with_provenance(
         old_peak=persisted, new_peak=rebased_peak, equity=current_equity,
         reason="external_capital_flow_rebase",
