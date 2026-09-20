@@ -28,12 +28,17 @@ async def run_snapshot(snapshot, timeout=1800):
             raise ValueError('invalid research response')
         return result
     finally:
+        # communicate() already waits for normal process termination. On timeout or
+        # cancellation, terminate only if the child is still running. ProcessLookupError
+        # is an expected race (the child exited between returncode check and kill), not
+        # a silent failure worth flagging by the safety audit.
         if proc.returncode is None:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            await proc.wait()
+            finally:
+                await proc.wait()
 
 
 def main():
