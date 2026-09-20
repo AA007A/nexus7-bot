@@ -149,7 +149,9 @@ class NativeTPSLTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(out["orderId"], "kc-recovered")
         self.assertEqual(client._post.await_count, 1)
-        self.assertEqual(client.get_order_by_client_oid.await_count, 4)\n        client.get_order_by_client_oid.assert_awaited_with("bgx7-native-tpsl")\n        self.assertFalse(out["protection_verified"])
+        self.assertEqual(client.get_order_by_client_oid.await_count, 4)
+        client.get_order_by_client_oid.assert_awaited_with("bgx7-native-tpsl")
+        self.assertFalse(out["protection_verified"])
 
     async def test_protection_readback_equivalence_is_required(self):
         Client = self._client_class()
