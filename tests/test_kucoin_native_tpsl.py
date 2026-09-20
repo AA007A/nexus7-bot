@@ -10,6 +10,7 @@ class _Log:
     info = staticmethod(lambda *a, **k: None)
     error = staticmethod(lambda *a, **k: None)
     critical = staticmethod(lambda *a, **k: None)
+    critical = staticmethod(lambda *a, **k: None)
 
 
 class _FakeClient:
