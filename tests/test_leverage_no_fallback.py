@@ -19,6 +19,7 @@ class LeverageNoFallbackTests(unittest.IsolatedAsyncioTestCase):
         }
         client._post = AsyncMock(return_value={})
         client._position_exists = AsyncMock(return_value=False)
+        client._engine = object()
 
         with patch("bot.kucoin.PAPER_TRADE", False), \
              patch("bot.kucoin.API_KEY", "test-key"):
