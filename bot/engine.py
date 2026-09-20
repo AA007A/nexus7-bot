@@ -1064,9 +1064,18 @@ class TradingEngine:
 
             return len(viable) > 0
         except Exception as e:
-            log.error(f"_filter_viable: {e}")
-            self.viable_symbols = list(cfg.SYMBOLS)
-            return True   # fallback conservador preexistente — mantido
+            # LIVE safety invariant: unknown instrument viability must never
+            # expand the tradable universe.  An exchange/instrument failure
+            # is retried by _ensure_viable_symbols(); until a successful
+            # refresh proves viability, new entries remain fail-closed.
+            self.viable_symbols = []
+            self._viable_retry_next_ts = 0.0
+            log.error(
+                "[MARKET_VIABILITY_FAIL_CLOSED] verified=0 dropped=ALL "
+                "entries_blocked=true reason=%s execution_effect=BLOCK_NEW_ENTRIES",
+                type(e).__name__,
+            )
+            return False
 
     # ── Sincronização em tempo real com a exchange ─────────────
     def _contracts_to_base_qty(self, symbol: str, contracts: float) -> float:
