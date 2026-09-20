@@ -58,12 +58,18 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
         self.assertIn("duplicate intent",result)
 
     async def test_deploy_overlap_end_to_end_transport_boundary(self):
-        dummy=SimpleNamespace(_instruments=self.info)\n        conn=ValidExecutionTestContext(dummy).conn\n        with patch.object(eo.db,"_conn",conn), patch.object(eo.db,"_is_pg",True), \
+        dummy=SimpleNamespace(_instruments=self.info)
+        conn=ValidExecutionTestContext(dummy).conn
+        with patch.object(eo.db,"_conn",conn), patch.object(eo.db,"_is_pg",True), \
              patch.object(eo.db,"configured_postgres_unavailable",return_value=False), \
              patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
             old=await eo.acquire_execution_ownership("OLD")
             state=json.loads(conn.value); state["expires_at"]="2000-01-01T00:00:00+00:00"; conn.value=json.dumps(state)
-            new=await eo.acquire_execution_ownership("NEW")\n            # Freeze the takeover state so the OLD dispatch cannot mutate the\n            # same fake authority object while validating.\n            takeover_value=conn.value\n            mutations=[]
+            new=await eo.acquire_execution_ownership("NEW")
+            # Freeze the takeover state so the OLD dispatch cannot mutate the
+            # same fake authority object while validating.
+            takeover_value=conn.value
+            mutations=[]
             async def dispatch(authority,label):
                 c=kucoin.KuCoinClient(); c._execution_ownership=authority
                 c._ensure_session=AsyncMock(); c._throttle=AsyncMock()
@@ -73,11 +79,15 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
                     async def __aexit__(self,*a): return False
                 c._session=SimpleNamespace(post=lambda *a,**k: CM())
                 try:
-                    async with c._fenced_entry_post("/api/v1/orders",{"clientOid":"same","reduceOnly":False},"http://exchange.test",data="{}",headers={}):\n                        pass
+                    async with c._fenced_entry_post("/api/v1/orders",{"clientOid":"same","reduceOnly":False},"http://exchange.test",data="{}",headers={}):
+                        pass
                     return "ok"
                 except eo.StaleExecutionFence:
                     return "stale fence"
-            conn.value=takeover_value\n            old_result=await dispatch(old,"OLD")\n            conn.value=takeover_value\n            new_result=await dispatch(new,"NEW")
+            conn.value=takeover_value
+            old_result=await dispatch(old,"OLD")
+            conn.value=takeover_value
+            new_result=await dispatch(new,"NEW")
             self.assertEqual(old_result,"stale fence")
             self.assertEqual(new_result,"ok")
             self.assertEqual(mutations,["NEW"])
