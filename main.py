@@ -124,11 +124,20 @@ async def lifespan(app: FastAPI):
         """Carrega instrumentos e inicia o engine — fora do caminho do healthcheck."""
         try:
             await asyncio.wait_for(client.load_instruments(), timeout=45)
-            log.info("✅ Instrumentos carregados")
+            instrument_count = len(getattr(client, "_instruments", {}) or {})
+            if instrument_count <= 0:
+                raise RuntimeError("instrument metadata empty after load_instruments")
+            log.info("✅ Instrumentos carregados | count=%d", instrument_count)
         except asyncio.TimeoutError:
-            log.error("⏱️ load_instruments excedeu 45s — seguindo mesmo assim")
+            app.state.ready = False
+            app.state.blocked = True
+            log.critical("[RUNTIME_READINESS] ready=false reason=INSTRUMENT_TIMEOUT execution_effect=BLOCK_FAIL_CLOSED")
+            return
         except Exception as e:
-            log.error(f"❌ load_instruments falhou: {e} — seguindo mesmo assim")
+            app.state.ready = False
+            app.state.blocked = True
+            log.critical("[RUNTIME_READINESS] ready=false reason=INSTRUMENT_LOAD_FAILED error=%s execution_effect=BLOCK_FAIL_CLOSED", type(e).__name__)
+            return
 
         app.state.ready = True
 
@@ -156,8 +165,19 @@ async def lifespan(app: FastAPI):
             app.state.telegram = {"ok": False, "reason": str(_e)}
 
         app.state.blocked = False
-        app.state.engine_task = asyncio.create_task(engine.run())
-        log.info("✅ BGX Capital online (KuCoin Futures)")
+
+        # A shadow can be intentionally public-only.  In that mode it validates
+        # startup/instrument metadata but never starts the private-account engine,
+        # eliminating useless authentication loops.  The transport READ_ONLY
+        # capability remains the final mutation barrier even if this flag drifts.
+        from bot.execution_capability import ExecutionCapability, configured_capability
+        shadow_public_only = os.environ.get("SHADOW_PUBLIC_ONLY", "").strip().lower() == "true"
+        if configured_capability() is ExecutionCapability.READ_ONLY and shadow_public_only:
+            app.state.engine_task = None
+            log.warning("[SHADOW_RUNTIME] capability=READ_ONLY public_only=true private_engine_started=false")
+        else:
+            app.state.engine_task = asyncio.create_task(engine.run())
+            log.info("✅ BGX Capital online (KuCoin Futures)")
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
         # PAPER_TRADE=false + VALIDATION_LOCK agora é SHADOW_LIVE e nunca
