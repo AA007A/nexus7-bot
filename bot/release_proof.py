@@ -7,16 +7,16 @@ import subprocess
 import sys
 
 MODULES = (
-    "tests.test_release_execution_boundary",
+    "tests.test_release_execution_boundary",\n    "tests.test_final_release_proof",
     "tests.test_release_pilot_postgres",
     "tests.test_execution_ownership",
     "tests.test_critical_state",
     "tests.test_financial_state",
     "tests.test_runtime_readiness",
     "tests.test_live_adapter_chaos",
-    "tests.test_durable_execution_restart",
+    "tests.test_durable_execution_restart",\n    "tests.test_durable_reconcile_hardening",\n    "tests.test_restart_opening_order_lineage",
     "tests.test_kucoin_native_tpsl",
-    "tests.test_quantity_boundary",
+    "tests.test_quantity_boundary",\n    "tests.test_regression",
 )
 
 def main() -> int:
