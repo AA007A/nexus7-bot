@@ -7,6 +7,7 @@ from tests.test_ai_gate import approval
 from bot.strategy import Signal
 from bot.kucoin import KuCoinClient
 from bot.order_state import OrderState
+from tests.execution_test_context import ValidExecutionTestContext
 
 
 class PilotCounterTests(PilotFixture):
@@ -127,9 +128,10 @@ class PilotCounterTests(PilotFixture):
     async def test_client_does_not_fallback_to_another_submission(self):
         self.client._post = AsyncMock(return_value={})
         self.client._position_exists = AsyncMock(return_value=False)
-        await KuCoinClient.place_order(
-            self.client, 'TESTUSDT', 'Buy', 1., single_submission=True
-        )
+        async with ValidExecutionTestContext(self.client, self.engine.instruments):
+            await KuCoinClient.place_order(
+                self.client, 'TESTUSDT', 'Buy', 1., single_submission=True
+            )
         self.client._post.assert_awaited_once()
         self.assertTrue(self.client._post.call_args.kwargs['single_attempt'])
         self.client._position_exists.assert_not_awaited()
