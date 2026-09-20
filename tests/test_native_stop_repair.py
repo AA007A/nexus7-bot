@@ -93,6 +93,27 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
         c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
         self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
 
+
+    async def test_adjacent_tick_readback_is_equivalent_but_larger_drift_fails(self):
+        c = self.client()
+        c.get_instruments = lambda: {"AVAXUSDT": {"multiplier": "0.1", "lotSize": "1", "minQty": "1", "tickSize": "0.001"}}
+        accepted = []
+        async def post(path, body, **kwargs):
+            native = dict(body, isActive=True)
+            native["stopPrice"] = "7.301"
+            native.pop("stopPriceType", None)
+            accepted.append(native)
+            return {"orderId": "native"}
+        c._post = AsyncMock(side_effect=post)
+        c.get_stop_orders = AsyncMock(side_effect=lambda symbol: list(accepted))
+        self.assertTrue(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+
+        accepted[0]["stopPrice"] = "7.3021"
+        c._post.reset_mock()
+        c._post = AsyncMock(return_value={"orderId": "replacement"})
+        self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+        c._post.assert_awaited_once()
+
     async def test_acknowledgement_without_readback_fails(self):
         c=self.client()
         c._post=AsyncMock(return_value={"orderId":"ack"})
