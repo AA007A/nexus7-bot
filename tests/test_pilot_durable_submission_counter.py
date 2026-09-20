@@ -102,6 +102,40 @@ class PilotDurableSubmissionCounterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, third)
 
+    async def test_postgres_reservation_uses_cross_worker_advisory_lock(self):
+        class Tx:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+
+        class Conn:
+            def __init__(self):
+                self.calls = []
+            def transaction(self): return Tx()
+            async def execute(self, sql, *args):
+                self.calls.append(("execute", sql, args))
+                return "OK"
+            async def fetchrow(self, sql, *args):
+                self.calls.append(("fetchrow", sql, args))
+                return None
+
+        class Lock:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+
+        conn = Conn()
+        from bot import database as db
+        with patch.object(db, "_conn", conn), patch.object(db, "_is_pg", True), \
+             patch.object(db, "_io_lock", Lock()), \
+             patch.object(db, "configured_postgres_unavailable", return_value=False), \
+             patch.dict(os.environ, {"PILOT_SESSION_ID": "stable-session"}, clear=False):
+            allowed, count = await counter._reserve_db("intent-a", 2)
+
+        self.assertTrue(allowed)
+        self.assertEqual(count, 1)
+        sql = [x[1] for x in conn.calls]
+        self.assertTrue(any("pg_advisory_xact_lock" in x for x in sql))
+        self.assertTrue(any("FOR UPDATE" in x for x in sql))
+
     def test_malformed_state_is_fail_closed(self):
         with self.assertRaises(RuntimeError):
             counter._decode('{"version":1,"order_tokens":"not-a-list"}')
