@@ -236,6 +236,17 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
+        try:
+            from bot.final_loss_budget import validate
+            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            from bot.config import cfg
+            validate(qty_f, metrics.get("executable_price"), sig.sl, direction,
+                     cfg.LEVERAGE, estimated_round_trip_cost_pct(symbol) / 100.0)
+        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
+            log.warning("[FINAL_LOSS_BUDGET] symbol=%s result=BLOCK stage=predispatch reason=%s",
+                        symbol, type(exc).__name__)
+            return False
+
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "
             "spread_bps=%.4f drift_bps=%.4f signed_drift_bps=%+.4f drift_class=%s "

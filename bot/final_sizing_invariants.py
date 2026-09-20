@@ -116,6 +116,20 @@ def install(engine_module, pilot_cap, log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
+        try:
+            from bot.final_loss_budget import validate
+            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            signal = pilot_cap._PILOT_SIGNAL.get()
+            projected, loss_limit = validate(
+                final_qty, price_f, signal.sl, signal.direction, leverage,
+                estimated_round_trip_cost_pct(symbol) / 100.0,
+            )
+        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
+            log.critical('[FINAL_LOSS_BUDGET] symbol=%s result=BLOCK reason=%s quantity_unchanged=true', symbol, type(exc).__name__)
+            pilot_cap._PILOT_FINAL_QTY.set(0.0)
+            return 0.0
+        log.info('[FINAL_LOSS_BUDGET] symbol=%s result=PASS projected_loss=%.8f loss_limit=%.8f policy=50pct_entry_margin costs=estimated', symbol, projected, loss_limit)
+
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(
             "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS target_qty=%.12g risk_validation_qty=%.12g final_qty=%.12g target_margin=%.6f target_notional=%.6f final_margin=%.6f margin_pct=50.00%% leverage=%.0fx authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
