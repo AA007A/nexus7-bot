@@ -21,6 +21,11 @@ class CriticalStateTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(critical_state.CriticalStateUnavailable):
                 critical_state.critical_state.assert_available_for_new_risk()
 
+    def test_reduce_existing_risk_does_not_require_new_risk_repository(self):
+        # CriticalStateRepository is intentionally an OPEN_NEW_RISK gate only;
+        # emergency protection/close/reduceOnly must remain exchange-available.
+        self.assertFalse(hasattr(critical_state.critical_state, "authorize_reduce_existing_risk"))
+
 
 if __name__ == "__main__":
     unittest.main()
