@@ -33,7 +33,7 @@ def main() -> int:
         if completed.returncode != 0:
             print(f"RELEASE_PROOF_FAILED={module}", file=sys.stderr)
             return completed.returncode or 1
-    print("RELEASE_PROOF=PASS")
+    for module in SCRIPT_MODULES:\n        print(f"=== RELEASE PROOF SCRIPT: {module} ===", flush=True)\n        completed = subprocess.run([sys.executable, "-m", module], check=False)\n        if completed.returncode != 0:\n            print(f"RELEASE_PROOF_FAILED={module}", file=sys.stderr)\n            return completed.returncode or 1\n    print("RELEASE_PROOF=PASS")
     return 0
 
 if __name__ == "__main__":
