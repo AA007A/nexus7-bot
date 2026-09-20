@@ -17,6 +17,7 @@ import os
 from datetime import datetime, timezone
 
 from bot.logger import log
+from bot.critical_state import critical_state
 
 _LOCK = asyncio.Lock()
 _STATE_VERSION = 1
@@ -73,6 +74,7 @@ async def _reserve_db(token: str, limit: int) -> tuple[bool, int]:
     """Atomically reserve token in PostgreSQL/SQLite key_value storage."""
     from bot import database as db
 
+    critical_state.assert_available_for_new_risk()
     if limit <= 0:
         raise RuntimeError("invalid pilot submission limit")
     conn = getattr(db, "_conn", None)
