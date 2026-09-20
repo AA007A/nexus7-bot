@@ -24,6 +24,16 @@ class PostTradeLineageV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot['confidence'], 0.91)
         self.assertTrue(decision.execution_allowed)
 
+    def test_dict_snapshot_normalizes_direction_to_authorization_outcome(self):
+        snapshot = _decision_snapshot({
+            'decision': 'LONG',
+            'execution_allowed': True,
+            'setup_quality': 78.56,
+            'confidence': 59.57,
+        })
+        self.assertEqual(snapshot['decision'], 'APPROVE')
+        self.assertIs(snapshot['execution_allowed'], True)
+
     def test_lineage_contains_durable_opening_order_identity(self):
         now = time.time()
         sig = SimpleNamespace(

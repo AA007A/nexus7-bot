@@ -52,7 +52,15 @@ def _decision_snapshot(decision):
     if decision is None:
         return {}
     if isinstance(decision, dict):
-        return dict(decision)
+        snapshot = dict(decision)
+        allowed = snapshot.get("execution_allowed")
+        # Lineage records the authorization outcome, not LONG/SHORT/WAIT.
+        # The directional NEXUS decision remains available in the source
+        # decision object; execution lineage must match the gate that opened
+        # the exchange order.
+        if type(allowed) is bool:
+            snapshot["decision"] = "APPROVE" if allowed else "REJECT"
+        return snapshot
     allowed = getattr(decision, "execution_allowed", None)
     return {
         "decision": "APPROVE" if allowed is True else "REJECT",
@@ -160,8 +168,11 @@ def install(TradingEngine, Position, cfg, fee_rate, log) -> None:
         async def _open_with_lineage(self, sig, *args, **kwargs):
             symbol = str(getattr(sig, "symbol", ""))
             started = time.time()
-            nexus = dict((getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {}) or {})
             result = await original_open(self, sig, *args, **kwargs)
+            # original_open performs the mandatory NEXUS validation. Read the
+            # wrapper cache only afterwards so this entry cannot inherit a
+            # previous same-symbol decision.
+            nexus = dict((getattr(self, "_post_trade_nexus_lineage", {}) or {}).get(symbol, {}) or {})
             pos = (getattr(self, "positions", {}) or {}).get(symbol)
             if pos is not None:
                 order_record = _opening_order_for_position(self, symbol, started)
