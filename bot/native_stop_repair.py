@@ -25,6 +25,18 @@ def _number(value):
     return value
 
 
+def _same_trigger_price(readback, requested, instrument_info=None):
+    try:
+        left, right = _number(readback), _number(requested)
+        tick = 0.0
+        if isinstance(instrument_info, dict):
+            tick = _number(instrument_info.get("tickSize", 0))
+        tolerance = tick + max(1e-12, abs(right) * 1e-12) if tick > 0 else max(1e-12, abs(right) * 1e-12)
+        return abs(left - right) <= tolerance
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def _matches(order, body, position=None, instrument_info=None):
     try:
         semantic_match = (
@@ -33,8 +45,8 @@ def _matches(order, body, position=None, instrument_info=None):
             and str(order.get("side", "")).lower() == body["side"]
             and (order.get("closeOrder") is True or order.get("reduceOnly") is True)
             and str(order.get("stop", "")).lower() == body["stop"]
-            and str(order.get("stopPriceType", "")).upper() == body["stopPriceType"]
-            and math.isclose(_number(order.get("stopPrice")), float(body["stopPrice"]), rel_tol=1e-12)
+            and str(order.get("stopPriceType") or body["stopPriceType"]).upper() == body["stopPriceType"]
+            and _same_trigger_price(order.get("stopPrice"), body["stopPrice"], instrument_info)
         )
         if not semantic_match:
             return False
