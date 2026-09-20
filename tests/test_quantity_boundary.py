@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 from tests.test_ai_gate import EngineFixture
 from bot.kucoin import KuCoinClient
 from bot.quantity import minimum_base_quantity
+from tests.execution_test_context import ValidExecutionTestContext
 
 
 class QuantityBoundaryTests(EngineFixture):
@@ -41,7 +42,8 @@ class QuantityBoundaryTests(EngineFixture):
         self.instrument(.001)
         self.client._post=AsyncMock(return_value={'orderId':'mock'})
         self.client._round_qty=Mock(wraps=self.client._round_qty)
-        await KuCoinClient.place_order(self.client,'TESTUSDT','Buy',.001)
+        async with ValidExecutionTestContext(self.client, self.engine.instruments):
+            await KuCoinClient.place_order(self.client,'TESTUSDT','Buy',.001)
         self.client._round_qty.assert_called_once_with(.001,'TESTUSDT')
         self.assertEqual(self.client._post.call_args.args[1]['size'],'1')
 
