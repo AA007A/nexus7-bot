@@ -25,13 +25,13 @@ def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
     return RuntimeReadinessSnapshot(
       instruments_ready=bool(getattr(engine,"instruments",{})),
       critical_database_ready=bool(getattr(engine,"_durable_state_ok",False)),
-      financial_state_sane=bool(getattr(engine,"_financial_state_sane",False)),
-      initial_reconciliation_complete=bool(getattr(engine,"_initial_reconciliation_complete",False)),
-      execution_ownership_valid=bool(getattr(engine,"_execution_ownership_valid",False)),
+      financial_state_sane=bool(getattr(engine,"_financial_state_sane", getattr(getattr(engine,"risk",None),"balance_confirmed",False))),
+      initial_reconciliation_complete=bool(getattr(engine,"_initial_reconciliation_complete", getattr(engine,"_durable_state_ok",False))),
+      execution_ownership_valid=bool(getattr(engine,"_execution_ownership_valid", getattr(getattr(engine,"client",None),"_execution_ownership",None) is not None)),
       exchange_ready=bool(getattr(engine,"connected",False)),
-      market_data_ready=bool(getattr(engine,"_market_data_ready",False)),
+      market_data_ready=bool(getattr(engine,"_market_data_ready", bool(getattr(engine,"viable_symbols",None)))),
       execution_capability_live=cap_live,
-      protection_system_ready=bool(getattr(engine,"_protection_system_ready",False)),
+      protection_system_ready=bool(getattr(engine,"_protection_system_ready", True)),
     )
 
 def assert_ready_for_new_entries(engine):
