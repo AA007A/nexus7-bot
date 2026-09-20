@@ -21,6 +21,9 @@ _CACHE_ATTR = "_durable_account_equity_peak"
 _INCIDENT_BAD_PEAK = 82_894_351_780.2826
 _INCIDENT_LAST_GOOD_PEAK = 28.7914
 _INCIDENT_BAD_PEAK_TOLERANCE = 1.0
+_TRANSFER_RATIO_INCIDENT_BAD_PEAK = 42_709_241_923.064377
+_TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK = 63.7942573
+_TRANSFER_RATIO_INCIDENT_TOLERANCE = 1.0
 _MAX_UNEXPLAINED_PEAK_TO_EQUITY_RATIO = 1_000.0
 
 
@@ -35,6 +38,10 @@ def _positive_finite(value, label: str) -> float:
 
 def _matches_known_20260914_corruption(persisted: float) -> bool:
     return abs(persisted - _INCIDENT_BAD_PEAK) <= _INCIDENT_BAD_PEAK_TOLERANCE
+
+
+def _matches_known_transfer_ratio_corruption(persisted: float) -> bool:
+    return abs(persisted - _TRANSFER_RATIO_INCIDENT_BAD_PEAK) <= _TRANSFER_RATIO_INCIDENT_TOLERANCE
 
 
 def _validate_peak_vs_equity(peak: float, equity: float) -> None:
@@ -131,6 +138,23 @@ async def restore_update_real_account_peak(risk, equity: float, *, strict: bool 
                 "old_peak=%.4f last_good_peak=%.4f current_equity=%.4f repaired_peak=%.4f "
                 "provenance=durable_atomic execution_effect=NONE",
                 old_peak, _INCIDENT_LAST_GOOD_PEAK, equity, persisted,
+            )
+        elif _matches_known_transfer_ratio_corruption(persisted):
+            old_peak = persisted
+            persisted = max(_TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK, equity)
+            await _write_peak_with_provenance(
+                old_peak=old_peak, new_peak=persisted, equity=equity,
+                reason="incident_repair",
+                evidence_ref="2026-09-20:transfer_ratio_hwm_corruption+authenticated_equity",
+                strict=strict,
+            )
+            setattr(risk, _CACHE_ATTR, persisted)
+            repaired = True
+            log.critical(
+                "[DURABLE_DRAWDOWN_REPAIR] incident=2026-09-20-transfer-ratio-hwm "
+                "old_peak=%.4f repaired_peak=%.4f current_equity=%.4f "
+                "provenance=durable_atomic execution_effect=NONE",
+                old_peak, persisted, equity,
             )
         else:
             _validate_peak_vs_equity(persisted, equity)
