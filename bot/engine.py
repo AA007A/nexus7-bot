@@ -3045,18 +3045,68 @@ class TradingEngine:
                                 sig.symbol, sl=sig.sl, tp=sig.tp
                             )
                             if not _retry_ok:
-                                await self.client.place_order(
+                                _close_res = await self.client.place_order(
                                     symbol=sig.symbol,
                                     side="Sell" if side == "Buy" else "Buy",
                                     qty=qty, sl=0, tp=0,
                                     instruments=self.instruments,
                                     reduce_only=True,
                                 )
+                                _close_oid = (
+                                    _close_res.get("orderId")
+                                    if isinstance(_close_res, dict) else ""
+                                )
+                                _close_fill = (
+                                    await self.client.wait_for_fill(
+                                        _close_oid, timeout_s=8.0
+                                    )
+                                    if _close_oid else {"filled": False}
+                                )
+                                _flat = False
+                                if _close_oid:
+                                    try:
+                                        _after_close = await self.client.get_positions()
+                                        _flat = not any(
+                                            ep.get("symbol") == sig.symbol
+                                            and abs(float(ep.get("size", 0) or 0)) > 0
+                                            for ep in _after_close
+                                        )
+                                    except Exception as _verify_exc:
+                                        log.critical(
+                                            "[POST_OPEN_EMERGENCY_CLOSE_UNCONFIRMED] "
+                                            "symbol=%s orderId=%s stage=POSITION_READ "
+                                            "error=%s entries_blocked=true",
+                                            sig.symbol, _close_oid,
+                                            type(_verify_exc).__name__,
+                                        )
+
+                                if _close_fill.get("filled") and _flat:
+                                    log.critical(
+                                        "[POST_OPEN_EMERGENCY_CLOSE_CONFIRMED] "
+                                        "symbol=%s orderId=%s fill_confirmed=true "
+                                        "exchange_flat=true",
+                                        sig.symbol, _close_oid,
+                                    )
+                                    await notify(
+                                        f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
+                                        f"`{sig.symbol}` foi aberta sem proteção; "
+                                        f"o fechamento foi confirmado na KuCoin."
+                                    )
+                                    return
+
+                                self._unprotected_symbols.add(sig.symbol)
+                                log.critical(
+                                    "[POST_OPEN_EMERGENCY_CLOSE_UNCONFIRMED] "
+                                    "symbol=%s orderId=%s fill_confirmed=%s "
+                                    "exchange_flat=%s entries_blocked=true",
+                                    sig.symbol, _close_oid or "NONE",
+                                    bool(_close_fill.get("filled", False)), _flat,
+                                )
                                 await notify(
-                                    f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
-                                    f"`{sig.symbol}` foi aberta mas o SL não pôde\n"
-                                    f"ser anexado. Fechada para evitar exposição\n"
-                                    f"sem proteção com {cfg.LEVERAGE}x."
+                                    f"🆘 *AÇÃO MANUAL NECESSÁRIA*\n"
+                                    f"`{sig.symbol}` foi aberta sem proteção e o "
+                                    f"fechamento não foi confirmado como FILLED + FLAT.\n"
+                                    f"Novas entradas foram bloqueadas."
                                 )
                                 return
                             log.info(f"✓ {sig.symbol}: SL/TP anexados na 2ª tentativa")
