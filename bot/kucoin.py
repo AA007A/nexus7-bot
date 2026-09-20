@@ -1051,8 +1051,9 @@ class KuCoinClient:
             from bot.execution_ownership import acquire_execution_ownership, validate_execution_ownership
             critical_state.assert_available_for_new_risk()
             engine = getattr(self, "_engine", None)
-            if engine is not None:
-                assert_ready_for_new_entries(engine)
+            if engine is None:
+                raise RuntimeError("READY_FOR_NEW_ENTRIES=false: execution engine unavailable")
+            assert_ready_for_new_entries(engine)
             ownership = getattr(self, "_execution_ownership", None)
             if ownership is None:
                 ownership = await acquire_execution_ownership()
