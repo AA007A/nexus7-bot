@@ -49,12 +49,12 @@ class ValidExecutionTestContext:
         self.stack = AsyncExitStack()
 
     async def __aenter__(self):
-        await self.stack.enter_async_context(patch.object(eo.db, "_conn", self.conn))
-        await self.stack.enter_async_context(patch.object(eo.db, "_is_pg", True))
-        await self.stack.enter_async_context(patch.object(eo.db, "configured_postgres_unavailable", return_value=False))
-        await self.stack.enter_async_context(patch("bot.critical_state.db._conn", self.conn))
-        await self.stack.enter_async_context(patch("bot.critical_state.db.configured_postgres_unavailable", return_value=False))
-        await self.stack.enter_async_context(patch.dict("os.environ", {"EXECUTION_CAPABILITY": "LIVE"}, clear=False))
+        self.stack.enter_context(patch.object(eo.db, "_conn", self.conn))
+        self.stack.enter_context(patch.object(eo.db, "_is_pg", True))
+        self.stack.enter_context(patch.object(eo.db, "configured_postgres_unavailable", return_value=False))
+        self.stack.enter_context(patch("bot.critical_state.db._conn", self.conn))
+        self.stack.enter_context(patch("bot.critical_state.db.configured_postgres_unavailable", return_value=False))
+        self.stack.enter_context(patch.dict("os.environ", {"EXECUTION_CAPABILITY": "LIVE"}, clear=False))
         return self
 
     async def __aexit__(self, *args):
