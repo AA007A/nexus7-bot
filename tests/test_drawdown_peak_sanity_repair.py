@@ -73,4 +73,18 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         write.assert_awaited_once()
 
 
+    async def test_known_transfer_ratio_corruption_repairs_to_additive_peak(self):
+        risk = SimpleNamespace(peak_balance=0.0, drawdown=0.0)
+        with patch.object(
+            db, "load_key_value",
+            AsyncMock(return_value=str(dd._TRANSFER_RATIO_INCIDENT_BAD_PEAK))
+        ), patch.object(
+            dd, "save_key_values_atomic", AsyncMock(return_value=True)
+        ) as save:
+            peak = await dd.restore_update_real_account_peak(risk, 19.1205130211, strict=True)
+        self.assertAlmostEqual(peak, dd._TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK, places=6)
+        self.assertLess(peak, 100.0)
+        self._assert_atomic(save, dd._TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK)
+
+
 if __name__ == "__main__": unittest.main()
