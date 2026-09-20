@@ -73,7 +73,7 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
                     async def __aexit__(self,*a): return False
                 c._session=SimpleNamespace(post=lambda *a,**k: CM())
                 try:
-                    await c._post("/api/v1/orders",{"clientOid":"same","reduceOnly":False},single_attempt=True)
+                    async with c._fenced_entry_post("/api/v1/orders",{"clientOid":"same","reduceOnly":False},"http://exchange.test",data="{}",headers={}):\n                        pass
                     return "ok"
                 except eo.StaleExecutionFence:
                     return "stale fence"
