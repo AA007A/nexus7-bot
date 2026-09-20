@@ -151,10 +151,12 @@ class PilotCounterTests(PilotFixture):
         session = Mock()
         session.post.return_value = LostResponse()
         self.client._session = session
+        self.client._execution_ownership = object()
         try:
-            result = await self.client._post(
-                '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
-            )
+            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
+                result = await self.client._post(
+                    '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
+                )
             session.post.assert_called_once()
             self.assertTrue(result['_ambiguous'])
         finally:
