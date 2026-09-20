@@ -165,8 +165,7 @@ class NativeTPSLTests(unittest.IsolatedAsyncioTestCase):
         Client = self._client_class()
         client = Client()
         client.get_order_by_client_oid.return_value = {}
-        with patch("bot.kucoin_native_tpsl.asyncio.sleep", AsyncMock()):
-            out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
+        out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
         self.assertFalse(out["protection_verified"])
         self.assertTrue(out["protection_not_verified"])
         self.assertTrue(client.entries_paused)
