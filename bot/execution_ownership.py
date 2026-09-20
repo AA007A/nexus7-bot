@@ -13,7 +13,7 @@ from bot.execution_capability import ExecutionCapability, current_execution_capa
 
 _KEY = "live_execution_ownership_v1"
 _OWNER_ID = os.environ.get("EXECUTION_OWNER_ID") or f"{os.environ.get('RAILWAY_SERVICE_ID','local')}:{uuid.uuid4().hex}"
-_LEASE_SECONDS = int(os.environ.get("EXECUTION_OWNERSHIP_LEASE_SECONDS","30"))
+_LEASE_SECONDS = int(os.environ.get("EXECUTION_OWNERSHIP_LEASE_SECONDS", str(15 * 2)))
 
 class ExecutionOwnershipUnavailable(CriticalStateUnavailable): pass
 class StaleExecutionFence(ExecutionOwnershipUnavailable): pass
