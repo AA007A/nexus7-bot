@@ -745,3 +745,72 @@ async def close():
         log.warning(f"Erro ao fechar banco: {e}")
     finally:
         _conn = None
+
+
+@_serialized_io
+async def reserve_pilot_submission_atomic(
+    session_id: str,
+    submission_id: str,
+    max_submissions: int,
+) -> tuple[bool, int]:
+    """Atomically reserve a durable pilot submission slot.
+
+    The key_value row is locked in PostgreSQL so multiple processes cannot
+    consume the same slot.  Replaying the same submission_id is idempotent and
+    does not consume a second slot.
+    """
+    if not _conn:
+        raise PersistenceError("pilot budget reservation blocked: database unavailable")
+    if not session_id or not submission_id or max_submissions < 1:
+        raise PersistenceError("invalid durable pilot reservation arguments")
+    key = f"pilot_budget:{session_id}"
+    ts = _now()
+    try:
+        if _is_pg:
+            async with _conn.transaction():
+                row = await _conn.fetchrow(
+                    "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", key
+                )
+                state = json.loads(row[0]) if row and row[0] else {"submissions": []}
+                submissions = list(state.get("submissions") or [])
+                if submission_id in submissions:
+                    return True, len(submissions)
+                if len(submissions) >= max_submissions:
+                    return False, len(submissions)
+                submissions.append(submission_id)
+                value = json.dumps({"submissions": submissions}, separators=(",", ":"))
+                await _conn.execute(
+                    "INSERT INTO key_value (key,value,updated_at) VALUES ($1,$2,$3) "
+                    "ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3",
+                    key, value, ts,
+                )
+                return True, len(submissions)
+
+        await _conn.execute("BEGIN IMMEDIATE")
+        async with _conn.execute("SELECT value FROM key_value WHERE key=?", (key,)) as cur:
+            row = await cur.fetchone()
+        state = json.loads(row[0]) if row and row[0] else {"submissions": []}
+        submissions = list(state.get("submissions") or [])
+        if submission_id in submissions:
+            await _conn.commit()
+            return True, len(submissions)
+        if len(submissions) >= max_submissions:
+            await _conn.commit()
+            return False, len(submissions)
+        submissions.append(submission_id)
+        value = json.dumps({"submissions": submissions}, separators=(",", ":"))
+        await _conn.execute(
+            "INSERT OR REPLACE INTO key_value (key,value,updated_at) VALUES (?,?,?)",
+            (key, value, ts),
+        )
+        await _conn.commit()
+        return True, len(submissions)
+    except PersistenceError:
+        raise
+    except Exception as exc:
+        if not _is_pg:
+            try:
+                await _conn.rollback()
+            except Exception:
+                pass
+        raise PersistenceError("durable pilot budget reservation failed") from exc
