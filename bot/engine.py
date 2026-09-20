@@ -3679,20 +3679,63 @@ class TradingEngine:
                     instruments=self.instruments,
                     reduce_only=True,
                 )
-                if res and res.get("orderId"):
-                    self.positions.pop(sym, None)
-                    await notify(
-                        f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
-                        f"`{sym}` estava SEM STOP LOSS e não foi possível\n"
-                        f"reaplicá-lo. Fechada para evitar exposição\n"
-                        f"sem proteção com {cfg.LEVERAGE}x."
+                _emergency_oid = res.get("orderId") if isinstance(res, dict) else ""
+                _emergency_flat = False
+                if _emergency_oid:
+                    _emergency_fill = await self.client.wait_for_fill(
+                        _emergency_oid, timeout_s=8.0
                     )
-                else:
-                    await notify(
-                        f"🆘 *AÇÃO MANUAL NECESSÁRIA*\n"
-                        f"`{sym}` está SEM STOP LOSS e o fechamento\n"
-                        f"automático FALHOU. Feche manualmente na KuCoin."
-                    )
+                    try:
+                        _after = await self.client.get_positions()
+                        _remaining = next(
+                            (
+                                ep for ep in _after
+                                if ep.get("symbol") == sym
+                                and abs(float(ep.get("size", 0) or 0)) > 0
+                            ),
+                            None,
+                        )
+                        _emergency_flat = _remaining is None
+                    except Exception as _verify_exc:
+                        log.critical(
+                            "[EMERGENCY_CLOSE_UNCONFIRMED] symbol=%s orderId=%s "
+                            "stage=POSITION_READ error=%s local_position_preserved=true "
+                            "entries_blocked=true",
+                            sym, _emergency_oid, type(_verify_exc).__name__,
+                        )
+
+                    if _emergency_fill.get("filled") and _emergency_flat:
+                        self.positions.pop(sym, None)
+                        self._unprotected_symbols.discard(sym)
+                        log.critical(
+                            "[EMERGENCY_CLOSE_CONFIRMED] symbol=%s orderId=%s "
+                            "fill_confirmed=true exchange_flat=true",
+                            sym, _emergency_oid,
+                        )
+                        await notify(
+                            f"🚨 *POSIÇÃO FECHADA POR SEGURANÇA*\n"
+                            f"`{sym}` estava SEM STOP LOSS e não foi possível\n"
+                            f"reaplicá-lo. Fechamento confirmado na KuCoin."
+                        )
+                        continue
+
+                # orderId/HTTP acceptance is not a fill. Keep the local
+                # position authoritative until KuCoin proves the account flat.
+                self._unprotected_symbols.add(sym)
+                log.critical(
+                    "[EMERGENCY_CLOSE_UNCONFIRMED] symbol=%s orderId=%s "
+                    "fill_confirmed=%s exchange_flat=%s local_position_preserved=true "
+                    "entries_blocked=true",
+                    sym, _emergency_oid or "NONE",
+                    bool(locals().get("_emergency_fill", {}).get("filled", False)),
+                    _emergency_flat,
+                )
+                await notify(
+                    f"🆘 *AÇÃO MANUAL NECESSÁRIA*\n"
+                    f"`{sym}` está SEM STOP LOSS e o fechamento automático\n"
+                    f"não foi confirmado como FILLED + FLAT na KuCoin.\n"
+                    f"Novas entradas foram bloqueadas."
+                )
             except Exception as e:
                 log.error(f"_guard_naked_positions {p.get('symbol','?')}: {e}")
 
