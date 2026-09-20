@@ -607,7 +607,14 @@ class KuCoinClient:
         KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
         auditoria). Não invento uma garantia que não posso comprovar.
         """
-        # Transport-level capability boundary. This executes before PAPER/LIVE\n        # branching so a READ_ONLY runtime remains unable to mutate even if\n        # valid credentials and live flags are accidentally configured.\n        assert_exchange_mutation_allowed("POST", endpoint)\n        if PAPER_TRADE:\n            log.info("[PAPER] _post: exchange mutation skipped")\n            return {}\n        await self._ensure_session()
+        # Transport-level capability boundary. This executes before PAPER/LIVE
+        # branching so a READ_ONLY runtime remains unable to mutate even if
+        # valid credentials and live flags are accidentally configured.
+        assert_exchange_mutation_allowed("POST", endpoint)
+        if PAPER_TRADE:
+            log.info("[PAPER] _post: exchange mutation skipped")
+            return {}
+        await self._ensure_session()
         url = REST_BASE + endpoint
         # separators=(",", ":") remove espaços — garante body idêntico entre assinatura e envio
         body_str = json.dumps(body, separators=(",", ":"))
