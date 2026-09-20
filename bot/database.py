@@ -57,6 +57,11 @@ async def init():
             _conn  = await asyncpg.connect(DATABASE_URL)
             _is_pg = True
             await _create_tables()
+            try:
+                ident = await _conn.fetchrow("SELECT current_database(), current_schema(), inet_server_addr()::text, inet_server_port()")
+                log.info("[DB_IDENTITY] backend=postgres database=%s schema=%s host_addr=%s port=%s durability=CANONICAL_CANDIDATE credentials=REDACTED", ident[0], ident[1], ident[2], ident[3])
+            except Exception as ident_exc:
+                log.warning("[DB_IDENTITY] PostgreSQL identity unavailable: %s", ident_exc)
             log.info("✅ PostgreSQL conectado")
             return
         except Exception as e:
