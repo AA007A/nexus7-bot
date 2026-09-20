@@ -47,6 +47,9 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
     KuCoinClient._post = _post_sized_reduce_only
 
     async def _manage_partial_tp_hardened(self):
+        if getattr(self, "paper_trade", True) is False:
+            from bot.durable_partial_exit import check
+            return await check(self)
         for sym, pos in list(self.positions.items()):
             try:
                 if pos.tp1_hit:
@@ -150,6 +153,8 @@ def install(TradingEngine, KuCoinClient, taker_fee: float, log) -> None:
                     self._unprotected_symbols.add(sym)
                     continue
 
+                pos.tp1_hit = True
+                pos.qty = remaining_qty
                 be_ok = await self.client.set_sl(sym, pos.entry)
 
                 # The partial fill itself is authoritative, so quantity and the

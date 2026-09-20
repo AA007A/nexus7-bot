@@ -24,6 +24,14 @@ class KuCoinPositionUnitAdapter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
 
+    @property
+    def entries_paused(self):
+        return getattr(self._client, 'entries_paused', False)
+
+    @entries_paused.setter
+    def entries_paused(self, value):
+        self._client.entries_paused = value
+
     async def get_positions(self) -> list:
         rows = await self._client.get_positions()
         if not isinstance(rows, list):

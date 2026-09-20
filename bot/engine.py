@@ -466,164 +466,193 @@ class TradingEngine:
         if self._running:
             return
         self._running = True
-        log.info("⚡ Engine v10 iniciando...")
-        await db.init()   # inicia DB (PostgreSQL ou SQLite)
-        self._durable_state_enforced = True
-        await durable.restore_engine_state(self)
-        asyncio.create_task(scoring.update_macro_cache())        # Fear&Greed
-        asyncio.create_task(scoring.news_reader_loop())           # news 24/7
-        asyncio.create_task(mdata.update_macro_correlations())    # DXY/S&P
-        asyncio.create_task(bt.weekly_backtest_loop(self.client))   # backtest semanal
-        asyncio.create_task(opt.weekly_optimization_loop(self.client)) # otimização semanal
-        asyncio.create_task(self._monitor_news_pipeline())               # pipeline de notícias
-        await self._connect()
-        await durable.reconcile_orders(self)
+        self._background_tasks = set()
+        try:
+            log.info("⚡ Engine v10 iniciando...")
+            await db.init()   # inicia DB (PostgreSQL ou SQLite)
+            self._durable_state_enforced = True
+            await durable.restore_engine_state(self)
+            self._start_background(scoring.update_macro_cache())        # Fear&Greed
+            self._start_background(scoring.news_reader_loop())           # news 24/7
+            self._start_background(mdata.update_macro_correlations())    # DXY/S&P
+            self._start_background(bt.weekly_backtest_loop(self.client))   # backtest semanal
+            self._start_background(opt.weekly_optimization_loop(self.client)) # otimização semanal
+            self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
+            await self._connect()
+            await durable.reconcile_orders(self)
 
-        _ciclos = 0
-        while self._running:
-            try:
-                _ciclos += 1
-                # Prova de vida: sem isso, um loop travado era
-                # indistinguível de "mercado sem setup".
-                if _ciclos == 1 or _ciclos % 60 == 0:
-                    log.info(
-                        f"💓 Loop #{_ciclos} | connected={self.connected} "
-                        f"active={self.active} pares={len(self.viable_symbols)} "
-                        f"posições={len(self.positions)} "
-                        f"retry_viable={self._viable_retry_attempt}"
-                    )
-
-                if not self.connected:
-                    await asyncio.sleep(20)   # scan a cada 20s
-                    await self._connect()
-                    continue
-
-                if self.active:
-                    self._check_daily_reset()
-                    self._gc_caches()
-                    await self._update_balance()
-                    await self._heartbeat_telegram()
-                    # Serializa a gestão de posições sob um único lock,
-                    # impedindo ordens concorrentes na mesma posição.
-                    async with self._pos_lock:
-                        await self._guard_naked_positions()
-                        await self._sync_positions()
-                        await self._check_stagnation_and_invalidation()
-                        await self._manage_partial_tp()
-                        await self._apply_trailing_stops()
-                        await self._check_rr_double()
-                    from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
-                    daily_pnl_ok = await checkpoint_daily_pnl(self)
-                    self._update_daily_pnl()
-                    from bot.durable_daily_stop import entries_blocked
-                    daily_state_blocked = await entries_blocked(self)
-                    from bot.exchange_accounting_evidence import schedule as schedule_accounting
-                    schedule_accounting(self)
-                    
-                    if self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
-                        # FIX: logar apenas 1x — não a cada 5s em loop infinito
-                        pass   # já logado em _update_daily_pnl, não repetir aqui
-                    elif self.risk.can_open(len(self.positions)):
-                        # ══════════════════════════════════════════
-                        # P0 — KILL SWITCH DE INTEGRIDADE
-                        #
-                        # Avalia o estado ANTES de qualquer entrada.
-                        # Bloqueia se a exchange não puder ser
-                        # confirmada, se houver divergência local ↔
-                        # exchange, ou se alguma posição estiver sem
-                        # stop confirmado.
-                        #
-                        # NÃO interrompe a gestão de posições abertas —
-                        # essa roda antes, sob o _pos_lock.
-                        # ══════════════════════════════════════════
-                        await self.integrity.assess(self.client, self)
-
-                        # ══════════════════════════════════════════
-                        # P0 — GATE viable_symbols=[] BLOQUEIA ORDENS
-                        #
-                        # Critério de aceite: viable_symbols=[] NUNCA
-                        # pode resultar em tentativa de abertura de
-                        # posição, independente do estado de
-                        # connected/active/integrity.
-                        #
-                        # _ensure_viable_symbols() faz o retry com
-                        # backoff (recarregando instrumentos e preços)
-                        # e retorna True assim que houver >=1 par
-                        # viável — sem exigir restart manual nem
-                        # depender de connected virar False.
-                        # ══════════════════════════════════════════
-                        _tem_pares = await self._ensure_viable_symbols()
-
-                        if not _tem_pares:
-                            # Throttle SOMENTE do log (LOW). O gate acima
-                            # já bloqueou o scan — nada aqui altera
-                            # segurança, retry ou backoff.
-                            #
-                            # Emite imediatamente na primeira vez e sempre
-                            # que o estado relevante mudar (nº da tentativa);
-                            # mensagens idênticas ficam limitadas a 1x/60s.
-                            _susp_key = f"viable_empty|{self._viable_retry_attempt}"
-                            _now_log = time.time()
-                            if (_susp_key != self._scan_susp_last_key or
-                                    _now_log - self._scan_susp_last_log_ts >= 60.0):
-                                self._scan_susp_last_key = _susp_key
-                                self._scan_susp_last_log_ts = _now_log
-                                log.warning(
-                                    f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
-                                    f"nenhuma ordem será aberta até a "
-                                    f"recuperação automática "
-                                    f"(tentativa #{self._viable_retry_attempt})"
-                                )
-                        elif not self.integrity.can_open_new():
-                            log.warning(
-                                f"🚫 ENTRADAS BLOQUEADAS: "
-                                f"{self.integrity.block_reason()}"
-                            )
-                        else:
-                            await self._scan_all_and_enter()
-                    else:
-                        # Sem este else, um can_open()=False fazia o ciclo
-                        # passar direto sem nenhum registro — parecia que o
-                        # bot tinha parado de analisar.
-                        _n = len(self.positions)
+            _ciclos = 0
+            while self._running:
+                try:
+                    _ciclos += 1
+                    # Prova de vida: sem isso, um loop travado era
+                    # indistinguível de "mercado sem setup".
+                    if _ciclos == 1 or _ciclos % 60 == 0:
                         log.info(
-                            f"⏸️ Scan pulado: posições={_n}/{cfg.MAX_POSITIONS} "
-                            f"drawdown={self.risk.drawdown:.1%}/"
-                            f"{cfg.MAX_DRAWDOWN:.0%} "
-                            f"ready={self.risk._ready} "
-                            f"stop_diário={self.daily_stopped}"
+                            f"💓 Loop #{_ciclos} | connected={self.connected} "
+                            f"active={self.active} pares={len(self.viable_symbols)} "
+                            f"posições={len(self.positions)} "
+                            f"retry_viable={self._viable_retry_attempt}"
                         )
 
-                await asyncio.sleep(5)
+                    if not self.connected:
+                        await asyncio.sleep(20)   # scan a cada 20s
+                        await self._connect()
+                        continue
 
-            except asyncio.CancelledError:
-                break
-            except (NameError, AttributeError, TypeError, ImportError) as e:
-                # Erro de programação no ciclo principal: log CRITICAL com
-                # traceback e alerta único (evita spam a cada 5s).
-                import traceback
-                _sig = f"{type(e).__name__}:{e}"
-                if getattr(self, "_last_bug_sig", None) != _sig:
-                    self._last_bug_sig = _sig
-                    log.critical(
-                        f"🐛 BUG DE CÓDIGO no engine loop: {type(e).__name__}: {e}\n"
-                        f"Traceback:\n{traceback.format_exc()}"
-                    )
-                    try:
-                        asyncio.create_task(notify(
-                            f"🐛 *BUG NO CICLO PRINCIPAL*\n"
-                            f"❌ `{type(e).__name__}`\n"
-                            f"💬 `{str(e)[:140]}`\n"
-                            f"_O bot continua rodando, mas este ciclo falhou._"
-                        ))
-                    except Exception:
-                        pass
-                await asyncio.sleep(5)
-            except Exception as e:
-                log.error(f"Engine loop: {e}")
-                await asyncio.sleep(5)
+                    if self.connected:
+                        self._check_daily_reset()
+                        self._gc_caches()
+                        await self._update_balance()
+                        # Serializa a gestão de posições sob um único lock,
+                        # impedindo ordens concorrentes na mesma posição.
+                        async with self._pos_lock:
+                            await self._guard_naked_positions()
+                            await self._sync_positions()
+                            await self._check_stagnation_and_invalidation()
+                            await self._manage_partial_tp()
+                            await self._apply_trailing_stops()
+                            await self._check_rr_double()
+                        await self._heartbeat_telegram()
+                        from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
+                        daily_pnl_ok = await checkpoint_daily_pnl(self)
+                        self._update_daily_pnl()
+                        from bot.durable_daily_stop import entries_blocked
+                        daily_state_blocked = await entries_blocked(self)
+                        from bot.exchange_accounting_evidence import schedule as schedule_accounting
+                        schedule_accounting(self)
+                    
+                        if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
+                            # FIX: logar apenas 1x — não a cada 5s em loop infinito
+                            pass   # já logado em _update_daily_pnl, não repetir aqui
+                        elif self.risk.can_open(len(self.positions)):
+                            # ══════════════════════════════════════════
+                            # P0 — KILL SWITCH DE INTEGRIDADE
+                            #
+                            # Avalia o estado ANTES de qualquer entrada.
+                            # Bloqueia se a exchange não puder ser
+                            # confirmada, se houver divergência local ↔
+                            # exchange, ou se alguma posição estiver sem
+                            # stop confirmado.
+                            #
+                            # NÃO interrompe a gestão de posições abertas —
+                            # essa roda antes, sob o _pos_lock.
+                            # ══════════════════════════════════════════
+                            await self.integrity.assess(self.client, self)
+
+                            # ══════════════════════════════════════════
+                            # P0 — GATE viable_symbols=[] BLOQUEIA ORDENS
+                            #
+                            # Critério de aceite: viable_symbols=[] NUNCA
+                            # pode resultar em tentativa de abertura de
+                            # posição, independente do estado de
+                            # connected/active/integrity.
+                            #
+                            # _ensure_viable_symbols() faz o retry com
+                            # backoff (recarregando instrumentos e preços)
+                            # e retorna True assim que houver >=1 par
+                            # viável — sem exigir restart manual nem
+                            # depender de connected virar False.
+                            # ══════════════════════════════════════════
+                            _tem_pares = await self._ensure_viable_symbols()
+
+                            if not _tem_pares:
+                                # Throttle SOMENTE do log (LOW). O gate acima
+                                # já bloqueou o scan — nada aqui altera
+                                # segurança, retry ou backoff.
+                                #
+                                # Emite imediatamente na primeira vez e sempre
+                                # que o estado relevante mudar (nº da tentativa);
+                                # mensagens idênticas ficam limitadas a 1x/60s.
+                                _susp_key = f"viable_empty|{self._viable_retry_attempt}"
+                                _now_log = time.time()
+                                if (_susp_key != self._scan_susp_last_key or
+                                        _now_log - self._scan_susp_last_log_ts >= 60.0):
+                                    self._scan_susp_last_key = _susp_key
+                                    self._scan_susp_last_log_ts = _now_log
+                                    log.warning(
+                                        f"🚫 SCAN_SUSPENSO: viable_symbols=[] — "
+                                        f"nenhuma ordem será aberta até a "
+                                        f"recuperação automática "
+                                        f"(tentativa #{self._viable_retry_attempt})"
+                                    )
+                            elif not self.integrity.can_open_new():
+                                log.warning(
+                                    f"🚫 ENTRADAS BLOQUEADAS: "
+                                    f"{self.integrity.block_reason()}"
+                                )
+                            else:
+                                await self._scan_all_and_enter()
+                        else:
+                            # Sem este else, um can_open()=False fazia o ciclo
+                            # passar direto sem nenhum registro — parecia que o
+                            # bot tinha parado de analisar.
+                            _n = len(self.positions)
+                            log.info(
+                                f"⏸️ Scan pulado: posições={_n}/{cfg.MAX_POSITIONS} "
+                                f"drawdown={self.risk.drawdown:.1%}/"
+                                f"{cfg.MAX_DRAWDOWN:.0%} "
+                                f"ready={self.risk._ready} "
+                                f"stop_diário={self.daily_stopped}"
+                            )
+
+                    await asyncio.sleep(5)
+
+                except asyncio.CancelledError:
+                    break
+                except (NameError, AttributeError, TypeError, ImportError) as e:
+                    # Erro de programação no ciclo principal: log CRITICAL com
+                    # traceback e alerta único (evita spam a cada 5s).
+                    import traceback
+                    _sig = f"{type(e).__name__}:{e}"
+                    if getattr(self, "_last_bug_sig", None) != _sig:
+                        self._last_bug_sig = _sig
+                        log.critical(
+                            f"🐛 BUG DE CÓDIGO no engine loop: {type(e).__name__}: {e}\n"
+                            f"Traceback:\n{traceback.format_exc()}"
+                        )
+                        try:
+                            asyncio.create_task(notify(
+                                f"🐛 *BUG NO CICLO PRINCIPAL*\n"
+                                f"❌ `{type(e).__name__}`\n"
+                                f"💬 `{str(e)[:140]}`\n"
+                                f"_O bot continua rodando, mas este ciclo falhou._"
+                            ))
+                        except Exception:
+                            pass
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    log.error(f"Engine loop: {e}")
+                    await asyncio.sleep(5)
+        finally:
+            self._running = False
+            accounting_task = getattr(self, '_accounting_evidence_task', None)
+            if accounting_task is not None:
+                self._background_tasks.add(accounting_task)
+            tasks = tuple(self._background_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._background_tasks.clear()
+
+    def _start_background(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        return task
+
+    def pause_entries(self):
+        self.entries_paused = True
+        self.client.entries_paused = True
+        log.warning('[ENTRY_PAUSE] paused=true position_management=CONTINUES')
+
+    def resume_entries(self):
+        self.entries_paused = False
+        self.client.entries_paused = False
+        log.info('[ENTRY_PAUSE] paused=false risk_gates=UNCHANGED')
 
     def stop(self):
+        self.pause_entries()
         self.active   = False
         self._running = False   # FIX: permite que run() seja recriado no resume
         log.info("⏸️ Bot pausado (servidor continua rodando)")
@@ -1884,6 +1913,9 @@ class TradingEngine:
         NÃO fecha por ruído, micro reversões ou trailing.
         Só fecha 100% da posição — sem parciais.
         """
+        if not self.paper_trade:
+            from bot.confirmed_rr_exit import check
+            return await check(self)
         for sym, pos in list(self.positions.items()):
             try:
                 risk_dist   = abs(pos.entry - pos.sl)   # distância SL original
@@ -3858,6 +3890,7 @@ class TradingEngine:
         return {
             "connected":        self.connected,
             "active":           self.active,
+            "entries_paused":   bool(getattr(self, 'entries_paused', False)),
             "balance":          round(self.risk.balance, 4),
             "buying_power":     round(self.risk.balance * cfg.LEVERAGE, 2),
             "drawdown_pct":     round(self.risk.drawdown * 100, 2),

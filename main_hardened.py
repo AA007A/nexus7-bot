@@ -119,7 +119,8 @@ async def readiness():
             getattr(app.state, 'engine_task', None),
             running=bool(getattr(engine, '_running', False))),
     )
-    trading_ready = bool(snap.get("ready"))
+    entries_paused = bool(getattr(engine, 'entries_paused', False))
+    trading_ready = bool(snap.get("ready")) and not entries_paused
 
     body = {
         "status": "ready" if service.ready else "not_ready",
@@ -127,6 +128,7 @@ async def readiness():
         "service_ready": service.ready,
         "service_reason": service.reason,
         "trading_ready": trading_ready,
+        "entries_paused": entries_paused,
         "connected": bool(snap.get("connected")),
         "active": bool(snap.get("active")),
         "safety_paused": bool(snap.get("connected")) and not bool(snap.get("active")),

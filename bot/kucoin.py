@@ -576,6 +576,16 @@ class KuCoinClient:
                 await asyncio.sleep(0.25 * (attempt + 1))
         return {}
 
+    def _entry_safe_post(self, endpoint, body, url, **kwargs):
+        # Evaluated after acquiring the rate semaphore, immediately before
+        # constructing the HTTP request; includes native protected entries.
+        if (getattr(self, 'entries_paused', False)
+                and endpoint in ('/api/v1/orders', '/api/v1/st-orders')
+                and body.get('reduceOnly') is not True
+                and body.get('closeOrder') is not True):
+            raise ValueError('New entry blocked by operator pause')
+        return self._session.post(url, **kwargs)
+
     async def _post(self, endpoint: str, body: dict, *, single_attempt: bool = False) -> dict:
         """
         NOTA DE IDEMPOTÊNCIA (ADV-02): body_str é serializado UMA VEZ,
@@ -608,7 +618,7 @@ class KuCoinClient:
         for attempt in range(1 if single_attempt else 3):
             try:
                 await self._throttle()
-                async with self._rate_sem, self._session.post(url, data=body_str, headers=headers) as r:
+                async with self._rate_sem, self._entry_safe_post(endpoint, body, url, data=body_str, headers=headers) as r:
                     # ══════════════════════════════════════════════════
                     # ADV-02 — HTTP 429 ERA PERDIDO EM _post()
                     #
@@ -1026,7 +1036,7 @@ class KuCoinClient:
             if managed_order.state == OrderState.CREATED:
                 managed_order.transition(OrderState.SUBMITTING, source="LOCAL")
 
-        post_options = {"single_attempt": True} if single_submission and not reduce_only else {}
+        post_options = {"single_attempt": True} if single_submission else {}
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
