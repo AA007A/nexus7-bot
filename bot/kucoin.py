@@ -1498,20 +1498,23 @@ class KuCoinClient:
         Retorna posições abertas formatadas igual ao BybitClient.
         CORRIGIDO: trata resposta vazia e erro 400004 sem quebrar o engine.
         """
-        try:
-            data = await self._get("/api/v1/positions", auth=True)
-        except Exception as e:
-            log.warning(f"get_positions erro: {e}")
-            return []
+        # IMPORTANT: an empty successful KuCoin response means "flat", but
+        # an empty dict from _get() can also mean REST/auth/rate-limit failure.
+        # Those states must never be conflated because IntegrityGuard treats
+        # a returned list as confirmed exchange exposure.
+        data = await self._get("/api/v1/positions", auth=True)
 
-        if not data:
-            return []
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict) and isinstance(data.get("data"), list):
+            raw = data["data"]
+        else:
+            raise RuntimeError(
+                "POSITIONS_UNCONFIRMED: KuCoin positions payload unavailable "
+                "or malformed"
+            )
 
         positions = []
-        # KuCoin pode retornar lista direta ou dict com lista
-        raw = data if isinstance(data, list) else data.get("data", [])
-        if not isinstance(raw, list):
-            return []
 
         for p in raw:
             try:
