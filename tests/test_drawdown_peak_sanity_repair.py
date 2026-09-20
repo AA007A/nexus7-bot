@@ -87,4 +87,20 @@ class DrawdownPeakSanityRepairTests(unittest.IsolatedAsyncioTestCase):
         self._assert_atomic(save, dd._TRANSFER_RATIO_INCIDENT_REPAIRED_PEAK)
 
 
+    async def test_transfer_out_preserves_preflow_drawdown_ratio(self):
+        risk = SimpleNamespace(peak_balance=38.2593, drawdown=0.0)
+        with patch.object(dd, "_load_peak", AsyncMock(return_value=(38.2593, "database"))), \
+             patch.object(dd, "_write_peak_with_provenance", AsyncMock()):
+            peak = await dd.rebase_real_account_peak_for_external_flow(
+                risk, 20.8664,
+                pre_flow_equity=34.8664,
+                post_flow_equity=20.8664,
+                flow_type="TransferOut",
+                flow_amount=14.0,
+                flow_offset="withdrawal-regression",
+                strict=True,
+            )
+        self.assertAlmostEqual(peak, 38.2593 * (20.8664 / 34.8664), places=6)
+
+
 if __name__ == "__main__": unittest.main()
