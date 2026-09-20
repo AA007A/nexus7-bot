@@ -1,9 +1,10 @@
 """Single reproducible pre-release proof-pack entry point.
 
-The runner only orchestrates unittest modules; proof logic remains in tests.
+Each proof module runs in a fresh interpreter so runtime hardening installers and
+class monkeypatches cannot leak state between otherwise independent proofs.
 """
+import subprocess
 import sys
-import unittest
 
 MODULES = (
     "tests.test_release_execution_boundary",
@@ -19,13 +20,17 @@ MODULES = (
 )
 
 def main() -> int:
-    loader = unittest.defaultTestLoader
-    suite = unittest.TestSuite(loader.loadTestsFromName(name) for name in MODULES)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if result.skipped:
-        print("RELEASE_PROOF_BLOCKED: skipped mandatory proof tests", file=sys.stderr)
-        return 2
-    return 0 if result.wasSuccessful() else 1
+    for module in MODULES:
+        print(f"=== RELEASE PROOF: {module} ===", flush=True)
+        completed = subprocess.run(
+            [sys.executable, "-m", "unittest", module, "-v"],
+            check=False,
+        )
+        if completed.returncode != 0:
+            print(f"RELEASE_PROOF_FAILED={module}", file=sys.stderr)
+            return completed.returncode or 1
+    print("RELEASE_PROOF=PASS")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
