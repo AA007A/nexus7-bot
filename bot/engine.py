@@ -3017,7 +3017,7 @@ class TradingEngine:
                             )):
                         return
 
-                    if not self.pilot.reserve_submission(sig.symbol):
+                    if not await self.pilot.reserve_submission(sig.symbol, submission_id=_idem):
                         return
                     _order = await self.client.place_order(
                         symbol=sig.symbol, side=side, qty=qty,
