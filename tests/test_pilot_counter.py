@@ -1,7 +1,7 @@
 """Two pilot submissions, including ambiguous/error outcomes and concurrency."""
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from tests.test_pilot_minimum import PilotFixture
 from tests.test_ai_gate import approval
 from bot.strategy import Signal
