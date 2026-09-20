@@ -623,36 +623,51 @@ class KuCoinClient:
         for attempt in range(1 if single_attempt else 3):
             try:
                 await self._throttle()
-                async with self._rate_sem, self._entry_safe_post(endpoint, body, url, data=body_str, headers=headers) as r:
-                    # ══════════════════════════════════════════════════
-                    # ADV-02 — HTTP 429 ERA PERDIDO EM _post()
-                    #
-                    # Mesmo bug já corrigido em _get() (Fase 4F): r.json()
-                    # levanta ContentTypeError quando a KuCoin devolve
-                    # HTTP 429 sem body JSON válido — a exceção caía no
-                    # except genérico, fazendo retry cego sem nunca
-                    # chamar _register_429(). Uma ordem rate-limitada
-                    # nunca alimentava o mecanismo global de backoff.
-                    #
-                    # CASO A do pedido: HTTP status 429 puro.
-                    # ══════════════════════════════════════════════════
-                    if r.status == 429:
-                        self._register_429()
-                        _retry_after = self._parse_retry_after(
-                            r.headers.get("Retry-After")
-                        )
-                        _w = _retry_after if _retry_after > 0 else self._backoff_seconds(attempt)
-                        log.warning(
-                            f"🚦 Rate limit KuCoin HTTP 429 em POST {endpoint} "
-                            f"({self._rate_limit_hits} recentes) — "
-                            f"aguardando {_w:.1f}s"
-                            f"{' (Retry-After)' if _retry_after > 0 else ''}"
-                        )
-                        await asyncio.sleep(_w)
-                        continue   # MESMO body_str/clientOid na próxima tentativa
+                async with self._rate_sem:
+                    # Final fencing check at the closest await-free boundary before
+                    # constructing the exchange request.  A takeover while waiting
+                    # for throttle/semaphore must invalidate the stale owner.
+                    is_new_risk = (
+                        endpoint in ("/api/v1/orders", "/api/v1/st-orders")
+                        and body.get("reduceOnly") is not True
+                        and body.get("closeOrder") is not True
+                    )
+                    if is_new_risk:
+                        from bot.execution_ownership import validate_execution_ownership
+                        ownership = getattr(self, "_execution_ownership", None)
+                        if ownership is None:
+                            raise RuntimeError("OPEN_NEW_RISK missing execution ownership at transport boundary")
+                        await validate_execution_ownership(ownership)
+                    async with self._entry_safe_post(endpoint, body, url, data=body_str, headers=headers) as r:
+                        # ══════════════════════════════════════════════════
+                        # ADV-02 — HTTP 429 ERA PERDIDO EM _post()
+                        #
+                        # Mesmo bug já corrigido em _get() (Fase 4F): r.json()
+                        # levanta ContentTypeError quando a KuCoin devolve
+                        # HTTP 429 sem body JSON válido — a exceção caía no
+                        # except genérico, fazendo retry cego sem nunca
+                        # chamar _register_429(). Uma ordem rate-limitada
+                        # nunca alimentava o mecanismo global de backoff.
+                        #
+                        # CASO A do pedido: HTTP status 429 puro.
+                        # ══════════════════════════════════════════════════
+                        if r.status == 429:
+                            self._register_429()
+                            _retry_after = self._parse_retry_after(
+                                r.headers.get("Retry-After")
+                            )
+                            _w = _retry_after if _retry_after > 0 else self._backoff_seconds(attempt)
+                            log.warning(
+                                f"🚦 Rate limit KuCoin HTTP 429 em POST {endpoint} "
+                                f"({self._rate_limit_hits} recentes) — "
+                                f"aguardando {_w:.1f}s"
+                                f"{' (Retry-After)' if _retry_after > 0 else ''}"
+                            )
+                            await asyncio.sleep(_w)
+                            continue   # MESMO body_str/clientOid na próxima tentativa
 
-                    try:
-                        data = await r.json(content_type=None)
+                        try:
+                            data = await r.json(content_type=None)
                     except Exception as _je:
                         log.warning(
                             f"KuCoin POST {endpoint}: resposta não-JSON "
