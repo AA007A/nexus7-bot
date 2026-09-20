@@ -110,7 +110,9 @@ class NativeStopRepairTests(unittest.IsolatedAsyncioTestCase):
 
         accepted[0]["stopPrice"] = "7.3021"
         c._post.reset_mock()
+        c._post = AsyncMock(return_value={"orderId": "replacement"})
         self.assertFalse(await set_stops(c, "AVAXUSDT", 7.3, 0, self.module(), Mock()))
+        c._post.assert_awaited_once()
 
     async def test_acknowledgement_without_readback_fails(self):
         c=self.client()
