@@ -1,4 +1,4 @@
-import pytest
+import asyncio
 
 from bot import kucoin_order_forensics as forensic
 
@@ -49,12 +49,14 @@ class FakeClient:
         }
 
 
-@pytest.mark.asyncio
-async def test_snapshot_is_read_only_and_redacted(monkeypatch):
+def test_snapshot_is_read_only_and_redacted():
     fake = FakeClient()
-    monkeypatch.setattr(forensic, "KuCoinClient", lambda: fake)
-
-    result = await forensic.snapshot_order("491192937082871808")
+    original = forensic.KuCoinClient
+    forensic.KuCoinClient = lambda: fake
+    try:
+        result = asyncio.run(forensic.snapshot_order("491192937082871808"))
+    finally:
+        forensic.KuCoinClient = original
 
     assert result["forensic_mode"] == "READ_ONLY"
     assert result["execution_effect"] == "NONE"
@@ -70,7 +72,9 @@ async def test_snapshot_is_read_only_and_redacted(monkeypatch):
     assert fake._session.closed is True
 
 
-@pytest.mark.asyncio
-async def test_rejects_non_numeric_order_id():
-    with pytest.raises(ValueError):
-        await forensic.snapshot_order("not-an-order")
+def test_rejects_non_numeric_order_id():
+    try:
+        asyncio.run(forensic.snapshot_order("not-an-order"))
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError")
