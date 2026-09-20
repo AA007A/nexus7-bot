@@ -93,13 +93,21 @@ class TradingEngine(CoreTradingEngine):
                 self.daily_stop_loss = round(equity * cfg.DAILY_STOP_LOSS_PCT, 2)
 
             if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+                hard_gate = cfg.DRAWDOWN_MODE == "HARD_GATE"
+                if hard_gate:
+                    self.client.entries_paused = True
+                    self._drawdown_hard_gate_active = True
                 if not getattr(self, "_dd_alerted", False):
                     self._dd_alerted = True
                     log.warning(
-                        "[DRAWDOWN_ADVISORY_RUNTIME] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "entries_blocked=false active_unchanged=true execution_effect=NONE",
+                        "[DRAWDOWN_POLICY_RUNTIME] drawdown_pct=%.2f threshold_pct=%.2f "
+                        "mode=%s entries_blocked=%s reason=DRAWDOWN_THRESHOLD "
+                        "execution_effect=%s",
                         self.risk.drawdown * 100.0,
                         cfg.MAX_DRAWDOWN * 100.0,
+                        cfg.DRAWDOWN_MODE,
+                        str(hard_gate).lower(),
+                        "BLOCK_NEW_ENTRIES" if hard_gate else "NONE",
                     )
                     await notify(
                         f"⚠️ *DRAWDOWN ELEVADO — ADVISORY*\n"
@@ -111,6 +119,16 @@ class TradingEngine(CoreTradingEngine):
                     )
             else:
                 self._dd_alerted = False
+                if getattr(self, "_drawdown_hard_gate_active", False):
+                    self.client.entries_paused = False
+                    self._drawdown_hard_gate_active = False
+                    log.warning(
+                        "[DRAWDOWN_POLICY_RUNTIME] drawdown_pct=%.2f threshold_pct=%.2f "
+                        "mode=%s entries_blocked=false reason=RECOVERED_BELOW_THRESHOLD",
+                        self.risk.drawdown * 100.0,
+                        cfg.MAX_DRAWDOWN * 100.0,
+                        cfg.DRAWDOWN_MODE,
+                    )
         except Exception as exc:
             self.risk.balance_confirmed = False
             self.risk.invalidate_capital()

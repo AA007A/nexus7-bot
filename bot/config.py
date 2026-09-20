@@ -38,6 +38,9 @@ class Config:
     MAX_RISK_PCT:   float = float(os.environ.get("MAX_RISK_PCT", "0.01"))
     MAX_MARGIN_PCT: float = float(os.environ.get("MAX_MARGIN_PCT", "0.10"))
     MAX_DRAWDOWN:   float = _pct(os.environ.get("MAX_DRAWDOWN", "0.10"), 0.10)
+    DRAWDOWN_MODE:   str = os.environ.get("DRAWDOWN_MODE", "ADVISORY").strip().upper()
+    if DRAWDOWN_MODE not in {"ADVISORY", "HARD_GATE"}:
+        raise ValueError("DRAWDOWN_MODE must be ADVISORY or HARD_GATE")
     INITIAL_CAP:    float = float(os.environ.get("INITIAL_CAP", "0"))
     MAX_POSITIONS:  int   = int(os.environ.get("MAX_POSITIONS", "2"))
     MIN_CONFIDENCE: float = float(os.environ.get("MIN_CONFIDENCE", "0.75"))

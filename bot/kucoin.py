@@ -42,6 +42,7 @@ import aiohttp
 from bot.logger import log
 from bot.order_state import OrderState, InvalidTransition
 from bot.quantity import base_to_contracts
+from bot.execution_capability import assert_post_allowed, configured_capability
 
 # ── Credenciais ────────────────────────────────────────────────────
 # .strip() automático — espaços acidentais no Railway são a causa #1 de 400004
@@ -285,6 +286,8 @@ class KuCoinClient:
 
         self._connected = False
         self._running   = False
+        self.execution_capability = configured_capability()
+        log.warning("[EXECUTION_CAPABILITY] mode=%s", self.execution_capability.value)
 
     # ── Rate Limiter ──────────────────────────────────────────────
     # A KuCoin limita requisições por peso (~30/10s no público).
@@ -606,6 +609,10 @@ class KuCoinClient:
         KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
         auditoria). Não invento uma garantia que não posso comprovar.
         """
+        # Transport-boundary capability check comes before PAPER handling on
+        # purpose: READ_ONLY must remain non-mutating even if credentials and
+        # live flags are accidentally configured later.
+        assert_post_allowed(endpoint)
         if PAPER_TRADE:
             log.info("[PAPER] _post: exchange mutation skipped")
             return {}

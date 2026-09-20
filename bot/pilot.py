@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List
 
 from bot.logger import log
+from bot import database as db
 
 PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "true"
 PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
@@ -47,20 +48,36 @@ class PilotGuard:
     def enabled(self) -> bool:
         return PILOT_ENABLED and not _paper_trade_enabled()
 
-    def reserve_submission(self, symbol: str) -> bool:
-        """Atomically reserve one of two session submission slots before dispatch."""
+    async def reserve_submission(self, symbol: str, submission_id: str) -> bool:
+        """Reserve a durable, idempotent pilot slot before network dispatch."""
         if not self.enabled:
             return True
+        session_id = os.environ.get("PILOT_SESSION_ID", "").strip()
+        if not session_id:
+            log.critical("[PILOT] durable reservation blocked: PILOT_SESSION_ID missing")
+            return False
+        try:
+            allowed, reserved = await db.reserve_pilot_submission_atomic(
+                session_id,
+                submission_id,
+                MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION,
+            )
+        except db.PersistenceError as exc:
+            log.critical(
+                "[PILOT] durable reservation failed closed symbol=%s error=%s",
+                symbol, type(exc).__name__,
+            )
+            return False
         with self._submission_lock:
-            if self.state.new_order_submissions_this_session >= MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION:
-                log.warning(f"[PILOT] {symbol} submission cap reached (2)")
-                return False
-            self.state.new_order_submissions_this_session += 1
-            self.state.first_order_ts = time.time()
-            reserved = self.state.new_order_submissions_this_session
+            self.state.new_order_submissions_this_session = reserved
+            if allowed and self.state.first_order_ts == 0.0:
+                self.state.first_order_ts = time.time()
+        if not allowed:
+            log.warning("[PILOT] %s durable submission cap reached (%d)", symbol, reserved)
+            return False
         log.critical(
-            f"[PILOT] symbol={symbol} submission_reserved={reserved}/"
-            f"{MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION} session"
+            "[PILOT] symbol=%s submission_id=%s submission_reserved=%d/%d session_id=%s",
+            symbol, submission_id, reserved, MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION, session_id,
         )
         return True
 
