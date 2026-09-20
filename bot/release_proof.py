@@ -4,7 +4,7 @@ import sys
 
 MODULES = (
     "tests.test_release_execution_boundary",
-    "tests.test_final_release_proof",
+    "tests.test_final_release_proof",\n    "tests.test_final_evidence_closure",
     "tests.test_final_evidence_closure",
     "tests.test_release_pilot_postgres",
     "tests.test_execution_ownership",
