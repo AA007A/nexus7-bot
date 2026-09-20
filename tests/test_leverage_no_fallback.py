@@ -1,5 +1,6 @@
 """A rejected order must not be retried with a different leverage."""
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bot.config import cfg
@@ -19,7 +20,7 @@ class LeverageNoFallbackTests(unittest.IsolatedAsyncioTestCase):
         }
         client._post = AsyncMock(return_value={})
         client._position_exists = AsyncMock(return_value=False)
-        client._engine = object()
+        client._engine = SimpleNamespace()
 
         with (
             patch("bot.kucoin.PAPER_TRADE", False),
