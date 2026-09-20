@@ -125,6 +125,8 @@ class PilotGuard:
             risk = getattr(engine, "risk", None)
             if risk is None or not getattr(risk, "_ready", False):
                 r.append("9_RISK: RiskManager não inicializado")
+            if getattr(engine, "_drawdown_hard_gate_active", False):
+                r.append("9B_DRAWDOWN: HARD_GATE ativo; novas entradas bloqueadas")
 
             if ai_decision is None:
                 r.append("10_AI: nenhuma decisão do NEXUS AI recebida")
