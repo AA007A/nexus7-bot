@@ -25,10 +25,44 @@ def _context_text(path: str, node: ast.ExceptHandler) -> str:
         return f"audit_read_error:{type(exc).__name__}"
 
 
+def _exception_type(node: ast.ExceptHandler) -> str:
+    if node.type is None:
+        return "bare"
+    try:
+        return ast.unparse(node.type)
+    except Exception as exc:
+        return f"{type(node.type).__name__}:{type(exc).__name__}"
+
+
+def _is_expected_process_exit_race(path: str, node: ast.ExceptHandler) -> bool:
+    """Recognize the bounded research-child kill race documented in run_snapshot.
+
+    The child can exit after the returncode check and before proc.kill().  The
+    handler intentionally ignores only ProcessLookupError, then still awaits
+    proc.wait() in the surrounding finally block.  This is cleanup idempotency,
+    not suppression of an execution/risk failure.
+    """
+    if os.path.basename(path) != "research_process.py":
+        return False
+    if _exception_type(node) != "ProcessLookupError":
+        return False
+    text = _context_text(path, node)
+    return (
+        "proc.returncode is none" in text
+        and "proc.kill()" in text
+        and "await proc.wait()" in text
+    )
+
+
 def _classify(path: str, node: ast.ExceptHandler) -> str:
     """Conservative static triage for review priority, not an execution gate."""
     name = os.path.basename(path)
     text = _context_text(path, node)
+
+    # This must precede generic critical-term matching because research_process
+    # deliberately contains isolation/risk language in its surrounding context.
+    if _is_expected_process_exit_race(path, node):
+        return "BEST_EFFORT_LIKELY"
 
     critical_terms = (
         "place_order", "set_sl", "set_position_stops", "save_trade", "database",
@@ -39,12 +73,6 @@ def _classify(path: str, node: ast.ExceptHandler) -> str:
         "notify", "telegram", "metrics", "log.debug", "observability", "heartbeat",
     )
 
-    # engine.py contains tiny handlers around scheduling Telegram notifications
-    # after the primary failure has already been logged CRITICAL/ERROR. The
-    # protected operation is observability-only and must not affect engine/risk
-    # execution. Use a wider context window so long multiline notification text
-    # cannot be misclassified as REVIEW_MEDIUM merely because create_task is
-    # more than eight lines above the except clause.
     notification_only_terms = (
         "asyncio.create_task(notify(",
         "create_task(notify(",
@@ -66,6 +94,11 @@ def _justification(path: str, node: ast.ExceptHandler, priority: str) -> str:
         return ""
     name = os.path.basename(path)
     text = _context_text(path, node)
+    if _is_expected_process_exit_race(path, node):
+        return (
+            "Expected child-process exit race during bounded cleanup; only "
+            "ProcessLookupError from proc.kill() is ignored and proc.wait() still runs"
+        )
     if name == "engine.py" and (
         "asyncio.create_task(notify(" in text or "create_task(notify(" in text
     ):
@@ -106,12 +139,7 @@ def audit_silent_excepts(log):
             meaningful = [stmt for stmt in node.body if not isinstance(stmt, ast.Pass)]
             if meaningful:
                 continue
-            exc_type = "bare"
-            if node.type is not None:
-                try:
-                    exc_type = ast.unparse(node.type)
-                except Exception as exc:
-                    exc_type = f"{type(node.type).__name__}:{type(exc).__name__}"
+            exc_type = _exception_type(node)
             priority = _classify(path, node)
             rows.append((filename, node.lineno, exc_type, priority))
             paths[(filename, node.lineno)] = (path, node)
