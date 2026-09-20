@@ -1,12 +1,8 @@
-"""Single reproducible pre-release proof-pack entry point.
-
-Each proof module runs in a fresh interpreter so runtime hardening installers and
-class monkeypatches cannot leak state between otherwise independent proofs.
-"""
+"""Single reproducible pre-release proof-pack entry point."""
 import subprocess
 import sys
 
-MODULES = (
+UNITTEST_MODULES = (
     "tests.test_release_execution_boundary",
     "tests.test_final_release_proof",
     "tests.test_release_pilot_postgres",
@@ -25,19 +21,19 @@ MODULES = (
 )
 
 def main() -> int:
-    for module in MODULES:
+    for module in UNITTEST_MODULES:
         print(f"=== RELEASE PROOF: {module} ===", flush=True)
-        completed = subprocess.run(
-            [sys.executable, "-m", "unittest", module, "-v"],
-            check=False,
-        )
+        completed = subprocess.run([sys.executable, "-m", "unittest", module, "-v"], check=False)
         if completed.returncode != 0:
             print(f"RELEASE_PROOF_FAILED={module}", file=sys.stderr)
             return completed.returncode or 1
-    for module in SCRIPT_MODULES:\n        print(f"=== RELEASE PROOF SCRIPT: {module} ===", flush=True)\n        completed = subprocess.run([sys.executable, "-m", module], check=False)\n        if completed.returncode != 0:\n            print(f"RELEASE_PROOF_FAILED={module}", file=sys.stderr)\n            return completed.returncode or 1\n    regression = subprocess.run([sys.executable, "-m", "tests.run_offline", "tests.test_regression"], check=False)
-    if regression.returncode != 0:
+    completed = subprocess.run(
+        [sys.executable, "-m", "tests.run_offline", "tests.test_regression"],
+        check=False,
+    )
+    if completed.returncode != 0:
         print("RELEASE_PROOF_FAILED=tests.test_regression", file=sys.stderr)
-        return regression.returncode or 1
+        return completed.returncode or 1
     print("RELEASE_PROOF=PASS")
     return 0
 
