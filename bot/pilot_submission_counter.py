@@ -87,6 +87,9 @@ async def _reserve_db(token: str, limit: int) -> tuple[bool, int]:
         async with db._io_lock:
             if getattr(db, "_is_pg", False):
                 async with conn.transaction():
+                    # Serialize even the first reservation, when no row exists yet.
+                    # FOR UPDATE alone cannot lock an absent key_value row.
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
                     row = await conn.fetchrow(
                         "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", key
                     )
