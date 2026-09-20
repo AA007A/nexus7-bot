@@ -82,6 +82,9 @@ async def init():
         _conn  = await aiosqlite.connect(SQLITE_PATH)
         _is_pg = False
         await _create_tables()
+        storage_mode = os.environ.get("SHADOW_STORAGE_MODE", "").strip().upper()
+        if storage_mode == "EPHEMERAL":
+            log.warning("[STORAGE_IDENTITY] mode=EPHEMERAL backend=sqlite path=%s durable=false production_authority=false", SQLITE_PATH)
         log.info(f"✅ SQLite: {SQLITE_PATH}")
     except Exception as e:
         log.error(f"DB init falhou: {e} — sem persistência")
