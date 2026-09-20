@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from bot import database as db
 from bot.logger import log
+from bot import daily_pnl_storage
 
 _ESTIMATED_SOURCE = 'ESTIMATED_LOCAL_MARK_AND_FEE_RATE'
 _CONFIRMED_ADJUSTMENT_SOURCE = 'KUCOIN_RECONCILIATION_ADJUSTMENT'
@@ -29,8 +30,7 @@ def utc_day(value):
 
 
 def _ledger_key(day):
-    from bot.durable_daily_stop import state_key
-    return state_key('pnl-ledger-v1:' + day)
+    return daily_pnl_storage.ledger_key(day)
 
 
 def event(trade):
@@ -249,11 +249,10 @@ async def reconcile_confirmed_exchange(engine, row, receipt):
             engine._daily_pnl_lock = asyncio.Lock()
         async with engine._daily_pnl_lock:
             key = _ledger_key(day)
-            raw = await db.load_key_value(key, strict=True)
-            if raw is None:
+            raw, state = await daily_pnl_storage.load(day)
+            if state is None:
                 log.warning('[DURABLE_DAILY_PNL_RECONCILE] close_id=%s result=NO_LEDGER adjustment=NONE', row.get('closeId', 'NA'))
                 return False
-            state = json.loads(raw)
             if state.get('version') != 1 or state.get('day') != day or not isinstance(state.get('events'), dict):
                 raise ValueError('invalid daily PnL ledger')
             rows = state['events']
@@ -318,8 +317,8 @@ async def checkpoint(engine, extra=None, now=None):
                 raise db.PersistenceError('ephemeral daily PnL storage')
             day = utc_day(now or datetime.now(timezone.utc))
             key = _ledger_key(day)
-            raw = await db.load_key_value(key, strict=True)
-            state = json.loads(raw) if raw is not None else {
+            raw, state = await daily_pnl_storage.load(day)
+            state = state if state is not None else {
                 'version': 1, 'day': day, 'events': {},
                 'coverage_started_at': (now or datetime.now(timezone.utc)).isoformat()}
             if state.get('version') != 1 or state.get('day') != day or not isinstance(state.get('events'), dict):
