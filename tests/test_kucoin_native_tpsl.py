@@ -9,6 +9,7 @@ class _Log:
     warning = staticmethod(lambda *a, **k: None)
     info = staticmethod(lambda *a, **k: None)
     error = staticmethod(lambda *a, **k: None)
+    critical = staticmethod(lambda *a, **k: None)
 
 
 class _FakeClient:
@@ -178,8 +179,7 @@ class NativeTPSLTests(unittest.IsolatedAsyncioTestCase):
             "triggerStopUpPrice": "103000.0", "triggerStopDownPrice": "97000.0",
             "reduceOnly": False,
         }
-        with patch("bot.kucoin_native_tpsl.asyncio.sleep", AsyncMock()):
-            out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
+        out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
         self.assertFalse(out["protection_verified"])
         self.assertTrue(out["protection_not_verified"])
 
