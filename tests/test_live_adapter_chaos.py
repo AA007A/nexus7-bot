@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import kucoin
+from tests.execution_test_context import ValidExecutionTestContext
 
 
 class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
@@ -33,10 +34,11 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
              )) as recover, \
              patch.object(self.client, "set_position_stops", AsyncMock(return_value=True)), \
              patch("bot.kucoin.asyncio.sleep", AsyncMock()):
-            out = await self.client.place_order(
-                "BTCUSDT", "Buy", 0.001, sl=99000, tp=103000,
-                idem_key="chaos-idem", single_submission=True,
-            )
+            async with ValidExecutionTestContext(self.client):
+                out = await self.client.place_order(
+                    "BTCUSDT", "Buy", 0.001, sl=99000, tp=103000,
+                    idem_key="chaos-idem", single_submission=True,
+                )
 
         self.assertEqual(out.get("orderId"), "kc-order-1")
         self.assertEqual(post.await_count, 1, "ambiguous LIVE submission must not be blindly retried")
@@ -49,10 +51,11 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_post", AsyncMock(return_value={"orderId": "kc-order-2"})), \
              patch.object(self.client, "set_position_stops", AsyncMock(return_value=False)) as stops, \
              patch("bot.kucoin.asyncio.sleep", AsyncMock()):
-            out = await self.client.place_order(
-                "BTCUSDT", "Sell", 0.001, sl=103000, tp=97000,
-                idem_key="chaos-protection", single_submission=True,
-            )
+            async with ValidExecutionTestContext(self.client):
+                out = await self.client.place_order(
+                    "BTCUSDT", "Sell", 0.001, sl=103000, tp=97000,
+                    idem_key="chaos-protection", single_submission=True,
+                )
 
         self.assertEqual(out.get("orderId"), "kc-order-2")
         self.assertTrue(out.get("sl_tp_failed"))
