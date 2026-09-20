@@ -1053,13 +1053,15 @@ class KuCoinClient:
             engine = getattr(self, "_engine", None)
             if engine is None:
                 raise RuntimeError("READY_FOR_NEW_ENTRIES=false: execution engine unavailable")
-            assert_ready_for_new_entries(engine)
+            # Ownership is one readiness component, so establish/validate it
+            # before evaluating the canonical aggregate snapshot.
             ownership = getattr(self, "_execution_ownership", None)
             if ownership is None:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
             await validate_execution_ownership(ownership)
             engine._execution_ownership_valid = True
+            assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
