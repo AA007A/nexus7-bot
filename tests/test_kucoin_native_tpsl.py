@@ -149,6 +149,42 @@ class NativeTPSLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._post.await_count, 1)
         client.get_order_by_client_oid.assert_awaited_once_with("bgx7-native-tpsl")
 
+    async def test_protection_readback_equivalence_is_required(self):
+        Client = self._client_class()
+        client = Client()
+        client.get_order_by_client_oid.return_value = {
+            "orderId": "kc-1", "symbol": "XBTUSDTM", "side": "sell", "size": 2,
+            "triggerStopUpPrice": "103000.0", "triggerStopDownPrice": "97000.0",
+            "reduceOnly": False,
+        }
+        out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
+        self.assertTrue(out["protection_verified"])
+        self.assertNotIn("protection_not_verified", out)
+
+    async def test_http_success_without_readback_is_not_verified(self):
+        Client = self._client_class()
+        client = Client()
+        client.get_order_by_client_oid.return_value = {}
+        with patch("bot.kucoin_native_tpsl.asyncio.sleep", AsyncMock()):
+            out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
+        self.assertFalse(out["protection_verified"])
+        self.assertTrue(out["protection_not_verified"])
+        self.assertTrue(client.entries_paused)
+
+    async def test_protection_readback_mismatch_is_not_verified(self):
+        Client = self._client_class()
+        client = Client()
+        client.get_order_by_client_oid.return_value = {
+            "orderId": "kc-1", "symbol": "XBTUSDTM", "side": "sell", "size": 1,
+            "triggerStopUpPrice": "103000.0", "triggerStopDownPrice": "97000.0",
+            "reduceOnly": False,
+        }
+        with patch("bot.kucoin_native_tpsl.asyncio.sleep", AsyncMock()):
+            out = await client.place_order("BTCUSDT", "Sell", .002, sl=103000, tp=97000)
+        self.assertFalse(out["protection_verified"])
+        self.assertTrue(out["protection_not_verified"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
