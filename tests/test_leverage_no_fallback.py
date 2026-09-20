@@ -21,12 +21,14 @@ class LeverageNoFallbackTests(unittest.IsolatedAsyncioTestCase):
         client._position_exists = AsyncMock(return_value=False)
         client._engine = object()
 
-        with patch("bot.kucoin.PAPER_TRADE", False), \\
-             patch("bot.kucoin.API_KEY", "test-key"), \\
-             patch("bot.critical_state.critical_state.assert_available_for_new_risk"), \\
-             patch("bot.execution_ownership.acquire_execution_ownership", AsyncMock(return_value=object())), \\
-             patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()), \\
-             patch("bot.runtime_readiness.assert_ready_for_new_entries"):
+        with (
+            patch("bot.kucoin.PAPER_TRADE", False),
+            patch("bot.kucoin.API_KEY", "test-key"),
+            patch("bot.critical_state.critical_state.assert_available_for_new_risk"),
+            patch("bot.execution_ownership.acquire_execution_ownership", AsyncMock(return_value=object())),
+            patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()),
+            patch("bot.runtime_readiness.assert_ready_for_new_entries"),
+        ):
             result = await client.place_order("TESTUSDT", "Buy", 0.001)
 
         client._post.assert_awaited_once()
