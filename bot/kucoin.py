@@ -1042,6 +1042,18 @@ class KuCoinClient:
                 managed_order.transition(OrderState.SUBMITTING, source="LOCAL")
 
         post_options = {"single_attempt": True} if single_submission else {}
+        # Last possible OPEN_NEW_RISK gate before the exchange mutation boundary.
+        # reduceOnly exits intentionally bypass ownership so DB/fence failure cannot
+        # prevent emergency risk reduction of an existing position.
+        if not reduce_only:
+            from bot.critical_state import critical_state
+            from bot.execution_ownership import acquire_execution_ownership, validate_execution_ownership
+            critical_state.assert_available_for_new_risk()
+            ownership = getattr(self, "_execution_ownership", None)
+            if ownership is None:
+                ownership = await acquire_execution_ownership()
+                self._execution_ownership = ownership
+            await validate_execution_ownership(ownership)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
