@@ -199,9 +199,17 @@ async def rebase_real_account_peak_for_external_flow(
     # a multi-billion HWM from a tens-of-USDT account.
     kind = str(flow_type)
     if kind == "TransferIn":
+        # Additive rebasing is mandatory here: a deposit following near-zero
+        # equity must not multiply the historical HWM by post/pre.
         rebased_peak = max(current_equity, persisted + flow_amount)
     elif kind == "TransferOut":
-        rebased_peak = max(current_equity, persisted - flow_amount)
+        # Preserve the pre-withdrawal drawdown ratio. This is the established
+        # durable-risk contract and remains numerically well-defined because a
+        # verified withdrawal has positive pre-flow equity.
+        ratio = post_flow_equity / pre_flow_equity
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError("external flow ratio must be positive and finite")
+        rebased_peak = max(current_equity, persisted * ratio)
     else:
         raise ValueError("unsupported external flow type")
     await _write_peak_with_provenance(
