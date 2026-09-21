@@ -439,6 +439,10 @@ class TradingEngine:
         # orders, ownership attribution and protection state are all proven.
         self._initial_reconciliation_complete = False
         self._initial_reconciliation_evidence = {}
+        # BGX-READY-003: protection readiness is derived from exchange readback.
+        # It must never default to ready before the first canonical evaluation.
+        self._protection_system_ready = False
+        self._protection_readiness_evidence = {}
 
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
@@ -506,6 +510,8 @@ class TradingEngine:
                 self,
                 orders_reconciled=_orders_reconciled,
             )
+            from bot.protection_readiness import refresh_protection_readiness
+            await refresh_protection_readiness(self)
 
             _ciclos = 0
             while self._running:
@@ -539,6 +545,8 @@ class TradingEngine:
                             await self._manage_partial_tp()
                             await self._apply_trailing_stops()
                             await self._check_rr_double()
+                        from bot.protection_readiness import refresh_protection_readiness
+                        await refresh_protection_readiness(self)
                         await self._heartbeat_telegram()
                         from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
                         daily_pnl_ok = await checkpoint_daily_pnl(self)
