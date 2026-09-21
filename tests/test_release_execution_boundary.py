@@ -1,5 +1,6 @@
 """Pre-release proofs for execution ordering and stale-fence TOCTOU."""
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -49,7 +50,7 @@ class ReleaseExecutionBoundaryProofs(unittest.IsolatedAsyncioTestCase):
             calls.append("ownership")
             return ownership
         async def validate(_):
-            return None
+            return datetime.now(timezone.utc)+timedelta(seconds=30)
         def critical():
             calls.append("critical_state")
         def ready(_):
@@ -79,7 +80,7 @@ class ReleaseExecutionBoundaryProofs(unittest.IsolatedAsyncioTestCase):
                 with patch.object(kucoin, "PAPER_TRADE", False), patch.object(kucoin, "API_KEY", "test"), \
                      patch("bot.critical_state.critical_state.assert_available_for_new_risk", side_effect=critical_side), \
                      patch("bot.execution_ownership.acquire_execution_ownership", new=AsyncMock(side_effect=acquire_side, return_value=object())), \
-                     patch("bot.execution_ownership.validate_execution_ownership", new=AsyncMock()), \
+                     patch("bot.execution_ownership.validate_execution_ownership", new=AsyncMock(return_value=datetime.now(timezone.utc)+timedelta(seconds=30))), \
                      patch("bot.runtime_readiness.assert_ready_for_new_entries", side_effect=ready_side), \
                      patch.object(self.client, "_post", post):
                     with self.assertRaises(RuntimeError):
