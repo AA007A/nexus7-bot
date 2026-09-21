@@ -160,26 +160,37 @@ async def lifespan(app: FastAPI):
         app.state.engine_task = asyncio.create_task(engine.run())
 
         def _supervise_engine_task(task):
+            # Schedule supervision on the task's running loop instead of
+            # consuming task.exception() inside the synchronous done callback.
+            # This keeps lifecycle tests and shutdown loop ownership deterministic.
             if task.cancelled():
                 return
-            try:
-                exc = task.exception()
-            except asyncio.CancelledError:
-                return
-            if exc is None:
-                if getattr(engine, "_running", False):
-                    exc = RuntimeError("engine task exited while engine still marked running")
-                else:
+
+            async def _publish_failure():
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
                     return
-            engine._fatal_engine_error = type(exc).__name__
-            engine._engine_state = "FAILED"
-            engine._execution_ownership_valid = False
-            engine._execution_ownership_expires_at = None
-            app.state.engine_fatal = type(exc).__name__
-            log.critical(
-                "[ENGINE_TASK] state=FAILED type=%s execution_effect=BLOCK_NEW_ENTRIES",
-                type(exc).__name__,
-            )
+                if exc is None:
+                    if getattr(engine, "_running", False):
+                        exc = RuntimeError("engine task exited while engine still marked running")
+                    else:
+                        return
+                engine._fatal_engine_error = type(exc).__name__
+                engine._engine_state = "FAILED"
+                engine._execution_ownership_valid = False
+                engine._execution_ownership_expires_at = None
+                app.state.engine_fatal = type(exc).__name__
+                log.critical(
+                    "[ENGINE_TASK] state=FAILED type=%s execution_effect=BLOCK_NEW_ENTRIES",
+                    type(exc).__name__,
+                )
+
+            try:
+                task.get_loop().create_task(_publish_failure())
+            except RuntimeError:
+                # Loop already closing: shutdown is fail-closed independently.
+                return
 
         app.state.engine_task.add_done_callback(_supervise_engine_task)
         log.info("✅ BGX Capital online (KuCoin Futures)")
