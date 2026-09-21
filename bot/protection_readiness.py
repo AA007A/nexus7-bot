@@ -93,9 +93,9 @@ async def refresh_protection_readiness(engine) -> bool:
     engine._protection_readiness_evidence["positions"] = len(live)
     engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
 
-    # A stale incident may be cleared only after independent flat confirmation.
-    # Position read alone is insufficient: unresolved durable submissions or
-    # active entry orders can still create exposure after the snapshot.
+    # Reconcile stale incidents per symbol. A flat position snapshot alone is
+    # insufficient: durable intents, active entry orders, and local filled
+    # positions awaiting exchange convergence are independent exposure evidence.
     if not live:
         registry = getattr(engine, "orders", None)
         pending_reader = getattr(registry, "pending_orders", None)
@@ -106,14 +106,7 @@ async def refresh_protection_readiness(engine) -> bool:
             pending = list(pending_reader() or [])
         except Exception as exc:
             engine._protection_readiness_evidence["reason"] = "flat_pending_orders_read_failed"
-            log.critical(
-                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
-                "reason=pending_orders_read_failed error=%s",
-                type(exc).__name__,
-            )
-            return False
-        if pending:
-            engine._protection_readiness_evidence["reason"] = "flat_with_pending_durable_orders"
+            log.critical("[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED reason=pending_orders_read_failed error=%s", type(exc).__name__)
             return False
 
         raw_get = getattr(client, "_get", None)
@@ -124,11 +117,7 @@ async def refresh_protection_readiness(engine) -> bool:
             payload = await raw_get("/api/v1/orders", {"status": "active"}, auth=True)
         except Exception as exc:
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_read_failed"
-            log.critical(
-                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
-                "reason=active_orders_read_failed error=%s",
-                type(exc).__name__,
-            )
+            log.critical("[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED reason=active_orders_read_failed error=%s", type(exc).__name__)
             return False
         if isinstance(payload, dict):
             active = payload.get("items")
@@ -141,32 +130,61 @@ async def refresh_protection_readiness(engine) -> bool:
         if not isinstance(active, list):
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_payload_malformed"
             return False
-        active_entry = [
-            row for row in active if isinstance(row, dict)
-            and row.get("reduceOnly") is not True and row.get("closeOrder") is not True
-        ]
-        if active_entry:
-            engine._protection_readiness_evidence["reason"] = "flat_with_active_entry_orders"
-            return False
 
-        before = sorted(unprotected)
-        if unprotected:
-            engine._unprotected_symbols = set()
-            unprotected = set()
-            engine._protection_readiness_evidence["unprotected_positions"] = 0
+        def _canon(value):
+            symbol = str(value or "")
+            return symbol[:-1] if symbol.endswith("M") else symbol
+
+        pending_symbols = {_canon(getattr(order, "symbol", "")) for order in pending}
+        active_entry_symbols = {
+            _canon(row.get("symbol"))
+            for row in active
+            if isinstance(row, dict)
+            and row.get("reduceOnly") is not True
+            and row.get("closeOrder") is not True
+        }
+        local_position_symbols = {
+            _canon(symbol) for symbol in (getattr(engine, "positions", {}) or {}).keys()
+        }
+
+        before = set(unprotected)
+        clearable = {
+            symbol for symbol in before
+            if _canon(symbol) not in pending_symbols
+            and _canon(symbol) not in active_entry_symbols
+            and _canon(symbol) not in local_position_symbols
+        }
+        if clearable:
+            engine._unprotected_symbols = before - clearable
+            unprotected = set(engine._unprotected_symbols)
+
+        for symbol in sorted(before):
+            canon = _canon(symbol)
+            if symbol in clearable:
+                decision, reason = "CLEAR_STALE", "confirmed_symbol_flat"
+            elif canon in pending_symbols:
+                decision, reason = "KEEP_BLOCKED", "pending_durable_intent"
+            elif canon in active_entry_symbols:
+                decision, reason = "KEEP_BLOCKED", "active_exchange_entry"
+            else:
+                decision, reason = "KEEP_BLOCKED", "local_filled_position_awaiting_exchange_convergence"
             log.warning(
-                "[PROTECTION_STATE_RECONCILIATION] exchange_position_qty=0 "
-                "active_entry_orders_count=0 unprotected_before=%s "
-                "unprotected_after=[] decision=CLEAR_STALE reason=confirmed_flat",
-                ",".join(before),
+                "[PROTECTION_STATE_RECONCILIATION] symbol=%s position_qty=0 "
+                "active_entry_orders=%s durable_pending=%s recent_fill_pending=%s "
+                "unprotected_before=true unprotected_after=%s decision=%s reason=%s",
+                symbol, int(canon in active_entry_symbols), int(canon in pending_symbols),
+                int(canon in local_position_symbols), str(symbol in unprotected).lower(),
+                decision, reason,
             )
-        engine._protection_system_ready = True
-        engine._protection_readiness_evidence["reason"] = "confirmed_flat_no_pending_exposure"
-        log.info(
-            "[PROTECTION_READINESS] ready=true positions=0 unprotected_positions=0 "
-            "basis=CONFIRMED_EXCHANGE_FLAT invariant=PROTECTION_READINESS_MUST_BE_DERIVED_FROM_EXCHANGE_STATE"
+
+        ready = len(unprotected) == 0
+        engine._protection_system_ready = ready
+        engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
+        engine._protection_readiness_evidence["reason"] = (
+            "confirmed_flat_no_pending_exposure"
+            if ready else "flat_with_unresolved_exposure_evidence"
         )
-        return True
+        return ready
 
     verified = {}
     for row in live:
