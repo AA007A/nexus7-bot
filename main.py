@@ -185,8 +185,10 @@ async def lifespan(app: FastAPI):
     # servidor, consumindo slots do pool.
     # Fail closed before cleanup: a shutting-down engine must never remain
     # published as the HTTP new-risk readiness authority.
-    engine._execution_ownership_valid = False
-    engine._execution_ownership_expires_at = None
+    from bot.execution_ownership import invalidate_local_execution_ownership
+    invalidate_local_execution_ownership(
+        engine, event="local_invalidated", reason="shutdown"
+    )
     app.state.ready = False
     app.state.engine = None
     engine.stop()

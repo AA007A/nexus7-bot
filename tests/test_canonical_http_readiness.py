@@ -153,8 +153,9 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 503)
         self.assertFalse(payload["ready_for_new_entries"])
         self.assertEqual(payload["blockers"], ["execution_ownership_valid"])
-        warning.assert_called_once()
-        self.assertEqual(warning.call_args.args[-1], ["execution_ownership_valid"])
+        http_calls = [call for call in warning.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_calls), 1)
+        self.assertEqual(http_calls[0].args[-1], ["execution_ownership_valid"])
 
     async def test_http_readiness_observability_multiple_blockers(self):
         _, engine = _make_canonical_engine()
@@ -185,7 +186,8 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["blockers"], [])
         self.assertTrue(snap.ready_for_new_entries)
         self.assertEqual(status == 200, snap.ready_for_new_entries)
-        info.assert_called_once()
+        http_calls = [call for call in info.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_calls), 1)
         engine.connected = False
         status, body = await _ready()
         payload = json.loads(body)
@@ -203,11 +205,13 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main_hardened.log, "warning") as warning:
             self.assertEqual((await _ready())[0], 503)
             self.assertEqual((await _ready())[0], 503)
-        warning.assert_called_once()
+        http_calls = [call for call in warning.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_calls), 1)
         engine._market_data_ready = False
         with patch.object(main_hardened.log, "warning") as warning_changed:
             self.assertEqual((await _ready())[0], 503)
-        warning_changed.assert_called_once()
+        http_changed = [call for call in warning_changed.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_changed), 1)
     async def test_real_lifespan_publishes_the_exact_engine_created_for_execution(self):
         created = {}
         real_engine_cls = main.TradingEngine
