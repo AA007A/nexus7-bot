@@ -56,7 +56,8 @@ def _ownership_state_log(
         return
     _OWNERSHIP_LOG_SIGNATURES[key] = signature
     from bot.logger import log
-    log.debug(
+    log_fn = log.info if execution_ownership_valid is True else log.warning
+    log_fn(
         "[OWNERSHIP_STATE] event=%s db_lease_valid=%s local_lease_valid=%s "
         "execution_ownership_valid=%s fencing_valid=%s lease_remaining_seconds=%s reason=%s",
         event,
