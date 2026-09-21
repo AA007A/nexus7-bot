@@ -33,6 +33,61 @@ def _session_id():
 def _now(): return datetime.now(timezone.utc)
 def _parse(v): return v if isinstance(v, datetime) else datetime.fromisoformat(v)
 
+_OWNERSHIP_LOG_SIGNATURES = {}
+
+def _ownership_state_log(
+    engine,
+    *,
+    event: str,
+    db_lease_valid,
+    local_lease_valid,
+    execution_ownership_valid,
+    fencing_valid,
+    lease_remaining_seconds,
+    reason: str,
+) -> None:
+    """Sanitized transition-based ownership telemetry; never changes authority."""
+    key = id(engine) if engine is not None else 0
+    signature = (
+        event, db_lease_valid, local_lease_valid,
+        execution_ownership_valid, fencing_valid, reason,
+    )
+    if _OWNERSHIP_LOG_SIGNATURES.get(key) == signature:
+        return
+    _OWNERSHIP_LOG_SIGNATURES[key] = signature
+    from bot.logger import log
+    log_fn = log.info if execution_ownership_valid is True else log.warning
+    log_fn(
+        "[OWNERSHIP_STATE] event=%s db_lease_valid=%s local_lease_valid=%s "
+        "execution_ownership_valid=%s fencing_valid=%s lease_remaining_seconds=%s reason=%s",
+        event,
+        str(db_lease_valid).lower() if isinstance(db_lease_valid, bool) else "unknown",
+        str(local_lease_valid).lower() if isinstance(local_lease_valid, bool) else "unknown",
+        str(execution_ownership_valid).lower() if isinstance(execution_ownership_valid, bool) else "unknown",
+        str(fencing_valid).lower() if isinstance(fencing_valid, bool) else "unknown",
+        f"{max(0.0, float(lease_remaining_seconds)):.3f}" if lease_remaining_seconds is not None else "unknown",
+        reason,
+    )
+
+def observe_readiness_ownership(engine, result: bool, *, reason: str) -> None:
+    """Observe the readiness view without acquiring, renewing or mutating ownership."""
+    expires_at = getattr(engine, "_execution_ownership_expires_at", None)
+    remaining = None
+    local_lease_valid = False
+    if isinstance(expires_at, datetime):
+        remaining = (expires_at - _now()).total_seconds()
+        local_lease_valid = remaining > 0
+    _ownership_state_log(
+        engine,
+        event="readiness_read",
+        db_lease_valid=None,
+        local_lease_valid=local_lease_valid,
+        execution_ownership_valid=result,
+        fencing_valid=None,
+        lease_remaining_seconds=remaining,
+        reason=reason,
+    )
+
 def publish_valid_execution_ownership(engine, ownership: ExecutionOwnership, *, event: str) -> None:
     """Publish validated DB lease state into the canonical local readiness view."""
     raw_expires_at = getattr(ownership, "expires_at", None)
@@ -42,25 +97,33 @@ def publish_valid_execution_ownership(engine, ownership: ExecutionOwnership, *, 
     expires_at = _parse(raw_expires_at)
     remaining = max(0.0, (expires_at - _now()).total_seconds())
     if remaining <= 0:
-        invalidate_local_execution_ownership(engine, event=event, reason="lease_expired")
+        invalidate_local_execution_ownership(engine, event="lease_expired", reason="lease_expired")
         return
     engine._execution_ownership_expires_at = expires_at
     engine._execution_ownership_valid = True
-    from bot.logger import log
-    log.info(
-        "[OWNERSHIP_STATE] event=%s db_lease_valid=true local_lease_valid=%s "
-        "execution_ownership_valid=true fencing_valid=true lease_remaining_seconds=%.3f reason=validated",
-        event, str(remaining > 0).lower(), remaining,
+    _ownership_state_log(
+        engine,
+        event=event,
+        db_lease_valid=True,
+        local_lease_valid=True,
+        execution_ownership_valid=True,
+        fencing_valid=True,
+        lease_remaining_seconds=remaining,
+        reason="validated",
     )
 
 def invalidate_local_execution_ownership(engine, *, event: str, reason: str) -> None:
     engine._execution_ownership_valid = False
     engine._execution_ownership_expires_at = None
-    from bot.logger import log
-    log.warning(
-        "[OWNERSHIP_STATE] event=%s db_lease_valid=false local_lease_valid=false "
-        "execution_ownership_valid=false fencing_valid=false lease_remaining_seconds=0 reason=%s",
-        event, reason,
+    _ownership_state_log(
+        engine,
+        event=event,
+        db_lease_valid=False,
+        local_lease_valid=False,
+        execution_ownership_valid=False,
+        fencing_valid=False,
+        lease_remaining_seconds=0,
+        reason=reason,
     )
 
 async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwnership:
@@ -102,10 +165,23 @@ async def validate_execution_ownership(ownership: ExecutionOwnership) -> None:
     if not row or not row[0]: raise StaleExecutionFence("REJECTED_STALE_FENCE missing authority")
     cur=json.loads(row[0]); now=_now()
     if str(cur.get("owner_id"))!=ownership.owner_id or int(cur.get("fencing_token",-1))!=ownership.fencing_token:
+        _ownership_state_log(
+            None, event="takeover_detected", db_lease_valid=True,
+            local_lease_valid=None, execution_ownership_valid=None,
+            fencing_valid=False, lease_remaining_seconds=None,
+            reason="superseded_fence",
+        )
         raise StaleExecutionFence("REJECTED_STALE_FENCE superseded token")
     try: valid_until=_parse(str(cur.get("expires_at")))
     except Exception as exc: raise StaleExecutionFence("REJECTED_STALE_FENCE invalid lease") from exc
-    if valid_until<=now: raise StaleExecutionFence("REJECTED_STALE_FENCE expired lease")
+    if valid_until<=now:
+        _ownership_state_log(
+            None, event="lease_expired", db_lease_valid=False,
+            local_lease_valid=None, execution_ownership_valid=None,
+            fencing_valid=False, lease_remaining_seconds=0,
+            reason="db_lease_expired",
+        )
+        raise StaleExecutionFence("REJECTED_STALE_FENCE expired lease")
 
 
 async def initialize_live_execution_ownership(engine):
@@ -119,6 +195,20 @@ async def initialize_live_execution_ownership(engine):
         invalidate_local_execution_ownership(engine, event="local_invalidated", reason="capability_not_live")
         return None
     ownership = await acquire_execution_ownership()
+    try:
+        remaining = max(0.0, (_parse(ownership.expires_at) - _now()).total_seconds())
+    except Exception:
+        remaining = None
+    _ownership_state_log(
+        engine,
+        event="startup_acquired",
+        db_lease_valid=True,
+        local_lease_valid=False,
+        execution_ownership_valid=bool(getattr(engine, "_execution_ownership_valid", False)),
+        fencing_valid=False,
+        lease_remaining_seconds=remaining,
+        reason="acquired_pending_validation",
+    )
     await validate_execution_ownership(ownership)
     client = getattr(engine, "client", None)
     raw_client = getattr(client, "_client", client)
