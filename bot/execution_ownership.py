@@ -234,6 +234,21 @@ async def execution_ownership_heartbeat(engine):
     interval = max(1.0, _LEASE_SECONDS / 3.0)
     while getattr(engine, "_running", False):
         try:
+            expires_at = getattr(engine, "_execution_ownership_expires_at", None)
+            remaining = (
+                (expires_at - _now()).total_seconds()
+                if isinstance(expires_at, datetime) else None
+            )
+            _ownership_state_log(
+                engine,
+                event="heartbeat_before_renew",
+                db_lease_valid=None,
+                local_lease_valid=bool(remaining is not None and remaining > 0),
+                execution_ownership_valid=bool(getattr(engine, "_execution_ownership_valid", False)),
+                fencing_valid=None,
+                lease_remaining_seconds=remaining,
+                reason="renewal_start",
+            )
             ownership = await acquire_execution_ownership()
             await validate_execution_ownership(ownership)
             client = getattr(engine, "client", None)
