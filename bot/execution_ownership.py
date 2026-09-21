@@ -58,11 +58,13 @@ def publish_validated_execution_ownership(engine, ownership: ExecutionOwnership,
     """Propagate a DB-validated lease into the canonical in-memory readiness state."""
     client = getattr(engine, "client", None)
     raw_client = getattr(client, "_client", client)
-    if raw_client is None:
-        raise ExecutionOwnershipUnavailable("execution client unavailable")
-    raw_client._execution_ownership = ownership
-    if client is not raw_client:
-        client._execution_ownership = ownership
+    # Startup/heartbeat engines expose their execution client and keep its
+    # transport fence synchronized here. Predispatch may use a minimal engine
+    # authority object; the KuCoin client already owns the validated lease.
+    if raw_client is not None:
+        raw_client._execution_ownership = ownership
+        if client is not raw_client:
+            client._execution_ownership = ownership
     # Runtime readiness deliberately requires a datetime deadline. The durable
     # representation is ISO text; normalize exactly at the DB -> local boundary.
     engine._execution_ownership_expires_at = _lease_deadline(ownership)
