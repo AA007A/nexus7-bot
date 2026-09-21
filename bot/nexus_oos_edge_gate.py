@@ -1,7 +1,8 @@
 """Fail-closed statistical evidence gate for NEXUS incremental edge.
 
 Analytics only. This module never mutates runtime thresholds, risk, leverage,
-position sizing, release authorization or exchange state.
+position sizing, release authorization or exchange state. Re-running its OOS
+workflow is evidence refresh only and carries no promotion authority by itself.
 
 The key methodological rule is that realized outcomes from *approved trades only*
 cannot prove incremental AI edge. A baseline-vs-NEXUS comparison requires an
