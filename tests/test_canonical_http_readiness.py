@@ -106,7 +106,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         try:
             response = await main_hardened.deployment_readiness()
             self.assertEqual(response.status_code, 503)
-            self.assertIn("durable_state_unhealthy", response.body.decode("utf-8"))
+            self.assertIn("db_authority_invalid", response.body.decode("utf-8"))
         finally:
             main.app.state.engine_task.cancel()
             with self.assertRaises(asyncio.CancelledError):
