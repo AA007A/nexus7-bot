@@ -137,7 +137,7 @@ def _loaded_instrument_count(engine) -> int:
     return 0
 
 
-@app.get("/service-ready", include_in_schema=False)
+@app.get("/service_ready", include_in_schema=False)
 async def service_readiness():
     """Railway rollout readiness, independent from financial execution permission."""
     engine = getattr(app.state, "engine", None)
