@@ -53,6 +53,24 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertTrue(engine._protection_system_ready)
 
+    async def test_inline_stop_on_wrong_side_is_not_equivalent(self):
+        position = {
+            "symbol": "BTCUSDT",
+            "size": 1,
+            "side": "Buy",
+            "entryPrice": 100.0,
+            "markPrice": 100.0,
+            "stopLoss": 105.0,
+        }
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[position]),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols=set()
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertFalse(engine._protection_system_ready)
+
     async def test_http_success_without_readback_cannot_authorize(self):
         position = {
             "symbol": "BTCUSDT",
