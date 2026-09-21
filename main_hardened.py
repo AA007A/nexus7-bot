@@ -55,6 +55,7 @@ from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
 from bot import runtime_mode_observability as runtime_mode  # noqa: E402
 from bot.logger import log  # noqa: E402
 from bot.service_readiness import evaluate_service_readiness, engine_task_healthy  # noqa: E402
+from bot.runtime_readiness import runtime_readiness  # noqa: E402
 
 
 @app.middleware("http")
@@ -91,53 +92,17 @@ async def destructive_admin_guard(request: Request, call_next):
 
 @app.get("/ready", include_in_schema=False)
 async def readiness():
-    """Infrastructure readiness, deliberately distinct from trading readiness.
-
-    Railway uses this endpoint to decide whether the deployment is healthy.
-    Trading may be intentionally fail-closed while the service remains healthy
-    and must continue running to monitor/reconcile the account. Therefore
-    ``engine.active`` and exchange connectivity are telemetry here, not
-    infrastructure health requirements. No exchange I/O is performed.
-    """
+    """Canonical new-entry readiness. Process liveness is intentionally separate."""
     engine = getattr(app.state, "engine", None)
-    blocked = bool(getattr(app.state, "blocked", False))
-    snap = runtime_mode.snapshot(
-        paper_trade=PAPER_TRADE,
-        engine=engine,
-        blocked=blocked,
-        mode_reason=TRADING_MODE_REASON,
-    )
-    bootstrap_complete = bool(getattr(app.state, "ready", False)) and engine is not None
-    durable_ok = bool(getattr(engine, "_durable_state_ok", False)) if engine else False
-    instruments = len(getattr(engine, "instruments", {}) or {}) if engine else 0
-    service = evaluate_service_readiness(
-        bootstrap_complete=bootstrap_complete,
-        startup_blocked=blocked,
-        durable_state_ok=durable_ok,
-        instrument_count=instruments,
-        worker_healthy=engine_task_healthy(
-            getattr(app.state, 'engine_task', None),
-            running=bool(getattr(engine, '_running', False))),
-    )
-    entries_paused = bool(getattr(engine, 'entries_paused', False))
-    trading_ready = bool(snap.get("ready")) and not entries_paused
+    if engine is None:
+        return JSONResponse(status_code=503, content={"status":"not_ready","ready":False,"reason":"engine_unavailable"})
+    snap = runtime_readiness(engine)
+    body = dict(snap.__dict__)
+    body["ready"] = snap.ready_for_new_entries
+    body["status"] = "ready" if snap.ready_for_new_entries else "not_ready"
+    return JSONResponse(status_code=200 if snap.ready_for_new_entries else 503, content=body)
 
-    body = {
-        "status": "ready" if service.ready else "not_ready",
-        "ready": service.ready,
-        "service_ready": service.ready,
-        "service_reason": service.reason,
-        "trading_ready": trading_ready,
-        "entries_paused": entries_paused,
-        "connected": bool(snap.get("connected")),
-        "active": bool(snap.get("active")),
-        "safety_paused": bool(snap.get("connected")) and not bool(snap.get("active")),
-        "blocked": blocked,
-        "durable_state_ok": durable_ok,
-        "instruments": instruments,
-        "trading_mode": snap.get("trading_mode"),
-        "validation_lock": snap.get("validation_lock"),
-        "orders_sent_to_exchange": snap.get("orders_sent_to_exchange"),
-        "score_floor": _strategy_floor,
-    }
-    return JSONResponse(status_code=200 if service.ready else 503, content=body)
+@app.get("/health", include_in_schema=False)
+async def process_health():
+    """Process liveness only; never authorizes financial execution."""
+    return {"status":"healthy","healthy":True}

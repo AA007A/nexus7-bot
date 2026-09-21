@@ -92,24 +92,31 @@ class TradingEngine(CoreTradingEngine):
                 self.daily_target = round(equity * cfg.DAILY_TARGET_PCT, 2)
                 self.daily_stop_loss = round(equity * cfg.DAILY_STOP_LOSS_PCT, 2)
 
-            if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
+            over_limit = self.risk.drawdown >= cfg.MAX_DRAWDOWN
+            hard_gate = cfg.DRAWDOWN_MODE == "HARD_GATE"
+            self._drawdown_hard_gate_active = bool(over_limit and hard_gate)
+            if over_limit:
+                entries_blocked = self._drawdown_hard_gate_active
                 if not getattr(self, "_dd_alerted", False):
                     self._dd_alerted = True
                     log.warning(
-                        "[DRAWDOWN_ADVISORY_RUNTIME] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "entries_blocked=false active_unchanged=true execution_effect=NONE",
+                        "[DRAWDOWN_POLICY] drawdown_pct=%.2f threshold_pct=%.2f "
+                        "mode=%s entries_blocked=%s reason=MAX_DRAWDOWN",
                         self.risk.drawdown * 100.0,
                         cfg.MAX_DRAWDOWN * 100.0,
+                        cfg.DRAWDOWN_MODE,
+                        str(entries_blocked).lower(),
                     )
                     await notify(
-                        f"⚠️ *DRAWDOWN ELEVADO — ADVISORY*\n"
+                        f"⚠️ *DRAWDOWN ELEVADO — {cfg.DRAWDOWN_MODE}*\n"
                         f"`{'━'*28}`\n"
                         f"📉 Drawdown:     `{self.risk.drawdown:.1%}`\n"
                         f"💼 Equity:       `${equity:,.2f} USDT`\n"
                         f"`{'━'*28}`\n"
-                        f"_BGX continua operando; drawdown não bloqueia novas entradas._"
+                        f"_Novas entradas bloqueadas: {entries_blocked}._"
                     )
             else:
+                self._drawdown_hard_gate_active = False
                 self._dd_alerted = False
         except Exception as exc:
             self.risk.balance_confirmed = False

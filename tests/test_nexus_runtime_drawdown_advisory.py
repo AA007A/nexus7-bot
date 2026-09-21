@@ -49,7 +49,8 @@ async def _exercise_runtime_drawdown_advisory():
         assert engine.active is True
         assert engine._dd_alerted is True
         assert len(messages) == 1
-        assert "continua operando" in messages[0]
+        assert "ADVISORY" in messages[0]
+        assert "Novas entradas bloqueadas: False" in messages[0]
 
         # One-shot alert semantics stay intact while drawdown remains elevated.
         await engine._update_balance()

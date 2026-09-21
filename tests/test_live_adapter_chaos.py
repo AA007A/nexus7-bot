@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import kucoin
+from tests.execution_test_context import ValidExecutionTestContext
 
 
 class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
@@ -33,10 +34,11 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
              )) as recover, \
              patch.object(self.client, "set_position_stops", AsyncMock(return_value=True)), \
              patch("bot.kucoin.asyncio.sleep", AsyncMock()):
-            out = await self.client.place_order(
-                "BTCUSDT", "Buy", 0.001, sl=99000, tp=103000,
-                idem_key="chaos-idem", single_submission=True,
-            )
+            async with ValidExecutionTestContext(self.client):
+                out = await self.client.place_order(
+                    "BTCUSDT", "Buy", 0.001, sl=99000, tp=103000,
+                    idem_key="chaos-idem", single_submission=True,
+                )
 
         self.assertEqual(out.get("orderId"), "kc-order-1")
         self.assertEqual(post.await_count, 1, "ambiguous LIVE submission must not be blindly retried")
@@ -49,10 +51,11 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_post", AsyncMock(return_value={"orderId": "kc-order-2"})), \
              patch.object(self.client, "set_position_stops", AsyncMock(return_value=False)) as stops, \
              patch("bot.kucoin.asyncio.sleep", AsyncMock()):
-            out = await self.client.place_order(
-                "BTCUSDT", "Sell", 0.001, sl=103000, tp=97000,
-                idem_key="chaos-protection", single_submission=True,
-            )
+            async with ValidExecutionTestContext(self.client):
+                out = await self.client.place_order(
+                    "BTCUSDT", "Sell", 0.001, sl=103000, tp=97000,
+                    idem_key="chaos-protection", single_submission=True,
+                )
 
         self.assertEqual(out.get("orderId"), "kc-order-2")
         self.assertTrue(out.get("sl_tp_failed"))
@@ -63,6 +66,26 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "get_positions", AsyncMock(side_effect=TimeoutError("network"))):
             exists = await self.client._position_exists("BTCUSDT")
         self.assertTrue(exists)
+
+    async def test_db_failure_immediately_before_entry_post_blocks_exchange_mutation(self):
+        from types import SimpleNamespace
+        self.client._engine = SimpleNamespace()
+        with patch.object(kucoin, "PAPER_TRADE", False), \
+             patch.object(kucoin, "API_KEY", "test-key"), \
+             patch("bot.critical_state.critical_state.assert_available_for_new_risk", side_effect=RuntimeError("db")), \
+             patch.object(self.client, "_post", AsyncMock()) as post:
+            with self.assertRaises(RuntimeError):
+                await self.client.place_order("BTCUSDT","Buy",0.001,idem_key="db-fail")
+        post.assert_not_awaited()
+
+    async def test_reduce_only_remains_available_when_critical_db_is_down(self):
+        with patch.object(kucoin, "PAPER_TRADE", False), \
+             patch.object(kucoin, "API_KEY", "test-key"), \
+             patch("bot.critical_state.critical_state.assert_available_for_new_risk", side_effect=RuntimeError("db")), \
+             patch.object(self.client, "_post", AsyncMock(return_value={"orderId":"reduce-1"})) as post:
+            out=await self.client.place_order("BTCUSDT","Sell",0.001,reduce_only=True,sl=0,tp=0)
+        self.assertEqual(out.get("orderId"),"reduce-1")
+        post.assert_awaited_once()
 
 
 if __name__ == "__main__":

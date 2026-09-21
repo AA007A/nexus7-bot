@@ -17,6 +17,7 @@ import os
 from datetime import datetime, timezone
 
 from bot.logger import log
+from bot.critical_state import critical_state
 
 _LOCK = asyncio.Lock()
 _STATE_VERSION = 1
@@ -73,6 +74,7 @@ async def _reserve_db(token: str, limit: int) -> tuple[bool, int]:
     """Atomically reserve token in PostgreSQL/SQLite key_value storage."""
     from bot import database as db
 
+    critical_state.assert_available_for_new_risk()
     if limit <= 0:
         raise RuntimeError("invalid pilot submission limit")
     conn = getattr(db, "_conn", None)
@@ -87,6 +89,9 @@ async def _reserve_db(token: str, limit: int) -> tuple[bool, int]:
         async with db._io_lock:
             if getattr(db, "_is_pg", False):
                 async with conn.transaction():
+                    # Serialize even the first reservation, when no row exists yet.
+                    # FOR UPDATE alone cannot lock an absent key_value row.
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
                     row = await conn.fetchrow(
                         "SELECT value FROM key_value WHERE key=$1 FOR UPDATE", key
                     )

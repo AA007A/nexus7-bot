@@ -57,6 +57,11 @@ async def init():
             _conn  = await asyncpg.connect(DATABASE_URL)
             _is_pg = True
             await _create_tables()
+            try:
+                ident = await _conn.fetchrow("SELECT current_database(), current_schema(), inet_server_addr()::text, inet_server_port()")
+                log.info("[DB_IDENTITY] backend=postgres database=%s schema=%s host_addr=%s port=%s durability=CANONICAL_CANDIDATE credentials=REDACTED", ident[0], ident[1], ident[2], ident[3])
+            except Exception as ident_exc:
+                log.warning("[DB_IDENTITY] PostgreSQL identity unavailable: %s", ident_exc)
             log.info("✅ PostgreSQL conectado")
             return
         except Exception as e:
@@ -77,6 +82,9 @@ async def init():
         _conn  = await aiosqlite.connect(SQLITE_PATH)
         _is_pg = False
         await _create_tables()
+        storage_mode = os.environ.get("SHADOW_STORAGE_MODE", "").strip().upper()
+        if storage_mode == "EPHEMERAL":
+            log.warning("[STORAGE_IDENTITY] mode=EPHEMERAL backend=sqlite path=%s durable=false production_authority=false", SQLITE_PATH)
         log.info(f"✅ SQLite: {SQLITE_PATH}")
     except Exception as e:
         log.error(f"DB init falhou: {e} — sem persistência")

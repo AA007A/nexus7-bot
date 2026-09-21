@@ -49,7 +49,7 @@ def _function_test_names(module):
 
 
 def run_one(module):
-    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG') if k in os.environ}
+    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG', 'TEST_POSTGRES_DSN') if k in os.environ}
     # -S prevents the repository's production sitecustomize from importing
     # trading modules before each suite can install its loopback mock and mode.
     # Add the active interpreter's dependencies explicitly because -S also

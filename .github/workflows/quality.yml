@@ -18,6 +18,20 @@ jobs:
     name: Quality Check
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: proof
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nexus_release_proof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proof -d nexus_release_proof"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_POSTGRES_DSN: postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +87,9 @@ jobs:
 
       - name: Full offline test suite
         run: python -m tests.run_offline
+
+      - name: Final pre-release proof pack
+        run: python -m bot.release_proof
 
       - name: Deterministic PAPER and SHADOW E2E safety pack
         run: |

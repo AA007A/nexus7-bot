@@ -1,12 +1,13 @@
 """Two pilot submissions, including ambiguous/error outcomes and concurrency."""
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from tests.test_pilot_minimum import PilotFixture
 from tests.test_ai_gate import approval
 from bot.strategy import Signal
 from bot.kucoin import KuCoinClient
 from bot.order_state import OrderState
+from tests.execution_test_context import ValidExecutionTestContext
 
 
 class PilotCounterTests(PilotFixture):
@@ -127,9 +128,10 @@ class PilotCounterTests(PilotFixture):
     async def test_client_does_not_fallback_to_another_submission(self):
         self.client._post = AsyncMock(return_value={})
         self.client._position_exists = AsyncMock(return_value=False)
-        await KuCoinClient.place_order(
-            self.client, 'TESTUSDT', 'Buy', 1., single_submission=True
-        )
+        async with ValidExecutionTestContext(self.client, self.engine.instruments):
+            await KuCoinClient.place_order(
+                self.client, 'TESTUSDT', 'Buy', 1., single_submission=True
+            )
         self.client._post.assert_awaited_once()
         self.assertTrue(self.client._post.call_args.kwargs['single_attempt'])
         self.client._position_exists.assert_not_awaited()
@@ -149,10 +151,12 @@ class PilotCounterTests(PilotFixture):
         session = Mock()
         session.post.return_value = LostResponse()
         self.client._session = session
+        self.client._execution_ownership = object()
         try:
-            result = await self.client._post(
-                '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
-            )
+            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
+                result = await self.client._post(
+                    '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
+                )
             session.post.assert_called_once()
             self.assertTrue(result['_ambiguous'])
         finally:

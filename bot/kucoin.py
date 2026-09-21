@@ -35,11 +35,13 @@ Diferenças-chave KuCoin vs Bybit:
 import asyncio, hashlib, hmac, json, math, os, time
 from base64 import b64encode
 from collections import deque
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import aiohttp
 
 from bot.logger import log
+from bot.execution_capability import assert_exchange_mutation_allowed
 from bot.order_state import OrderState, InvalidTransition
 from bot.quantity import base_to_contracts
 
@@ -577,14 +579,28 @@ class KuCoinClient:
         return {}
 
     def _entry_safe_post(self, endpoint, body, url, **kwargs):
-        # Evaluated after acquiring the rate semaphore, immediately before
-        # constructing the HTTP request; includes native protected entries.
         if (getattr(self, 'entries_paused', False)
                 and endpoint in ('/api/v1/orders', '/api/v1/st-orders')
                 and body.get('reduceOnly') is not True
                 and body.get('closeOrder') is not True):
             raise ValueError('New entry blocked by operator pause')
         return self._session.post(url, **kwargs)
+
+    @asynccontextmanager
+    async def _fenced_entry_post(self, endpoint, body, url, **kwargs):
+        is_new_risk = (
+            endpoint in ('/api/v1/orders', '/api/v1/st-orders')
+            and body.get('reduceOnly') is not True
+            and body.get('closeOrder') is not True
+        )
+        if is_new_risk:
+            from bot.execution_ownership import validate_execution_ownership
+            ownership = getattr(self, '_execution_ownership', None)
+            if ownership is None:
+                raise RuntimeError('OPEN_NEW_RISK missing execution ownership at transport boundary')
+            await validate_execution_ownership(ownership)
+        async with self._entry_safe_post(endpoint, body, url, **kwargs) as response:
+            yield response
 
     async def _post(self, endpoint: str, body: dict, *, single_attempt: bool = False) -> dict:
         """
@@ -606,6 +622,10 @@ class KuCoinClient:
         KuCoin real (ver REAL_EXCHANGE_E2E = UNVERIFIED no restante da
         auditoria). Não invento uma garantia que não posso comprovar.
         """
+        # Transport-level capability boundary. This executes before PAPER/LIVE
+        # branching so a READ_ONLY runtime remains unable to mutate even if
+        # valid credentials and live flags are accidentally configured.
+        assert_exchange_mutation_allowed("POST", endpoint)
         if PAPER_TRADE:
             log.info("[PAPER] _post: exchange mutation skipped")
             return {}
@@ -618,7 +638,7 @@ class KuCoinClient:
         for attempt in range(1 if single_attempt else 3):
             try:
                 await self._throttle()
-                async with self._rate_sem, self._entry_safe_post(endpoint, body, url, data=body_str, headers=headers) as r:
+                async with self._rate_sem, self._fenced_entry_post(endpoint, body, url, data=body_str, headers=headers) as r:
                     # ══════════════════════════════════════════════════
                     # ADV-02 — HTTP 429 ERA PERDIDO EM _post()
                     #
@@ -711,9 +731,10 @@ class KuCoinClient:
                         return {}
                     log.warning(f"KuCoin POST {endpoint}: {code} {msg}")
             except Exception as e:
-                # CASO D — erro de rede/timeout. Comportamento
-                # PRÉ-EXISTENTE, não alterado por esta correção (fora
-                # do escopo do ADV-02 conforme instrução explícita).
+                from bot.execution_ownership import StaleExecutionFence, ExecutionOwnershipUnavailable
+                if isinstance(e, (StaleExecutionFence, ExecutionOwnershipUnavailable)):
+                    raise
+                # Network/timeout ambiguity is reconciled by clientOid.
                 ambiguous = True
                 recovered = await self._recover_ambiguous_order(endpoint, body)
                 if recovered:
@@ -1037,6 +1058,26 @@ class KuCoinClient:
                 managed_order.transition(OrderState.SUBMITTING, source="LOCAL")
 
         post_options = {"single_attempt": True} if single_submission else {}
+        # Last possible OPEN_NEW_RISK gate before the exchange mutation boundary.
+        # reduceOnly exits intentionally bypass ownership so DB/fence failure cannot
+        # prevent emergency risk reduction of an existing position.
+        if not reduce_only:
+            from bot.critical_state import critical_state
+            from bot.runtime_readiness import assert_ready_for_new_entries
+            from bot.execution_ownership import acquire_execution_ownership, validate_execution_ownership
+            critical_state.assert_available_for_new_risk()
+            engine = getattr(self, "_engine", None)
+            if engine is None:
+                raise RuntimeError("READY_FOR_NEW_ENTRIES=false: execution engine unavailable")
+            # Ownership is one readiness component, so establish/validate it
+            # before evaluating the canonical aggregate snapshot.
+            ownership = getattr(self, "_execution_ownership", None)
+            if ownership is None:
+                ownership = await acquire_execution_ownership()
+                self._execution_ownership = ownership
+            await validate_execution_ownership(ownership)
+            engine._execution_ownership_valid = True
+            assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
 
@@ -1148,6 +1189,7 @@ class KuCoinClient:
         KuCoin Futures: DELETE /api/v1/orders
         CORRIGIDO: removido código duplicado (POST + DELETE ao mesmo tempo).
         """
+        assert_exchange_mutation_allowed("DELETE", "/api/v1/orders")
         if PAPER_TRADE:
             log.info("[PAPER] cancel_all_orders: exchange mutation skipped")
             return False

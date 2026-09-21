@@ -112,6 +112,20 @@ async def _ensure_cross_margin(self, kucoin_module, symbol: str, log) -> bool:
     return True
 
 
+def _protection_equivalent(expected: dict, observed: dict) -> bool:
+    """Require exchange readback to match the protection-bearing entry intent."""
+    if not isinstance(observed, dict) or not observed:
+        return False
+    fields = ("symbol", "side", "size", "triggerStopUpPrice", "triggerStopDownPrice")
+    for field in fields:
+        if field in expected:
+            if str(observed.get(field, "")) != str(expected[field]):
+                return False
+    if bool(observed.get("reduceOnly", False)) is not bool(expected.get("reduceOnly", False)):
+        return False
+    return True
+
+
 def install(KuCoinClient, kucoin_module, log) -> None:
     if getattr(KuCoinClient, "_native_tpsl_entry_installed", False):
         return
@@ -224,6 +238,33 @@ def install(KuCoinClient, kucoin_module, log) -> None:
         data["clientOid"] = client_oid
         data["native_tpsl"] = True
         data["protection_endpoint"] = TPSL_ENDPOINT
+
+        # A successful mutation response is not proof that protection exists.
+        # Read back by the deterministic clientOid and require semantic
+        # equivalence before declaring the entry protected.
+        verified = False
+        observed = {}
+        for attempt in range(3):
+            try:
+                observed = await self.get_order_by_client_oid(client_oid) or {}
+            except Exception:
+                observed = {}
+            if _protection_equivalent(body, observed):
+                verified = True
+                break
+            if attempt < 2:
+                import asyncio
+                await asyncio.sleep(0.25 * (attempt + 1))
+        data["protection_verified"] = verified
+        if not verified:
+            data["protection_not_verified"] = True
+            self.entries_paused = True
+            log.critical(
+                "[KUCOIN_NATIVE_TPSL] PROTECTION_NOT_VERIFIED symbol=%s clientOid=%s "
+                "execution_effect=BLOCK_NEW_ENTRIES",
+                symbol, client_oid,
+            )
+
         log.info(
             "📤 [ORDER+TPSL] clientOid=%s orderId=%s symbol=%s side=%s qty=%s "
             "leverage=%sx marginMode=CROSS SL=%s TP=%s endpoint=%s",
