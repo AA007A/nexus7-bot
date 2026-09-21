@@ -26,6 +26,11 @@ class DeploymentReadinessSnapshot:
     reason: str
     engine_state: str
 
+    @property
+    def ready(self) -> bool:
+        """Compatibility view for legacy infrastructure-readiness callers."""
+        return self.deployment_ready
+
 
 def engine_task_healthy(task, *, running: bool) -> bool:
     """A running worker is healthy; cancellation/failure is not."""
