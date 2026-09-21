@@ -106,14 +106,39 @@ async def refresh_protection_readiness(engine) -> bool:
         )
         return False
 
-    # A FILLED order becomes exposure-reconciled only after authenticated
-    # exchange position truth actually contains that symbol. Terminal order
-    # state alone never authorizes flatness.
-    live_canon = {_canon(row.get("symbol")) for row in live}
+    # Exposure reconciliation is intent-sensitive. An entry fill is absorbed
+    # by a live exchange position. A reduce fill is absorbed only by a residual
+    # quantity lower than the durable pre-reduce quantity; a full reduce is
+    # absorbed by confirmed flatness, but only after active-order truth is read.
+    live_qty = {}
+    for row in live:
+        canon = _canon(row.get("symbol"))
+        live_qty[canon] = live_qty.get(canon, 0.0) + abs(float(row.get("size", 0) or 0))
+
+    unresolved_fills = list(unresolved_reader() or [])
+    entry_unresolved = [
+        order for order in unresolved_fills
+        if str(getattr(order, "exposure_intent", "INCREASE")) == "INCREASE"
+    ]
+    reduce_unresolved = [
+        order for order in unresolved_fills
+        if str(getattr(order, "exposure_intent", "INCREASE")) == "REDUCE"
+    ]
+
     reconciled_now = 0
-    for order in list(unresolved_reader() or []):
-        if _canon(getattr(order, "symbol", "")) in live_canon:
+    for order in entry_unresolved:
+        if live_qty.get(_canon(getattr(order, "symbol", "")), 0.0) > 0:
             reconciled_now += mark_reconciled(order.symbol)
+    for order in reduce_unresolved:
+        previous = getattr(order, "previous_position_qty", None)
+        current = live_qty.get(_canon(getattr(order, "symbol", "")), 0.0)
+        filled = max(0.0, float(getattr(order, "filled_qty", 0.0) or 0.0))
+        if previous is not None and filled > 0 and current > 0:
+            expected = max(0.0, float(previous) - filled)
+            tolerance = max(1e-9, abs(expected) * 1e-6)
+            if abs(current - expected) <= tolerance:
+                reconciled_now += mark_reconciled(order.symbol)
+
     if reconciled_now:
         from bot import durable_execution as durable
         if not await durable.persist_orders(
@@ -177,6 +202,38 @@ async def refresh_protection_readiness(engine) -> bool:
         }
         local_position_symbols = {
             _canon(symbol) for symbol in (getattr(engine, "positions", {}) or {}).keys()
+        }
+
+        # A durable REDUCE/FULL_CLOSE fill can legitimately reconcile to zero.
+        # Flatness alone is insufficient: require no pending durable intent and
+        # no active exposure-increasing exchange order for that symbol.
+        close_reconciled = 0
+        for order in list(unresolved_reader() or []):
+            canon = _canon(getattr(order, "symbol", ""))
+            if str(getattr(order, "exposure_intent", "INCREASE")) != "REDUCE":
+                continue
+            previous = getattr(order, "previous_position_qty", None)
+            filled = max(0.0, float(getattr(order, "filled_qty", 0.0) or 0.0))
+            if (
+                previous is not None
+                and filled + 1e-9 >= float(previous)
+                and canon not in pending_symbols
+                and canon not in active_entry_symbols
+            ):
+                close_reconciled += mark_reconciled(order.symbol)
+        if close_reconciled:
+            from bot import durable_execution as durable
+            if not await durable.persist_orders(
+                engine, "full_close_exposure_reconciled_flat", strict=True
+            ):
+                engine._protection_readiness_evidence["reason"] = (
+                    "durable_fill_reconciliation_persist_failed"
+                )
+                return False
+
+        unresolved_fills = list(unresolved_reader() or [])
+        unresolved_fill_symbols = {
+            _canon(getattr(order, "symbol", "")) for order in unresolved_fills
         }
 
         before = set(unprotected)
