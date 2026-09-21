@@ -54,7 +54,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             await eo.acquire_execution_ownership("B")
 
     async def test_heartbeat_db_failure_revokes_readiness_and_recovery_revalidates(self):
-        ownership=await eo.acquire_execution_ownership("A")
+        ownership=await eo.acquire_execution_ownership()
         raw=SimpleNamespace(_execution_ownership=ownership)
         engine=SimpleNamespace(_running=True,_execution_ownership_valid=True,client=raw)
         calls=0
