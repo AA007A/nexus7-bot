@@ -110,6 +110,11 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await main.app.state.engine_task
 
+    async def test_service_ready_route_uses_railway_compatible_path(self):
+        paths = {route.path for route in main_hardened.app.routes}
+        self.assertIn("/service_ready", paths)
+        self.assertNotIn("/service-ready", paths)
+
     async def test_startup_incomplete_is_503_even_when_engine_is_published(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
