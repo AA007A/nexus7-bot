@@ -422,5 +422,165 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine._protection_system_ready)
 
 
+    def _valid_xrp_pilot_context(self, unprotected):
+        from bot import pilot
+        import time
+        class State:
+            def codes(self):
+                return []
+        class Integrity:
+            state = State()
+        risk = SimpleNamespace(
+            balance=100.0, available_margin=100.0, peak_balance=100.0,
+            drawdown=0.0, _ready=True,
+        )
+        engine = SimpleNamespace(
+            risk=risk,
+            viable_symbols=["XRPUSDT"],
+            instruments={"XRPUSDT": {"minQty": 1.0, "multiplier": 0.1}},
+            integrity=Integrity(),
+            _unprotected_symbols=set(unprotected),
+            orders=_registry(),
+            positions={},
+        )
+        client = SimpleNamespace(
+            _last_ws_update=time.time(),
+            _order_registry=object(),
+        )
+        ai = SimpleNamespace(
+            execution_allowed=True,
+            expected_value=0.01,
+            net_rr=2.0,
+            cross_risk_pass=True,
+            direction="LONG",
+        )
+        return pilot, engine, client, ai
+
+    async def test_xrp_candidate_proceeds_after_sol_confirmed_flat_reconciliation(self):
+        from bot import pilot
+        import os
+        client_reconcile = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine_reconcile = SimpleNamespace(
+            connected=True, client=client_reconcile,
+            _unprotected_symbols={"SOLUSDT"}, orders=_registry(), positions={},
+        )
+        self.assertTrue(await refresh_protection_readiness(engine_reconcile))
+        self.assertEqual(engine_reconcile._unprotected_symbols, set())
+
+        _, engine, client, ai = self._valid_xrp_pilot_context(
+            engine_reconcile._unprotected_symbols
+        )
+        guard = pilot.PilotGuard()
+        with patch.object(pilot, "PILOT_ENABLED", True), patch(
+            "bot.kucoin.API_KEY", "test-key"
+        ), patch("bot.kucoin.API_SECRET", "test-secret"), patch(
+            "bot.kucoin.API_PASSPHRASE", "test-pass"
+        ), patch.dict(os.environ, {
+            "PAPER_TRADE": "false",
+            "PILOT_ACCOUNT_CONFIRMED": "true",
+            "PILOT_RELEASE_APPROVED": pilot.PILOT_RELEASE_TOKEN,
+        }, clear=False):
+            reasons = guard.evaluate(engine, client, "XRPUSDT", ai)
+
+        self.assertFalse(any(r.startswith("7_8_UNPROTECTED:") for r in reasons))
+        self.assertEqual(reasons, [])
+        self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+
+    async def test_xrp_candidate_remains_blocked_when_sol_is_genuinely_unprotected(self):
+        from bot import pilot
+        import os
+        _, engine, client, ai = self._valid_xrp_pilot_context({"SOLUSDT"})
+        engine.positions = {"SOLUSDT": SimpleNamespace()}
+        guard = pilot.PilotGuard()
+        exchange_entry_mutations = 0
+        with patch.object(pilot, "PILOT_ENABLED", True), patch(
+            "bot.kucoin.API_KEY", "test-key"
+        ), patch("bot.kucoin.API_SECRET", "test-secret"), patch(
+            "bot.kucoin.API_PASSPHRASE", "test-pass"
+        ), patch.dict(os.environ, {
+            "PAPER_TRADE": "false",
+            "PILOT_ACCOUNT_CONFIRMED": "true",
+            "PILOT_RELEASE_APPROVED": pilot.PILOT_RELEASE_TOKEN,
+        }, clear=False):
+            reasons = guard.evaluate(engine, client, "XRPUSDT", ai)
+
+        self.assertIn("7_8_UNPROTECTED: ['SOLUSDT']", reasons)
+        self.assertEqual(exchange_entry_mutations, 0)
+        self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+
+    async def test_xrp_race_blocks_while_sol_unknown_then_allows_new_candidate_after_reconciliation(self):
+        from bot import pilot
+        import asyncio
+        import os
+
+        orders, close_order = self._filled_reduce("bgx7-xrp-race-close", 4.2, 4.2)
+        exchange_truth_released = asyncio.Event()
+        exchange_read_started = asyncio.Event()
+
+        async def get_positions():
+            exchange_read_started.set()
+            await exchange_truth_released.wait()
+            return []
+
+        reconcile_client = SimpleNamespace(
+            get_positions=AsyncMock(side_effect=get_positions),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        reconcile_engine = SimpleNamespace(
+            connected=True, client=reconcile_client,
+            _unprotected_symbols={"SOLUSDT"}, orders=orders,
+            positions={"SOLUSDT": SimpleNamespace()},
+        )
+
+        _, pilot_engine, pilot_client, ai = self._valid_xrp_pilot_context({"SOLUSDT"})
+        guard = pilot.PilotGuard()
+        unknown_exchange_entry_mutations = 0
+        env = {
+            "PAPER_TRADE": "false",
+            "PILOT_ACCOUNT_CONFIRMED": "true",
+            "PILOT_RELEASE_APPROVED": pilot.PILOT_RELEASE_TOKEN,
+        }
+        patches = (
+            patch.object(pilot, "PILOT_ENABLED", True),
+            patch("bot.kucoin.API_KEY", "test-key"),
+            patch("bot.kucoin.API_SECRET", "test-secret"),
+            patch("bot.kucoin.API_PASSPHRASE", "test-pass"),
+            patch.dict(os.environ, env, clear=False),
+        )
+        for p in patches:
+            p.start()
+        try:
+            reconcile_task = asyncio.create_task(
+                refresh_protection_readiness(reconcile_engine)
+            )
+            await exchange_read_started.wait()
+
+            during = guard.evaluate(pilot_engine, pilot_client, "XRPUSDT", ai)
+            self.assertIn("7_8_UNPROTECTED: ['SOLUSDT']", during)
+            self.assertEqual(unknown_exchange_entry_mutations, 0)
+
+            reconcile_engine.positions = {}
+            exchange_truth_released.set()
+            with patch(
+                "bot.durable_execution.persist_orders",
+                new=AsyncMock(return_value=True),
+            ):
+                self.assertTrue(await reconcile_task)
+
+            self.assertTrue(close_order.exposure_reconciliation_complete)
+            self.assertEqual(reconcile_engine._unprotected_symbols, set())
+            pilot_engine._unprotected_symbols = set()
+            after = guard.evaluate(pilot_engine, pilot_client, "XRPUSDT", ai)
+            self.assertFalse(any(r.startswith("7_8_UNPROTECTED:") for r in after))
+            self.assertEqual(after, [])
+            self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
