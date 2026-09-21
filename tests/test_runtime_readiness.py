@@ -37,6 +37,15 @@ class RuntimeReadinessTests(unittest.TestCase):
     def test_read_only_blocks(self):
       with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"READ_ONLY"},clear=False):
         self.assertFalse(runtime_readiness(engine()).ready_for_new_entries)
+
+    def test_durable_state_cannot_substitute_for_explicit_reconciliation(self):
+      e=engine()
+      del e._initial_reconciliation_complete
+      self.assertTrue(e._durable_state_ok)
+      with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
+        snap=runtime_readiness(e)
+      self.assertFalse(snap.initial_reconciliation_complete)
+      self.assertFalse(snap.ready_for_new_entries)
 class ProductionStartupOwnershipLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_startup_establishes_ownership_before_readiness(self):
       from bot.execution_ownership import initialize_live_execution_ownership

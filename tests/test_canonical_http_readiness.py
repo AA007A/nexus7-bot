@@ -120,6 +120,19 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snap.initial_reconciliation_complete)
         self.assertFalse(snap.protection_system_ready)
 
+    async def test_database_ready_without_reconciliation_is_http_503(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+        engine._durable_state_ok = True
+        engine._initial_reconciliation_complete = False
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertTrue(payload["critical_database_ready"])
+        self.assertFalse(payload["initial_reconciliation_complete"])
+        self.assertEqual(payload["blockers"], ["initial_reconciliation_complete"])
+
     async def test_shutdown_invalidates_published_authority_and_restart_uses_new_engine(self):
         raw_a, engine_a = _make_canonical_engine()
         main.app.state.engine = engine_a
