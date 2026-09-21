@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 from bot import execution_ownership as eo
+from bot.runtime_readiness import runtime_readiness
 
 class Tx:
     async def __aenter__(self): return self
@@ -77,6 +78,30 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({x.fencing_token for x in observed},{initial.fencing_token})
         self.assertTrue(all(b.expires_at >= a.expires_at for a,b in zip(observed,observed[1:])))
         self.assertTrue(engine._execution_ownership_valid)
+
+
+    async def test_valid_real_ownership_is_visible_to_runtime_readiness(self):
+        engine=SimpleNamespace(
+            instruments={"BTCUSDT":{}},
+            _durable_state_ok=True,
+            _financial_state_sane=True,
+            _initial_reconciliation_complete=True,
+            _execution_ownership_valid=False,
+            _execution_ownership_expires_at=None,
+            connected=True,
+            _market_data_ready=True,
+            viable_symbols=["BTCUSDT"],
+            _protection_system_ready=True,
+            client=SimpleNamespace(),
+        )
+        ownership=await eo.initialize_live_execution_ownership(engine)
+        await eo.validate_execution_ownership(ownership)
+        self.assertIsInstance(ownership.expires_at,str)
+        self.assertTrue(engine._execution_ownership_valid)
+        self.assertTrue(
+            runtime_readiness(engine).execution_ownership_valid,
+            "validated DB ownership must be visible to readiness",
+        )
 
     async def test_second_live_owner_is_rejected_while_first_lease_is_valid(self):
         await eo.acquire_execution_ownership("A")
