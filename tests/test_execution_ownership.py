@@ -1,5 +1,6 @@
 import json, unittest
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
@@ -104,6 +105,58 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             runtime_readiness(engine).execution_ownership_valid,
             "valid DB renewal must propagate a locally valid lease deadline to readiness",
         )
+
+    async def test_multiple_valid_heartbeats_remain_visible_to_readiness(self):
+        initial=await eo.acquire_execution_ownership()
+        engine=SimpleNamespace(
+            _running=True,_execution_ownership_valid=False,
+            _execution_ownership_expires_at=None,
+            client=SimpleNamespace(_execution_ownership=initial),
+            instruments={"BTCUSDT": {}},_durable_state_ok=True,
+            _financial_state_sane=True,_initial_reconciliation_complete=True,
+            connected=True,viable_symbols=["BTCUSDT"],_market_data_ready=True,
+            _protection_system_ready=True,
+        )
+        cycles=0
+        snapshots=[]
+        async def bounded_sleep(_seconds):
+            nonlocal cycles
+            snapshots.append(runtime_readiness(engine).execution_ownership_valid)
+            cycles += 1
+            if cycles >= 3:
+                engine._running=False
+        with patch("asyncio.sleep",bounded_sleep):
+            await eo.execution_ownership_heartbeat(engine)
+        self.assertEqual(snapshots,[True,True,True])
+        self.assertIsInstance(engine._execution_ownership_expires_at,datetime)
+
+    async def test_local_expiry_is_false_then_valid_renewal_recovers(self):
+        ownership=await eo.acquire_execution_ownership()
+        engine=SimpleNamespace(
+            _running=False,_execution_ownership_valid=True,
+            _execution_ownership_expires_at=datetime.now(timezone.utc)-timedelta(seconds=1),
+            client=SimpleNamespace(_execution_ownership=ownership),
+            instruments={"BTCUSDT": {}},_durable_state_ok=True,
+            _financial_state_sane=True,_initial_reconciliation_complete=True,
+            connected=True,viable_symbols=["BTCUSDT"],_market_data_ready=True,
+            _protection_system_ready=True,
+        )
+        self.assertFalse(runtime_readiness(engine).execution_ownership_valid)
+        await eo.validate_execution_ownership(ownership)
+        eo.publish_validated_execution_ownership(engine,ownership,event="heartbeat_renewed")
+        self.assertTrue(runtime_readiness(engine).execution_ownership_valid)
+
+    async def test_runtime_readiness_does_not_mutate_ownership_state(self):
+        expiry=datetime.now(timezone.utc)+timedelta(seconds=30)
+        engine=SimpleNamespace(
+            _execution_ownership_valid=True,_execution_ownership_expires_at=expiry,
+            instruments={"BTCUSDT": {}},_durable_state_ok=True,_financial_state_sane=True,
+            _initial_reconciliation_complete=True,connected=True,viable_symbols=["BTCUSDT"],
+            _market_data_ready=True,_protection_system_ready=True,
+        )
+        before=(engine._execution_ownership_valid,engine._execution_ownership_expires_at)
+        runtime_readiness(engine)
+        self.assertEqual(before,(engine._execution_ownership_valid,engine._execution_ownership_expires_at))
 
     async def test_second_live_owner_is_rejected_while_first_lease_is_valid(self):
         await eo.acquire_execution_ownership("A")
