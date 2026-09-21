@@ -47,7 +47,7 @@ def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
       instruments_ready=bool(getattr(engine,"instruments",{})),
       critical_database_ready=bool(getattr(engine,"_durable_state_ok",False)),
       financial_state_sane=bool(getattr(engine,"_financial_state_sane", getattr(getattr(engine,"risk",None),"balance_confirmed",False))),
-      initial_reconciliation_complete=bool(getattr(engine,"_initial_reconciliation_complete", getattr(engine,"_durable_state_ok",False))),
+      initial_reconciliation_complete=bool(getattr(engine,"_initial_reconciliation_complete", False)),
       execution_ownership_valid=ownership_valid,
       exchange_ready=bool(getattr(engine,"connected",False)),
       market_data_ready=bool(getattr(engine,"_market_data_ready", bool(getattr(engine,"viable_symbols",None)))),

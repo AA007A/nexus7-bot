@@ -434,6 +434,11 @@ class TradingEngine:
         self._durable_state_enforced = False
         self._durable_state_ok = True
         self._durable_state_errors = set()
+        # BGX-READY-002: durable storage health is not startup reconciliation.
+        # Fail closed until authenticated exchange truth, positions, active
+        # orders, ownership attribution and protection state are all proven.
+        self._initial_reconciliation_complete = False
+        self._initial_reconciliation_evidence = {}
 
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
@@ -495,7 +500,12 @@ class TradingEngine:
             self._start_background(opt.weekly_optimization_loop(self.client)) # otimização semanal
             self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
             await self._connect()
-            await durable.reconcile_orders(self)
+            _orders_reconciled = await durable.reconcile_orders(self)
+            from bot.initial_reconciliation import finalize_initial_reconciliation
+            self._initial_reconciliation_complete = await finalize_initial_reconciliation(
+                self,
+                orders_reconciled=_orders_reconciled,
+            )
 
             _ciclos = 0
             while self._running:
