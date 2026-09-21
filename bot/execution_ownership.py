@@ -33,6 +33,57 @@ def _session_id():
 def _now(): return datetime.now(timezone.utc)
 def _parse(v): return datetime.fromisoformat(v)
 
+def _expiry_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        expiry=value
+    else:
+        expiry=_parse(str(value))
+    if expiry.tzinfo is None:
+        expiry=expiry.replace(tzinfo=timezone.utc)
+    return expiry
+
+def _log_ownership_state(engine, *, event, db_lease_valid, fencing_valid, reason):
+    from bot.logger import log
+    now=_now()
+    expiry=getattr(engine,"_execution_ownership_expires_at",None)
+    local_lease_valid=isinstance(expiry,datetime) and expiry>now
+    remaining=max(0.0,(expiry-now).total_seconds()) if isinstance(expiry,datetime) else 0.0
+    execution_valid=bool(getattr(engine,"_execution_ownership_valid",False))
+    signature=(event,db_lease_valid,local_lease_valid,execution_valid,fencing_valid,reason)
+    if signature==getattr(engine,"_ownership_state_log_signature",None):
+        return
+    engine._ownership_state_log_signature=signature
+    log.info(
+        "[OWNERSHIP_STATE] event=%s db_lease_valid=%s local_lease_valid=%s "
+        "execution_ownership_valid=%s fencing_valid=%s lease_remaining_seconds=%.3f reason=%s",
+        event, str(db_lease_valid).lower(), str(local_lease_valid).lower(),
+        str(execution_valid).lower(), str(fencing_valid).lower(), remaining, reason,
+    )
+
+def apply_validated_execution_ownership(engine, ownership, validated_until: datetime, *, event: str):
+    expiry=_expiry_datetime(validated_until)
+    if expiry<=_now():
+        invalidate_local_execution_ownership(engine,event="lease_expired",reason="validated_lease_expired")
+        raise StaleExecutionFence("REJECTED_STALE_FENCE expired lease")
+    engine._execution_ownership_expires_at=expiry
+    engine._execution_ownership_valid=True
+    _log_ownership_state(
+        engine,event=event,db_lease_valid=True,fencing_valid=True,reason="validated",
+    )
+
+def invalidate_local_execution_ownership(engine, *, event: str, reason: str):
+    engine._execution_ownership_valid=False
+    engine._execution_ownership_expires_at=None
+    _log_ownership_state(
+        engine,event=event,db_lease_valid=False,fencing_valid=False,reason=reason,
+    )
+
+def observe_readiness_ownership_state(engine, *, local_lease_valid: bool, reason: str):
+    _log_ownership_state(
+        engine,event="readiness_read",db_lease_valid="unknown",
+        fencing_valid="unknown",reason=reason,
+    )
+
 async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwnership:
     if current_execution_capability() is not ExecutionCapability.LIVE:
         raise ExecutionOwnershipUnavailable("SHADOW_CANNOT_ACQUIRE_LIVE_EXECUTION_OWNERSHIP")
@@ -60,7 +111,7 @@ async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwn
         await conn.execute("INSERT INTO key_value(key,value,updated_at) VALUES($1,$2,$3) ON CONFLICT(key) DO UPDATE SET value=$2,updated_at=$3",_KEY,payload,now.isoformat())
         return state
 
-async def validate_execution_ownership(ownership: ExecutionOwnership) -> None:
+async def validate_execution_ownership(ownership: ExecutionOwnership) -> datetime:
     if current_execution_capability() is not ExecutionCapability.LIVE:
         raise StaleExecutionFence("execution capability is not LIVE")
     conn=getattr(db,"_conn",None)
@@ -76,6 +127,7 @@ async def validate_execution_ownership(ownership: ExecutionOwnership) -> None:
     try: valid_until=_parse(str(cur.get("expires_at")))
     except Exception as exc: raise StaleExecutionFence("REJECTED_STALE_FENCE invalid lease") from exc
     if valid_until<=now: raise StaleExecutionFence("REJECTED_STALE_FENCE expired lease")
+    return valid_until
 
 
 async def initialize_live_execution_ownership(engine):
@@ -86,10 +138,16 @@ async def initialize_live_execution_ownership(engine):
     there, while the readiness bit lives on the engine.
     """
     if current_execution_capability() is not ExecutionCapability.LIVE:
-        engine._execution_ownership_valid = False
+        invalidate_local_execution_ownership(
+            engine,event="local_invalidated",reason="execution_capability_not_live",
+        )
         return None
     ownership = await acquire_execution_ownership()
-    await validate_execution_ownership(ownership)
+    _log_ownership_state(
+        engine,event="startup_acquired",db_lease_valid="unknown",
+        fencing_valid="unknown",reason="validation_pending",
+    )
+    validated_until = await validate_execution_ownership(ownership)
     client = getattr(engine, "client", None)
     raw_client = getattr(client, "_client", client)
     if raw_client is None:
@@ -98,8 +156,9 @@ async def initialize_live_execution_ownership(engine):
     # Keep proxy-visible state coherent for simple clients/tests.
     if client is not raw_client:
         client._execution_ownership = ownership
-    engine._execution_ownership_expires_at = ownership.expires_at
-    engine._execution_ownership_valid = True
+    apply_validated_execution_ownership(
+        engine,ownership,validated_until,event="startup_validated",
+    )
     from bot.logger import log
     log.info("[EXECUTION_OWNERSHIP] acquired=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
     return ownership
@@ -110,23 +169,42 @@ async def execution_ownership_heartbeat(engine):
     import asyncio
     from bot.logger import log
     if current_execution_capability() is not ExecutionCapability.LIVE:
-        engine._execution_ownership_valid = False
+        invalidate_local_execution_ownership(
+            engine,event="local_invalidated",reason="execution_capability_not_live",
+        )
         return
     interval = max(1.0, _LEASE_SECONDS / 3.0)
     while getattr(engine, "_running", False):
         try:
             ownership = await acquire_execution_ownership()
-            await validate_execution_ownership(ownership)
+            validated_until = await validate_execution_ownership(ownership)
             client = getattr(engine, "client", None)
             raw_client = getattr(client, "_client", client)
             raw_client._execution_ownership = ownership
             if client is not raw_client:
                 client._execution_ownership = ownership
-            engine._execution_ownership_expires_at = ownership.expires_at
-            engine._execution_ownership_valid = True
+            apply_validated_execution_ownership(
+                engine,ownership,validated_until,event="heartbeat_renewed",
+            )
             log.info("[EXECUTION_OWNERSHIP] heartbeat_renewed=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
+        except StaleExecutionFence as exc:
+            message=str(exc)
+            event="takeover_detected" if "superseded token" in message else (
+                "lease_expired" if "expired lease" in message else "heartbeat_failed"
+            )
+            invalidate_local_execution_ownership(engine,event=event,reason=type(exc).__name__)
+            _log_ownership_state(
+                engine,event="local_invalidated",db_lease_valid=False,
+                fencing_valid=False,reason=event,
+            )
+            log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
         except Exception as exc:
-            engine._execution_ownership_valid = False
-            engine._execution_ownership_expires_at = None
+            invalidate_local_execution_ownership(
+                engine,event="heartbeat_failed",reason=type(exc).__name__,
+            )
+            _log_ownership_state(
+                engine,event="local_invalidated",db_lease_valid=False,
+                fencing_valid=False,reason="heartbeat_failed",
+            )
             log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
         await asyncio.sleep(interval)
