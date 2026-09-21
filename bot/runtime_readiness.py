@@ -1,5 +1,6 @@
 """Single semantic authority for permission to open new financial risk."""
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from bot.execution_capability import ExecutionCapability, current_execution_capability
 
 @dataclass(frozen=True)
@@ -19,15 +20,29 @@ class RuntimeReadinessSnapshot:
           self.initial_reconciliation_complete,self.execution_ownership_valid,self.exchange_ready,
           self.market_data_ready,self.execution_capability_live,self.protection_system_ready))
 
+def _ownership_locally_valid(engine) -> bool:
+    if not bool(getattr(engine, "_execution_ownership_valid", False)):
+        return False
+    client = getattr(engine, "client", None)
+    raw_client = getattr(client, "_client", client)
+    ownership = getattr(raw_client, "_execution_ownership", None)
+    if ownership is None:
+        return False
+    expires_at = getattr(ownership, "expires_at", None)
+    if not isinstance(expires_at, datetime):
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > datetime.now(timezone.utc)
+
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
-    risk=getattr(engine,"risk",None)
     cap_live=current_execution_capability() is ExecutionCapability.LIVE
     return RuntimeReadinessSnapshot(
       instruments_ready=bool(getattr(engine,"instruments",{})),
       critical_database_ready=bool(getattr(engine,"_durable_state_ok",False)),
       financial_state_sane=bool(getattr(engine,"_financial_state_sane", getattr(getattr(engine,"risk",None),"balance_confirmed",False))),
       initial_reconciliation_complete=bool(getattr(engine,"_initial_reconciliation_complete", getattr(engine,"_durable_state_ok",False))),
-      execution_ownership_valid=bool(getattr(engine,"_execution_ownership_valid", getattr(getattr(engine,"client",None),"_execution_ownership",None) is not None)),
+      execution_ownership_valid=_ownership_locally_valid(engine),
       exchange_ready=bool(getattr(engine,"connected",False)),
       market_data_ready=bool(getattr(engine,"_market_data_ready", bool(getattr(engine,"viable_symbols",None)))),
       execution_capability_live=cap_live,
