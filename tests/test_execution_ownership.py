@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 from bot import execution_ownership as eo
+from bot.runtime_readiness import runtime_readiness
 
 class Tx:
     async def __aenter__(self): return self
@@ -77,6 +78,32 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({x.fencing_token for x in observed},{initial.fencing_token})
         self.assertTrue(all(b.expires_at >= a.expires_at for a,b in zip(observed,observed[1:])))
         self.assertTrue(engine._execution_ownership_valid)
+
+    async def test_valid_heartbeat_lease_is_visible_to_runtime_readiness(self):
+        initial=await eo.acquire_execution_ownership()
+        engine=SimpleNamespace(
+            _running=True,
+            _execution_ownership_valid=True,
+            _execution_ownership_expires_at=None,
+            client=SimpleNamespace(_execution_ownership=initial),
+            instruments={"BTCUSDT": {}},
+            _durable_state_ok=True,
+            _financial_state_sane=True,
+            _initial_reconciliation_complete=True,
+            connected=True,
+            viable_symbols=["BTCUSDT"],
+            _market_data_ready=True,
+            _protection_system_ready=True,
+        )
+        async def one_cycle(_seconds):
+            engine._running=False
+        with patch("asyncio.sleep",one_cycle):
+            await eo.execution_ownership_heartbeat(engine)
+        self.assertTrue(engine._execution_ownership_valid)
+        self.assertTrue(
+            runtime_readiness(engine).execution_ownership_valid,
+            "valid DB renewal must propagate a locally valid lease deadline to readiness",
+        )
 
     async def test_second_live_owner_is_rejected_while_first_lease_is_valid(self):
         await eo.acquire_execution_ownership("A")
