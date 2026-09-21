@@ -124,6 +124,23 @@ if __name__ == '__main__':
                 module_skipped = sum(child_skips)
                 skipped += module_skipped
                 print(f'{module}: {"PASS" if rc == 0 else "FAIL"} ({count})', flush=True)
+                # Proof-only observability: surface named XRP proof evidence even
+                # when the parent suite succeeds and normally suppresses child output.
+                if module == 'tests.test_protection_readiness_authority':
+                    for line in output.splitlines():
+                        if (
+                            'test_xrp_' in line
+                            or line.startswith('[XRP_PROOF]')
+                            or line.startswith('case=')
+                            or line.startswith('result=')
+                            or line.startswith('sol_unprotected_block=')
+                            or line.startswith('next_gate=')
+                            or line.startswith('blocker=')
+                            or line.startswith('exchange_entry_mutations=')
+                            or line.startswith('unknown_phase_')
+                            or line.startswith('post_reconciliation_')
+                        ):
+                            print(line, flush=True)
                 total += count
                 passed += max(0, count - module_skipped) if rc == 0 else 0
                 if rc:
