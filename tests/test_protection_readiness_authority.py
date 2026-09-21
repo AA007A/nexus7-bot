@@ -3,7 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from bot.protection_readiness import refresh_protection_readiness
+from bot.order_state import OrderRegistry, OrderState
 from bot.runtime_readiness import runtime_readiness
+
+
+def _registry():
+    return OrderRegistry()
 
 
 class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +23,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols=set(),
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
         )
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertTrue(engine._protection_system_ready)
@@ -41,7 +46,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
         )
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, set())
@@ -54,7 +59,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
@@ -64,9 +69,12 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             get_positions=AsyncMock(return_value=[]),
             _get=AsyncMock(return_value={"items": []}),
         )
+        orders = _registry()
+        order, _ = orders.get_or_create("bgx7-pending", "SOLUSDT", "Buy", 1.0)
+        order.transition(OrderState.SUBMITTING, source="REST")
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: [SimpleNamespace(symbol="SOLUSDT")]),
+            orders=orders,
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
@@ -78,7 +86,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
@@ -90,7 +98,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
             positions={"SOLUSDT": SimpleNamespace()},
         )
         self.assertFalse(await refresh_protection_readiness(engine))
@@ -107,7 +115,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         engine = SimpleNamespace(
             connected=True, client=client,
             _unprotected_symbols={"SOLUSDT", "ETHUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []),
+            orders=_registry(),
             positions={"ETHUSDT": SimpleNamespace()},
         )
         self.assertFalse(await refresh_protection_readiness(engine))
@@ -121,7 +129,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = SimpleNamespace(
             connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
-            orders=SimpleNamespace(pending_orders=lambda: []), positions={},
+            orders=_registry(), positions={},
         )
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertTrue(await refresh_protection_readiness(engine))
@@ -148,7 +156,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             }]),
         )
         engine = SimpleNamespace(
-            connected=True, client=client, _unprotected_symbols=set()
+            connected=True, client=client, _unprotected_symbols=set(), orders=_registry()
         )
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertTrue(engine._protection_system_ready)
@@ -166,7 +174,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             get_positions=AsyncMock(return_value=[position]),
         )
         engine = SimpleNamespace(
-            connected=True, client=client, _unprotected_symbols=set()
+            connected=True, client=client, _unprotected_symbols=set(), orders=_registry()
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertFalse(engine._protection_system_ready)
@@ -186,7 +194,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             set_position_stops=AsyncMock(return_value=True),
         )
         engine = SimpleNamespace(
-            connected=True, client=client, _unprotected_symbols=set()
+            connected=True, client=client, _unprotected_symbols=set(), orders=_registry()
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertFalse(engine._protection_system_ready)
@@ -213,7 +221,7 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             }]),
         )
         engine = SimpleNamespace(
-            connected=True, client=client, _unprotected_symbols=set()
+            connected=True, client=client, _unprotected_symbols=set(), orders=_registry()
         )
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertFalse(engine._protection_system_ready)
