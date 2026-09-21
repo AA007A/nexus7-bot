@@ -12,6 +12,12 @@ import os
 from urllib.parse import urlsplit
 
 
+def database_authority_id() -> str:
+    """Return the non-secret operator identifier for the canonical DB service."""
+    value = os.environ.get("DB_AUTHORITY_ID", "").strip()
+    return value or "UNCONFIGURED"
+
+
 def database_authority_fingerprint() -> str:
     raw = os.environ.get("DATABASE_URL", "").strip()
     if not raw:
@@ -33,7 +39,8 @@ def database_authority_fingerprint() -> str:
 
 def log_database_authority(log) -> None:
     log.info(
-        "[STATE_AUTHORITY] database=postgres fingerprint=%s "
+        "[STATE_AUTHORITY] backend=postgres authority_id=%s fingerprint=%s "
         "credential_material=false execution_effect=NONE",
+        database_authority_id(),
         database_authority_fingerprint(),
     )
