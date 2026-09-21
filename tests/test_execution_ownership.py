@@ -1,9 +1,11 @@
 import json, unittest
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 from bot import execution_ownership as eo
+from bot.runtime_readiness import runtime_readiness
 
 class Tx:
     async def __aenter__(self): return self
@@ -27,6 +29,76 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         for p in self.patches:p.start()
     async def asyncTearDown(self):
         for p in reversed(self.patches):p.stop()
+
+    def _ready_engine(self, ownership=None):
+        raw=SimpleNamespace(_execution_ownership=ownership)
+        return SimpleNamespace(
+            _running=True,
+            _execution_ownership_valid=False,
+            _execution_ownership_expires_at=None,
+            client=raw,
+            instruments={"BTCUSDT": {}},
+            _durable_state_ok=True,
+            _financial_state_sane=True,
+            _initial_reconciliation_complete=True,
+            connected=True,
+            viable_symbols=["BTCUSDT"],
+            _market_data_ready=True,
+            _protection_system_ready=True,
+        )
+
+    async def test_validated_db_lease_is_published_with_readiness_compatible_expiry(self):
+        engine=self._ready_engine()
+        ownership=await eo.initialize_live_execution_ownership(engine)
+        self.assertIsInstance(ownership.expires_at,str)
+        self.assertIsInstance(engine._execution_ownership_expires_at,datetime)
+        self.assertTrue(engine._execution_ownership_valid)
+        self.assertTrue(runtime_readiness(engine).execution_ownership_valid)
+        self.assertTrue(runtime_readiness(engine).ready_for_new_entries)
+
+    async def test_multiple_valid_heartbeats_remain_visible_to_readiness(self):
+        engine=self._ready_engine()
+        initial=await eo.initialize_live_execution_ownership(engine)
+        observed=[]
+        real_acquire=eo.acquire_execution_ownership
+        async def recording_acquire(*args,**kwargs):
+            item=await real_acquire(*args,**kwargs)
+            observed.append(item)
+            return item
+        cycles=0
+        async def bounded_sleep(_seconds):
+            nonlocal cycles
+            self.assertTrue(engine._execution_ownership_valid)
+            self.assertIsInstance(engine._execution_ownership_expires_at,datetime)
+            self.assertTrue(runtime_readiness(engine).execution_ownership_valid)
+            cycles += 1
+            if cycles >= 3:
+                engine._running=False
+        with patch("bot.execution_ownership.acquire_execution_ownership",side_effect=recording_acquire), \
+             patch("asyncio.sleep",bounded_sleep):
+            await eo.execution_ownership_heartbeat(engine)
+        self.assertEqual(len(observed),3)
+        self.assertEqual({x.fencing_token for x in observed},{initial.fencing_token})
+
+    async def test_local_expiry_is_false_then_valid_reacquire_restores_readiness(self):
+        engine=self._ready_engine()
+        await eo.initialize_live_execution_ownership(engine)
+        engine._execution_ownership_expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)
+        self.assertFalse(runtime_readiness(engine).execution_ownership_valid)
+        renewed=await eo.acquire_execution_ownership()
+        await eo.validate_execution_ownership(renewed)
+        eo._publish_validated_ownership(engine,renewed,event="heartbeat_renewed")
+        self.assertTrue(runtime_readiness(engine).execution_ownership_valid)
+
+    async def test_runtime_readiness_observes_but_does_not_mutate_ownership(self):
+        engine=self._ready_engine()
+        engine._execution_ownership_valid=True
+        expiry=datetime.now(timezone.utc)+timedelta(seconds=30)
+        engine._execution_ownership_expires_at=expiry
+        before=(engine._execution_ownership_valid,engine._execution_ownership_expires_at)
+        runtime_readiness(engine)
+        after=(engine._execution_ownership_valid,engine._execution_ownership_expires_at)
+        self.assertEqual(before,after)
 
     async def test_takeover_monotonically_fences_stale_owner(self):
         a=await eo.acquire_execution_ownership("A")
