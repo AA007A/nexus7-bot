@@ -54,7 +54,7 @@ from main import app  # noqa: E402
 from bot.kucoin import PAPER_TRADE, TRADING_MODE_REASON  # noqa: E402
 from bot import runtime_mode_observability as runtime_mode  # noqa: E402
 from bot.logger import log  # noqa: E402
-from bot.service_readiness import evaluate_service_readiness, engine_task_healthy  # noqa: E402
+from bot.service_readiness import evaluate_deployment_readiness, engine_task_healthy  # noqa: E402
 from bot.runtime_readiness import runtime_readiness  # noqa: E402
 
 _http_readiness_last_signature = None
@@ -137,14 +137,14 @@ def _loaded_instrument_count(engine) -> int:
     return 0
 
 
-@app.get("/service_ready", include_in_schema=False)
-async def service_readiness():
-    """Railway rollout readiness, independent from financial execution permission."""
+@app.get("/deployment_ready", include_in_schema=False)
+async def deployment_readiness():
+    """Railway cutover readiness. This endpoint never authorizes trading."""
     engine = getattr(app.state, "engine", None)
     if engine is None:
         return JSONResponse(
             status_code=503,
-            content={"status": "not_ready", "ready": False, "reason": "engine_unavailable"},
+            content={"status": "not_ready", "deployment_ready": False, "reason": "engine_unavailable"},
         )
 
     task = getattr(app.state, "engine_task", None)
@@ -152,7 +152,11 @@ async def service_readiness():
         getattr(engine, "_durable_state_enforced", False)
         and getattr(engine, "_durable_state_ok", False)
     )
-    result = evaluate_service_readiness(
+    db_authority_valid = bool(
+        getattr(engine, "_durable_state_enforced", False)
+        and not getattr(engine, "_durable_state_errors", set())
+    )
+    result = evaluate_deployment_readiness(
         bootstrap_complete=bool(getattr(app.state, "ready", False)),
         startup_blocked=bool(getattr(app.state, "blocked", False)),
         durable_state_ok=durable_ready,
@@ -161,13 +165,24 @@ async def service_readiness():
             task,
             running=bool(getattr(engine, "_running", False)),
         ),
+        engine_state=getattr(engine, "_engine_state", "STARTING"),
+        db_authority_valid=db_authority_valid,
+    )
+    log_fn = log.info if result.deployment_ready else log.warning
+    log_fn(
+        "[DEPLOYMENT_READINESS] ready=%s state=%s reason=%s financial_ready=%s",
+        str(result.deployment_ready).lower(),
+        result.engine_state,
+        result.reason,
+        str(bool(runtime_readiness(engine).ready_for_new_entries)).lower(),
     )
     return JSONResponse(
-        status_code=200 if result.ready else 503,
+        status_code=200 if result.deployment_ready else 503,
         content={
-            "status": "ready" if result.ready else "not_ready",
-            "ready": result.ready,
+            "status": "ready" if result.deployment_ready else "not_ready",
+            "deployment_ready": result.deployment_ready,
             "reason": result.reason,
+            "engine_state": result.engine_state,
             "financial_ready": bool(runtime_readiness(engine).ready_for_new_entries),
         },
     )
