@@ -111,6 +111,25 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
                 setattr(engine, field, value)
                 self.assertEqual((await _ready())[0], 503)
 
+    async def test_http_readiness_fails_closed_until_protection_is_exchange_derived(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+
+        engine._protection_system_ready = False
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertFalse(payload["ready_for_new_entries"])
+        self.assertIn("protection_system_ready", payload["blockers"])
+
+        engine._protection_system_ready = True
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ready_for_new_entries"])
+        self.assertEqual(payload["blockers"], [])
+
     async def test_reconciliation_and_protection_values_reach_snapshot(self):
         _, engine = _make_canonical_engine()
         _set_all_ready(engine)
