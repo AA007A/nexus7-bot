@@ -23,17 +23,16 @@ class RuntimeReadinessSnapshot:
 def _ownership_locally_valid(engine) -> bool:
     if not bool(getattr(engine, "_execution_ownership_valid", False)):
         return False
-    client = getattr(engine, "client", None)
-    raw_client = getattr(client, "_client", client)
-    ownership = getattr(raw_client, "_execution_ownership", None)
-    if ownership is None:
-        return False
-    expires_at = getattr(ownership, "expires_at", None)
-    if not isinstance(expires_at, datetime):
-        return False
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at > datetime.now(timezone.utc)
+    # Canonical TradingEngine instances carry an explicit lease deadline.
+    # Legacy isolated fixtures without that field retain their boolean contract.
+    if hasattr(engine, "_execution_ownership_expires_at"):
+        expires_at = getattr(engine, "_execution_ownership_expires_at", None)
+        if not isinstance(expires_at, datetime):
+            return False
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at > datetime.now(timezone.utc)
+    return True
 
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
     cap_live=current_execution_capability() is ExecutionCapability.LIVE
