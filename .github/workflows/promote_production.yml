@@ -1,0 +1,67 @@
+name: Promote Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Exact main commit SHA approved for production"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote attested main SHA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate exact main candidate and CI attestation
+        env:
+          CANDIDATE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+
+          candidate="${CANDIDATE_SHA,,}"
+          if ! [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Candidate must be one full 40-character Git SHA"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main ci-attestations
+          main_sha="$(git rev-parse origin/main)"
+          if [[ "$candidate" != "$main_sha" ]]; then
+            echo "::error::Candidate $candidate is not current main $main_sha"
+            exit 1
+          fi
+
+          marker="$(git show "origin/ci-attestations:passed/${candidate}.txt" | tr -d '[:space:]')"
+          if [[ "$marker" != "$candidate" ]]; then
+            echo "::error::Exact-SHA Quality and Security attestation is absent or invalid"
+            exit 1
+          fi
+
+          echo "PROMOTION_SHA=$candidate" >> "$GITHUB_ENV"
+
+      - name: Fast-forward production branch
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --heads origin production >/dev/null 2>&1; then
+            git fetch --no-tags origin production
+            if ! git merge-base --is-ancestor origin/production "$PROMOTION_SHA"; then
+              echo "::error::Production branch is not an ancestor of the approved candidate"
+              exit 1
+            fi
+          fi
+
+          git push origin "$PROMOTION_SHA:refs/heads/production"
+

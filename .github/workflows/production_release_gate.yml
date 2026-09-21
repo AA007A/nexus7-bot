@@ -1,0 +1,44 @@
+name: Production Release Gate
+
+on:
+  push:
+    branches: [production]
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    name: Verify promoted SHA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require promoted main ancestry and exact attestation
+        env:
+          PROMOTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          promoted="${PROMOTED_SHA,,}"
+          if ! [[ "$promoted" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid promoted SHA"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main ci-attestations
+          if ! git merge-base --is-ancestor "$promoted" origin/main; then
+            echo "::error::Promoted SHA is not contained in main"
+            exit 1
+          fi
+
+          marker="$(git show "origin/ci-attestations:passed/${promoted}.txt" | tr -d '[:space:]')"
+          if [[ "$marker" != "$promoted" ]]; then
+            echo "::error::Exact-SHA Quality and Security attestation is absent or invalid"
+            exit 1
+          fi
+
+          echo "Production release gate passed for $promoted"
+
