@@ -52,7 +52,7 @@ def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
       exchange_ready=bool(getattr(engine,"connected",False)),
       market_data_ready=bool(getattr(engine,"_market_data_ready", bool(getattr(engine,"viable_symbols",None)))),
       execution_capability_live=cap_live,
-      protection_system_ready=bool(getattr(engine,"_protection_system_ready", True)),
+      protection_system_ready=bool(getattr(engine,"_protection_system_ready", False)),
     )
 
 def assert_ready_for_new_entries(engine):
