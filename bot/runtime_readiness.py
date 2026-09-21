@@ -35,6 +35,8 @@ def _ownership_locally_valid(engine) -> bool:
     return True
 
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
+    from bot.execution_ownership import observe_readiness_ownership_state
+    observe_readiness_ownership_state(engine)
     cap_live=current_execution_capability() is ExecutionCapability.LIVE
     return RuntimeReadinessSnapshot(
       instruments_ready=bool(getattr(engine,"instruments",{})),
