@@ -67,7 +67,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raw._engine, engine)
         self.assertIsInstance(main.app.state.engine, TradingEngine)
 
-    async def test_service_ready_does_not_authorize_financial_execution(self):
+    async def test_deployment_ready_does_not_authorize_financial_execution(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
         main.app.state.ready = True
@@ -79,8 +79,9 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
         engine._execution_ownership_valid = False
         engine._execution_ownership_expires_at = None
+        engine._engine_state = "WAITING_FOR_EXECUTION_OWNERSHIP"
         try:
-            service = await main_hardened.service_readiness()
+            service = await main_hardened.deployment_readiness()
             financial = await main_hardened.readiness()
             self.assertEqual(service.status_code, 200)
             self.assertEqual(financial.status_code, 503)
@@ -91,7 +92,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await main.app.state.engine_task
 
-    async def test_service_ready_requires_durable_initialization(self):
+    async def test_deployment_ready_requires_durable_initialization(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
         main.app.state.ready = True
@@ -101,8 +102,9 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
         engine._durable_state_enforced = False
         engine._durable_state_ok = True
+        engine._engine_state = "WAITING_FOR_EXECUTION_OWNERSHIP"
         try:
-            response = await main_hardened.service_readiness()
+            response = await main_hardened.deployment_readiness()
             self.assertEqual(response.status_code, 503)
             self.assertIn("durable_state_unhealthy", response.body.decode("utf-8"))
         finally:
@@ -110,10 +112,10 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await main.app.state.engine_task
 
-    async def test_service_ready_route_uses_railway_compatible_path(self):
+    async def test_deployment_ready_route_is_explicit(self):
         paths = {route.path for route in main_hardened.app.routes}
-        self.assertIn("/service_ready", paths)
-        self.assertNotIn("/service-ready", paths)
+        self.assertIn("/deployment_ready", paths)
+        self.assertNotIn("/service_ready", paths)
 
     async def test_startup_incomplete_is_503_even_when_engine_is_published(self):
         _, engine = _make_canonical_engine()
