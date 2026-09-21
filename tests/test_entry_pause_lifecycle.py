@@ -59,7 +59,7 @@ class EntryPauseTests(EngineFixture):
              patch.object(E.durable, 'reconcile_orders', AsyncMock()), \
              patch('bot.initial_reconciliation.finalize_initial_reconciliation', AsyncMock(return_value=False)), \
              patch('bot.protection_readiness.refresh_protection_readiness', AsyncMock(return_value=False)), \
-             patch('bot.execution_ownership.initialize_live_execution_ownership', AsyncMock()), \
+             patch('bot.execution_ownership.wait_for_live_execution_ownership', AsyncMock(return_value=object())), \
              patch('bot.execution_ownership.execution_ownership_heartbeat', worker), \
              patch.object(E.scoring, 'update_macro_cache', worker), \
              patch.object(E.scoring, 'news_reader_loop', worker), \

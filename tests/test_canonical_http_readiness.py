@@ -67,6 +67,49 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raw._engine, engine)
         self.assertIsInstance(main.app.state.engine, TradingEngine)
 
+    async def test_service_ready_does_not_authorize_financial_execution(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        main.app.state.ready = True
+        main.app.state.blocked = False
+        main.app.state.engine_task = asyncio.create_task(asyncio.sleep(3600))
+        engine._running = True
+        engine._durable_state_enforced = True
+        engine._durable_state_ok = True
+        engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
+        engine._execution_ownership_valid = False
+        engine._execution_ownership_expires_at = None
+        try:
+            service = await main_hardened.service_readiness()
+            financial = await main_hardened.readiness()
+            self.assertEqual(service.status_code, 200)
+            self.assertEqual(financial.status_code, 503)
+            service_payload = json.loads(service.body)
+            self.assertFalse(service_payload["financial_ready"])
+        finally:
+            main.app.state.engine_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await main.app.state.engine_task
+
+    async def test_service_ready_requires_durable_initialization(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        main.app.state.ready = True
+        main.app.state.blocked = False
+        main.app.state.engine_task = asyncio.create_task(asyncio.sleep(3600))
+        engine._running = True
+        engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
+        engine._durable_state_enforced = False
+        engine._durable_state_ok = True
+        try:
+            response = await main_hardened.service_readiness()
+            self.assertEqual(response.status_code, 503)
+            self.assertIn("durable_state_unhealthy", response.body.decode("utf-8"))
+        finally:
+            main.app.state.engine_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await main.app.state.engine_task
+
     async def test_startup_incomplete_is_503_even_when_engine_is_published(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
