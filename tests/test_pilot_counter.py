@@ -1,5 +1,6 @@
 """Two pilot submissions, including ambiguous/error outcomes and concurrency."""
 import asyncio
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from tests.test_pilot_minimum import PilotFixture
@@ -153,7 +154,7 @@ class PilotCounterTests(PilotFixture):
         self.client._session = session
         self.client._execution_ownership = object()
         try:
-            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()):
+            with patch("bot.execution_ownership.validate_execution_ownership", AsyncMock(return_value=datetime.now(timezone.utc)+timedelta(seconds=30))):
                 result = await self.client._post(
                     '/api/v1/orders', {'clientOid': 'offline'}, single_attempt=True
                 )
