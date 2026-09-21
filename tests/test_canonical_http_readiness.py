@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.previous = getattr(main.app.state, "engine", None)
         self.previous_ready = getattr(main.app.state, "ready", None)
         os.environ["EXECUTION_CAPABILITY"] = "LIVE"
+        main_hardened._http_readiness_last_signature = None
 
     async def asyncTearDown(self):
         main.app.state.engine = self.previous
@@ -139,6 +141,73 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raw_b._engine, engine_b)
         self.assertEqual((await _ready())[0], 200)
 
+    async def test_http_readiness_observability_single_blocker(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+        engine._execution_ownership_valid = False
+        engine._execution_ownership_expires_at = None
+        with patch.object(main_hardened.log, "warning") as warning:
+            status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertFalse(payload["ready_for_new_entries"])
+        self.assertEqual(payload["blockers"], ["execution_ownership_valid"])
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[-1], ["execution_ownership_valid"])
+
+    async def test_http_readiness_observability_multiple_blockers(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+        engine._durable_state_ok = False
+        engine._market_data_ready = False
+        engine._execution_ownership_valid = False
+        engine._execution_ownership_expires_at = None
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["blockers"], ["critical_database_ready", "execution_ownership_valid", "market_data_ready"])
+        self.assertTrue(payload["instruments_ready"])
+        self.assertTrue(payload["financial_state_sane"])
+        self.assertTrue(payload["exchange_ready"])
+
+    async def test_http_readiness_observability_ready_and_http_snapshot_consistency(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+        with patch.object(main_hardened.log, "info") as info:
+            status, body = await _ready()
+        payload = json.loads(body)
+        snap = runtime_readiness(engine)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ready_for_new_entries"])
+        self.assertEqual(payload["blockers"], [])
+        self.assertTrue(snap.ready_for_new_entries)
+        self.assertEqual(status == 200, snap.ready_for_new_entries)
+        info.assert_called_once()
+        engine.connected = False
+        status, body = await _ready()
+        payload = json.loads(body)
+        snap = runtime_readiness(engine)
+        self.assertEqual(status, 503)
+        self.assertFalse(payload["ready_for_new_entries"])
+        self.assertEqual(status == 200, snap.ready_for_new_entries)
+        self.assertEqual(payload["blockers"], ["exchange_ready"])
+
+    async def test_http_readiness_transition_logging_deduplicates_identical_state(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+        engine.connected = False
+        with patch.object(main_hardened.log, "warning") as warning:
+            self.assertEqual((await _ready())[0], 503)
+            self.assertEqual((await _ready())[0], 503)
+        warning.assert_called_once()
+        engine._market_data_ready = False
+        with patch.object(main_hardened.log, "warning") as warning_changed:
+            self.assertEqual((await _ready())[0], 503)
+        warning_changed.assert_called_once()
     async def test_real_lifespan_publishes_the_exact_engine_created_for_execution(self):
         created = {}
         real_engine_cls = main.TradingEngine
