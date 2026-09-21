@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -36,7 +37,7 @@ class FinalReleaseProof(unittest.IsolatedAsyncioTestCase):
         async def acquire():
             calls.append("ownership_acquire"); return ownership
         async def validate(_):
-            calls.append("ownership")
+            calls.append("ownership"); return datetime.now(timezone.utc)+timedelta(seconds=30)
         def critical():
             calls.append("critical_state")
         def ready(_):
@@ -68,7 +69,8 @@ class FinalReleaseProof(unittest.IsolatedAsyncioTestCase):
                  patch("bot.execution_ownership.acquire_execution_ownership",
                        AsyncMock(return_value=object())), \
                  patch("bot.execution_ownership.validate_execution_ownership",
-                       AsyncMock(side_effect=RuntimeError("ownership") if failed=="ownership" else None)), \
+                       AsyncMock(side_effect=RuntimeError("ownership") if failed=="ownership" else None,
+                                 return_value=datetime.now(timezone.utc)+timedelta(seconds=30))), \
                  patch("bot.runtime_readiness.assert_ready_for_new_entries",
                        side_effect=RuntimeError("readiness") if failed=="readiness" else None), \
                  patch.object(self.client,"_post",post):
