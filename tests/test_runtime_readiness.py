@@ -25,4 +25,18 @@ class RuntimeReadinessTests(unittest.TestCase):
     def test_read_only_blocks(self):
       with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"READ_ONLY"},clear=False):
         self.assertFalse(runtime_readiness(engine()).ready_for_new_entries)
+class ProductionStartupOwnershipLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_startup_establishes_ownership_before_readiness(self):
+      from bot.execution_ownership import initialize_live_execution_ownership
+      e=engine(_execution_ownership_valid=False)
+      e.client=SimpleNamespace()
+      ownership=SimpleNamespace(owner_id="owner",fencing_token=7)
+      with patch("bot.execution_ownership.acquire_execution_ownership",return_value=ownership) as acquire, \
+           patch("bot.execution_ownership.validate_execution_ownership") as validate:
+        await initialize_live_execution_ownership(e)
+      acquire.assert_awaited_once()
+      validate.assert_awaited_once_with(ownership)
+      self.assertIs(e.client._execution_ownership,ownership)
+      self.assertTrue(e._execution_ownership_valid)
+
 if __name__=="__main__": unittest.main()
