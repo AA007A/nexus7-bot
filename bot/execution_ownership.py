@@ -42,7 +42,7 @@ def _ownership_state_log(engine, *, event: str, db_lease_valid: bool, fencing_va
     deadline = getattr(engine, "_execution_ownership_expires_at", None)
     local_lease_valid = isinstance(deadline, datetime) and deadline > _now()
     remaining = max(0.0, (deadline - _now()).total_seconds()) if isinstance(deadline, datetime) else 0.0
-    signature = (db_lease_valid, local_lease_valid, bool(getattr(engine, "_execution_ownership_valid", False)), fencing_valid, reason)
+    signature = (event, db_lease_valid, local_lease_valid, bool(getattr(engine, "_execution_ownership_valid", False)), fencing_valid, reason)
     if getattr(engine, "_ownership_state_log_signature", None) == signature:
         return
     engine._ownership_state_log_signature = signature
@@ -69,6 +69,8 @@ def publish_validated_execution_ownership(engine, ownership: ExecutionOwnership,
     # representation is ISO text; normalize exactly at the DB -> local boundary.
     engine._execution_ownership_expires_at = _lease_deadline(ownership)
     engine._execution_ownership_valid = True
+    engine._execution_ownership_db_lease_valid = True
+    engine._execution_ownership_fencing_valid = True
     _ownership_state_log(
         engine, event=event, db_lease_valid=True, fencing_valid=True,
         reason="validated_lease_propagated",
@@ -77,8 +79,19 @@ def publish_validated_execution_ownership(engine, ownership: ExecutionOwnership,
 def invalidate_execution_ownership(engine, *, event: str, reason: str) -> None:
     engine._execution_ownership_valid = False
     engine._execution_ownership_expires_at = None
+    engine._execution_ownership_db_lease_valid = False
+    engine._execution_ownership_fencing_valid = False
     _ownership_state_log(
         engine, event=event, db_lease_valid=False, fencing_valid=False, reason=reason,
+    )
+
+def observe_execution_ownership_read(engine) -> None:
+    _ownership_state_log(
+        engine,
+        event="readiness_read",
+        db_lease_valid=bool(getattr(engine, "_execution_ownership_db_lease_valid", False)),
+        fencing_valid=bool(getattr(engine, "_execution_ownership_fencing_valid", False)),
+        reason="read_only_observation",
     )
 
 async def acquire_execution_ownership(owner_id: str | None=None) -> ExecutionOwnership:
