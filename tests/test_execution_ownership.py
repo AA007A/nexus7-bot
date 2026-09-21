@@ -53,9 +53,18 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_heartbeat_multiple_cycles_renews_same_fence(self):
         initial=await eo.acquire_execution_ownership()
         engine=SimpleNamespace(
-            _running=True,_execution_ownership_valid=True,
-            _execution_ownership_expires_at=initial.expires_at,
+            _running=True,
+            _execution_ownership_valid=True,
+            _execution_ownership_expires_at=eo._parse(initial.expires_at),
             client=SimpleNamespace(_execution_ownership=initial),
+            instruments={"BTCUSDT": {}},
+            _durable_state_ok=True,
+            _financial_state_sane=True,
+            _initial_reconciliation_complete=True,
+            connected=True,
+            viable_symbols=["BTCUSDT"],
+            _market_data_ready=True,
+            _protection_system_ready=True,
         )
         observed=[]
         readiness=[]
@@ -67,6 +76,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         cycles=0
         async def bounded_sleep(_seconds):
             nonlocal cycles
+            readiness.append(runtime_readiness(engine).ready_for_new_entries)
             cycles += 1
             if cycles >= 3:
                 engine._running=False
@@ -74,6 +84,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
              patch("asyncio.sleep",bounded_sleep):
             await eo.execution_ownership_heartbeat(engine)
         self.assertEqual(len(observed),3)
+        self.assertEqual(readiness,[True,True,True])
         self.assertEqual({x.owner_id for x in observed},{initial.owner_id})
         self.assertEqual({x.session_id for x in observed},{initial.session_id})
         self.assertEqual({x.fencing_token for x in observed},{initial.fencing_token})
@@ -131,6 +142,44 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         runtime_readiness(engine)
         after=(engine._execution_ownership_valid,engine._execution_ownership_expires_at)
         self.assertEqual(before,after)
+
+    async def test_takeover_invalidates_stale_process_and_new_owner_stays_ready(self):
+        a = await eo.acquire_execution_ownership("A")
+        engine_a = SimpleNamespace(
+            _running=True,
+            _execution_ownership_valid=True,
+            _execution_ownership_expires_at=eo._parse(a.expires_at),
+            client=SimpleNamespace(_execution_ownership=a),
+            instruments={"BTCUSDT": {}}, _durable_state_ok=True,
+            _financial_state_sane=True, _initial_reconciliation_complete=True,
+            connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
+            _protection_system_ready=True,
+        )
+        state=json.loads(self.conn.value)
+        state["expires_at"]="2000-01-01T00:00:00+00:00"
+        self.conn.value=json.dumps(state)
+        b = await eo.acquire_execution_ownership("B")
+        engine_b = SimpleNamespace(
+            _execution_ownership_valid=False,
+            _execution_ownership_expires_at=None,
+            client=SimpleNamespace(_execution_ownership=b),
+            instruments={"BTCUSDT": {}}, _durable_state_ok=True,
+            _financial_state_sane=True, _initial_reconciliation_complete=True,
+            connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
+            _protection_system_ready=True,
+        )
+        await eo.validate_execution_ownership(b)
+        eo.publish_valid_execution_ownership(engine_b,b,event="startup_validated")
+        self.assertTrue(runtime_readiness(engine_b).ready_for_new_entries)
+
+        async def stop_after_failure(_seconds):
+            engine_a._running=False
+        with patch("asyncio.sleep",stop_after_failure):
+            await eo.execution_ownership_heartbeat(engine_a)
+        self.assertFalse(engine_a._execution_ownership_valid)
+        self.assertFalse(runtime_readiness(engine_a).ready_for_new_entries)
+        self.assertTrue(engine_b._execution_ownership_valid)
+        self.assertTrue(runtime_readiness(engine_b).ready_for_new_entries)
 
     async def test_second_live_owner_is_rejected_while_first_lease_is_valid(self):
         await eo.acquire_execution_ownership("A")
