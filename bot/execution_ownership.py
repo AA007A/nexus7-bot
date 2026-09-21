@@ -36,8 +36,9 @@ def _parse(v): return datetime.fromisoformat(v)
 _ownership_observation_signature = None
 
 def _local_expiry(ownership: ExecutionOwnership) -> datetime:
-    """Normalize the persisted ISO lease deadline to the local readiness type."""
-    expiry = _parse(ownership.expires_at)
+    """Normalize the validated lease deadline to the local readiness type."""
+    raw = ownership.expires_at
+    expiry = raw if isinstance(raw, datetime) else _parse(raw)
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
     return expiry
