@@ -347,6 +347,8 @@ class TradingEngine:
         # KuCoin's final transport fence executes on the exchange client and
         # needs the canonical engine to evaluate the same readiness authority.
         self.client._engine = self
+        self._execution_ownership_valid = False
+        self._execution_ownership_expires_at = None
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
         self.stats        = Stats()
