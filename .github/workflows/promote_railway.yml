@@ -1,0 +1,85 @@
+name: Prepare Railway Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Exact main SHA to promote"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-promotion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify exact main SHA and CI attestation
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+
+          TARGET_SHA="${TARGET_SHA,,}"
+          if ! [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be an exact 40-character commit SHA"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main ci-attestations
+          MAIN_SHA="$(git rev-parse origin/main)"
+          if [[ "$TARGET_SHA" != "$MAIN_SHA" ]]; then
+            echo "::error::target_sha=$TARGET_SHA is not current main=$MAIN_SHA"
+            exit 1
+          fi
+
+          ATTESTED="$(git show "origin/ci-attestations:passed/$TARGET_SHA.txt" 2>/dev/null | tr -d '\r\n' || true)"
+          if [[ "$ATTESTED" != "$TARGET_SHA" ]]; then
+            echo "::error::Exact Quality+Security attestation missing for $TARGET_SHA"
+            exit 1
+          fi
+
+          echo "PROMOTION_TARGET=$TARGET_SHA" >> "$GITHUB_ENV"
+
+      - name: Create promotion branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="railway-promote-${PROMOTION_TARGET:0:12}-${GITHUB_RUN_ID}"
+          git switch -c "$BRANCH" origin/main
+          mkdir -p .railway
+          printf '%s\n' "$PROMOTION_TARGET" > .railway/promote.txt
+
+          git add .railway/promote.txt
+          if git diff --cached --quiet; then
+            echo "::error::This SHA is already the current promotion marker"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "promote: Railway production ${PROMOTION_TARGET:0:12}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "Promote Railway: ${PROMOTION_TARGET:0:12}" \
+            --body "Explicit Railway production promotion for exact main SHA `$PROMOTION_TARGET`.
+
+Preconditions already verified by this workflow:
+- target is the current `main` HEAD;
+- exact Quality+Security attestation exists on `ci-attestations`.
+
+Merging this PR changes only `.railway/promote.txt`, which is the sole Railway Watch Path for `nexus7-bot`. Railway then runs the existing `python -m bot.ci_deploy_gate` pre-deploy gate before runtime deployment.
+
+Do not add code changes to this promotion PR."
