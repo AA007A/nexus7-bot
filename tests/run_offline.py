@@ -110,6 +110,8 @@ if __name__ == '__main__':
         modules = sys.argv[1:] or ['tests.' + p.stem for p in sorted((ROOT/'tests').glob('test_*.py'))]
         failed = 0
         total = 0
+        passed = 0
+        skipped = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             for module, rc, count, output in pool.map(run_one, modules):
                 explicit = re.findall(r'OFFLINE_TESTS_EXECUTED:\s*(\d+)', output)
@@ -118,10 +120,19 @@ if __name__ == '__main__':
                 if rc == 0 and count == 0:
                     rc = 3
                     output += f'\nZERO-TEST FAILURE: {module} completed without executing any tests\n'
+                child_skips = [int(x) for x in re.findall(r'skipped=(\\d+)', output, flags=re.IGNORECASE)]
+                module_skipped = sum(child_skips)
+                skipped += module_skipped
                 print(f'{module}: {"PASS" if rc == 0 else "FAIL"} ({count})', flush=True)
                 total += count
+                passed += max(0, count - module_skipped) if rc == 0 else 0
                 if rc:
                     failed += 1
                     print(output, flush=True)
-        print(f'TOTAL={total} FAILED_SUITES={failed}', flush=True)
+        mandatory_skipped = skipped
+        print(
+            f'TOTAL={total} PASSED={passed} FAILED={failed} SKIPPED={skipped} '
+            f'MANDATORY_SKIPPED={mandatory_skipped} FAILED_SUITES={failed}',
+            flush=True,
+        )
         sys.exit(bool(failed))
