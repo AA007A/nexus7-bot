@@ -93,6 +93,42 @@ async def refresh_protection_readiness(engine) -> bool:
     engine._protection_readiness_evidence["positions"] = len(live)
     engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
 
+    def _canon(value):
+        symbol = str(value or "")
+        return symbol[:-1] if symbol.endswith("M") else symbol
+
+    registry = getattr(engine, "orders", None)
+    unresolved_reader = getattr(registry, "unreconciled_filled_orders", None)
+    mark_reconciled = getattr(registry, "mark_filled_exposure_reconciled", None)
+    if not callable(unresolved_reader) or not callable(mark_reconciled):
+        engine._protection_readiness_evidence["reason"] = (
+            "durable_fill_reconciliation_authority_unavailable"
+        )
+        return False
+
+    # A FILLED order becomes exposure-reconciled only after authenticated
+    # exchange position truth actually contains that symbol. Terminal order
+    # state alone never authorizes flatness.
+    live_canon = {_canon(row.get("symbol")) for row in live}
+    reconciled_now = 0
+    for order in list(unresolved_reader() or []):
+        if _canon(getattr(order, "symbol", "")) in live_canon:
+            reconciled_now += mark_reconciled(order.symbol)
+    if reconciled_now:
+        from bot import durable_execution as durable
+        if not await durable.persist_orders(
+            engine, "exposure_reconciled_from_position_truth", strict=True
+        ):
+            engine._protection_readiness_evidence["reason"] = (
+                "durable_fill_reconciliation_persist_failed"
+            )
+            return False
+
+    unresolved_fills = list(unresolved_reader() or [])
+    unresolved_fill_symbols = {
+        _canon(getattr(order, "symbol", "")) for order in unresolved_fills
+    }
+
     # Reconcile stale incidents per symbol. A flat position snapshot alone is
     # insufficient: durable intents, active entry orders, and local filled
     # positions awaiting exchange convergence are independent exposure evidence.
@@ -131,10 +167,6 @@ async def refresh_protection_readiness(engine) -> bool:
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_payload_malformed"
             return False
 
-        def _canon(value):
-            symbol = str(value or "")
-            return symbol[:-1] if symbol.endswith("M") else symbol
-
         pending_symbols = {_canon(getattr(order, "symbol", "")) for order in pending}
         active_entry_symbols = {
             _canon(row.get("symbol"))
@@ -153,6 +185,7 @@ async def refresh_protection_readiness(engine) -> bool:
             if _canon(symbol) not in pending_symbols
             and _canon(symbol) not in active_entry_symbols
             and _canon(symbol) not in local_position_symbols
+            and _canon(symbol) not in unresolved_fill_symbols
         }
         if clearable:
             engine._unprotected_symbols = before - clearable
@@ -166,15 +199,20 @@ async def refresh_protection_readiness(engine) -> bool:
                 decision, reason = "KEEP_BLOCKED", "pending_durable_intent"
             elif canon in active_entry_symbols:
                 decision, reason = "KEEP_BLOCKED", "active_exchange_entry"
+            elif canon in unresolved_fill_symbols:
+                decision, reason = "KEEP_BLOCKED", "durable_fill_exposure_not_reconciled"
             else:
                 decision, reason = "KEEP_BLOCKED", "local_filled_position_awaiting_exchange_convergence"
             log.warning(
                 "[PROTECTION_STATE_RECONCILIATION] symbol=%s position_qty=0 "
-                "active_entry_orders=%s durable_pending=%s recent_fill_pending=%s "
-                "unprotected_before=true unprotected_after=%s decision=%s reason=%s",
+                "exchange_position_qty=0 active_entry_orders=%s durable_pending=%s "
+                "local_materialized_position=%s durable_fill_unreconciled=%s "
+                "exposure_reconciliation_complete=%s unprotected_before=true "
+                "unprotected_after=%s decision=%s reason=%s",
                 symbol, int(canon in active_entry_symbols), int(canon in pending_symbols),
-                int(canon in local_position_symbols), str(symbol in unprotected).lower(),
-                decision, reason,
+                int(canon in local_position_symbols), int(canon in unresolved_fill_symbols),
+                str(canon not in unresolved_fill_symbols).lower(),
+                str(symbol in unprotected).lower(), decision, reason,
             )
 
         ready = len(unprotected) == 0
