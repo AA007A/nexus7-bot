@@ -314,6 +314,30 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(engine, real_engine_cls)
             self.assertIsNone(main.app.state.engine)
             self.assertFalse(engine._execution_ownership_valid)
+            self.assertIsNone(main.app.state.engine_task)
+            self.assertIsNone(main.app.state.bootstrap_task)
+
+    async def test_lifespan_ignores_stale_task_from_prior_event_loop(self):
+        stale_loop = asyncio.new_event_loop()
+        async def never():
+            await asyncio.Event().wait()
+        stale_task = stale_loop.create_task(never())
+        main.app.state.engine_task = stale_task
+        try:
+            # The real lifespan must replace lifecycle-owned task references,
+            # never await a task created by another loop.
+            with patch.object(main.ExchangeClient, "load_instruments", AsyncMock(return_value=None)), \
+                 patch("bot.notifier.test_telegram", AsyncMock(return_value={"ok": True})), \
+                 patch("bot.notifier.notify", AsyncMock()):
+                async with main.lifespan(main.app):
+                    await asyncio.sleep(0)
+                    task = main.app.state.engine_task
+                    if task is not None:
+                        self.assertIs(task.get_loop(), asyncio.get_running_loop())
+        finally:
+            stale_task.cancel()
+            stale_loop.run_until_complete(asyncio.gather(stale_task, return_exceptions=True))
+            stale_loop.close()
 
 
 if __name__ == "__main__":
