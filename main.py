@@ -210,7 +210,11 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             log.debug(f"notify modo: {_e}")
 
-    app.state.bootstrap_task = asyncio.create_task(_bootstrap())
+    # Lifecycle ownership is per-lifespan invocation. Never retain/await a task
+    # created by a previous app/test event loop.
+    lifecycle_loop = asyncio.get_running_loop()
+    app.state.bootstrap_task = lifecycle_loop.create_task(_bootstrap())
+    app.state.engine_task = None
 
     # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
     yield
@@ -228,12 +232,38 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     app.state.engine = None
     engine.stop()
-    for t in ("bootstrap_task", "engine_task"):
-        task=getattr(app.state,t,None)
-        if task and not task.done():
+    owned_tasks = []
+    for name in ("bootstrap_task", "engine_task"):
+        task = getattr(app.state, name, None)
+        if task is None:
+            continue
+        if task.get_loop() is not lifecycle_loop:
+            log.warning("[LIFECYCLE] ignoring stale %s from a different event loop", name)
+            setattr(app.state, name, None)
+            continue
+        owned_tasks.append((name, task))
+        if not task.done():
             task.cancel()
-    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task')]
-    await asyncio.gather(*(t for t in tasks if t is not None), return_exceptions=True)
+
+    for name, task in owned_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            # Deliberate lifespan shutdown cancellation is expected.
+            pass
+        except Exception as exc:
+            # Preserve unexpected engine/bootstrap failures; do not mask cleanup.
+            log.error(
+                "[LIFECYCLE] task=%s state=FAILED type=%s during_shutdown=true",
+                name,
+                type(exc).__name__,
+            )
+            if name == "engine_task":
+                engine._fatal_engine_error = type(exc).__name__
+                engine._engine_state = "FAILED"
+                app.state.engine_fatal = type(exc).__name__
+        finally:
+            setattr(app.state, name, None)
     try:
         await client.close()
     except Exception as e:
