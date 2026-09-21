@@ -91,8 +91,12 @@ def evaluate_deployment_readiness(
     return DeploymentReadinessSnapshot(True, "deployment_safe", state)
 
 
-# Compatibility alias for existing tests/importers. Semantics are deployment-only.
-ServiceReadiness = DeploymentReadinessSnapshot
+@dataclass(frozen=True)
+class ServiceReadiness:
+    """Legacy infrastructure-readiness compatibility contract."""
+
+    ready: bool
+    reason: str
 
 
 def evaluate_service_readiness(
@@ -103,11 +107,16 @@ def evaluate_service_readiness(
     instrument_count: int,
     worker_healthy: bool = True,
 ):
-    return evaluate_deployment_readiness(
-        bootstrap_complete=bootstrap_complete,
-        startup_blocked=startup_blocked,
-        durable_state_ok=durable_state_ok,
-        instrument_count=instrument_count,
-        worker_healthy=worker_healthy,
-        engine_state=EngineState.WAITING_FOR_EXECUTION_OWNERSHIP.value,
-    )
+    # Preserve the historical service contract independently from the
+    # canonical deployment-readiness authority.
+    if not bootstrap_complete:
+        return ServiceReadiness(False, "bootstrap_incomplete")
+    if startup_blocked:
+        return ServiceReadiness(False, "startup_blocked")
+    if not worker_healthy:
+        return ServiceReadiness(False, "engine_task_unhealthy")
+    if not durable_state_ok:
+        return ServiceReadiness(False, "durable_state_unhealthy")
+    if int(instrument_count or 0) <= 0:
+        return ServiceReadiness(False, "instruments_unavailable")
+    return ServiceReadiness(True, "service_healthy")
