@@ -86,6 +86,11 @@ class ManagedOrder:
     # observed by reconciliation. This bit is durable and may become True only
     # after exchange position truth has absorbed the fill.
     exposure_reconciliation_complete: bool = False
+    # Semantic intent is durable. side alone cannot distinguish an entry from
+    # a reduce/close because the same side can have different exposure effect.
+    reduce_only: bool = False
+    exposure_intent: str = "INCREASE"  # INCREASE | REDUCE
+    previous_position_qty: Optional[float] = None
 
     def transition(self, novo: OrderState, **info):
         """
@@ -196,6 +201,9 @@ class ManagedOrder:
             "exposure_reconciliation_complete": bool(
                 self.exposure_reconciliation_complete
             ),
+            "reduce_only": bool(self.reduce_only),
+            "exposure_intent": str(self.exposure_intent),
+            "previous_position_qty": self.previous_position_qty,
         }
 
     @classmethod
@@ -231,6 +239,14 @@ class ManagedOrder:
         # truth is observed again; non-FILLED terminal states carry no exposure.
         order.exposure_reconciliation_complete = bool(
             record.get("exposure_reconciliation_complete", False)
+        )
+        order.reduce_only = bool(record.get("reduce_only", False))
+        order.exposure_intent = str(
+            record.get("exposure_intent", "REDUCE" if order.reduce_only else "INCREASE")
+        )
+        previous_qty = record.get("previous_position_qty")
+        order.previous_position_qty = (
+            None if previous_qty is None else max(0.0, float(previous_qty))
         )
         return order
 
