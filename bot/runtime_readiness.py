@@ -36,6 +36,13 @@ def _ownership_locally_valid(engine) -> bool:
 
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
     cap_live=current_execution_capability() is ExecutionCapability.LIVE
+    # Telemetry only: observes the already-established ownership state; it does
+    # not acquire, renew, validate, or mutate the lease/readiness decision.
+    try:
+        from bot.execution_ownership import observe_execution_ownership_read
+        observe_execution_ownership_read(engine)
+    except Exception:
+        pass
     return RuntimeReadinessSnapshot(
       instruments_ready=bool(getattr(engine,"instruments",{})),
       critical_database_ready=bool(getattr(engine,"_durable_state_ok",False)),

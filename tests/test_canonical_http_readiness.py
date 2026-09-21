@@ -185,7 +185,11 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["blockers"], [])
         self.assertTrue(snap.ready_for_new_entries)
         self.assertEqual(status == 200, snap.ready_for_new_entries)
-        info.assert_called_once()
+        http_ready_logs = [
+            call for call in info.call_args_list
+            if call.args and "[HTTP_READINESS]" in str(call.args[0])
+        ]
+        self.assertEqual(len(http_ready_logs), 1)
         engine.connected = False
         status, body = await _ready()
         payload = json.loads(body)
