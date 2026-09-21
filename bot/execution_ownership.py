@@ -98,7 +98,10 @@ async def initialize_live_execution_ownership(engine):
     # Keep proxy-visible state coherent for simple clients/tests.
     if client is not raw_client:
         client._execution_ownership = ownership
+    engine._execution_ownership_expires_at = ownership.expires_at
     engine._execution_ownership_valid = True
+    from bot.logger import log
+    log.info("[EXECUTION_OWNERSHIP] acquired=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
     return ownership
 
 
@@ -119,8 +122,11 @@ async def execution_ownership_heartbeat(engine):
             raw_client._execution_ownership = ownership
             if client is not raw_client:
                 client._execution_ownership = ownership
+            engine._execution_ownership_expires_at = ownership.expires_at
             engine._execution_ownership_valid = True
+            log.info("[EXECUTION_OWNERSHIP] heartbeat_renewed=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
         except Exception as exc:
             engine._execution_ownership_valid = False
+            engine._execution_ownership_expires_at = None
             log.error("[EXECUTION_OWNERSHIP] heartbeat_invalid type=%s", type(exc).__name__)
         await asyncio.sleep(interval)
