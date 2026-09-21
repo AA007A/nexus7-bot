@@ -349,6 +349,9 @@ class TradingEngine:
         self.client._engine = self
         self._execution_ownership_valid = False
         self._execution_ownership_expires_at = None
+        # BGX-READY-002: durable storage health is not reconciliation proof.
+        self._initial_reconciliation_complete = False
+        self._initial_reconciliation_receipt = None
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
         self.stats        = Stats()
@@ -495,7 +498,12 @@ class TradingEngine:
             self._start_background(opt.weekly_optimization_loop(self.client)) # otimização semanal
             self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
             await self._connect()
-            await durable.reconcile_orders(self)
+            durable_orders_reconciled = await durable.reconcile_orders(self)
+            from bot.initial_reconciliation import reconcile_initial_state
+            await reconcile_initial_state(
+                self,
+                durable_orders_reconciled=durable_orders_reconciled,
+            )
 
             _ciclos = 0
             while self._running:
