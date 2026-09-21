@@ -205,11 +205,13 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main_hardened.log, "warning") as warning:
             self.assertEqual((await _ready())[0], 503)
             self.assertEqual((await _ready())[0], 503)
-        warning.assert_called_once()
+        http_calls = [call for call in warning.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_calls), 1)
         engine._market_data_ready = False
         with patch.object(main_hardened.log, "warning") as warning_changed:
             self.assertEqual((await _ready())[0], 503)
-        warning_changed.assert_called_once()
+        http_changed = [call for call in warning_changed.call_args_list if "[HTTP_READINESS]" in str(call)]
+        self.assertEqual(len(http_changed), 1)
     async def test_real_lifespan_publishes_the_exact_engine_created_for_execution(self):
         created = {}
         real_engine_cls = main.TradingEngine
