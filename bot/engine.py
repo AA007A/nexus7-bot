@@ -434,6 +434,10 @@ class TradingEngine:
         self._durable_state_enforced = False
         self._durable_state_ok = True
         self._durable_state_errors = set()
+        # BGX-READY-003: protection readiness is never optimistic. It is
+        # refreshed only from authenticated exchange readback.
+        self._protection_system_ready = False
+        self._protection_readiness_evidence = {}
 
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
@@ -496,6 +500,8 @@ class TradingEngine:
             self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
             await self._connect()
             await durable.reconcile_orders(self)
+            from bot.protection_readiness import refresh_protection_readiness
+            await refresh_protection_readiness(self)
 
             _ciclos = 0
             while self._running:
@@ -529,6 +535,8 @@ class TradingEngine:
                             await self._manage_partial_tp()
                             await self._apply_trailing_stops()
                             await self._check_rr_double()
+                            from bot.protection_readiness import refresh_protection_readiness
+                            await refresh_protection_readiness(self)
                         await self._heartbeat_telegram()
                         from bot.durable_daily_pnl import checkpoint as checkpoint_daily_pnl
                         daily_pnl_ok = await checkpoint_daily_pnl(self)
