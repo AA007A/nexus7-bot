@@ -27,6 +27,19 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await refresh_protection_readiness(engine))
         self.assertFalse(engine._protection_system_ready)
 
+    async def test_stale_unprotected_symbol_is_cleared_only_after_confirmed_flat(self):
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=SimpleNamespace(pending_orders=lambda: []),
+        )
+        self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertEqual(engine._unprotected_symbols, set())
+        self.assertTrue(engine._protection_system_ready)
+
     async def test_existing_position_requires_native_protection_readback(self):
         position = {
             "symbol": "BTCUSDT",
