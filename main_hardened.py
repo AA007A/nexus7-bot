@@ -57,6 +57,38 @@ from bot.logger import log  # noqa: E402
 from bot.service_readiness import evaluate_service_readiness, engine_task_healthy  # noqa: E402
 from bot.runtime_readiness import runtime_readiness  # noqa: E402
 
+_http_readiness_last_signature = None
+
+def _readiness_blockers(snap):
+    return [
+        name for name, value in snap.__dict__.items()
+        if isinstance(value, bool) and not value
+    ]
+
+def _log_http_readiness(snap):
+    global _http_readiness_last_signature
+    blockers = _readiness_blockers(snap)
+    ready = bool(snap.ready_for_new_entries)
+    signature = (ready, tuple(blockers))
+    if signature == _http_readiness_last_signature:
+        return blockers
+    _http_readiness_last_signature = signature
+    fields = " ".join(
+        f"{name}={str(value).lower()}"
+        for name, value in snap.__dict__.items()
+        if isinstance(value, bool)
+    )
+    log_fn = log.info if ready else log.warning
+    log_fn(
+        "[HTTP_READINESS] endpoint=/ready status=%s %s "
+        "ready_for_new_entries=%s blockers=%s",
+        "READY" if ready else "NOT_READY",
+        fields,
+        str(ready).lower(),
+        blockers,
+    )
+    return blockers
+
 
 @app.middleware("http")
 async def destructive_admin_guard(request: Request, call_next):
@@ -97,8 +129,11 @@ async def readiness():
     if engine is None:
         return JSONResponse(status_code=503, content={"status":"not_ready","ready":False,"reason":"engine_unavailable"})
     snap = runtime_readiness(engine)
+    blockers = _log_http_readiness(snap)
     body = dict(snap.__dict__)
     body["ready"] = snap.ready_for_new_entries
+    body["ready_for_new_entries"] = snap.ready_for_new_entries
+    body["blockers"] = blockers
     body["status"] = "ready" if snap.ready_for_new_entries else "not_ready"
     return JSONResponse(status_code=200 if snap.ready_for_new_entries else 503, content=body)
 
