@@ -245,10 +245,12 @@ async def wait_for_live_execution_ownership(
         try:
             return await initialize_live_execution_ownership(engine)
         except ExecutionOwnershipUnavailable as exc:
+            if str(exc) != "LIVE_EXECUTION_OWNERSHIP_HELD":
+                raise
             invalidate_local_execution_ownership(
                 engine,
                 event="startup_wait",
-                reason=type(exc).__name__,
+                reason="lease_held_by_serving_replica",
             )
             log.warning(
                 "[EXECUTION_OWNERSHIP] startup_wait=true reason=%s "
