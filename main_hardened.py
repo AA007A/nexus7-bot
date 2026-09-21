@@ -122,6 +122,57 @@ async def destructive_admin_guard(request: Request, call_next):
     return await call_next(request)
 
 
+def _loaded_instrument_count(engine) -> int:
+    instruments = getattr(engine, "instruments", None)
+    if instruments:
+        return len(instruments)
+    client = getattr(app.state, "client", None)
+    getter = getattr(client, "get_instruments", None)
+    if callable(getter):
+        try:
+            loaded = getter()
+            return len(loaded or {})
+        except Exception:
+            return 0
+    return 0
+
+
+@app.get("/service-ready", include_in_schema=False)
+async def service_readiness():
+    """Railway rollout readiness, independent from financial execution permission."""
+    engine = getattr(app.state, "engine", None)
+    if engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "ready": False, "reason": "engine_unavailable"},
+        )
+
+    task = getattr(app.state, "engine_task", None)
+    durable_ready = bool(
+        getattr(engine, "_durable_state_enforced", False)
+        and getattr(engine, "_durable_state_ok", False)
+    )
+    result = evaluate_service_readiness(
+        bootstrap_complete=bool(getattr(app.state, "ready", False)),
+        startup_blocked=bool(getattr(app.state, "blocked", False)),
+        durable_state_ok=durable_ready,
+        instrument_count=_loaded_instrument_count(engine),
+        worker_healthy=engine_task_healthy(
+            task,
+            running=bool(getattr(engine, "_running", False)),
+        ),
+    )
+    return JSONResponse(
+        status_code=200 if result.ready else 503,
+        content={
+            "status": "ready" if result.ready else "not_ready",
+            "ready": result.ready,
+            "reason": result.reason,
+            "financial_ready": bool(runtime_readiness(engine).ready_for_new_entries),
+        },
+    )
+
+
 @app.get("/ready", include_in_schema=False)
 async def readiness():
     """Canonical new-entry readiness. Process liveness is intentionally separate."""
