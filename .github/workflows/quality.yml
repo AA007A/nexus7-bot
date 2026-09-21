@@ -33,7 +33,25 @@ jobs:
     env:
       TEST_POSTGRES_DSN: postgresql://proof:postgres@127.0.0.1:5432/nexus_release_proof
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact candidate SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Exact candidate SHA attestation
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          echo "[SHA_ATTESTATION]"
+          echo "expected_candidate_sha=$EXPECTED_CANDIDATE_SHA"
+          echo "event_sha=$EVENT_SHA"
+          echo "pr_head_sha=$PR_HEAD_SHA"
+          echo "checked_out_sha=$CHECKED_OUT_SHA"
+          test "$CHECKED_OUT_SHA" = "$EXPECTED_CANDIDATE_SHA"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -90,6 +108,13 @@ jobs:
 
       - name: Final pre-release proof pack
         run: python -m bot.release_proof
+
+      - name: Explicit XRP BGX-MISSED-001 proof pack
+        run: |
+          python -m unittest -v \
+            tests.test_protection_readiness_authority.ProtectionReadinessAuthorityTests.test_xrp_candidate_proceeds_after_sol_confirmed_flat_reconciliation \
+            tests.test_protection_readiness_authority.ProtectionReadinessAuthorityTests.test_xrp_candidate_remains_blocked_when_sol_is_genuinely_unprotected \
+            tests.test_protection_readiness_authority.ProtectionReadinessAuthorityTests.test_xrp_race_blocks_while_sol_unknown_then_allows_new_candidate_after_reconciliation
 
       - name: Deterministic PAPER and SHADOW E2E safety pack
         run: |
