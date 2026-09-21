@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -32,7 +33,7 @@ class FinalReleaseProof(unittest.IsolatedAsyncioTestCase):
             viable_symbols=["BTCUSDT"], _protection_system_ready=True,
         )
         self.client._engine = engine
-        ownership = object()
+        ownership = SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30))
         async def acquire():
             calls.append("ownership_acquire"); return ownership
         async def validate(_):
@@ -66,7 +67,7 @@ class FinalReleaseProof(unittest.IsolatedAsyncioTestCase):
                  patch("bot.critical_state.critical_state.assert_available_for_new_risk",
                        side_effect=RuntimeError("critical") if failed=="critical" else None), \
                  patch("bot.execution_ownership.acquire_execution_ownership",
-                       AsyncMock(return_value=object())), \
+                       AsyncMock(return_value=SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30)))), \
                  patch("bot.execution_ownership.validate_execution_ownership",
                        AsyncMock(side_effect=RuntimeError("ownership") if failed=="ownership" else None)), \
                  patch("bot.runtime_readiness.assert_ready_for_new_entries",
