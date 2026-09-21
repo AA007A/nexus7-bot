@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bot.protection_readiness import refresh_protection_readiness
 from bot.order_state import OrderRegistry, OrderState
@@ -134,6 +134,77 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, set())
+
+    async def test_restart_filled_terminal_does_not_imply_exposure_reconciled(self):
+        orders = _registry()
+        order, _ = orders.get_or_create("bgx7-fill-restart", "SOLUSDT", "Buy", 4.2)
+        order.transition(OrderState.SUBMITTING, source="REST")
+        order.transition(OrderState.SUBMITTED, order_id="oid-sol", source="REST")
+        order.transition(
+            OrderState.FILLED, order_id="oid-sol", filled_qty=4.2, source="REST"
+        )
+        snapshot = orders.snapshot()
+
+        restarted = _registry()
+        restarted.restore(snapshot)
+        restored = restarted.get("bgx7-fill-restart")
+        self.assertTrue(restored.is_terminal)
+        self.assertFalse(restored.exposure_reconciliation_complete)
+
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=restarted, positions={},
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
+        self.assertEqual(
+            engine._protection_readiness_evidence["reason"],
+            "flat_with_unresolved_exposure_evidence",
+        )
+
+    async def test_exchange_position_truth_completes_fill_reconciliation_durably(self):
+        orders = _registry()
+        order, _ = orders.get_or_create("bgx7-fill-live", "SOLUSDT", "Buy", 4.2)
+        order.transition(OrderState.SUBMITTING, source="REST")
+        order.transition(OrderState.SUBMITTED, order_id="oid-sol", source="REST")
+        order.transition(OrderState.FILLED, filled_qty=4.2, source="REST")
+        position = {
+            "symbol": "SOLUSDT", "size": 4.2, "side": "Buy",
+            "entryPrice": 100.0, "markPrice": 100.0, "stopLoss": 90.0,
+        }
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[position]),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols=set(),
+            orders=orders, positions={},
+        )
+        with patch(
+            "bot.durable_execution.persist_orders",
+            new=AsyncMock(return_value=True),
+        ) as persist:
+            self.assertTrue(await refresh_protection_readiness(engine))
+            persist.assert_awaited_once()
+        self.assertTrue(order.exposure_reconciliation_complete)
+
+        client.get_positions = AsyncMock(return_value=[])
+        client._get = AsyncMock(return_value={"items": []})
+        engine._unprotected_symbols = {"SOLUSDT"}
+        self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertEqual(engine._unprotected_symbols, set())
+
+    async def test_unreconciled_fill_is_not_garbage_collected_by_age(self):
+        orders = _registry()
+        order, _ = orders.get_or_create("bgx7-old-fill", "SOLUSDT", "Buy", 1.0)
+        order.transition(OrderState.SUBMITTING, source="REST")
+        order.transition(OrderState.FILLED, filled_qty=1.0, source="REST")
+        order.created_at = 0.0
+        orders.gc(max_age=1.0)
+        self.assertIsNotNone(orders.get("bgx7-old-fill"))
 
     async def test_existing_position_requires_native_protection_readback(self):
         position = {
