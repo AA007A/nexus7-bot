@@ -594,11 +594,28 @@ class KuCoinClient:
             and body.get('closeOrder') is not True
         )
         if is_new_risk:
-            from bot.execution_ownership import validate_execution_ownership
+            from bot.execution_ownership import (
+                StaleExecutionFence,
+                validate_execution_ownership,
+                apply_validated_execution_ownership,
+                invalidate_local_execution_ownership,
+            )
             ownership = getattr(self, '_execution_ownership', None)
             if ownership is None:
                 raise RuntimeError('OPEN_NEW_RISK missing execution ownership at transport boundary')
-            await validate_execution_ownership(ownership)
+            engine = getattr(self, "_engine", None)
+            try:
+                validated_until = await validate_execution_ownership(ownership)
+            except StaleExecutionFence:
+                if engine is not None:
+                    invalidate_local_execution_ownership(
+                        engine,event="local_invalidated",reason="transport_stale_fence",
+                    )
+                raise
+            if engine is not None:
+                apply_validated_execution_ownership(
+                    engine, ownership, validated_until, event="transport_revalidated",
+                )
         async with self._entry_safe_post(endpoint, body, url, **kwargs) as response:
             yield response
 
@@ -1064,7 +1081,11 @@ class KuCoinClient:
         if not reduce_only:
             from bot.critical_state import critical_state
             from bot.runtime_readiness import assert_ready_for_new_entries
-            from bot.execution_ownership import acquire_execution_ownership, validate_execution_ownership
+            from bot.execution_ownership import (
+                acquire_execution_ownership,
+                validate_execution_ownership,
+                apply_validated_execution_ownership,
+            )
             critical_state.assert_available_for_new_risk()
             engine = getattr(self, "_engine", None)
             if engine is None:
@@ -1075,10 +1096,10 @@ class KuCoinClient:
             if ownership is None:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
-            await validate_execution_ownership(ownership)
-            if hasattr(engine, "_execution_ownership_expires_at"):
-                engine._execution_ownership_expires_at = getattr(ownership, "expires_at", None)
-            engine._execution_ownership_valid = True
+            validated_until = await validate_execution_ownership(ownership)
+            apply_validated_execution_ownership(
+                engine, ownership, validated_until, event="dispatch_revalidated",
+            )
             assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")

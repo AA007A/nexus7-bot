@@ -21,17 +21,32 @@ class RuntimeReadinessSnapshot:
           self.market_data_ready,self.execution_capability_live,self.protection_system_ready))
 
 def _ownership_locally_valid(engine) -> bool:
+    from bot.execution_ownership import observe_readiness_ownership_state
     if not bool(getattr(engine, "_execution_ownership_valid", False)):
+        observe_readiness_ownership_state(
+            engine,local_lease_valid=False,reason="execution_flag_false",
+        )
         return False
     # Canonical TradingEngine instances carry an explicit lease deadline.
     # Legacy isolated fixtures without that field retain their boolean contract.
     if hasattr(engine, "_execution_ownership_expires_at"):
         expires_at = getattr(engine, "_execution_ownership_expires_at", None)
         if not isinstance(expires_at, datetime):
+            observe_readiness_ownership_state(
+                engine,local_lease_valid=False,reason="local_expiry_type_invalid",
+            )
             return False
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        return expires_at > datetime.now(timezone.utc)
+        valid=expires_at > datetime.now(timezone.utc)
+        observe_readiness_ownership_state(
+            engine,local_lease_valid=valid,
+            reason="local_lease_valid" if valid else "local_lease_expired",
+        )
+        return valid
+    observe_readiness_ownership_state(
+        engine,local_lease_valid=True,reason="legacy_boolean_contract",
+    )
     return True
 
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:

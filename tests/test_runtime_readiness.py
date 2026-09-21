@@ -44,7 +44,7 @@ class ProductionStartupOwnershipLifecycleTests(unittest.IsolatedAsyncioTestCase)
       e.client=SimpleNamespace()
       ownership=SimpleNamespace(owner_id="owner",fencing_token=7,expires_at=datetime.now(timezone.utc)+timedelta(seconds=30))
       with patch("bot.execution_ownership.acquire_execution_ownership",return_value=ownership) as acquire, \
-           patch("bot.execution_ownership.validate_execution_ownership") as validate:
+           patch("bot.execution_ownership.validate_execution_ownership",return_value=ownership.expires_at) as validate:
         await initialize_live_execution_ownership(e)
       acquire.assert_awaited_once()
       validate.assert_awaited_once_with(ownership)
