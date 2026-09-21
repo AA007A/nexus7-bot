@@ -48,6 +48,36 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(renewed.expires_at,a.expires_at)
         await eo.validate_execution_ownership(renewed)
 
+
+    async def test_heartbeat_multiple_cycles_renews_same_fence(self):
+        initial=await eo.acquire_execution_ownership()
+        engine=SimpleNamespace(
+            _running=True,_execution_ownership_valid=True,
+            _execution_ownership_expires_at=initial.expires_at,
+            client=SimpleNamespace(_execution_ownership=initial),
+        )
+        observed=[]
+        real_acquire=eo.acquire_execution_ownership
+        async def recording_acquire(*args,**kwargs):
+            item=await real_acquire(*args,**kwargs)
+            observed.append(item)
+            return item
+        cycles=0
+        async def bounded_sleep(_seconds):
+            nonlocal cycles
+            cycles += 1
+            if cycles >= 3:
+                engine._running=False
+        with patch("bot.execution_ownership.acquire_execution_ownership",side_effect=recording_acquire), \
+             patch("asyncio.sleep",bounded_sleep):
+            await eo.execution_ownership_heartbeat(engine)
+        self.assertEqual(len(observed),3)
+        self.assertEqual({x.owner_id for x in observed},{initial.owner_id})
+        self.assertEqual({x.session_id for x in observed},{initial.session_id})
+        self.assertEqual({x.fencing_token for x in observed},{initial.fencing_token})
+        self.assertTrue(all(b.expires_at >= a.expires_at for a,b in zip(observed,observed[1:])))
+        self.assertTrue(engine._execution_ownership_valid)
+
     async def test_second_live_owner_is_rejected_while_first_lease_is_valid(self):
         await eo.acquire_execution_ownership("A")
         with self.assertRaises(eo.ExecutionOwnershipUnavailable):
