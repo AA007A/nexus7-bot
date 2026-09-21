@@ -183,8 +183,7 @@ async def lifespan(app: FastAPI):
     # P2 CORRIGIDO: a conexão com o banco nunca era fechada. Em restarts
     # frequentes, conexões PostgreSQL ficavam penduradas até o timeout do
     # servidor, consumindo slots do pool.
-    engine.stop()
-    for t in ("bootstrap_task", "engine_task"):
+    # Fail closed before cleanup: a shutting-down engine must never remain\n    # published as the HTTP new-risk readiness authority.\n    engine._execution_ownership_valid = False\n    engine._execution_ownership_expires_at = None\n    app.state.ready = False\n    app.state.engine = None\n    engine.stop()\n    for t in ("bootstrap_task", "engine_task"):
         task=getattr(app.state,t,None)
         if task and not task.done():
             task.cancel()
