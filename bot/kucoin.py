@@ -1076,9 +1076,8 @@ class KuCoinClient:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
             await validate_execution_ownership(ownership)
-            if hasattr(engine, "_execution_ownership_expires_at"):
-                engine._execution_ownership_expires_at = getattr(ownership, "expires_at", None)
-            engine._execution_ownership_valid = True
+            from bot.execution_ownership import publish_validated_execution_ownership
+            publish_validated_execution_ownership(engine, ownership, event="predispatch_validated")
             assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
