@@ -35,8 +35,15 @@ def _parse(v): return v if isinstance(v, datetime) else datetime.fromisoformat(v
 
 def publish_valid_execution_ownership(engine, ownership: ExecutionOwnership, *, event: str) -> None:
     """Publish validated DB lease state into the canonical local readiness view."""
-    expires_at = _parse(ownership.expires_at)
+    raw_expires_at = getattr(ownership, "expires_at", None)
+    if raw_expires_at is None:
+        invalidate_local_execution_ownership(engine, event=event, reason="lease_expiry_missing")
+        return
+    expires_at = _parse(raw_expires_at)
     remaining = max(0.0, (expires_at - _now()).total_seconds())
+    if remaining <= 0:
+        invalidate_local_execution_ownership(engine, event=event, reason="lease_expired")
+        return
     engine._execution_ownership_expires_at = expires_at
     engine._execution_ownership_valid = True
     from bot.logger import log
