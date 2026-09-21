@@ -62,13 +62,13 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             nonlocal calls
             calls += 1
             engine._running=False
-        with patch.object(eo.db,"_conn",None), patch("bot.execution_ownership.asyncio.sleep",sleep_once):
+        with patch.object(eo.db,"_conn",None), patch("asyncio.sleep",sleep_once):
             await eo.execution_ownership_heartbeat(engine)
         self.assertFalse(engine._execution_ownership_valid)
         engine._running=True
         async def stop_after_recovery(_seconds):
             engine._running=False
-        with patch("bot.execution_ownership.asyncio.sleep",stop_after_recovery):
+        with patch("asyncio.sleep",stop_after_recovery):
             await eo.execution_ownership_heartbeat(engine)
         self.assertTrue(engine._execution_ownership_valid)
         await eo.validate_execution_ownership(raw._execution_ownership)
