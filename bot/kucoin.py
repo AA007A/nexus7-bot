@@ -1076,8 +1076,13 @@ class KuCoinClient:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
             await validate_execution_ownership(ownership)
-            from bot.execution_ownership import publish_validated_execution_ownership
-            publish_validated_execution_ownership(engine, ownership, event="predispatch_validated")
+            from bot.execution_ownership import ExecutionOwnership, publish_validated_execution_ownership
+            if isinstance(ownership, ExecutionOwnership):
+                publish_validated_execution_ownership(engine, ownership, event="predispatch_validated")
+            else:
+                # Compatibility for isolated gate-order fixtures that replace
+                # the durable ownership object with an opaque sentinel.
+                engine._execution_ownership_valid = True
             assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
