@@ -57,6 +57,7 @@ class EntryPauseTests(EngineFixture):
         with patch.object(E.db, 'init', AsyncMock()), \
              patch.object(E.durable, 'restore_engine_state', AsyncMock()), \
              patch.object(E.durable, 'reconcile_orders', AsyncMock()), \
+             patch('bot.protection_readiness.refresh_protection_readiness', AsyncMock(return_value=False)), \
              patch('bot.execution_ownership.initialize_live_execution_ownership', AsyncMock()), \
              patch('bot.execution_ownership.execution_ownership_heartbeat', worker), \
              patch.object(E.scoring, 'update_macro_cache', worker), \
