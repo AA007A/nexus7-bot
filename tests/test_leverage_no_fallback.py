@@ -1,5 +1,6 @@
 """A rejected order must not be retried with a different leverage."""
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -26,7 +27,7 @@ class LeverageNoFallbackTests(unittest.IsolatedAsyncioTestCase):
             patch("bot.kucoin.PAPER_TRADE", False),
             patch("bot.kucoin.API_KEY", "test-key"),
             patch("bot.critical_state.critical_state.assert_available_for_new_risk"),
-            patch("bot.execution_ownership.acquire_execution_ownership", AsyncMock(return_value=object())),
+            patch("bot.execution_ownership.acquire_execution_ownership", AsyncMock(return_value=SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30)))),
             patch("bot.execution_ownership.validate_execution_ownership", AsyncMock()),
             patch("bot.runtime_readiness.assert_ready_for_new_entries"),
         ):
