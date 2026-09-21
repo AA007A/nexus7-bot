@@ -55,7 +55,8 @@ def _observe_ownership_state(engine, *, event: str, db_lease_valid: bool | None,
         return
     _ownership_observation_signature = signature
     from bot.logger import log
-    log.info(
+    log_fn = log.debug if event == "readiness_read" else log.info
+    log_fn(
         "[OWNERSHIP_STATE] event=%s db_lease_valid=%s local_lease_valid=%s "
         "execution_ownership_valid=%s fencing_valid=%s lease_remaining_seconds=%.3f reason=%s",
         event,
