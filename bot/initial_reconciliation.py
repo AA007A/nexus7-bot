@@ -10,6 +10,10 @@ from dataclasses import asdict, dataclass
 
 from bot.conditional_stop_protection import conditional_stop_confirmed
 from bot.logger import log
+from bot.protection_readiness import (
+    publish_exchange_protection_state,
+    reset_protection_readiness,
+)
 
 DURABLE_STATE_READY_IS_NOT_RECONCILIATION_COMPLETE = True
 
@@ -30,6 +34,7 @@ def begin(engine) -> None:
     """Reset the gate before any startup I/O can be treated as evidence."""
     engine._initial_reconciliation_complete = False
     engine._initial_reconciliation_receipt = None
+    reset_protection_readiness(engine)
 
 
 def _active_orders(payload) -> list[dict]:
@@ -121,12 +126,14 @@ async def reconcile_initial_state(engine, *, durable_orders_reconciled: bool) ->
         protected = 0
         unprotected = 0
         protection_evidence = {}
+        protection_readbacks = {}
         for position in positions:
             confirmed, evidence = await conditional_stop_confirmed(
                 engine.client, position
             )
             symbol = str(position["symbol"])
             protection_evidence[symbol] = str(evidence)
+            protection_readbacks[symbol] = (confirmed, str(evidence))
             if confirmed is True:
                 protected += 1
             else:
@@ -149,6 +156,9 @@ async def reconcile_initial_state(engine, *, durable_orders_reconciled: bool) ->
             "active_order_attribution_complete": True,
             "protection_evidence": protection_evidence,
         }
+        publish_exchange_protection_state(
+            engine, positions, protection_readbacks
+        )
         engine._initial_reconciliation_complete = True
         log.info(
             "[INITIAL_RECONCILIATION] result=COMPLETE positions=%s "

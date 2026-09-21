@@ -352,6 +352,9 @@ class TradingEngine:
         # BGX-READY-002: durable storage health is not reconciliation proof.
         self._initial_reconciliation_complete = False
         self._initial_reconciliation_receipt = None
+        # BGX-READY-003: protection readiness requires exchange readback.
+        self._protection_system_ready = False
+        self._protection_readiness_receipt = None
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
         self.stats        = Stats()

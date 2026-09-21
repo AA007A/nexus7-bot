@@ -111,7 +111,11 @@ class FinalReleaseProof(unittest.IsolatedAsyncioTestCase):
     def test_financial_state_execution_matrix(self):
         base=dict(instruments={"BTC":{}},_durable_state_ok=True,_financial_state_sane=True,
             _initial_reconciliation_complete=True,_execution_ownership_valid=True,connected=True,
-            _market_data_ready=True,_protection_system_ready=True)
+            _market_data_ready=True,_protection_system_ready=True,
+            _protection_readiness_receipt={"observed_symbols":[],"positions":0,
+                "protected_positions":0,"unprotected_positions":0,
+                "readback_complete":True,"evidence":{}},positions={},
+            _external_position_symbols=set(),_unprotected_symbols=set())
         with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
             self.assertTrue(runtime_readiness(SimpleNamespace(**base)).ready_for_new_entries)
             for label in ("nan","inf","negative_equity","negative_hwm","hwm_lt_equity",

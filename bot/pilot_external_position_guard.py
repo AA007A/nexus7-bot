@@ -40,6 +40,8 @@ def install(TradingEngine, log):
         try:
             rows = await engine.client.get_positions()
         except Exception as exc:
+            from bot.protection_readiness import reset_protection_readiness
+            reset_protection_readiness(engine)
             log.critical(
                 "[EXTERNAL_POSITION_IMMUTABLE] result=BLOCKED "
                 "reason=position_read_failed error=%s action=no_mutation",
@@ -101,6 +103,9 @@ def install(TradingEngine, log):
 
         blocked = bool(unprotected)
         setattr(engine, "_pilot_external_position_guard_blocked", blocked)
+
+        from bot.protection_readiness import refresh_protection_readiness
+        await refresh_protection_readiness(engine, positions=rows)
 
         if unprotected:
             log.critical(
