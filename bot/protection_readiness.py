@@ -93,21 +93,80 @@ async def refresh_protection_readiness(engine) -> bool:
     engine._protection_readiness_evidence["positions"] = len(live)
     engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
 
-    # Explicit flat-account rule: no open exposure and no unresolved protection
-    # incident is sufficient. This is not a default; it is exchange-derived.
+    # A stale incident may be cleared only after independent flat confirmation.
+    # Position read alone is insufficient: unresolved durable submissions or
+    # active entry orders can still create exposure after the snapshot.
     if not live:
-        ready = len(unprotected) == 0
-        engine._protection_system_ready = ready
-        engine._protection_readiness_evidence["reason"] = (
-            "flat_account_no_unprotected_positions"
-            if ready else "flat_account_with_unresolved_unprotected_state"
-        )
+        registry = getattr(engine, "orders", None)
+        pending_reader = getattr(registry, "pending_orders", None)
+        if not callable(pending_reader):
+            engine._protection_readiness_evidence["reason"] = "flat_pending_orders_unconfirmed"
+            return False
+        try:
+            pending = list(pending_reader() or [])
+        except Exception as exc:
+            engine._protection_readiness_evidence["reason"] = "flat_pending_orders_read_failed"
+            log.critical(
+                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                "reason=pending_orders_read_failed error=%s",
+                type(exc).__name__,
+            )
+            return False
+        if pending:
+            engine._protection_readiness_evidence["reason"] = "flat_with_pending_durable_orders"
+            return False
+
+        raw_get = getattr(client, "_get", None)
+        if not callable(raw_get):
+            engine._protection_readiness_evidence["reason"] = "flat_active_orders_unconfirmed"
+            return False
+        try:
+            payload = await raw_get("/api/v1/orders", {"status": "active"}, auth=True)
+        except Exception as exc:
+            engine._protection_readiness_evidence["reason"] = "flat_active_orders_read_failed"
+            log.critical(
+                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                "reason=active_orders_read_failed error=%s",
+                type(exc).__name__,
+            )
+            return False
+        if isinstance(payload, dict):
+            active = payload.get("items")
+            if active is None and isinstance(payload.get("data"), list):
+                active = payload.get("data")
+        elif isinstance(payload, list):
+            active = payload
+        else:
+            active = None
+        if not isinstance(active, list):
+            engine._protection_readiness_evidence["reason"] = "flat_active_orders_payload_malformed"
+            return False
+        active_entry = [
+            row for row in active if isinstance(row, dict)
+            and row.get("reduceOnly") is not True and row.get("closeOrder") is not True
+        ]
+        if active_entry:
+            engine._protection_readiness_evidence["reason"] = "flat_with_active_entry_orders"
+            return False
+
+        before = sorted(unprotected)
+        if unprotected:
+            engine._unprotected_symbols = set()
+            unprotected = set()
+            engine._protection_readiness_evidence["unprotected_positions"] = 0
+            log.warning(
+                "[PROTECTION_STATE_RECONCILIATION] exchange_position_qty=0 "
+                "active_entry_orders_count=0 unprotected_before=%s "
+                "unprotected_after=[] decision=CLEAR_STALE reason=confirmed_flat",
+                ",".join(before),
+            )
+        engine._protection_system_ready = True
+        engine._protection_readiness_evidence["reason"] = "confirmed_flat_no_pending_exposure"
         log.info(
-            "[PROTECTION_READINESS] ready=%s positions=0 unprotected_positions=%s "
-            "basis=EXCHANGE_STATE invariant=PROTECTION_READINESS_MUST_BE_DERIVED_FROM_EXCHANGE_STATE",
-            str(ready).lower(), len(unprotected),
+            "[PROTECTION_READINESS] ready=true positions=0 unprotected_positions=0 "
+            "basis=CONFIRMED_EXCHANGE_FLAT invariant=PROTECTION_READINESS_MUST_BE_DERIVED_FROM_EXCHANGE_STATE"
         )
-        return ready
+        return True
 
     verified = {}
     for row in live:
