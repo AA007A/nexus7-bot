@@ -197,6 +197,130 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await refresh_protection_readiness(engine))
         self.assertEqual(engine._unprotected_symbols, set())
 
+    def _filled_reduce(self, oid, qty, previous):
+        orders = _registry()
+        order, _ = orders.get_or_create(oid, "SOLUSDT", "Sell", qty)
+        order.reduce_only = True
+        order.exposure_intent = "REDUCE"
+        order.previous_position_qty = previous
+        order.transition(OrderState.SUBMITTING, source="REST")
+        order.transition(OrderState.SUBMITTED, order_id="x-" + oid, source="REST")
+        order.transition(OrderState.FILLED, filled_qty=qty, source="REST")
+        return orders, order
+
+    async def test_partial_reduce_reconciles_only_to_expected_residual(self):
+        orders, order = self._filled_reduce("bgx7-reduce", 2.0, 4.2)
+        position = {
+            "symbol": "SOLUSDT", "size": 2.2, "side": "Buy",
+            "entryPrice": 100.0, "markPrice": 100.0, "stopLoss": 90.0,
+        }
+        client = SimpleNamespace(get_positions=AsyncMock(return_value=[position]))
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols=set(),
+            orders=orders, positions={},
+        )
+        with patch("bot.durable_execution.persist_orders", new=AsyncMock(return_value=True)):
+            self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertTrue(order.exposure_reconciliation_complete)
+
+    async def test_partial_reduce_wrong_residual_does_not_complete(self):
+        orders, order = self._filled_reduce("bgx7-reduce-bad", 2.0, 4.2)
+        position = {
+            "symbol": "SOLUSDT", "size": 3.1, "side": "Buy",
+            "entryPrice": 100.0, "markPrice": 100.0, "stopLoss": 90.0,
+        }
+        client = SimpleNamespace(get_positions=AsyncMock(return_value=[position]))
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertFalse(order.exposure_reconciliation_complete)
+
+    async def test_partial_reduce_residual_without_protection_stays_blocked(self):
+        orders, order = self._filled_reduce("bgx7-reduce-nostop", 2.0, 4.2)
+        position = {
+            "symbol": "SOLUSDT", "size": 2.2, "side": "Buy",
+            "entryPrice": 100.0, "markPrice": 100.0, "stopLoss": 0,
+        }
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[position]),
+            get_stop_orders=AsyncMock(return_value=[]),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        with patch("bot.durable_execution.persist_orders", new=AsyncMock(return_value=True)):
+            self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertTrue(order.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
+
+    async def test_full_close_fill_converges_to_confirmed_flat(self):
+        orders, order = self._filled_reduce("bgx7-full-close", 4.2, 4.2)
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        with patch("bot.durable_execution.persist_orders", new=AsyncMock(return_value=True)) as persist:
+            self.assertTrue(await refresh_protection_readiness(engine))
+            persist.assert_awaited_once()
+        self.assertTrue(order.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, set())
+
+    async def test_full_close_persistence_failure_keeps_blocked(self):
+        orders, order = self._filled_reduce("bgx7-close-db-fail", 4.2, 4.2)
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        with patch("bot.durable_execution.persist_orders", new=AsyncMock(return_value=False)):
+            self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
+
+    async def test_partial_full_close_fill_cannot_reconcile_to_flat(self):
+        orders, order = self._filled_reduce("bgx7-close-partial", 2.0, 4.2)
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=orders, positions={},
+        )
+        self.assertFalse(await refresh_protection_readiness(engine))
+        self.assertFalse(order.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, {"SOLUSDT"})
+
+    async def test_restart_full_close_uses_durable_intent_and_converges(self):
+        orders, _ = self._filled_reduce("bgx7-close-restart", 4.2, 4.2)
+        restarted = _registry()
+        restarted.restore(orders.snapshot())
+        restored = restarted.get("bgx7-close-restart")
+        self.assertTrue(restored.reduce_only)
+        self.assertEqual(restored.exposure_intent, "REDUCE")
+        self.assertEqual(restored.previous_position_qty, 4.2)
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(return_value={"items": []}),
+        )
+        engine = SimpleNamespace(
+            connected=True, client=client, _unprotected_symbols={"SOLUSDT"},
+            orders=restarted, positions={},
+        )
+        with patch("bot.durable_execution.persist_orders", new=AsyncMock(return_value=True)):
+            self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertTrue(restored.exposure_reconciliation_complete)
+        self.assertEqual(engine._unprotected_symbols, set())
+
     async def test_unreconciled_fill_is_not_garbage_collected_by_age(self):
         orders = _registry()
         order, _ = orders.get_or_create("bgx7-old-fill", "SOLUSDT", "Buy", 1.0)
