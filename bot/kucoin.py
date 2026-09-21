@@ -1076,6 +1076,7 @@ class KuCoinClient:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
             await validate_execution_ownership(ownership)
+            engine._execution_ownership_expires_at = ownership.expires_at
             engine._execution_ownership_valid = True
             assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
