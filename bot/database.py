@@ -9,6 +9,7 @@ import os, json, asyncio
 from datetime import datetime, timezone, date
 from functools import wraps
 from bot.logger import log
+from bot.state_authority_observability import log_database_authority
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
 SQLITE_PATH  = "/tmp/bgx_capital.db"
@@ -58,10 +59,22 @@ async def init():
             _is_pg = True
             await _create_tables()
             try:
-                ident = await _conn.fetchrow("SELECT current_database(), current_schema(), inet_server_addr()::text, inet_server_port()")
-                log.info("[DB_IDENTITY] backend=postgres database=%s schema=%s host_addr=%s port=%s durability=CANONICAL_CANDIDATE credentials=REDACTED", ident[0], ident[1], ident[2], ident[3])
+                ident = await _conn.fetchrow(
+                    "SELECT current_database(), current_schema()"
+                )
+                log_database_authority(
+                    log,
+                    event="connected",
+                    backend="postgres",
+                    database=ident[0],
+                    schema=ident[1],
+                )
             except Exception as ident_exc:
-                log.warning("[DB_IDENTITY] PostgreSQL identity unavailable: %s", ident_exc)
+                log.warning(
+                    "[STATE_AUTHORITY] event=connected_identity_unavailable "
+                    "reason=%s credential_material=false",
+                    type(ident_exc).__name__,
+                )
             log.info("✅ PostgreSQL conectado")
             return
         except Exception as e:
