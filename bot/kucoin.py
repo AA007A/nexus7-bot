@@ -1064,7 +1064,11 @@ class KuCoinClient:
         if not reduce_only:
             from bot.critical_state import critical_state
             from bot.runtime_readiness import assert_ready_for_new_entries
-            from bot.execution_ownership import acquire_execution_ownership, validate_execution_ownership
+            from bot.execution_ownership import (
+                acquire_execution_ownership,
+                validate_execution_ownership,
+                publish_valid_execution_ownership,
+            )
             critical_state.assert_available_for_new_risk()
             engine = getattr(self, "_engine", None)
             if engine is None:
@@ -1076,9 +1080,7 @@ class KuCoinClient:
                 ownership = await acquire_execution_ownership()
                 self._execution_ownership = ownership
             await validate_execution_ownership(ownership)
-            if hasattr(engine, "_execution_ownership_expires_at"):
-                engine._execution_ownership_expires_at = getattr(ownership, "expires_at", None)
-            engine._execution_ownership_valid = True
+            publish_valid_execution_ownership(engine, ownership, event="predispatch_validated")
             assert_ready_for_new_entries(engine)
         data     = await self._post("/api/v1/orders", body, **post_options)
         order_id = data.get("orderId", "")
