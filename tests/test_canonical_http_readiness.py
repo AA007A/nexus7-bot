@@ -74,6 +74,30 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 503)
         self.assertFalse(runtime_readiness(engine).ready_for_new_entries)
 
+    async def test_durable_ready_cannot_substitute_for_initial_reconciliation(self):
+        _, engine = _make_canonical_engine()
+        main.app.state.engine = engine
+        _set_all_ready(engine)
+
+        # Exact BGX-READY-002 pre-fix reproduction: durable DB health alone
+        # must never stand in for startup reconciliation proof.
+        engine._durable_state_ok = True
+        engine._initial_reconciliation_complete = False
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertFalse(payload["ready_for_new_entries"])
+        self.assertIn("initial_reconciliation_complete", payload["blockers"])
+
+        # Once the canonical reconciliation authority has completed, readiness
+        # may converge if every other independent gate remains true.
+        engine._initial_reconciliation_complete = True
+        status, body = await _ready()
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ready_for_new_entries"])
+        self.assertEqual(payload["blockers"], [])
+
     async def test_canonical_engine_startup_binds_http_readiness(self):
         raw, engine = _make_canonical_engine()
         main.app.state.engine = engine
