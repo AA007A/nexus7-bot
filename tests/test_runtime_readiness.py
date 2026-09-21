@@ -42,7 +42,7 @@ class ProductionStartupOwnershipLifecycleTests(unittest.IsolatedAsyncioTestCase)
       from bot.execution_ownership import initialize_live_execution_ownership
       e=engine(_execution_ownership_valid=False)
       e.client=SimpleNamespace()
-      ownership=SimpleNamespace(owner_id="owner",fencing_token=7)
+      ownership=SimpleNamespace(owner_id="owner",fencing_token=7,expires_at=datetime.now(timezone.utc)+timedelta(seconds=30))
       with patch("bot.execution_ownership.acquire_execution_ownership",return_value=ownership) as acquire, \
            patch("bot.execution_ownership.validate_execution_ownership") as validate:
         await initialize_live_execution_ownership(e)
