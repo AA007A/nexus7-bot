@@ -57,6 +57,8 @@ class EntryPauseTests(EngineFixture):
         with patch.object(E.db, 'init', AsyncMock()), \
              patch.object(E.durable, 'restore_engine_state', AsyncMock()), \
              patch.object(E.durable, 'reconcile_orders', AsyncMock()), \
+             patch('bot.execution_ownership.initialize_live_execution_ownership', AsyncMock()), \
+             patch('bot.execution_ownership.execution_ownership_heartbeat', worker), \
              patch.object(E.scoring, 'update_macro_cache', worker), \
              patch.object(E.scoring, 'news_reader_loop', worker), \
              patch.object(E.mdata, 'update_macro_correlations', worker), \
@@ -70,9 +72,9 @@ class EntryPauseTests(EngineFixture):
             for name in managed:
                 getattr(e, name).assert_awaited_once()
             e._scan_all_and_enter.assert_not_awaited()
-            self.assertEqual(len(tasks), 6)
+            self.assertEqual(len(tasks), 7)
             self.assertTrue(all(t.done() for t in tasks))
             self.assertFalse(e._background_tasks)
             await e.run()
-            self.assertEqual(len(tasks), 12)
+            self.assertEqual(len(tasks), 14)
             self.assertTrue(all(t.done() for t in tasks))

@@ -78,6 +78,26 @@ class LiveAdapterChaosTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.place_order("BTCUSDT","Buy",0.001,idem_key="db-fail")
         post.assert_not_awaited()
 
+
+    async def test_stale_fence_at_transport_boundary_blocks_dispatch_race(self):
+        from bot.execution_ownership import StaleExecutionFence
+        with patch.object(kucoin, "PAPER_TRADE", False), \
+             patch.object(kucoin, "API_KEY", "test-key"), \
+             patch.object(self.client, "_post", AsyncMock()) as post:
+            async with ValidExecutionTestContext(self.client):
+                # Establish a valid local owner first, then simulate takeover
+                # exactly at the final transport-boundary revalidation.
+                from bot.execution_ownership import acquire_execution_ownership
+                self.client._execution_ownership=await acquire_execution_ownership()
+                self.client._engine._execution_ownership_valid=True
+                with patch("bot.execution_ownership.validate_execution_ownership",
+                           AsyncMock(side_effect=StaleExecutionFence("REJECTED_STALE_FENCE"))):
+                    with self.assertRaises(StaleExecutionFence):
+                        await self.client.place_order(
+                            "BTCUSDT","Buy",0.001,idem_key="stale-race",single_submission=True
+                        )
+        post.assert_not_awaited()
+
     async def test_reduce_only_remains_available_when_critical_db_is_down(self):
         with patch.object(kucoin, "PAPER_TRADE", False), \
              patch.object(kucoin, "API_KEY", "test-key"), \

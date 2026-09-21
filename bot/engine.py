@@ -344,6 +344,11 @@ from bot.risk import RiskManager
 class TradingEngine:
     def __init__(self, client: KuCoinClient):
         self.client       = client
+        # KuCoin's final transport fence executes on the exchange client and
+        # needs the canonical engine to evaluate the same readiness authority.
+        self.client._engine = self
+        self._execution_ownership_valid = False
+        self._execution_ownership_expires_at = None
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
         self.stats        = Stats()
@@ -472,6 +477,17 @@ class TradingEngine:
             await db.init()   # inicia DB (PostgreSQL ou SQLite)
             self._durable_state_enforced = True
             await durable.restore_engine_state(self)
+
+            # Canonical readiness requires a valid LIVE execution lease. Acquire
+            # it during startup rather than lazily on the first order, otherwise
+            # /ready can never converge before any dispatch is permitted.
+            from bot.execution_ownership import (
+                initialize_live_execution_ownership,
+                execution_ownership_heartbeat,
+            )
+            await initialize_live_execution_ownership(self)
+            self._start_background(execution_ownership_heartbeat(self))
+
             self._start_background(scoring.update_macro_cache())        # Fear&Greed
             self._start_background(scoring.news_reader_loop())           # news 24/7
             self._start_background(mdata.update_macro_correlations())    # DXY/S&P

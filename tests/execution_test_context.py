@@ -44,6 +44,7 @@ class ValidExecutionTestContext:
             _market_data_ready=True,
             viable_symbols=list(instruments),
             _protection_system_ready=True,
+            client=self.client,
         )
         self.client._engine = self.engine
         self.stack = AsyncExitStack()
