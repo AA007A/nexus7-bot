@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from urllib.parse import urlsplit
 
 
@@ -31,9 +32,23 @@ def database_authority_fingerprint() -> str:
         return "MALFORMED"
 
 
+def database_authority_id() -> str:
+    """Return an explicitly configured non-secret operational DB identifier."""
+    raw = os.environ.get("DB_AUTHORITY_ID", "").strip()
+    if not raw:
+        return "UNSET"
+    # Only service-name / UUID style identifiers are accepted. URLs, DSNs,
+    # credentials and query strings are deliberately rejected.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", raw):
+        return "INVALID_NONSECRET_ID"
+    return raw
+
+
 def log_database_authority(log) -> None:
+    authority_id = database_authority_id()
     log.info(
-        "[STATE_AUTHORITY] database=postgres fingerprint=%s "
+        "[STATE_AUTHORITY] database=postgres authority_id=%s fingerprint=%s "
         "credential_material=false execution_effect=NONE",
+        authority_id,
         database_authority_fingerprint(),
     )
