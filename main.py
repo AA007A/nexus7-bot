@@ -156,7 +156,32 @@ async def lifespan(app: FastAPI):
             app.state.telegram = {"ok": False, "reason": str(_e)}
 
         app.state.blocked = False
+        app.state.engine_fatal = None
         app.state.engine_task = asyncio.create_task(engine.run())
+
+        def _supervise_engine_task(task):
+            if task.cancelled():
+                return
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is None:
+                if getattr(engine, "_running", False):
+                    exc = RuntimeError("engine task exited while engine still marked running")
+                else:
+                    return
+            engine._fatal_engine_error = type(exc).__name__
+            engine._engine_state = "FAILED"
+            engine._execution_ownership_valid = False
+            engine._execution_ownership_expires_at = None
+            app.state.engine_fatal = type(exc).__name__
+            log.critical(
+                "[ENGINE_TASK] state=FAILED type=%s execution_effect=BLOCK_NEW_ENTRIES",
+                type(exc).__name__,
+            )
+
+        app.state.engine_task.add_done_callback(_supervise_engine_task)
         log.info("✅ BGX Capital online (KuCoin Futures)")
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
