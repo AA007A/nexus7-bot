@@ -45,6 +45,10 @@ def install(TradingEngine, kucoin_mod, log):
             if getattr(self, "_validation_safety_lock_active", False):
                 return result
 
+            # A just-opened position invalidates the previous protection
+            # snapshot until the exchange independently proves current state.
+            self._protection_system_ready = False
+
             try:
                 positions = await self.client.get_positions()
                 live = next(
@@ -106,6 +110,11 @@ def install(TradingEngine, kucoin_mod, log):
                             sig.symbol, type(block_exc).__name__,
                         )
 
+            # Recompute the full gate from exchange state. This prevents
+            # a successful HTTP acknowledgement or an older ready=True snapshot
+            # from authorizing a second dispatch in the same scan.
+            from bot.protection_readiness import refresh_protection_readiness
+            await refresh_protection_readiness(self)
             return result
 
         TradingEngine._open = _open_with_pilot_protection_postcondition
