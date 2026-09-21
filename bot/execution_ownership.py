@@ -224,6 +224,49 @@ async def initialize_live_execution_ownership(engine):
     return ownership
 
 
+async def wait_for_live_execution_ownership(
+    engine,
+    *,
+    retry_seconds: float = 2.0,
+):
+    """Wait fail-closed for exclusive LIVE ownership during blue-green rollout.
+
+    A Railway candidate can overlap the currently serving replica during its
+    healthcheck. The serving replica must retain the lease until cutover, so a
+    candidate seeing LIVE_EXECUTION_OWNERSHIP_HELD is healthy-but-not-executable,
+    not a crashed engine. No execution-valid bit is published until the normal
+    acquire+validate path succeeds.
+    """
+    import asyncio
+    from bot.logger import log
+
+    delay = max(0.1, float(retry_seconds))
+    while getattr(engine, "_running", False):
+        try:
+            return await initialize_live_execution_ownership(engine)
+        except ExecutionOwnershipUnavailable as exc:
+            invalidate_local_execution_ownership(
+                engine,
+                event="startup_wait",
+                reason=type(exc).__name__,
+            )
+            log.warning(
+                "[EXECUTION_OWNERSHIP] startup_wait=true reason=%s "
+                "retry_seconds=%.1f execution_ownership_valid=false "
+                "execution_effect=BLOCK_NEW_ENTRIES",
+                str(exc),
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    invalidate_local_execution_ownership(
+        engine,
+        event="startup_wait_cancelled",
+        reason="engine_stopped",
+    )
+    return None
+
+
 async def execution_ownership_heartbeat(engine):
     """Renew the LIVE lease for the current owner; fail closed on any loss."""
     import asyncio
