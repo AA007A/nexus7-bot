@@ -1,5 +1,6 @@
 """Pre-release proofs for execution ordering and stale-fence TOCTOU."""
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -43,7 +44,7 @@ class ReleaseExecutionBoundaryProofs(unittest.IsolatedAsyncioTestCase):
 
     async def test_execution_gate_order(self):
         calls = []
-        ownership = object()
+        ownership = SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30))
         self.client._engine = SimpleNamespace()
         async def acquire():
             calls.append("ownership")
@@ -78,7 +79,7 @@ class ReleaseExecutionBoundaryProofs(unittest.IsolatedAsyncioTestCase):
                 ready_side = RuntimeError("readiness") if failure == "readiness" else None
                 with patch.object(kucoin, "PAPER_TRADE", False), patch.object(kucoin, "API_KEY", "test"), \
                      patch("bot.critical_state.critical_state.assert_available_for_new_risk", side_effect=critical_side), \
-                     patch("bot.execution_ownership.acquire_execution_ownership", new=AsyncMock(side_effect=acquire_side, return_value=object())), \
+                     patch("bot.execution_ownership.acquire_execution_ownership", new=AsyncMock(side_effect=acquire_side, return_value=SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30)))), \
                      patch("bot.execution_ownership.validate_execution_ownership", new=AsyncMock()), \
                      patch("bot.runtime_readiness.assert_ready_for_new_entries", side_effect=ready_side), \
                      patch.object(self.client, "_post", post):
@@ -89,7 +90,7 @@ class ReleaseExecutionBoundaryProofs(unittest.IsolatedAsyncioTestCase):
     async def test_takeover_after_pipeline_validation_is_rejected_at_http_boundary(self):
         calls = []
         self.client._session = _Session(calls)
-        self.client._execution_ownership = object()
+        self.client._execution_ownership = SimpleNamespace(expires_at=datetime.now(timezone.utc)+timedelta(seconds=30))
         self.client._ensure_session = AsyncMock()
         self.client._throttle = AsyncMock()
         self.client._auth_headers = lambda *a, **k: {}
