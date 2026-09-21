@@ -219,6 +219,7 @@ async def initialize_live_execution_ownership(engine):
     if client is not raw_client:
         client._execution_ownership = ownership
     publish_valid_execution_ownership(engine, ownership, event="startup_validated")
+    engine._engine_state = "EXECUTION_OWNERSHIP_ACQUIRED"
     from bot.logger import log
     log.info("[EXECUTION_OWNERSHIP] acquired=true fencing_valid=true lease_seconds=%s", _LEASE_SECONDS)
     return ownership
@@ -252,6 +253,8 @@ async def wait_for_live_execution_ownership(
                 event="startup_wait",
                 reason="lease_held_by_serving_replica",
             )
+            engine._engine_state = "WAITING_FOR_EXECUTION_OWNERSHIP"
+            log.warning("[ENGINE_STATE] state=WAITING_FOR_EXECUTION_OWNERSHIP reason=existing_valid_owner")
             log.warning(
                 "[EXECUTION_OWNERSHIP] startup_wait=true reason=%s "
                 "retry_seconds=%.1f execution_ownership_valid=false "
