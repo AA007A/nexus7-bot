@@ -1,0 +1,56 @@
+# BGX production promotion gate.
+#
+# This workflow is intentionally a push check on main so Railway "Wait for CI"
+# can observe it. It does not deploy. It succeeds only after the exact main SHA
+# has been attested on ci-attestations by ci_attest.yml.
+name: Release Gate
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release-gate:
+    name: Exact SHA release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require exact-SHA CI attestation
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$RELEASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid release SHA: $RELEASE_SHA"
+            exit 1
+          fi
+
+          target="passed/${RELEASE_SHA,,}.txt"
+          encoded_path="$(printf '%s' "$target" | jq -sRr @uri)"
+
+          for attempt in $(seq 1 80); do
+            response="$(gh api               -H "Accept: application/vnd.github+json"               "/repos/$GITHUB_REPOSITORY/contents/$encoded_path?ref=ci-attestations"               2>/dev/null || true)"
+
+            content="$(jq -r '.content // ""' <<<"$response" | tr -d '\n')"
+            if [[ -n "$content" ]]; then
+              attested="$(printf '%s' "$content" | base64 --decode 2>/dev/null | tr -d '\r\n' || true)"
+              if [[ "${attested,,}" == "${RELEASE_SHA,,}" ]]; then
+                echo "RELEASE_GATE=PASS sha=${RELEASE_SHA,,}"
+                exit 0
+              fi
+              echo "::error::Attestation content mismatch for $RELEASE_SHA"
+              exit 1
+            fi
+
+            echo "Waiting for exact-SHA attestation ($attempt/80)"
+            sleep 15
+          done
+
+          echo "::error::Timed out waiting for exact-SHA attestation: $RELEASE_SHA"
+          exit 1
