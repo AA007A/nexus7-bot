@@ -140,7 +140,20 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_heartbeat_db_failure_revokes_readiness_and_recovery_revalidates(self):
         ownership=await eo.acquire_execution_ownership()
         raw=SimpleNamespace(_execution_ownership=ownership)
-        engine=SimpleNamespace(_running=True,_execution_ownership_valid=True,client=raw)
+        engine=SimpleNamespace(
+            _running=True,
+            _execution_ownership_valid=True,
+            _execution_ownership_expires_at=eo._parse(ownership.expires_at),
+            client=raw,
+            instruments={"BTCUSDT": {}},
+            _durable_state_ok=True,
+            _financial_state_sane=True,
+            _initial_reconciliation_complete=True,
+            connected=True,
+            viable_symbols=["BTCUSDT"],
+            _market_data_ready=True,
+            _protection_system_ready=True,
+        )
         calls=0
         async def sleep_once(_seconds):
             nonlocal calls
@@ -149,12 +162,14 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(eo.db,"_conn",None), patch("asyncio.sleep",sleep_once):
             await eo.execution_ownership_heartbeat(engine)
         self.assertFalse(engine._execution_ownership_valid)
+        self.assertFalse(runtime_readiness(engine).execution_ownership_valid)
         engine._running=True
         async def stop_after_recovery(_seconds):
             engine._running=False
         with patch("asyncio.sleep",stop_after_recovery):
             await eo.execution_ownership_heartbeat(engine)
         self.assertTrue(engine._execution_ownership_valid)
+        self.assertTrue(runtime_readiness(engine).execution_ownership_valid)
         await eo.validate_execution_ownership(raw._execution_ownership)
 
     async def test_shadow_heartbeat_never_acquires_live_authority(self):
