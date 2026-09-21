@@ -17,9 +17,25 @@ jobs:
     name: Dependency, source, secrets and SBOM audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact candidate SHA
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+
+      - name: Exact candidate SHA attestation
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          echo "[SHA_ATTESTATION]"
+          echo "expected_candidate_sha=$EXPECTED_CANDIDATE_SHA"
+          echo "event_sha=$EVENT_SHA"
+          echo "pr_head_sha=$PR_HEAD_SHA"
+          echo "checked_out_sha=$CHECKED_OUT_SHA"
+          test "$CHECKED_OUT_SHA" = "$EXPECTED_CANDIDATE_SHA"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

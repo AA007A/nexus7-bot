@@ -1053,7 +1053,25 @@ class KuCoinClient:
         registry = getattr(self, "_order_registry", None)
         managed_order = None
         if registry is not None and submitted_oid.startswith("bgx7-"):
-            managed_order, _created = registry.get_or_create(submitted_oid, symbol, side, float(contracts))
+            managed_order, _created = registry.get_or_create(
+                submitted_oid, symbol, side, float(contracts)
+            )
+            managed_order.reduce_only = bool(reduce_only)
+            managed_order.exposure_intent = "REDUCE" if reduce_only else "INCREASE"
+            if reduce_only:
+                engine = getattr(self, "_engine", None)
+                local_position = (
+                    (getattr(engine, "positions", {}) or {}).get(symbol)
+                    if engine is not None else None
+                )
+                previous_qty = getattr(local_position, "qty", None)
+                if previous_qty is not None:
+                    try:
+                        managed_order.previous_position_qty = max(
+                            0.0, float(previous_qty)
+                        )
+                    except (TypeError, ValueError):
+                        managed_order.previous_position_qty = None
             if managed_order.state == OrderState.CREATED:
                 managed_order.transition(OrderState.SUBMITTING, source="LOCAL")
 

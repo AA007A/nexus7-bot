@@ -82,6 +82,15 @@ class ManagedOrder:
     updated_at: float = field(default_factory=time.time)   # última transição
     last_source: str  = ""       # "REST" ou "WS" — de onde veio a última atualização
     history:    List[tuple] = field(default_factory=list)
+    # FILLED is execution-terminal, not proof that resulting exposure has been
+    # observed by reconciliation. This bit is durable and may become True only
+    # after exchange position truth has absorbed the fill.
+    exposure_reconciliation_complete: bool = False
+    # Semantic intent is durable. side alone cannot distinguish an entry from
+    # a reduce/close because the same side can have different exposure effect.
+    reduce_only: bool = False
+    exposure_intent: str = "INCREASE"  # INCREASE | REDUCE
+    previous_position_qty: Optional[float] = None
 
     def transition(self, novo: OrderState, **info):
         """
@@ -148,6 +157,8 @@ class ManagedOrder:
             self.filled_qty = float(info["filled_qty"])
         if "avg_price" in info and info["avg_price"]:
             self.avg_price = float(info["avg_price"])
+        if novo == OrderState.FILLED:
+            self.exposure_reconciliation_complete = False
 
         log.debug(
             f"📋 {self.symbol} [{self.client_oid[:8]}]: "
@@ -187,6 +198,12 @@ class ManagedOrder:
             "updated_at": self.updated_at,
             "last_source": self.last_source,
             "history": self.history,
+            "exposure_reconciliation_complete": bool(
+                self.exposure_reconciliation_complete
+            ),
+            "reduce_only": bool(self.reduce_only),
+            "exposure_intent": str(self.exposure_intent),
+            "previous_position_qty": self.previous_position_qty,
         }
 
     @classmethod
@@ -217,6 +234,20 @@ class ManagedOrder:
         if not isinstance(history, list):
             raise ValueError("invalid managed order history")
         order.history = history
+        # Records written before BGX-MISSED-001 have no durable reconciliation
+        # authority. They remain conservative for FILLED orders until exchange
+        # truth is observed again; non-FILLED terminal states carry no exposure.
+        order.exposure_reconciliation_complete = bool(
+            record.get("exposure_reconciliation_complete", False)
+        )
+        order.reduce_only = bool(record.get("reduce_only", False))
+        order.exposure_intent = str(
+            record.get("exposure_intent", "REDUCE" if order.reduce_only else "INCREASE")
+        )
+        previous_qty = record.get("previous_position_qty")
+        order.previous_position_qty = (
+            None if previous_qty is None else max(0.0, float(previous_qty))
+        )
         return order
 
 
@@ -289,6 +320,26 @@ class OrderRegistry:
         """Include submissions whose exchange acknowledgement may be lost."""
         return [o for o in self._orders.values() if not o.is_terminal]
 
+    def unreconciled_filled_orders(self, symbol: str = None) -> List[ManagedOrder]:
+        return [
+            o for o in self._orders.values()
+            if o.state == OrderState.FILLED
+            and not o.exposure_reconciliation_complete
+            and (symbol is None or o.symbol == symbol)
+        ]
+
+    def mark_filled_exposure_reconciled(self, symbol: str) -> int:
+        changed = 0
+        for order in self.unreconciled_filled_orders(symbol):
+            order.exposure_reconciliation_complete = True
+            order.updated_at = time.time()
+            order.history.append((
+                order.updated_at, order.state.value, order.state.value,
+                {"source": "EXPOSURE_RECONCILIATION", "exposure_reconciled": True},
+            ))
+            changed += 1
+        return changed
+
     def open_orders(self, symbol: str = None) -> List[ManagedOrder]:
         return [o for o in self._orders.values()
                 if o.is_open and (symbol is None or o.symbol == symbol)]
@@ -297,7 +348,12 @@ class OrderRegistry:
         """Remove ordens terminais antigas."""
         agora = time.time()
         for k in [k for k, o in list(self._orders.items())
-                  if o.is_terminal and agora - o.created_at > max_age]:
+                  if o.is_terminal
+                  and not (
+                      o.state == OrderState.FILLED
+                      and not o.exposure_reconciliation_complete
+                  )
+                  and agora - o.created_at > max_age]:
             removed = self._orders.pop(k, None)
             if removed and removed.order_id:
                 self._by_order_id.pop(removed.order_id, None)

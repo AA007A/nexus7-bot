@@ -17,6 +17,7 @@ MODULES = (
     "tests.test_restart_opening_order_lineage",
     "tests.test_kucoin_native_tpsl",
     "tests.test_native_stop_repair",
+    "tests.test_protection_readiness_authority",  # BGX-MISSED-001: includes explicit XRP positive/negative/race proofs
     "tests.test_release_source_regression",
     "tests.test_quantity_boundary",
     "tests.test_regression",
