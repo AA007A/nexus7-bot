@@ -31,7 +31,7 @@ def _session_id():
     return os.environ.get("RAILWAY_DEPLOYMENT_ID") or os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "local"
 
 def _now(): return datetime.now(timezone.utc)
-def _parse(v): return datetime.fromisoformat(v)
+def _parse(v): return v if isinstance(v, datetime) else datetime.fromisoformat(v)
 
 def publish_valid_execution_ownership(engine, ownership: ExecutionOwnership, *, event: str) -> None:
     """Publish validated DB lease state into the canonical local readiness view."""
