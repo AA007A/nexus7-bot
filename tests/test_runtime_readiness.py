@@ -9,6 +9,10 @@ def engine(**overrides):
     d=dict(instruments={"BTC":{}},_durable_state_ok=True,_financial_state_sane=True,
       _initial_reconciliation_complete=True,_execution_ownership_valid=True,_execution_ownership_expires_at=ownership.expires_at,connected=True,
       _market_data_ready=True,_protection_system_ready=True,
+      _protection_readiness_receipt={"observed_symbols":[],"positions":0,
+        "protected_positions":0,"unprotected_positions":0,
+        "readback_complete":True,"evidence":{}},positions={},
+      _external_position_symbols=set(),_unprotected_symbols=set(),
       client=SimpleNamespace(_execution_ownership=ownership))
     d.update(overrides); return SimpleNamespace(**d)
 
@@ -45,6 +49,22 @@ class RuntimeReadinessTests(unittest.TestCase):
       with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
         snap=runtime_readiness(e)
       self.assertFalse(snap.initial_reconciliation_complete)
+      self.assertFalse(snap.ready_for_new_entries)
+
+    def test_missing_protection_authority_cannot_default_ready(self):
+      e=engine()
+      del e._protection_system_ready
+      with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
+        snap=runtime_readiness(e)
+      self.assertFalse(snap.protection_system_ready)
+      self.assertFalse(snap.ready_for_new_entries)
+
+    def test_explicit_boolean_without_exchange_receipt_cannot_authorize(self):
+      e=engine()
+      del e._protection_readiness_receipt
+      with patch.dict("os.environ",{"EXECUTION_CAPABILITY":"LIVE"},clear=False):
+        snap=runtime_readiness(e)
+      self.assertFalse(snap.protection_system_ready)
       self.assertFalse(snap.ready_for_new_entries)
 class ProductionStartupOwnershipLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_startup_establishes_ownership_before_readiness(self):

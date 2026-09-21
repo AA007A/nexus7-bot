@@ -6,6 +6,25 @@ from unittest.mock import AsyncMock, patch
 from bot import execution_ownership as eo
 from bot.runtime_readiness import runtime_readiness
 
+ZERO_PROTECTION_RECEIPT = {
+    "observed_symbols": [],
+    "positions": 0,
+    "protected_positions": 0,
+    "unprotected_positions": 0,
+    "readback_complete": True,
+    "evidence": {},
+}
+
+
+def _protection_ready_fields():
+    return {
+        "_protection_system_ready": True,
+        "_protection_readiness_receipt": dict(ZERO_PROTECTION_RECEIPT),
+        "positions": {},
+        "_external_position_symbols": set(),
+        "_unprotected_symbols": set(),
+    }
+
 class Tx:
     async def __aenter__(self): return self
     async def __aexit__(self,*a): return False
@@ -64,7 +83,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             connected=True,
             viable_symbols=["BTCUSDT"],
             _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         observed=[]
         readiness=[]
@@ -107,7 +126,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             connected=True,
             viable_symbols=["BTCUSDT"],
             _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         async def stop_after_one(_seconds):
             engine._running=False
@@ -126,7 +145,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             instruments={"BTCUSDT": {}}, _durable_state_ok=True,
             _financial_state_sane=True, _initial_reconciliation_complete=True,
             connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         self.assertFalse(runtime_readiness(engine).execution_ownership_valid)
         eo.publish_valid_execution_ownership(engine, ownership, event="startup_validated")
@@ -153,7 +172,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             instruments={"BTCUSDT": {}}, _durable_state_ok=True,
             _financial_state_sane=True, _initial_reconciliation_complete=True,
             connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         state=json.loads(self.conn.value)
         state["expires_at"]="2000-01-01T00:00:00+00:00"
@@ -166,7 +185,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             instruments={"BTCUSDT": {}}, _durable_state_ok=True,
             _financial_state_sane=True, _initial_reconciliation_complete=True,
             connected=True, viable_symbols=["BTCUSDT"], _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         await eo.validate_execution_ownership(b)
         eo.publish_valid_execution_ownership(engine_b,b,event="startup_validated")
@@ -201,7 +220,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             connected=True,
             viable_symbols=["BTCUSDT"],
             _market_data_ready=True,
-            _protection_system_ready=True,
+            **_protection_ready_fields(),
         )
         calls=0
         async def sleep_once(_seconds):

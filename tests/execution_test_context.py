@@ -44,6 +44,17 @@ class ValidExecutionTestContext:
             _market_data_ready=True,
             viable_symbols=list(instruments),
             _protection_system_ready=True,
+            _protection_readiness_receipt={
+                "observed_symbols": [],
+                "positions": 0,
+                "protected_positions": 0,
+                "unprotected_positions": 0,
+                "readback_complete": True,
+                "evidence": {},
+            },
+            positions={},
+            _external_position_symbols=set(),
+            _unprotected_symbols=set(),
             client=self.client,
         )
         self.client._engine = self.engine

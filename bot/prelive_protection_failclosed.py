@@ -12,8 +12,6 @@ inline stop OR a fully-covering conditional close/reduce-only stop confirmed by
 the read-only conditional-stop verifier. This prevents a protected position
 from being emergency-closed merely because ``position.stopLoss`` is zero.
 """
-import asyncio
-
 from bot.conditional_stop_protection import conditional_stop_confirmed
 
 
@@ -33,13 +31,22 @@ def install(TradingEngine, kucoin_mod, log):
         original_open = TradingEngine._open
 
         async def _open_with_pilot_protection_postcondition(self, sig, *args, **kwargs):
+            pilot = getattr(self, "pilot", None)
+            controlled_live = bool(
+                not getattr(self, "paper_trade", False)
+                and pilot is not None
+                and getattr(pilot, "enabled", False)
+                and not getattr(self, "_validation_safety_lock_active", False)
+            )
+            if controlled_live:
+                from bot.protection_readiness import reset_protection_readiness
+                reset_protection_readiness(self)
             result = await original_open(self, sig, *args, **kwargs)
 
             # This postcondition is exclusively for the controlled real pilot.
             # PAPER and validation-held SHADOW retain their existing behavior.
             if getattr(self, "paper_trade", False):
                 return result
-            pilot = getattr(self, "pilot", None)
             if pilot is None or not getattr(pilot, "enabled", False):
                 return result
             if getattr(self, "_validation_safety_lock_active", False):
@@ -106,6 +113,9 @@ def install(TradingEngine, kucoin_mod, log):
                             sig.symbol, type(block_exc).__name__,
                         )
 
+            from bot.protection_readiness import refresh_protection_readiness
+            await refresh_protection_readiness(self, positions=positions)
+
             return result
 
         TradingEngine._open = _open_with_pilot_protection_postcondition
@@ -123,6 +133,8 @@ def install(TradingEngine, kucoin_mod, log):
             try:
                 positions = await self.client.get_positions()
             except Exception as exc:
+                from bot.protection_readiness import reset_protection_readiness
+                reset_protection_readiness(self)
                 log.debug("_guard_naked_positions: %s", exc)
                 return
 
@@ -196,6 +208,9 @@ def install(TradingEngine, kucoin_mod, log):
                         "_guard_naked_positions %s: %s",
                         p.get("symbol", "?"), exc,
                     )
+
+            from bot.protection_readiness import refresh_protection_readiness
+            await refresh_protection_readiness(self)
 
         TradingEngine._guard_naked_positions = _guard_naked_positions_with_conditional_protection
         TradingEngine._conditional_naked_guard_patched = True

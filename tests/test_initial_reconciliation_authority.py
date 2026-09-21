@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot.initial_reconciliation import reconcile_initial_state
 from bot.order_state import OrderRegistry
+from bot.protection_readiness import protection_system_ready
 
 
 def _engine(*, positions=None, orders=None):
@@ -33,6 +34,8 @@ class InitialReconciliationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine._initial_reconciliation_complete)
         self.assertEqual(engine._initial_reconciliation_receipt["positions"], 0)
         self.assertEqual(engine._initial_reconciliation_receipt["active_orders"], 0)
+        self.assertTrue(protection_system_ready(engine))
+        self.assertEqual(engine._protection_readiness_receipt["positions"], 0)
         engine.client.get_positions.assert_awaited_once()
         engine.client._get.assert_awaited_once_with(
             "/api/v1/orders", {"status": "active"}, auth=True

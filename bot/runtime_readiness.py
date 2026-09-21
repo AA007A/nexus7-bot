@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from bot.execution_capability import ExecutionCapability, current_execution_capability
+from bot.protection_readiness import protection_system_ready
 
 @dataclass(frozen=True)
 class RuntimeReadinessSnapshot:
@@ -52,7 +53,7 @@ def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
       exchange_ready=bool(getattr(engine,"connected",False)),
       market_data_ready=bool(getattr(engine,"_market_data_ready", bool(getattr(engine,"viable_symbols",None)))),
       execution_capability_live=cap_live,
-      protection_system_ready=bool(getattr(engine,"_protection_system_ready", True)),
+      protection_system_ready=protection_system_ready(engine),
     )
 
 def assert_ready_for_new_entries(engine):
