@@ -12,31 +12,51 @@ The Railway service watches exactly one path:
 ```
 
 That marker is intentionally absent from normal hardening PRs. A production
-promotion is a separate, explicit action.
+promotion is a separate, explicit, human-reviewed PR.
 
 ## Promotion sequence
 
-1. Merge code to `main`.
-2. Wait for **Quality Check** and **Supply Chain Security** on the exact main SHA.
-3. Wait for **Publish CI Attestation** to publish
-   `ci-attestations/passed/<sha>.txt`.
-4. Manually run **Prepare Railway Promotion** with that exact SHA.
-5. The workflow verifies:
-   - the SHA is exactly the current `main` HEAD;
-   - the exact Quality+Security attestation exists.
-6. The workflow opens a PR that changes only `.railway/promote.txt`.
-7. Review and merge that promotion PR.
-8. Railway sees the watched path change and starts the intentional deployment.
-9. Railway still executes `python -m bot.ci_deploy_gate` as pre-deploy defense.
+1. Merge the intended release changes to `main`.
+2. Wait for **Quality Check** on the exact current main SHA.
+3. Wait for **Supply Chain Security** on that same SHA.
+4. Verify **Publish CI Attestation** created
+   `ci-attestations/passed/<main_sha>.txt` containing that exact SHA.
+5. Create a new branch from that exact, still-current `main` SHA.
+6. Change **only** `.railway/promote.txt` to contain the attested main SHA.
+7. Open a dedicated promotion PR.
+8. Verify the PR diff contains only `.railway/promote.txt`.
+9. Merge the promotion PR.
+10. Railway sees the watched-path change and starts the intentional deployment.
+11. Railway still executes `python -m bot.ci_deploy_gate` before runtime deploy.
+12. Verify production SHA and `/ready` after deployment.
+
+## Promotion preconditions
+
+A promotion PR MUST NOT be created or merged unless:
+
+- target SHA is the current `main` HEAD;
+- Quality is successful for that exact SHA;
+- Security is successful for that exact SHA;
+- exact CI attestation exists;
+- no non-marker file is present in the promotion PR.
 
 ## Failure semantics
 
-- A normal main merge: **no Railway deployment**.
-- Missing/failed CI attestation: **no promotion PR**.
-- Stale target SHA: **no promotion PR**.
-- Promotion PR containing code changes: **must not be merged**.
-- Missing exact attestation for the deployed promotion SHA:
-  `ci_deploy_gate` remains fail-closed and blocks pre-deploy.
+- A normal main merge: **Railway deployment SKIPPED**.
+- Missing/failed Quality or Security: **no promotion**.
+- Missing exact attestation: **no promotion**.
+- Stale target SHA: **no promotion**.
+- Promotion PR containing code changes: **do not merge**.
+- Even after explicit promotion, missing deployment-SHA attestation causes
+  `ci_deploy_gate` to fail closed in Railway pre-deploy.
+
+## Why promotion is intentionally manual
+
+The critical control is not convenience automation; it is separation between
+code integration and production promotion. A small review-only marker PR is
+easy to inspect, leaves an immutable GitHub audit trail, and avoids coupling
+release authority to another workflow that could fail or accidentally broaden
+its permissions.
 
 ## Non-scope
 
