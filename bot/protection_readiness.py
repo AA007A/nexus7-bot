@@ -10,6 +10,33 @@ from bot.conditional_stop_protection import conditional_stop_confirmed
 from bot.logger import log
 
 
+def _positive(value):
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
+def _inline_stop_equivalent(position) -> bool:
+    stop = _positive(position.get("stopLoss", position.get("stop_loss", 0)))
+    if stop <= 0:
+        return False
+    reference = 0.0
+    for key in ("markPrice", "mark_price", "entryPrice", "avgEntryPrice"):
+        reference = _positive(position.get(key))
+        if reference > 0:
+            break
+    if reference <= 0:
+        return False
+    side = str(position.get("side", "") or "").strip().lower()
+    if side in ("buy", "long"):
+        return stop < reference
+    if side in ("sell", "short"):
+        return stop > reference
+    return False
+
+
 def _live_positions(rows):
     live = []
     for row in rows:
@@ -98,6 +125,11 @@ async def refresh_protection_readiness(engine) -> bool:
                 symbol, type(exc).__name__,
             )
             return False
+
+        if protected and evidence == "inline_stop":
+            protected = _inline_stop_equivalent(row)
+            if not protected:
+                evidence = "inline_stop_mismatch"
 
         verified[symbol] = {
             "protected": bool(protected),
