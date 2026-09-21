@@ -488,6 +488,11 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(r.startswith("7_8_UNPROTECTED:") for r in reasons))
         self.assertEqual(reasons, [])
         self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+        print("[XRP_PROOF]", flush=True)
+        print("case=POSITIVE", flush=True)
+        print("result=PASS", flush=True)
+        print("sol_unprotected_block=false", flush=True)
+        print("next_gate=POST_PILOT_EXECUTION_BOUNDARY", flush=True)
 
     async def test_xrp_candidate_remains_blocked_when_sol_is_genuinely_unprotected(self):
         from bot import pilot
@@ -510,6 +515,11 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7_8_UNPROTECTED: ['SOLUSDT']", reasons)
         self.assertEqual(exchange_entry_mutations, 0)
         self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+        print("[XRP_PROOF]", flush=True)
+        print("case=NEGATIVE", flush=True)
+        print("result=PASS", flush=True)
+        print("blocker=7_8_UNPROTECTED", flush=True)
+        print("exchange_entry_mutations=0", flush=True)
 
     async def test_xrp_race_blocks_while_sol_unknown_then_allows_new_candidate_after_reconciliation(self):
         from bot import pilot
@@ -577,6 +587,12 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any(r.startswith("7_8_UNPROTECTED:") for r in after))
             self.assertEqual(after, [])
             self.assertEqual(guard.state.new_order_submissions_this_session, 0)
+            print("[XRP_PROOF]", flush=True)
+            print("case=RACE", flush=True)
+            print("unknown_phase_blocked=true", flush=True)
+            print("unknown_phase_exchange_entry_mutations=0", flush=True)
+            print("post_reconciliation_candidate_proceeds=true", flush=True)
+            print("result=PASS", flush=True)
         finally:
             for p in reversed(patches):
                 p.stop()
