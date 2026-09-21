@@ -37,16 +37,12 @@ def _ownership_locally_valid(engine) -> bool:
 def runtime_readiness(engine) -> RuntimeReadinessSnapshot:
     cap_live=current_execution_capability() is ExecutionCapability.LIVE
     ownership_valid = _ownership_locally_valid(engine)
-    try:
-        from bot.execution_ownership import observe_readiness_ownership
-        observe_readiness_ownership(
-            engine,
-            ownership_valid,
-            reason="valid_local_lease" if ownership_valid else "local_flag_or_lease_invalid",
-        )
-    except Exception:
-        # Telemetry must never alter readiness semantics.
-        pass
+    from bot.execution_ownership import observe_readiness_ownership
+    observe_readiness_ownership(
+        engine,
+        ownership_valid,
+        reason="valid_local_lease" if ownership_valid else "local_flag_or_lease_invalid",
+    )
     return RuntimeReadinessSnapshot(
       instruments_ready=bool(getattr(engine,"instruments",{})),
       critical_database_ready=bool(getattr(engine,"_durable_state_ok",False)),
