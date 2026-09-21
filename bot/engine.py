@@ -491,10 +491,12 @@ class TradingEngine:
             # it during startup rather than lazily on the first order, otherwise
             # /ready can never converge before any dispatch is permitted.
             from bot.execution_ownership import (
-                initialize_live_execution_ownership,
+                wait_for_live_execution_ownership,
                 execution_ownership_heartbeat,
             )
-            await initialize_live_execution_ownership(self)
+            ownership = await wait_for_live_execution_ownership(self)
+            if ownership is None:
+                return
             self._start_background(execution_ownership_heartbeat(self))
 
             self._start_background(scoring.update_macro_cache())        # Fear&Greed
