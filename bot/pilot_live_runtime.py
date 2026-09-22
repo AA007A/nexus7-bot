@@ -29,6 +29,7 @@ from decimal import Decimal, ROUND_FLOOR
 from bot import account_balance_semantics as account_semantics
 from bot import capital_flow_reconciliation as capital_flows
 from bot.drawdown_persistence import restore_update_real_account_peak
+from bot.financial_state import validate_financial_state
 from bot.quantity import quantity_rules
 
 
@@ -115,6 +116,19 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
 
     engine._pilot_prev_account_equity = equity
     await restore_update_real_account_peak(engine.risk, equity, strict=True)
+
+    # Publish one immutable, internally validated financial snapshot before the
+    # legacy affordability shim is allowed to expose free collateral through
+    # risk.balance. PilotGuard must never reconstruct "equity" from that
+    # compatibility field because, during _open, it intentionally contains
+    # availableMargin rather than accountEquity.
+    legacy = getattr(engine.risk, "_legacy", engine.risk)
+    engine._pilot_financial_state_snapshot = validate_financial_state(
+        equity=equity,
+        available_margin=available,
+        hwm=float(getattr(legacy, "peak_balance", 0.0) or 0.0),
+        drawdown=float(getattr(legacy, "drawdown", 0.0) or 0.0),
+    )
 
     engine._pilot_account_equity = equity
     engine._pilot_available_balance = available
