@@ -1,15 +1,18 @@
 """Canonical protection-system readiness derived from exchange state.
 
-Readiness itself remains fail-closed and exchange-truth-derived. Lifecycle
-hardening is delegated to bounded owner/fenced helpers: durable order state may
-converge from authoritative REST truth and obsolete BGX-owned conditional
-protection may be selectively retired only after flatness is independently
-proved. External orders are never lifecycle-owned here.
+Readiness remains fail-closed and exchange-truth-derived. Lifecycle hardening
+may converge durable order state and selectively retire obsolete BGX-owned
+conditional protection only after independent exposure evidence is clean.
 """
 from __future__ import annotations
 
+import time
+
 from bot.conditional_stop_protection import conditional_stop_confirmed
 from bot.logger import log
+
+
+_FLAT_GC_RETRY_S = 60.0
 
 
 def _positive(value):
@@ -53,6 +56,63 @@ def _live_positions(rows):
     return live
 
 
+def _configured_symbols(engine, extras=()):
+    symbols = {str(symbol) for symbol in extras if str(symbol)}
+    viable = getattr(engine, "viable_symbols", None)
+    if isinstance(viable, (list, tuple, set)):
+        symbols.update(str(symbol) for symbol in viable if str(symbol))
+    instruments = getattr(engine, "instruments", None)
+    if isinstance(instruments, dict):
+        symbols.update(str(symbol) for symbol in instruments if str(symbol))
+    return sorted(symbols)
+
+
+async def _reconcile_global_flat_bgx_protection(engine, symbols) -> bool:
+    """Bounded one-shot sweep of configured symbols for legacy BGX stop debt.
+
+    Successful completion is cached for the current global-flat epoch. A failed
+    sweep retries no faster than once per minute. Any later live position resets
+    the epoch. Per-symbol cleanup still performs owner/fence checks and preserves
+    external orders.
+    """
+    if bool(getattr(engine, "_flat_protection_gc_complete", False)):
+        return True
+
+    now = time.monotonic()
+    last = float(getattr(engine, "_flat_protection_gc_last", 0.0) or 0.0)
+    if last and now - last < _FLAT_GC_RETRY_S:
+        return False
+    engine._flat_protection_gc_last = now
+
+    from bot.conditional_stop_lifecycle import cleanup_flat_symbol
+
+    checked = 0
+    for symbol in symbols:
+        checked += 1
+        if not await cleanup_flat_symbol(
+            engine,
+            symbol,
+            exchange_position_qty=0.0,
+            active_entry_confirmed_absent=True,
+        ):
+            engine._flat_protection_gc_complete = False
+            log.warning(
+                "[PROTECTION_FLAT_SWEEP] result=UNCONFIRMED symbol=%s "
+                "checked=%s retry_after_s=%s",
+                symbol,
+                checked,
+                int(_FLAT_GC_RETRY_S),
+            )
+            return False
+
+    engine._flat_protection_gc_complete = True
+    log.info(
+        "[PROTECTION_FLAT_SWEEP] result=VERIFIED symbols=%s cadence=ON_FLAT_EPOCH",
+        checked,
+    )
+    return True
+
+
 async def refresh_protection_readiness(engine) -> bool:
     """Refresh canonical readiness and return the derived boolean."""
     engine._protection_system_ready = False
@@ -72,9 +132,6 @@ async def refresh_protection_readiness(engine) -> bool:
         engine._protection_readiness_evidence["reason"] = "exchange_client_unavailable"
         return False
 
-    # Lifecycle-only convergence. It never resubmits an order and is bounded to
-    # non-terminal durable intents on a cadence. Failure cannot make readiness
-    # true; the existing pending-intent authority below remains fail-closed.
     try:
         from bot.durable_live_reconciliation import reconcile_pending
         await reconcile_pending(engine)
@@ -107,6 +164,12 @@ async def refresh_protection_readiness(engine) -> bool:
         engine._protection_readiness_evidence["reason"] = "position_size_malformed"
         return False
 
+    if live:
+        # A future transition back to global flat must inventory protection debt
+        # again exactly once for that new flat epoch.
+        engine._flat_protection_gc_complete = False
+        engine._flat_protection_gc_last = 0.0
+
     unprotected = set(getattr(engine, "_unprotected_symbols", set()) or set())
     engine._protection_readiness_evidence["positions"] = len(live)
     engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
@@ -124,10 +187,6 @@ async def refresh_protection_readiness(engine) -> bool:
         )
         return False
 
-    # Exposure reconciliation is intent-sensitive. An entry fill is absorbed
-    # by a live exchange position. A reduce fill is absorbed only by a residual
-    # quantity lower than the durable pre-reduce quantity; a full reduce is
-    # absorbed by confirmed flatness, but only after active-order truth is read.
     live_qty = {}
     for row in live:
         canon = _canon(row.get("symbol"))
@@ -172,11 +231,7 @@ async def refresh_protection_readiness(engine) -> bool:
         _canon(getattr(order, "symbol", "")) for order in unresolved_fills
     }
 
-    # Reconcile stale incidents per symbol. A flat position snapshot alone is
-    # insufficient: durable intents, active entry orders, and local filled
-    # positions awaiting exchange convergence are independent exposure evidence.
     if not live:
-        registry = getattr(engine, "orders", None)
         pending_reader = getattr(registry, "pending_orders", None)
         if not callable(pending_reader):
             engine._protection_readiness_evidence["reason"] = "flat_pending_orders_unconfirmed"
@@ -230,9 +285,6 @@ async def refresh_protection_readiness(engine) -> bool:
             _canon(symbol) for symbol in (getattr(engine, "positions", {}) or {}).keys()
         }
 
-        # A durable REDUCE/FULL_CLOSE fill can legitimately reconcile to zero.
-        # Flatness alone is insufficient: require no pending durable intent and
-        # no active exposure-increasing exchange order for that symbol.
         close_reconciled = 0
         for order in list(unresolved_reader() or []):
             canon = _canon(getattr(order, "symbol", ""))
@@ -271,29 +323,50 @@ async def refresh_protection_readiness(engine) -> bool:
             and _canon(symbol) not in unresolved_fill_symbols
         }
 
-        # Flat local/readiness state is not sufficient to forget exchange-side
-        # protection debt. Before clearing the stale incident, selectively remove
-        # only BGX-owned conditional orders for that proven-flat symbol and
-        # independently read them back. External orders and other symbols are
-        # never candidates.
+        # Legacy stop debt may exist after restart even when no local incident is
+        # marked. Sweep configured symbols only after GLOBAL flatness is proven by
+        # all independent exposure authorities. This is not a readiness bypass.
+        global_flat_for_gc = (
+            not pending
+            and not active_entry_symbols
+            and not local_position_symbols
+            and not unresolved_fill_symbols
+        )
+        global_gc_verified = False
+        if global_flat_for_gc:
+            sweep_symbols = _configured_symbols(engine, extras=before)
+            global_gc_verified = await _reconcile_global_flat_bgx_protection(
+                engine, sweep_symbols
+            )
+            if not global_gc_verified:
+                engine._protection_readiness_evidence["reason"] = (
+                    "flat_bgx_protection_inventory_unconfirmed"
+                )
+                return False
+
+        # When the global sweep is not yet eligible (for example another symbol
+        # has a pending intent), preserve the older per-symbol convergence for
+        # independently clearable stale incidents.
         gc_verified = set()
-        if clearable:
+        if clearable and not global_gc_verified:
             from bot.conditional_stop_lifecycle import cleanup_flat_symbol
             for symbol in sorted(clearable):
-                cleaned = await cleanup_flat_symbol(
+                if await cleanup_flat_symbol(
                     engine,
                     symbol,
                     exchange_position_qty=0.0,
                     active_entry_confirmed_absent=True,
-                )
-                if cleaned:
+                ):
                     gc_verified.add(symbol)
                 else:
                     log.warning(
                         "[PROTECTION_STATE_RECONCILIATION] symbol=%s "
-                        "decision=KEEP_BLOCKED reason=obsolete_bgx_protection_cleanup_unconfirmed",
+                        "decision=KEEP_BLOCKED "
+                        "reason=obsolete_bgx_protection_cleanup_unconfirmed",
                         symbol,
                     )
+        elif global_gc_verified:
+            gc_verified = set(clearable)
         clearable = gc_verified
 
         if clearable:
@@ -303,27 +376,44 @@ async def refresh_protection_readiness(engine) -> bool:
         for symbol in sorted(before):
             canon = _canon(symbol)
             if symbol in clearable:
-                decision, reason = "CLEAR_STALE", "confirmed_symbol_flat_and_bgx_cleanup"
+                decision, reason = (
+                    "CLEAR_STALE",
+                    "confirmed_symbol_flat_and_bgx_cleanup",
+                )
             elif canon in pending_symbols:
                 decision, reason = "KEEP_BLOCKED", "pending_durable_intent"
             elif canon in active_entry_symbols:
                 decision, reason = "KEEP_BLOCKED", "active_exchange_entry"
             elif canon in unresolved_fill_symbols:
-                decision, reason = "KEEP_BLOCKED", "durable_fill_exposure_not_reconciled"
+                decision, reason = (
+                    "KEEP_BLOCKED",
+                    "durable_fill_exposure_not_reconciled",
+                )
             elif canon not in local_position_symbols:
-                decision, reason = "KEEP_BLOCKED", "obsolete_bgx_protection_cleanup_unconfirmed"
+                decision, reason = (
+                    "KEEP_BLOCKED",
+                    "obsolete_bgx_protection_cleanup_unconfirmed",
+                )
             else:
-                decision, reason = "KEEP_BLOCKED", "local_filled_position_awaiting_exchange_convergence"
+                decision, reason = (
+                    "KEEP_BLOCKED",
+                    "local_filled_position_awaiting_exchange_convergence",
+                )
             log.warning(
                 "[PROTECTION_STATE_RECONCILIATION] symbol=%s position_qty=0 "
                 "exchange_position_qty=0 active_entry_orders=%s durable_pending=%s "
                 "local_materialized_position=%s durable_fill_unreconciled=%s "
                 "exposure_reconciliation_complete=%s unprotected_before=true "
                 "unprotected_after=%s decision=%s reason=%s",
-                symbol, int(canon in active_entry_symbols), int(canon in pending_symbols),
-                int(canon in local_position_symbols), int(canon in unresolved_fill_symbols),
+                symbol,
+                int(canon in active_entry_symbols),
+                int(canon in pending_symbols),
+                int(canon in local_position_symbols),
+                int(canon in unresolved_fill_symbols),
                 str(canon not in unresolved_fill_symbols).lower(),
-                str(symbol in unprotected).lower(), decision, reason,
+                str(symbol in unprotected).lower(),
+                decision,
+                reason,
             )
 
         ready = len(unprotected) == 0
@@ -348,7 +438,8 @@ async def refresh_protection_readiness(engine) -> bool:
             engine._protection_readiness_evidence["reason"] = "protection_readback_failed"
             log.critical(
                 "[PROTECTION_READINESS] ready=false symbol=%s stage=readback error=%s",
-                symbol, type(exc).__name__,
+                symbol,
+                type(exc).__name__,
             )
             return False
 
@@ -369,7 +460,8 @@ async def refresh_protection_readiness(engine) -> bool:
             log.critical(
                 "[PROTECTION_READINESS] ready=false symbol=%s evidence=%s "
                 "http_success_is_not_readback=true",
-                symbol, evidence,
+                symbol,
+                evidence,
             )
             return False
 
@@ -389,7 +481,9 @@ async def refresh_protection_readiness(engine) -> bool:
     engine._protection_system_ready = True
     log.info(
         "[PROTECTION_READINESS] ready=true positions=%s unprotected_positions=%s "
-        "basis=EXCHANGE_READBACK invariant=PROTECTION_READINESS_MUST_BE_DERIVED_FROM_EXCHANGE_STATE",
-        len(live), len(unprotected),
+        "basis=EXCHANGE_READBACK "
+        "invariant=PROTECTION_READINESS_MUST_BE_DERIVED_FROM_EXCHANGE_STATE",
+        len(live),
+        len(unprotected),
     )
     return True
