@@ -207,7 +207,7 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.original_open_called)
         engine.integrity.assess.assert_awaited_once()
 
-    async def test_entry_refresh_exposes_only_available_collateral_during_open(self):
+    async def test_entry_refresh_keeps_equity_authoritative_during_open(self):
         class Engine:
             _pilot_live_runtime_patched = False
 
@@ -215,9 +215,11 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.paper_trade = False
                 self.client = SimpleNamespace()
                 self.risk = _Risk()
+                self.risk.init(100.0)
                 self.integrity = _Integrity()
                 self.instruments = {"BTCUSDT": {}}
                 self._pilot_open_in_progress = True
+                self._pilot_available_balance = 25.0
 
             async def _connect(self):
                 self.connected = True
@@ -244,8 +246,60 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ok = await engine._refresh_entry_balance()
 
         self.assertTrue(ok)
-        self.assertEqual(engine.risk.balance, 25.0)
+        self.assertEqual(engine.risk.balance, 100.0)
+        self.assertEqual(engine._pilot_available_balance, 25.0)
         self.assertTrue(engine.risk.balance_confirmed)
+
+    async def test_historical_alias_transition_is_eliminated_at_source(self):
+        class Engine:
+            _pilot_live_runtime_patched = False
+
+            def __init__(self):
+                self.paper_trade = False
+                self.client = SimpleNamespace()
+                self.risk = _Risk()
+                self.risk._ready = True
+                self.risk.balance = 21.5075351411
+                self.risk.peak_balance = 63.7942573
+                self.risk.drawdown = 0.6628609525155488
+                self.integrity = _Integrity()
+                self.instruments = {"DOGEUSDT": {}}
+                self._pilot_open_in_progress = True
+                self._pilot_available_balance = 11.9815151411
+
+            async def _connect(self):
+                self.connected = True
+
+            async def _update_balance(self):
+                return None
+
+            async def _refresh_entry_balance(self):
+                return True
+
+            async def _open(self, sig):
+                return None
+
+        live.install(Engine, _Log())
+        engine = Engine()
+        state = {
+            "equity": 21.5075351411,
+            "available": 11.9815151411,
+            "available_source": "availableMargin",
+        }
+        with patch.object(
+            live, "_refresh_account", AsyncMock(return_value=state)
+        ):
+            ok = await engine._refresh_entry_balance()
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+        self.assertAlmostEqual(engine._pilot_available_balance, 11.9815151411)
+        validate_financial_state(
+            equity=engine.risk.balance,
+            available_margin=engine._pilot_available_balance,
+            hwm=engine.risk.peak_balance,
+            drawdown=engine.risk.drawdown,
+        )
 
 
 if __name__ == "__main__":
