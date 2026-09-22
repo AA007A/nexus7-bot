@@ -20,7 +20,7 @@ BGX Capital Trading Engine v11.0
   ✅ WebSocket Bybit com reconnect automático + fallback REST
   ✅ Paper Trade mode funcional (PAPER_TRADE=true)
 """
-import asyncio, time, itertools, os
+import asyncio, time, itertools, os, math
 from datetime import datetime, timedelta, timezone
 import time
 import os
