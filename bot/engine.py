@@ -795,6 +795,28 @@ class TradingEngine:
         return cfg.MAX_RISK_PCT           # padrão (30%)
 
     # ── Connect ────────────────────────────────────────────────
+    async def _startup_risk_balance(self) -> float:
+        """Return the authority used for the first risk balance initialization.
+
+        Controlled LIVE publishes canonical KuCoin accountEquity before the
+        legacy connect routine runs. That mode must never initialize the equity
+        slot from availableBalance/availableMargin. PAPER and non-pilot callers
+        retain the existing get_balance() behavior unchanged.
+        """
+        controlled_live = (
+            not getattr(self, "paper_trade", False)
+            and bool(getattr(type(self), "_pilot_live_runtime_patched", False))
+        )
+        if controlled_live:
+            value = getattr(self, "_pilot_startup_account_equity", None)
+            if value is None:
+                raise RuntimeError("controlled LIVE startup equity unavailable")
+            value = float(value)
+            if not math.isfinite(value) or value < 0:
+                raise RuntimeError("controlled LIVE startup equity invalid")
+            return value
+        return await self.client.get_balance()
+
     async def _connect(self):
         try:
             # Ping é opcional — não bloqueia o bot se falhar
@@ -803,7 +825,7 @@ class TradingEngine:
             if not ping_ok:
                 log.warning("⚠️ Ping da exchange falhou — continuando mesmo assim (REST pode funcionar)")
 
-            bal = await self.client.get_balance()
+            bal = await self._startup_risk_balance()
             if bal < 0:
                 log.error("❌ Autenticação falhou")
                 self.connected = False
