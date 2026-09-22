@@ -116,12 +116,15 @@ def install(engine_module, pilot_cap, log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        signal = pilot_cap._PILOT_SIGNAL.get()
-        from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-        from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-        cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
-        setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
+        signal = None
+        cost_fraction = float("nan")
+        setup_id = "UNKNOWN"
         try:
+            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
+            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            signal = pilot_cap._PILOT_SIGNAL.get()
+            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
             validate(
                 final_qty, price_f, signal.sl, signal.direction, leverage,
                 cost_fraction,
