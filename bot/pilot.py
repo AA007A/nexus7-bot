@@ -27,6 +27,45 @@ PILOT_MAX_NEW_POSITIONS_SESSION = MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION
 PILOT_MAX_MARKET_DATA_AGE_S = float(os.environ.get("PILOT_MAX_MARKET_DATA_AGE_S", "120"))
 
 
+def _validated_financial_state(engine, legacy_balance: float):
+    """Return the canonical financial snapshot used by the pilot gate.
+
+    In controlled LIVE, risk.balance is temporarily repurposed by the
+    compatibility affordability path to mean free collateral. It is therefore
+    not an equity authority. pilot_live_runtime publishes one immutable
+    snapshot from the same authenticated account-overview read after durable
+    HWM reconciliation; consume that snapshot atomically here.
+
+    Isolated/non-LIVE fixtures retain the pre-existing legacy fallback. A LIVE
+    runtime that should have published the snapshot but did not fails closed.
+    """
+    snapshot = getattr(engine, "_pilot_financial_state_snapshot", None)
+    if snapshot is not None:
+        return validate_financial_state(
+            equity=snapshot.equity,
+            available_margin=snapshot.available_margin,
+            hwm=snapshot.hwm,
+            drawdown=snapshot.drawdown,
+        )
+
+    if bool(getattr(engine, "_pilot_live_runtime_patched", False)):
+        raise FinancialStateInvalid("pilot_financial_state_snapshot_unavailable")
+
+    risk_state = getattr(engine, "risk", None)
+    peak = float(getattr(risk_state, "peak_balance", 0) or 0)
+    drawdown = float(getattr(risk_state, "drawdown", 0) or 0)
+    available_margin = float(
+        getattr(risk_state, "available_margin", None)
+        or getattr(risk_state, "available_balance", None)
+        or legacy_balance
+    )
+    return validate_financial_state(
+        equity=legacy_balance,
+        available_margin=available_margin,
+        hwm=peak,
+        drawdown=drawdown,
+    )
+
 @dataclass
 class PilotState:
     new_order_submissions_this_session: int = 0
@@ -103,11 +142,7 @@ class PilotGuard:
                 r.append(f"3_BALANCE: saldo Futures USDT = {bal}")
 
             try:
-                risk_state = getattr(engine, "risk", None)
-                peak = float(getattr(risk_state, "peak_balance", 0) or 0)
-                drawdown = float(getattr(risk_state, "drawdown", 0) or 0)
-                available_margin = float(getattr(risk_state, "available_margin", None) or getattr(risk_state, "available_balance", None) or bal)
-                validate_financial_state(equity=bal, available_margin=available_margin, hwm=peak, drawdown=drawdown)
+                _validated_financial_state(engine, bal)
             except (FinancialStateInvalid, TypeError, ValueError) as exc:
                 log.critical("[FINANCIAL_STATE_INVALID] symbol=%s evidence=%r execution_effect=BLOCK_NEW_ENTRIES reconciliation_required=true", symbol, str(exc))
                 r.append(f"3B_FINANCIAL_STATE_INVALID: {exc}")
