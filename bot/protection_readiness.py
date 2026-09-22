@@ -1,8 +1,10 @@
 """Canonical protection-system readiness derived from exchange state.
 
-Read-only authority. It never creates, modifies, cancels, adopts or closes an
-order or position. HTTP acknowledgement from a protection write is never
-readiness evidence; only independently observed exchange state is.
+Readiness itself remains fail-closed and exchange-truth-derived. Lifecycle
+hardening is delegated to bounded owner/fenced helpers: durable order state may
+converge from authoritative REST truth and obsolete BGX-owned conditional
+protection may be selectively retired only after flatness is independently
+proved. External orders are never lifecycle-owned here.
 """
 from __future__ import annotations
 
@@ -68,6 +70,22 @@ async def refresh_protection_readiness(engine) -> bool:
     client = getattr(engine, "client", None)
     if client is None:
         engine._protection_readiness_evidence["reason"] = "exchange_client_unavailable"
+        return False
+
+    # Lifecycle-only convergence. It never resubmits an order and is bounded to
+    # non-terminal durable intents on a cadence. Failure cannot make readiness
+    # true; the existing pending-intent authority below remains fail-closed.
+    try:
+        from bot.durable_live_reconciliation import reconcile_pending
+        await reconcile_pending(engine)
+    except Exception as exc:
+        engine._protection_readiness_evidence["reason"] = (
+            "durable_live_reconciliation_failed"
+        )
+        log.critical(
+            "[PROTECTION_READINESS] ready=false stage=durable_live_reconcile error=%s",
+            type(exc).__name__,
+        )
         return False
 
     try:
@@ -167,7 +185,11 @@ async def refresh_protection_readiness(engine) -> bool:
             pending = list(pending_reader() or [])
         except Exception as exc:
             engine._protection_readiness_evidence["reason"] = "flat_pending_orders_read_failed"
-            log.critical("[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED reason=pending_orders_read_failed error=%s", type(exc).__name__)
+            log.critical(
+                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                "reason=pending_orders_read_failed error=%s",
+                type(exc).__name__,
+            )
             return False
 
         raw_get = getattr(client, "_get", None)
@@ -178,7 +200,11 @@ async def refresh_protection_readiness(engine) -> bool:
             payload = await raw_get("/api/v1/orders", {"status": "active"}, auth=True)
         except Exception as exc:
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_read_failed"
-            log.critical("[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED reason=active_orders_read_failed error=%s", type(exc).__name__)
+            log.critical(
+                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                "reason=active_orders_read_failed error=%s",
+                type(exc).__name__,
+            )
             return False
         if isinstance(payload, dict):
             active = payload.get("items")
@@ -244,6 +270,32 @@ async def refresh_protection_readiness(engine) -> bool:
             and _canon(symbol) not in local_position_symbols
             and _canon(symbol) not in unresolved_fill_symbols
         }
+
+        # Flat local/readiness state is not sufficient to forget exchange-side
+        # protection debt. Before clearing the stale incident, selectively remove
+        # only BGX-owned conditional orders for that proven-flat symbol and
+        # independently read them back. External orders and other symbols are
+        # never candidates.
+        gc_verified = set()
+        if clearable:
+            from bot.conditional_stop_lifecycle import cleanup_flat_symbol
+            for symbol in sorted(clearable):
+                cleaned = await cleanup_flat_symbol(
+                    engine,
+                    symbol,
+                    exchange_position_qty=0.0,
+                    active_entry_confirmed_absent=True,
+                )
+                if cleaned:
+                    gc_verified.add(symbol)
+                else:
+                    log.warning(
+                        "[PROTECTION_STATE_RECONCILIATION] symbol=%s "
+                        "decision=KEEP_BLOCKED reason=obsolete_bgx_protection_cleanup_unconfirmed",
+                        symbol,
+                    )
+        clearable = gc_verified
+
         if clearable:
             engine._unprotected_symbols = before - clearable
             unprotected = set(engine._unprotected_symbols)
@@ -251,13 +303,15 @@ async def refresh_protection_readiness(engine) -> bool:
         for symbol in sorted(before):
             canon = _canon(symbol)
             if symbol in clearable:
-                decision, reason = "CLEAR_STALE", "confirmed_symbol_flat"
+                decision, reason = "CLEAR_STALE", "confirmed_symbol_flat_and_bgx_cleanup"
             elif canon in pending_symbols:
                 decision, reason = "KEEP_BLOCKED", "pending_durable_intent"
             elif canon in active_entry_symbols:
                 decision, reason = "KEEP_BLOCKED", "active_exchange_entry"
             elif canon in unresolved_fill_symbols:
                 decision, reason = "KEEP_BLOCKED", "durable_fill_exposure_not_reconciled"
+            elif canon not in local_position_symbols:
+                decision, reason = "KEEP_BLOCKED", "obsolete_bgx_protection_cleanup_unconfirmed"
             else:
                 decision, reason = "KEEP_BLOCKED", "local_filled_position_awaiting_exchange_convergence"
             log.warning(
@@ -276,7 +330,7 @@ async def refresh_protection_readiness(engine) -> bool:
         engine._protection_system_ready = ready
         engine._protection_readiness_evidence["unprotected_positions"] = len(unprotected)
         engine._protection_readiness_evidence["reason"] = (
-            "confirmed_flat_no_pending_exposure"
+            "confirmed_flat_no_pending_exposure_and_bgx_cleanup"
             if ready else "flat_with_unresolved_exposure_evidence"
         )
         return ready
