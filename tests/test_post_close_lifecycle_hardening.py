@@ -3,9 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bot import conditional_stop_lifecycle as lifecycle
+from bot import durable_execution as durable
 from bot.durable_live_reconciliation import reconcile_pending
 from bot.native_stop_repair import set_stops
 from bot.order_state import OrderRegistry, OrderState
+from bot.protection_readiness import refresh_protection_readiness
 
 
 class DurableTerminalizationTests(unittest.IsolatedAsyncioTestCase):
@@ -51,6 +53,13 @@ class DurableTerminalizationTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=True),
         ):
             return await reconcile_pending(engine, min_interval_s=0)
+
+    async def startup_reconcile(self, engine):
+        with patch(
+            "bot.durable_execution.persist_orders",
+            new=AsyncMock(return_value=True),
+        ):
+            return await durable.reconcile_orders(engine)
 
     async def test_lost_ws_done_recovers_partial_to_filled_without_restart(self):
         engine, order = self.make_engine()
@@ -133,6 +142,46 @@ class DurableTerminalizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.reconcile(engine))
         self.assertEqual(order.state, OrderState.PARTIALLY_FILLED)
 
+    async def test_startup_position_presence_does_not_fake_fill(self):
+        engine, order = self.make_engine()
+        engine.positions = {"ATOMUSDT": SimpleNamespace(qty=10.0)}
+        engine.client.get_order_by_client_oid.return_value = {
+            "clientOid": order.client_oid,
+            "orderId": "oid-1",
+            "symbol": "ATOMUSDTM",
+            "isActive": True,
+            "filledSize": 5.0,
+        }
+        self.assertFalse(await self.startup_reconcile(engine))
+        self.assertEqual(order.state, OrderState.PARTIALLY_FILLED)
+
+    async def test_startup_partial_cancelled_remainder_is_cancelled_not_filled(self):
+        engine, order = self.make_engine()
+        engine.client.get_order_by_client_oid.return_value = {
+            "clientOid": order.client_oid,
+            "orderId": "oid-1",
+            "symbol": "ATOMUSDTM",
+            "isActive": False,
+            "cancelExist": True,
+            "status": "done",
+            "filledSize": 5.0,
+        }
+        self.assertTrue(await self.startup_reconcile(engine))
+        self.assertEqual(order.state, OrderState.CANCELLED)
+
+    async def test_startup_full_exchange_truth_terminalizes_filled(self):
+        engine, order = self.make_engine()
+        engine.client.get_order_by_client_oid.return_value = {
+            "clientOid": order.client_oid,
+            "orderId": "oid-1",
+            "symbol": "ATOMUSDTM",
+            "isActive": False,
+            "status": "done",
+            "filledSize": 10.0,
+        }
+        self.assertTrue(await self.startup_reconcile(engine))
+        self.assertEqual(order.state, OrderState.FILLED)
+
 
 class _StopClient:
     def __init__(self, orders=None, post_mode="accept"):
@@ -140,6 +189,7 @@ class _StopClient:
         self.post_mode = post_mode
         self.post_calls = []
         self.cancelled = []
+        self.stop_reads = 0
         self._instruments = {
             "ATOMUSDT": {
                 "multiplier": "0.1",
@@ -166,6 +216,7 @@ class _StopClient:
         return str(round(float(price), 3))
 
     async def get_stop_orders(self, symbol):
+        self.stop_reads += 1
         return list(self.orders)
 
     async def get_order_by_client_oid(self, client_oid):
@@ -365,6 +416,31 @@ class ConditionalStopLifecycleTests(unittest.IsolatedAsyncioTestCase):
             active_entry_confirmed_absent=True,
         ))
 
+    async def test_restart_flat_sweep_discovers_legacy_bgx_without_incident_marker(self):
+        client = _StopClient([
+            self.stop("legacy", 1.775),
+            self.stop("external", 1.770, external=True),
+        ])
+        client.get_positions = AsyncMock(return_value=[])
+        client._get = AsyncMock(return_value={"items": []})
+        engine = SimpleNamespace(
+            connected=True,
+            client=client,
+            orders=OrderRegistry(),
+            positions={},
+            _unprotected_symbols=set(),
+            instruments={"ATOMUSDT": client._instruments["ATOMUSDT"]},
+            viable_symbols=["ATOMUSDT"],
+        )
+        self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertIn("legacy", client.cancelled)
+        self.assertTrue(any(
+            row.get("clientOid") == "external-user" for row in client.orders
+        ))
+        reads_after_first = client.stop_reads
+        self.assertTrue(await refresh_protection_readiness(engine))
+        self.assertEqual(client.stop_reads, reads_after_first)
+
 
 class LifecycleTopologyReplayTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -425,8 +501,6 @@ class LifecycleTopologyReplayTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await reconcile_pending(engine, min_interval_s=0))
         self.assertEqual(order.state, OrderState.FILLED)
-        # Model the already-observed residual position from the partial stage;
-        # only after that exposure truth has been reconciled may final flat GC run.
         self.assertEqual(orders.mark_filled_exposure_reconciled("ATOMUSDT"), 1)
         return engine
 
