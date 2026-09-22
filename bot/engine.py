@@ -2696,7 +2696,10 @@ class TradingEngine:
             asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
             if not await self._refresh_entry_balance():
                 return
-            fresh_bal = self.risk.balance
+            fresh_bal = (
+                float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
+                if self.pilot.enabled else self.risk.balance
+            )
             # Piloto não permite fallback silencioso: same mandatory AI gate.
             if not self.pilot.can_open_pilot(self, self.client, sig.symbol, nx_dec):
                 return
@@ -3034,7 +3037,11 @@ class TradingEngine:
                             log.warning("[PAPER_LOSS_BUDGET] entry blocked: %s", exc)
                             return
                     required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
-                    if required > self.risk.balance:
+                    current_funds = (
+                        float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
+                        if self.pilot.enabled else self.risk.balance
+                    )
+                    if required > current_funds:
                         log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
                         return
                     _managed, _ = self.orders.get_or_create(
