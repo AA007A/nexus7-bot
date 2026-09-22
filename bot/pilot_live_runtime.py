@@ -181,6 +181,25 @@ def install(TradingEngine, log) -> None:
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
 
+        # Establish canonical accountEquity before the legacy connect routine
+        # performs its first RiskManager init/update. Available collateral is
+        # recorded separately and must never occupy the equity slot.
+        try:
+            startup_state = await account_semantics.read_account_state(self.client)
+            self._pilot_startup_account_equity = float(startup_state["equity"])
+            self._pilot_account_equity = float(startup_state["equity"])
+            self._pilot_available_balance = float(startup_state["available"])
+            self._pilot_balance_source = startup_state.get("available_source", "unknown")
+        except Exception as exc:
+            self._pilot_live_prelive_ready = False
+            self.risk.balance_confirmed = False
+            self.connected = False
+            log.critical(
+                "[PILOT_LIVE_STARTUP] result=BLOCKED reason=%s action=no_connect",
+                type(exc).__name__,
+            )
+            return None
+
         result = await original_connect(self, *args, **kwargs)
         if not getattr(self, "connected", False):
             self._pilot_live_prelive_ready = False
