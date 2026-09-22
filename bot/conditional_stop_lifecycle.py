@@ -38,7 +38,10 @@ def _canon_symbol(value: str) -> str:
 
 
 def is_bgx_owned(order: dict) -> bool:
-    return isinstance(order, dict) and str(order.get("clientOid") or "").startswith(_BGX_PREFIX)
+    return (
+        isinstance(order, dict)
+        and str(order.get("clientOid") or "").startswith(_BGX_PREFIX)
+    )
 
 
 def _active(order: dict) -> bool:
@@ -59,6 +62,19 @@ def _engine(client):
     return getattr(raw, "_engine", None) if raw is not None else None
 
 
+def _production_runtime(client) -> bool:
+    """True only after the canonical durable runtime has been initialized.
+
+    TradingEngine unit fixtures intentionally do not call
+    ``durable_execution.restore_engine_state`` and therefore have no durable
+    order lock. Production does. This keeps offline tests transport-focused
+    without introducing a production fallback: once runtime durability exists,
+    registry reads/writes are strict PostgreSQL-backed operations.
+    """
+    engine = _engine(client)
+    return engine is not None and hasattr(engine, "_durable_order_lock")
+
+
 def _cache_key(client):
     engine = _engine(client)
     return id(engine) if engine is not None else id(client)
@@ -72,11 +88,10 @@ def _lock(client):
 
 
 async def _validate_owner(client) -> bool:
-    """Require the existing production ownership/fencing authority."""
-    engine = _engine(client)
-    if engine is None:
-        # Isolated unit adapters have no production engine/lease.
+    """Require existing ownership/fencing for production lifecycle mutations."""
+    if not _production_runtime(client):
         return True
+    engine = _engine(client)
     if not bool(getattr(engine, "_execution_ownership_valid", False)):
         return False
     raw_client = getattr(client, "_client", client)
@@ -102,8 +117,7 @@ async def _load_registry(client) -> dict:
     cached = _CACHE.get(key)
     if isinstance(cached, dict):
         return cached
-    engine = _engine(client)
-    if engine is None:
+    if not _production_runtime(client):
         state = {"version": 1, "slots": {}}
         _CACHE[key] = state
         return state
@@ -121,14 +135,17 @@ async def _load_registry(client) -> dict:
 
 
 async def _persist_registry(client, state: dict, reason: str) -> bool:
-    engine = _engine(client)
-    if engine is None:
+    if not _production_runtime(client):
         _CACHE[_cache_key(client)] = state
         return True
     if not await _validate_owner(client):
         return False
     payload = json.dumps(
-        {"version": 1, "reason": str(reason)[:160], "slots": state.get("slots", {})},
+        {
+            "version": 1,
+            "reason": str(reason)[:160],
+            "slots": state.get("slots", {}),
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -141,17 +158,21 @@ def position_lineage(client, symbol: str, position: dict) -> str:
     engine = _engine(client)
     if engine is not None:
         trade_id = (getattr(engine, "_trade_ids", {}) or {}).get(symbol)
-        try:
-            if int(trade_id or 0) > 0:
-                return f"trade-{int(trade_id)}"
-        except (TypeError, ValueError):
-            pass
+        parsed = 0
+        if isinstance(trade_id, int) and not isinstance(trade_id, bool):
+            parsed = trade_id
+        elif isinstance(trade_id, str) and trade_id.isdigit():
+            parsed = int(trade_id)
+        if parsed > 0:
+            return f"trade-{parsed}"
     side = str(position.get("side") or "").lower()
     return f"live-{_canon_symbol(symbol)}-{side or 'unknown'}"
 
 
 def _slot_key(symbol: str, order_side: str, kind: str, lineage: str) -> str:
-    return "|".join((_canon_symbol(symbol), order_side.lower(), kind.upper(), str(lineage)))
+    return "|".join(
+        (_canon_symbol(symbol), order_side.lower(), kind.upper(), str(lineage))
+    )
 
 
 def _logical_oid(slot_key: str, trigger: str, generation: int = 0) -> str:
@@ -186,10 +207,14 @@ async def owned_for_lineage(
     client, symbol: str, order_side: str, kind: str, lineage: str, client_oid: str
 ) -> bool:
     state = await _load_registry(client)
-    rec = state.get("slots", {}).get(_slot_key(symbol, order_side, kind, lineage))
+    rec = state.get("slots", {}).get(
+        _slot_key(symbol, order_side, kind, lineage)
+    )
     if not isinstance(rec, dict):
         return False
-    return str(client_oid) in {str(x) for x in rec.get("owned_client_oids", [])}
+    return str(client_oid) in {
+        str(value) for value in rec.get("owned_client_oids", [])
+    }
 
 
 async def prepare_candidate(
@@ -228,14 +253,21 @@ async def prepare_candidate(
                     "reason": "capacity_blocked_reconcile_required",
                     "slot_key": key,
                 }
-            age = max(0.0, now - float(rec.get("attempted_at", now) or now))
+            attempted_raw = rec.get("attempted_at")
+            attempted_at = now if attempted_raw is None else float(attempted_raw)
+            age = max(0.0, now - attempted_at)
             lookup = getattr(client, "get_order_by_client_oid", None)
             truth = None
             if callable(lookup):
                 try:
                     truth = await lookup(oid)
-                except Exception:
-                    truth = None
+                except Exception as exc:
+                    log.warning(
+                        "[PROTECTION_LIFECYCLE] candidate_lookup_unconfirmed "
+                        "client_oid=%s error=%s",
+                        oid,
+                        type(exc).__name__,
+                    )
             if isinstance(truth, dict) and truth:
                 if truth.get("isActive") is True:
                     return {
@@ -247,7 +279,9 @@ async def prepare_candidate(
                 if _terminal_truth(truth):
                     rec["status"] = "RESOLVED_TERMINAL"
                     rec["resolved_at"] = now
-                    await _persist_registry(client, state, "candidate_terminal_truth")
+                    await _persist_registry(
+                        client, state, "candidate_terminal_truth"
+                    )
                 else:
                     return {
                         "client_oid": oid,
@@ -263,11 +297,13 @@ async def prepare_candidate(
                         "reason": "candidate_ambiguity_grace",
                         "slot_key": key,
                     }
-                # Re-submit, if needed, with the SAME idempotency identity. This
-                # cannot create UUID A/B/C for one unresolved desired state.
+                # Same unresolved desired state may retry transport only with
+                # the same exchange idempotency key. It never mints UUID A/B/C.
                 rec["attempted_at"] = now
                 rec["updated_at"] = now
-                if not await _persist_registry(client, state, "candidate_same_identity_retry"):
+                if not await _persist_registry(
+                    client, state, "candidate_same_identity_retry"
+                ):
                     return {
                         "client_oid": oid,
                         "post_allowed": False,
@@ -285,10 +321,17 @@ async def prepare_candidate(
         owned = []
         previous_verified = ""
         if rec:
-            owned = [str(x) for x in rec.get("owned_client_oids", []) if str(x)]
+            owned = [
+                str(value)
+                for value in rec.get("owned_client_oids", [])
+                if str(value)
+            ]
             if rec.get("status") == "VERIFIED":
                 previous_verified = str(rec.get("client_oid") or "")
-            if rec.get("desired_trigger") == desired and rec.get("status") == "RESOLVED_TERMINAL":
+            if (
+                rec.get("desired_trigger") == desired
+                and rec.get("status") == "RESOLVED_TERMINAL"
+            ):
                 generation = int(rec.get("generation", 0) or 0) + 1
 
         oid = _logical_oid(key, desired, generation)
@@ -339,7 +382,9 @@ async def mark_verified(client, slot_key: str, order_id: str = "") -> bool:
         return await _persist_registry(client, state, "candidate_verified")
 
 
-async def mark_capacity_blocked(client, slot_key: str, observed_count: int) -> bool:
+async def mark_capacity_blocked(
+    client, slot_key: str, observed_count: int
+) -> bool:
     async with _lock(client):
         state = await _load_registry(client)
         rec = state.setdefault("slots", {}).get(slot_key)
@@ -352,8 +397,10 @@ async def mark_capacity_blocked(client, slot_key: str, observed_count: int) -> b
         return await _persist_registry(client, state, "kucoin_300004_capacity")
 
 
-async def clear_capacity_if_recovered(client, slot_key: str, observed_count: int) -> bool:
-    """Permit the SAME pending identity to retry only after capacity is observed free."""
+async def clear_capacity_if_recovered(
+    client, slot_key: str, observed_count: int
+) -> bool:
+    """Permit the SAME pending identity to retry only after capacity is free."""
     if int(observed_count) >= _STOP_LIMIT:
         return False
     async with _lock(client):
@@ -389,32 +436,48 @@ async def _cancel_order(client, order_id: str) -> bool:
     from bot.kucoin import REST_BASE
     headers = auth("DELETE", endpoint)
     try:
-        async with session.delete(REST_BASE + endpoint, headers=headers) as response:
+        async with session.delete(
+            REST_BASE + endpoint, headers=headers
+        ) as response:
             data = await response.json()
             return isinstance(data, dict) and data.get("code") == "200000"
     except Exception as exc:
         log.warning(
             "[PROTECTION_GC] cancel_unconfirmed order_id=%s error=%s",
-            order_id, type(exc).__name__,
+            order_id,
+            type(exc).__name__,
         )
         return False
 
 
-def inventory(orders, symbol: str, position_side: str, kind: str, canonical_oid: str, lineage_oids=None) -> dict:
+def inventory(
+    orders, symbol: str, position_side: str, kind: str,
+    canonical_oid: str, lineage_oids=None,
+) -> dict:
     same_symbol = [
         row for row in (orders or [])
-        if _active(row) and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
+        if _active(row)
+        and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
     ]
     bgx = [row for row in same_symbol if is_bgx_owned(row)]
     external = [row for row in same_symbol if not is_bgx_owned(row)]
-    allowed = {str(x) for x in (lineage_oids or []) if str(x)}
+    allowed = {str(value) for value in (lineage_oids or []) if str(value)}
     same_kind = [
         row for row in bgx
         if protection_kind(row, position_side) == kind
-        and (not allowed or str(row.get("clientOid") or "") in allowed)
+        and (
+            not allowed
+            or str(row.get("clientOid") or "") in allowed
+        )
     ]
-    superseded = [row for row in same_kind if str(row.get("clientOid") or "") != canonical_oid]
-    canonical = [row for row in same_kind if str(row.get("clientOid") or "") == canonical_oid]
+    superseded = [
+        row for row in same_kind
+        if str(row.get("clientOid") or "") != canonical_oid
+    ]
+    canonical = [
+        row for row in same_kind
+        if str(row.get("clientOid") or "") == canonical_oid
+    ]
     unknown_bgx = [
         row for row in bgx
         if allowed and str(row.get("clientOid") or "") not in allowed
@@ -433,7 +496,7 @@ async def cleanup_superseded(
     client, symbol: str, position_side: str, kind: str, canonical_oid: str,
     read_stop_orders,
 ) -> tuple[bool, int, int]:
-    """Create/verify has already succeeded; retire same-lineage BGX superseded stops."""
+    """Retire only same-lineage BGX stops after canonical is verified."""
     if not await _validate_owner(client):
         return False, 0, 0
     state = await _load_registry(client)
@@ -441,27 +504,32 @@ async def cleanup_superseded(
     for rec in state.get("slots", {}).values():
         if not isinstance(rec, dict):
             continue
-        owned = {str(x) for x in rec.get("owned_client_oids", [])}
+        owned = {str(value) for value in rec.get("owned_client_oids", [])}
         if canonical_oid in owned:
             matching = rec
             break
     if matching is None:
-        # Never adopt a legacy/unknown BGX stop as a live-lineage authority.
         return False, 0, 0
 
     lineage_oids = matching.get("owned_client_oids", [])
     before = await read_stop_orders(client, symbol)
     if before is None:
         return False, 0, 0
-    inv = inventory(before, symbol, position_side, kind, canonical_oid, lineage_oids)
+    inv = inventory(
+        before, symbol, position_side, kind, canonical_oid, lineage_oids
+    )
     if not inv["canonical"]:
         return False, len(inv["superseded"]), len(inv["external"])
     for row in inv["superseded"]:
-        await _cancel_order(client, str(row.get("id") or row.get("orderId") or ""))
+        await _cancel_order(
+            client, str(row.get("id") or row.get("orderId") or "")
+        )
     after = await read_stop_orders(client, symbol)
     if after is None:
         return False, len(inv["superseded"]), len(inv["external"])
-    after_inv = inventory(after, symbol, position_side, kind, canonical_oid, lineage_oids)
+    after_inv = inventory(
+        after, symbol, position_side, kind, canonical_oid, lineage_oids
+    )
     ok = bool(after_inv["canonical"]) and not after_inv["superseded"]
     return ok, len(inv["superseded"]), len(after_inv["external"])
 
@@ -472,72 +540,94 @@ async def cleanup_flat_symbol(
 ) -> bool:
     """Retire only BGX-owned protection after authoritative flat preconditions."""
     try:
-        if not math.isfinite(float(exchange_position_qty)) or abs(float(exchange_position_qty)) > 0:
-            return False
-        if not active_entry_confirmed_absent:
-            return False
-        if symbol in (getattr(engine, "positions", {}) or {}):
-            return False
-        registry = getattr(engine, "orders", None)
-        pending = list(registry.pending_orders() or []) if registry is not None else []
-        if any(_canon_symbol(getattr(o, "symbol", "")) == _canon_symbol(symbol) for o in pending):
-            return False
-        unresolved = list(registry.unreconciled_filled_orders(symbol) or []) if registry is not None else []
-        if unresolved:
-            return False
-        client = getattr(engine, "client", None)
-        if client is None or not await _validate_owner(client):
-            return False
-
-        from bot.conditional_stop_protection import read_stop_orders
-        before = await read_stop_orders(client, symbol)
-        if before is None:
-            return False
-        owned = [
-            row for row in before
-            if _active(row)
-            and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
-            and is_bgx_owned(row)
-        ]
-        external_count = len([
-            row for row in before
-            if _active(row)
-            and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
-            and not is_bgx_owned(row)
-        ])
-        for row in owned:
-            await _cancel_order(client, str(row.get("id") or row.get("orderId") or ""))
-        after = await read_stop_orders(client, symbol)
-        if after is None:
-            return False
-        remaining = [
-            row for row in after
-            if _active(row)
-            and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
-            and is_bgx_owned(row)
-        ]
-        ok = not remaining
-        log.warning(
-            "[PROTECTION_FLAT_GC] symbol=%s bgx_before=%s bgx_after=%s "
-            "external_preserved=%s cleanup_status=%s",
-            symbol, len(owned), len(remaining), external_count,
-            "VERIFIED" if ok else "UNCONFIRMED",
-        )
-        if ok:
-            async with _lock(client):
-                state = await _load_registry(client)
-                changed = False
-                for rec in state.setdefault("slots", {}).values():
-                    if isinstance(rec, dict) and _canon_symbol(rec.get("symbol")) == _canon_symbol(symbol):
-                        rec["status"] = "FLAT_CLEANED"
-                        rec["updated_at"] = time.time()
-                        changed = True
-                if changed:
-                    await _persist_registry(client, state, "flat_cleanup_verified")
-        return ok
-    except Exception as exc:
+        exchange_qty = float(exchange_position_qty)
+    except (TypeError, ValueError) as exc:
         log.error(
-            "[PROTECTION_FLAT_GC] symbol=%s cleanup_status=FAILED error=%s",
-            symbol, type(exc).__name__,
+            "[PROTECTION_FLAT_GC] symbol=%s cleanup_status=FAILED "
+            "error=%s",
+            symbol,
+            type(exc).__name__,
         )
         return False
+    if not math.isfinite(exchange_qty) or abs(exchange_qty) > 0:
+        return False
+    if not active_entry_confirmed_absent:
+        return False
+    if symbol in (getattr(engine, "positions", {}) or {}):
+        return False
+
+    registry = getattr(engine, "orders", None)
+    pending = list(registry.pending_orders() or []) if registry is not None else []
+    if any(
+        _canon_symbol(getattr(order, "symbol", "")) == _canon_symbol(symbol)
+        for order in pending
+    ):
+        return False
+    unresolved = (
+        list(registry.unreconciled_filled_orders(symbol) or [])
+        if registry is not None else []
+    )
+    if unresolved:
+        return False
+
+    client = getattr(engine, "client", None)
+    if client is None or not await _validate_owner(client):
+        return False
+
+    from bot.conditional_stop_protection import read_stop_orders
+    before = await read_stop_orders(client, symbol)
+    if before is None:
+        return False
+    owned = [
+        row for row in before
+        if _active(row)
+        and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
+        and is_bgx_owned(row)
+    ]
+    external_count = len([
+        row for row in before
+        if _active(row)
+        and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
+        and not is_bgx_owned(row)
+    ])
+    for row in owned:
+        await _cancel_order(
+            client, str(row.get("id") or row.get("orderId") or "")
+        )
+
+    after = await read_stop_orders(client, symbol)
+    if after is None:
+        return False
+    remaining = [
+        row for row in after
+        if _active(row)
+        and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
+        and is_bgx_owned(row)
+    ]
+    ok = not remaining
+    log.warning(
+        "[PROTECTION_FLAT_GC] symbol=%s bgx_before=%s bgx_after=%s "
+        "external_preserved=%s cleanup_status=%s",
+        symbol,
+        len(owned),
+        len(remaining),
+        external_count,
+        "VERIFIED" if ok else "UNCONFIRMED",
+    )
+    if ok:
+        async with _lock(client):
+            state = await _load_registry(client)
+            changed = False
+            for rec in state.setdefault("slots", {}).values():
+                if (
+                    isinstance(rec, dict)
+                    and _canon_symbol(rec.get("symbol")) == _canon_symbol(symbol)
+                ):
+                    rec["status"] = "FLAT_CLEANED"
+                    rec["updated_at"] = time.time()
+                    changed = True
+            if changed:
+                await _persist_registry(
+                    client, state, "flat_cleanup_verified"
+                )
+    return ok
