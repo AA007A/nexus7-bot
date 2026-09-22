@@ -236,13 +236,14 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
-        from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-        from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-        from bot.config import cfg
         executable_price = metrics.get("executable_price")
-        cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+        cost_fraction = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
         try:
+            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
+            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            from bot.config import cfg
+            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
             validate(
                 qty_f, executable_price, sig.sl, direction,
                 cfg.LEVERAGE, cost_fraction,
