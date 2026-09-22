@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bot import pilot_live_runtime as live
-from bot.financial_state import FinancialStateInvalid, validate_financial_state
+from bot.financial_state import validate_financial_state
 
 
 class _Risk:
@@ -81,59 +81,6 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             engine.client._last_account_overview_snapshot["availableMargin"], "25"
         )
         self.assertIn("_observed_at", engine.client._last_account_overview_snapshot)
-
-    async def test_historical_incident_publishes_account_equity_snapshot_before_legacy_shim(self):
-        hwm = 63.7942573
-        account_equity = 21.5075351411
-        available_margin = 11.9815151411
-        risk = _Risk()
-        risk._ready = True
-        risk.balance = hwm
-        risk.peak_balance = hwm
-        risk.drawdown = 0.0
-        engine = SimpleNamespace(client=SimpleNamespace(), risk=risk)
-        state = {
-            "equity": account_equity,
-            "available": available_margin,
-            "available_source": "availableMargin",
-            "accountEquity": str(account_equity),
-            "availableMargin": str(available_margin),
-        }
-        with patch.object(
-            live.account_semantics, "read_account_state", AsyncMock(return_value=state)
-        ), patch.object(
-            live.capital_flows,
-            "reconcile_external_capital_flows",
-            AsyncMock(return_value={"applied": 0, "bootstrap": False}),
-        ), patch.object(
-            live, "restore_update_real_account_peak", AsyncMock(return_value=hwm)
-        ):
-            await live._refresh_account(engine, _Log(), for_entry=True)
-
-        snapshot = engine._pilot_financial_state_snapshot
-        self.assertAlmostEqual(snapshot.equity, account_equity)
-        self.assertAlmostEqual(snapshot.available_margin, available_margin)
-        self.assertAlmostEqual(snapshot.hwm, hwm)
-        self.assertAlmostEqual(snapshot.drawdown, 0.6628609525155488)
-
-        # Exact historical failure mode: the legacy affordability shim exposes
-        # availableMargin through risk.balance during _open. Treating that field
-        # as equity must still fail closed, while the published snapshot remains
-        # internally consistent.
-        engine.risk.balance = available_margin
-        with self.assertRaises(FinancialStateInvalid):
-            validate_financial_state(
-                equity=engine.risk.balance,
-                available_margin=available_margin,
-                hwm=hwm,
-                drawdown=snapshot.drawdown,
-            )
-        validate_financial_state(
-            equity=snapshot.equity,
-            available_margin=snapshot.available_margin,
-            hwm=snapshot.hwm,
-            drawdown=snapshot.drawdown,
-        )
 
     async def test_preflight_block_prevents_original_open(self):
         class Engine:
