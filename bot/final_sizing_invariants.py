@@ -116,19 +116,36 @@ def install(engine_module, pilot_cap, log) -> None:
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
+        signal = pilot_cap._PILOT_SIGNAL.get()
+        from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
+        from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+        cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+        setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
         try:
-            from bot.final_loss_budget import validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            signal = pilot_cap._PILOT_SIGNAL.get()
-            projected, loss_limit = validate(
+            validate(
                 final_qty, price_f, signal.sl, signal.direction, leverage,
-                estimated_round_trip_cost_pct(symbol) / 100.0,
+                cost_fraction,
             )
         except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            log.critical('[FINAL_LOSS_BUDGET] symbol=%s result=BLOCK reason=%s quantity_unchanged=true', symbol, type(exc).__name__)
+            emit_telemetry(
+                log, symbol=symbol, setup_id=setup_id,
+                stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
+                stop=getattr(signal, "sl", float("nan")),
+                direction=getattr(signal, "direction", "UNKNOWN"),
+                leverage=leverage, cost_fraction=cost_fraction, result="BLOCK",
+                specific_reason=reason_from_exception(exc),
+                risk_v3_advisory_qty=risk_qty,
+            )
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
-        log.info('[FINAL_LOSS_BUDGET] symbol=%s result=PASS projected_loss=%.8f loss_limit=%.8f policy=50pct_entry_margin costs=estimated', symbol, projected, loss_limit)
+        emit_telemetry(
+            log, symbol=symbol, setup_id=setup_id,
+            stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
+            stop=signal.sl, direction=signal.direction, leverage=leverage,
+            cost_fraction=cost_fraction, result="PASS",
+            specific_reason="within_50pct_entry_margin",
+            risk_v3_advisory_qty=risk_qty,
+        )
 
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(

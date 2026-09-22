@@ -278,7 +278,9 @@ async def _record(engine, sig, decision, log) -> None:
     if not await _ensure_table(log):
         return
     now = time.time()
-    key = _signal_key(sig.symbol, sig.direction, getattr(sig, "entry_type", "UNKNOWN"), now)
+    key = str(getattr(sig, "_bgx_setup_id", "") or "") or _signal_key(
+        sig.symbol, sig.direction, getattr(sig, "entry_type", "UNKNOWN"), now
+    )
     if key in _RECORDED_KEYS:
         return
 

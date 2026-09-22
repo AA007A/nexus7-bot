@@ -10,6 +10,7 @@ liquidation, TPSL, idempotency or final pre-dispatch market checks.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from bot.indicators import ema, macd, rsi, smc_analysis
@@ -142,6 +143,80 @@ def _intrabar_fast_metrics(k15: list, direction: str) -> dict:
     return out
 
 
+_STRATEGY_STOP_GEOMETRY_EMITTED: set[str] = set()
+
+
+def _strategy_setup_id(signal, epoch: float | None = None) -> str:
+    existing = str(getattr(signal, "_bgx_setup_id", "") or "")
+    if existing:
+        return existing
+    formation_timestamp = float(time.time() if epoch is None else epoch)
+    formation_bucket = int(formation_timestamp // 900)
+    setup_id = (
+        f"{getattr(signal, 'symbol', 'UNKNOWN')}:"
+        f"{str(getattr(signal, 'direction', 'UNKNOWN')).upper()}:"
+        f"{getattr(signal, 'entry_type', 'UNKNOWN')}:{formation_bucket}"
+    )
+    signal._bgx_setup_id = setup_id
+    signal._bgx_formation_timestamp = formation_timestamp
+    signal._bgx_formation_bucket = formation_bucket
+    return setup_id
+
+
+def _emit_strategy_stop_geometry(signal, log, epoch: float | None = None) -> str | None:
+    """Best-effort pre-NEXUS telemetry; never changes the returned signal."""
+    if signal is None:
+        return None
+    setup_id = _strategy_setup_id(signal, epoch)
+    if setup_id in _STRATEGY_STOP_GEOMETRY_EMITTED:
+        return setup_id
+    try:
+        entry = float(signal.entry)
+        sl = float(signal.sl)
+        tp = float(signal.tp)
+        atr_15m = float(signal._bgx_atr_15m)
+        atr_1h = float(signal._bgx_atr_1h)
+        adjusted_atr = float(signal._bgx_adjusted_atr)
+        if entry <= 0:
+            raise ValueError("invalid_entry")
+        stop_abs = abs(entry - sl)
+        target_abs = abs(tp - entry)
+        stop_pct = stop_abs / entry * 100.0
+        target_pct = target_abs / entry * 100.0
+        log.info(
+            "[STRATEGY_STOP_GEOMETRY] setup_id=%s symbol=%s direction=%s "
+            "entry_type=%s formation_timestamp=%.6f formation_bucket=%s "
+            "entry=%.12g sl=%.12g tp=%.12g atr_15m=%.12g atr_1h=%.12g "
+            "adjusted_atr=%.12g original_stop_abs=%.12g original_stop_pct=%.8f "
+            "target_abs=%.12g target_pct=%.8f strategy_score=%s regime=%s "
+            "4h_bias=%s 1h_bias=%s 15m_bias=%s decision_effect=NONE execution_effect=NONE",
+            setup_id,
+            getattr(signal, "symbol", "UNKNOWN"),
+            getattr(signal, "direction", "UNKNOWN"),
+            getattr(signal, "entry_type", "UNKNOWN"),
+            float(getattr(signal, "_bgx_formation_timestamp")),
+            int(getattr(signal, "_bgx_formation_bucket")),
+            entry, sl, tp, atr_15m, atr_1h, adjusted_atr,
+            stop_abs, stop_pct, target_abs, target_pct,
+            getattr(signal, "score", "UNKNOWN"),
+            getattr(signal, "regime", "UNKNOWN"),
+            getattr(signal, "_bgx_4h_bias", "UNKNOWN"),
+            getattr(signal, "_bgx_1h_bias", "UNKNOWN"),
+            getattr(signal, "_bgx_15m_bias", "UNKNOWN"),
+        )
+        _STRATEGY_STOP_GEOMETRY_EMITTED.add(setup_id)
+    except Exception as exc:
+        try:
+            log.warning(
+                "[STRATEGY_STOP_GEOMETRY] setup_id=%s telemetry_error=%s "
+                "decision_effect=NONE execution_effect=NONE",
+                setup_id, type(exc).__name__,
+            )
+        except Exception:
+            pass
+    return setup_id
+
+
 def install(Analyzer, log) -> None:
     if getattr(Analyzer, "_pullback_confirmation_installed", False):
         return
@@ -150,6 +225,7 @@ def install(Analyzer, log) -> None:
 
     def analyze_mtf_confirmed_pullback(self, symbol, k15, k1h, k4h, *args, **kwargs):
         signal = original(self, symbol, k15, k1h, k4h, *args, **kwargs)
+        setup_id = _emit_strategy_stop_geometry(signal, log)
         if signal is None or str(getattr(signal, "entry_type", "")).upper() != "PULLBACK":
             return signal
 
@@ -157,10 +233,10 @@ def install(Analyzer, log) -> None:
         metrics = _pullback_metrics(k15, direction)
         if metrics.get("ok"):
             log.info(
-                "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=PASS path=closed_15m "
+                "[PULLBACK_CONFIRMATION] setup_id=%s symbol=%s side=%s result=PASS path=closed_15m "
                 "votes=%s vote_count=%s structure=%s bos=%s bos_dir=%s rsi=%s "
                 "execution_effect=SIGNAL_FILTER_ONLY",
-                symbol, direction, metrics.get("votes", {}), metrics.get("vote_count", 0),
+                setup_id, symbol, direction, metrics.get("votes", {}), metrics.get("vote_count", 0),
                 metrics.get("structure", "UNKNOWN"), metrics.get("bos", False),
                 metrics.get("bos_dir", "NONE"), metrics.get("rsi", "N/A"),
             )
@@ -173,19 +249,20 @@ def install(Analyzer, log) -> None:
             fast = _intrabar_fast_metrics(k15, direction)
             if fast.get("ok"):
                 log.warning(
-                    "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=PASS path=intrabar_fast "
+                    "[PULLBACK_CONFIRMATION] setup_id=%s symbol=%s side=%s result=PASS path=intrabar_fast "
                     "closed_votes=%s intrabar_votes=%s ema20_side=true structure=%s "
                     "strict=5/5 NEXUS_and_risk_gates_preserved=true execution_effect=SIGNAL_FILTER_ONLY",
-                    symbol, direction, metrics.get("vote_count", 0), fast.get("vote_count", 0),
+                    setup_id, symbol, direction, metrics.get("vote_count", 0), fast.get("vote_count", 0),
                     fast.get("structure", "UNKNOWN"),
                 )
                 return signal
 
         log.info(
-            "[PULLBACK_CONFIRMATION] symbol=%s side=%s result=BLOCKED reason=%s "
+            "[PULLBACK_CONFIRMATION] setup_id=%s symbol=%s side=%s result=BLOCKED reason=%s "
             "votes=%s vote_count=%s structure=%s bos=%s bos_dir=%s rsi=%s "
             "macd=%s/%s ema20_side=%s intrabar_reason=%s intrabar_votes=%s "
             "execution_effect=SIGNAL_FILTER_ONLY",
+            setup_id,
             symbol,
             direction or "UNKNOWN",
             metrics.get("reason"),
