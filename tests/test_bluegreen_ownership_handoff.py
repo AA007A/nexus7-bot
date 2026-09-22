@@ -76,6 +76,43 @@ class BlueGreenOwnershipHandoffTests(unittest.IsolatedAsyncioTestCase):
         init.assert_not_awaited()
         self.assertFalse(engine._execution_ownership_valid)
 
+    async def test_candidate_survives_multiple_old_lease_cycles_then_converges(self):
+        engine = SimpleNamespace(
+            _running=True,
+            _execution_ownership_valid=False,
+            _execution_ownership_expires_at=None,
+            _engine_state="STARTING",
+        )
+        acquired = object()
+        attempts = [
+            ownership.ExecutionOwnershipUnavailable("LIVE_EXECUTION_OWNERSHIP_HELD"),
+            ownership.ExecutionOwnershipUnavailable("LIVE_EXECUTION_OWNERSHIP_HELD"),
+            ownership.ExecutionOwnershipUnavailable("LIVE_EXECUTION_OWNERSHIP_HELD"),
+            acquired,
+        ]
+
+        async def initialize(_engine):
+            item = attempts.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            _engine._engine_state = "EXECUTION_OWNERSHIP_ACQUIRED"
+            return item
+
+        async def no_wait(_seconds):
+            return None
+
+        with patch.object(
+            ownership,
+            "initialize_live_execution_ownership",
+            AsyncMock(side_effect=initialize),
+        ) as init, patch.object(asyncio, "sleep", no_wait):
+            result = await ownership.wait_for_live_execution_ownership(engine, retry_seconds=0.1)
+
+        self.assertIs(result, acquired)
+        self.assertEqual(init.await_count, 4)
+        self.assertEqual(engine._engine_state, "EXECUTION_OWNERSHIP_ACQUIRED")
+        self.assertFalse(engine._execution_ownership_valid)
+
 
 if __name__ == "__main__":
     unittest.main()

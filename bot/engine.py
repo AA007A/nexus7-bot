@@ -349,6 +349,8 @@ class TradingEngine:
         self.client._engine = self
         self._execution_ownership_valid = False
         self._execution_ownership_expires_at = None
+        self._engine_state = "STARTING"
+        self._fatal_engine_error = None
         self.analyzer     = Analyzer()
         self.risk         = RiskManager()
         self.stats        = Stats()
@@ -505,15 +507,25 @@ class TradingEngine:
             self._start_background(bt.weekly_backtest_loop(self.client))   # backtest semanal
             self._start_background(opt.weekly_optimization_loop(self.client)) # otimização semanal
             self._start_background(self._monitor_news_pipeline())               # pipeline de notícias
+            self._engine_state = "CONNECTING"
+            log.info("[ENGINE_STATE] state=CONNECTING")
             await self._connect()
+            self._engine_state = "RECONCILING"
+            log.info("[ENGINE_STATE] state=RECONCILING")
             _orders_reconciled = await durable.reconcile_orders(self)
             from bot.initial_reconciliation import finalize_initial_reconciliation
             self._initial_reconciliation_complete = await finalize_initial_reconciliation(
                 self,
                 orders_reconciled=_orders_reconciled,
             )
+            self._engine_state = "PROTECTION_VALIDATING"
+            log.info("[ENGINE_STATE] state=PROTECTION_VALIDATING")
             from bot.protection_readiness import refresh_protection_readiness
             await refresh_protection_readiness(self)
+            from bot.runtime_readiness import runtime_readiness as _runtime_readiness
+            if _runtime_readiness(self).ready_for_new_entries:
+                self._engine_state = "FINANCIAL_READY"
+                log.info("[ENGINE_STATE] state=FINANCIAL_READY")
 
             _ciclos = 0
             while self._running:

@@ -67,7 +67,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raw._engine, engine)
         self.assertIsInstance(main.app.state.engine, TradingEngine)
 
-    async def test_service_ready_does_not_authorize_financial_execution(self):
+    async def test_deployment_ready_does_not_authorize_financial_execution(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
         main.app.state.ready = True
@@ -79,8 +79,9 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
         engine._execution_ownership_valid = False
         engine._execution_ownership_expires_at = None
+        engine._engine_state = "WAITING_FOR_EXECUTION_OWNERSHIP"
         try:
-            service = await main_hardened.service_readiness()
+            service = await main_hardened.deployment_readiness()
             financial = await main_hardened.readiness()
             self.assertEqual(service.status_code, 200)
             self.assertEqual(financial.status_code, 503)
@@ -91,7 +92,7 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await main.app.state.engine_task
 
-    async def test_service_ready_requires_durable_initialization(self):
+    async def test_deployment_ready_requires_durable_initialization(self):
         _, engine = _make_canonical_engine()
         main.app.state.engine = engine
         main.app.state.ready = True
@@ -101,19 +102,20 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
         engine.instruments = {"BTCUSDT": {"symbol": "XBTUSDTM"}}
         engine._durable_state_enforced = False
         engine._durable_state_ok = True
+        engine._engine_state = "WAITING_FOR_EXECUTION_OWNERSHIP"
         try:
-            response = await main_hardened.service_readiness()
+            response = await main_hardened.deployment_readiness()
             self.assertEqual(response.status_code, 503)
-            self.assertIn("durable_state_unhealthy", response.body.decode("utf-8"))
+            self.assertIn("db_authority_invalid", response.body.decode("utf-8"))
         finally:
             main.app.state.engine_task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await main.app.state.engine_task
 
-    async def test_service_ready_route_uses_railway_compatible_path(self):
+    async def test_deployment_ready_route_is_explicit(self):
         paths = {route.path for route in main_hardened.app.routes}
-        self.assertIn("/service_ready", paths)
-        self.assertNotIn("/service-ready", paths)
+        self.assertIn("/deployment_ready", paths)
+        self.assertNotIn("/service_ready", paths)
 
     async def test_startup_incomplete_is_503_even_when_engine_is_published(self):
         _, engine = _make_canonical_engine()
@@ -312,6 +314,30 @@ class CanonicalHttpReadinessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(engine, real_engine_cls)
             self.assertIsNone(main.app.state.engine)
             self.assertFalse(engine._execution_ownership_valid)
+            self.assertIsNone(main.app.state.engine_task)
+            self.assertIsNone(main.app.state.bootstrap_task)
+
+    async def test_lifespan_ignores_stale_task_from_prior_event_loop(self):
+        stale_loop = asyncio.new_event_loop()
+        async def never():
+            await asyncio.Event().wait()
+        stale_task = stale_loop.create_task(never())
+        main.app.state.engine_task = stale_task
+        try:
+            # The real lifespan must replace lifecycle-owned task references,
+            # never await a task created by another loop.
+            with patch.object(main.ExchangeClient, "load_instruments", AsyncMock(return_value=None)), \
+                 patch("bot.notifier.test_telegram", AsyncMock(return_value={"ok": True})), \
+                 patch("bot.notifier.notify", AsyncMock()):
+                async with main.lifespan(main.app):
+                    await asyncio.sleep(0)
+                    task = main.app.state.engine_task
+                    if task is not None:
+                        self.assertIs(task.get_loop(), asyncio.get_running_loop())
+        finally:
+            stale_task.cancel()
+            stale_loop.run_until_complete(asyncio.gather(stale_task, return_exceptions=True))
+            stale_loop.close()
 
 
 if __name__ == "__main__":

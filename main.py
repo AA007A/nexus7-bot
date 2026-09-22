@@ -156,7 +156,43 @@ async def lifespan(app: FastAPI):
             app.state.telegram = {"ok": False, "reason": str(_e)}
 
         app.state.blocked = False
+        app.state.engine_fatal = None
         app.state.engine_task = asyncio.create_task(engine.run())
+
+        def _supervise_engine_task(task):
+            # Schedule supervision on the task's running loop instead of
+            # consuming task.exception() inside the synchronous done callback.
+            # This keeps lifecycle tests and shutdown loop ownership deterministic.
+            if task.cancelled():
+                return
+
+            async def _publish_failure():
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    return
+                if exc is None:
+                    if getattr(engine, "_running", False):
+                        exc = RuntimeError("engine task exited while engine still marked running")
+                    else:
+                        return
+                engine._fatal_engine_error = type(exc).__name__
+                engine._engine_state = "FAILED"
+                engine._execution_ownership_valid = False
+                engine._execution_ownership_expires_at = None
+                app.state.engine_fatal = type(exc).__name__
+                log.critical(
+                    "[ENGINE_TASK] state=FAILED type=%s execution_effect=BLOCK_NEW_ENTRIES",
+                    type(exc).__name__,
+                )
+
+            try:
+                task.get_loop().create_task(_publish_failure())
+            except RuntimeError:
+                # Loop already closing: shutdown is fail-closed independently.
+                return
+
+        app.state.engine_task.add_done_callback(_supervise_engine_task)
         log.info("✅ BGX Capital online (KuCoin Futures)")
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
@@ -174,7 +210,11 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             log.debug(f"notify modo: {_e}")
 
-    app.state.bootstrap_task = asyncio.create_task(_bootstrap())
+    # Lifecycle ownership is per-lifespan invocation. Never retain/await a task
+    # created by a previous app/test event loop.
+    lifecycle_loop = asyncio.get_running_loop()
+    app.state.bootstrap_task = lifecycle_loop.create_task(_bootstrap())
+    app.state.engine_task = None
 
     # yield IMEDIATO — /health passa a responder agora, sem esperar a KuCoin
     yield
@@ -192,12 +232,38 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     app.state.engine = None
     engine.stop()
-    for t in ("bootstrap_task", "engine_task"):
-        task=getattr(app.state,t,None)
-        if task and not task.done():
+    owned_tasks = []
+    for name in ("bootstrap_task", "engine_task"):
+        task = getattr(app.state, name, None)
+        if task is None:
+            continue
+        if task.get_loop() is not lifecycle_loop:
+            log.warning("[LIFECYCLE] ignoring stale %s from a different event loop", name)
+            setattr(app.state, name, None)
+            continue
+        owned_tasks.append((name, task))
+        if not task.done():
             task.cancel()
-    tasks = [getattr(app.state, name, None) for name in ('bootstrap_task', 'engine_task')]
-    await asyncio.gather(*(t for t in tasks if t is not None), return_exceptions=True)
+
+    for name, task in owned_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            # Deliberate lifespan shutdown cancellation is expected.
+            pass
+        except Exception as exc:
+            # Preserve unexpected engine/bootstrap failures; do not mask cleanup.
+            log.error(
+                "[LIFECYCLE] task=%s state=FAILED type=%s during_shutdown=true",
+                name,
+                type(exc).__name__,
+            )
+            if name == "engine_task":
+                engine._fatal_engine_error = type(exc).__name__
+                engine._engine_state = "FAILED"
+                app.state.engine_fatal = type(exc).__name__
+        finally:
+            setattr(app.state, name, None)
     try:
         await client.close()
     except Exception as e:
