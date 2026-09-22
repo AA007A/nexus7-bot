@@ -2616,6 +2616,17 @@ class TradingEngine:
             log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
             raise
 
+    def _entry_available_funds(self) -> float:
+        """Return the capital authority for immediate entry affordability.
+
+        Account equity remains in risk.balance. Controlled LIVE keeps KuCoin
+        free collateral separately in _pilot_available_balance so affordability
+        never changes the semantic meaning of the equity field.
+        """
+        if self.pilot.enabled:
+            return float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
+        return float(getattr(self.risk, "balance", 0.0) or 0.0)
+
     async def _refresh_entry_balance(self) -> bool:
         """Zero/negative is a valid account result; query failure is separate."""
         try:
@@ -2696,10 +2707,7 @@ class TradingEngine:
             asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
             if not await self._refresh_entry_balance():
                 return
-            fresh_bal = (
-                float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
-                if self.pilot.enabled else self.risk.balance
-            )
+            fresh_bal = self._entry_available_funds()
             # Piloto não permite fallback silencioso: same mandatory AI gate.
             if not self.pilot.can_open_pilot(self, self.client, sig.symbol, nx_dec):
                 return
@@ -3037,10 +3045,7 @@ class TradingEngine:
                             log.warning("[PAPER_LOSS_BUDGET] entry blocked: %s", exc)
                             return
                     required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
-                    current_funds = (
-                        float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
-                        if self.pilot.enabled else self.risk.balance
-                    )
+                    current_funds = self._entry_available_funds()
                     if required > current_funds:
                         log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
                         return
