@@ -236,16 +236,35 @@ def install(TradingEngine, log) -> None:
             )
             return False
 
+        executable_price = metrics.get("executable_price")
+        cost_fraction = float("nan")
+        setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
         try:
-            from bot.final_loss_budget import validate
+            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
             from bot.kucoin_execution_model import estimated_round_trip_cost_pct
             from bot.config import cfg
-            validate(qty_f, metrics.get("executable_price"), sig.sl, direction,
-                     cfg.LEVERAGE, estimated_round_trip_cost_pct(symbol) / 100.0)
+            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            validate(
+                qty_f, executable_price, sig.sl, direction,
+                cfg.LEVERAGE, cost_fraction,
+            )
         except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            log.warning("[FINAL_LOSS_BUDGET] symbol=%s result=BLOCK stage=predispatch reason=%s",
-                        symbol, type(exc).__name__)
+            emit_telemetry(
+                log, symbol=symbol, setup_id=setup_id,
+                stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
+                entry=executable_price, stop=getattr(sig, "sl", float("nan")),
+                direction=direction, leverage=cfg.LEVERAGE,
+                cost_fraction=cost_fraction, result="BLOCK",
+                specific_reason=reason_from_exception(exc),
+            )
             return False
+        emit_telemetry(
+            log, symbol=symbol, setup_id=setup_id,
+            stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
+            entry=executable_price, stop=sig.sl, direction=direction,
+            leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
+            specific_reason="within_50pct_entry_margin",
+        )
 
         log.info(
             "[LIVE_PREDISPATCH_MARKET] symbol=%s result=PASS "

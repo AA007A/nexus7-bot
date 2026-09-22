@@ -721,7 +721,7 @@ class Analyzer:
             f"| {' '.join(reasons)}"
         )
 
-        return Signal(
+        signal = Signal(
             symbol=symbol, direction=direction,
             entry=price, sl=sl, tp=tp,
             confidence=min(0.97, combined/100),
@@ -733,6 +733,25 @@ class Analyzer:
             entry_type=entry_type,
             regime=regime,
         )
+
+        # Observability-only metadata: these are the exact values already
+        # computed by the strategy above. They are never consulted by trading
+        # decisions and exist only so the pre-NEXUS wrapper can emit an
+        # uncensored stop-geometry record before a pullback veto.
+        signal._bgx_atr_15m = float(atr_15)
+        signal._bgx_atr_1h = float(atr_1h)
+        signal._bgx_adjusted_atr = float(sl_atr)
+        formation_candle = (k15[:-1] if len(k15) > 20 else k15)[-1]
+        formation_timestamp = float(formation_candle.get("ts", 0.0) or 0.0) / 1000.0
+        if formation_timestamp > 0:
+            signal._bgx_formation_timestamp = formation_timestamp
+            signal._bgx_formation_bucket = int(formation_timestamp // 900)
+        signal._bgx_4h_bias = "LONG" if bull_4h else ("SHORT" if bear_4h else "NEUTRAL")
+        signal._bgx_1h_bias = "LONG" if bull_1h else ("SHORT" if bear_1h else "NEUTRAL")
+        signal._bgx_15m_bias = (
+            "LONG" if s15.get("bull") else ("SHORT" if s15.get("bear") else "NEUTRAL")
+        )
+        return signal
 
     def analyze(self, symbol, klines):
         return self.analyze_mtf(symbol, klines, klines, klines)
