@@ -150,8 +150,15 @@ def _strategy_setup_id(signal, epoch: float | None = None) -> str:
     existing = str(getattr(signal, "_bgx_setup_id", "") or "")
     if existing:
         return existing
-    formation_timestamp = float(time.time() if epoch is None else epoch)
-    formation_bucket = int(formation_timestamp // 900)
+    formation_timestamp = float(
+        getattr(signal, "_bgx_formation_timestamp", 0.0) or 0.0
+    )
+    formation_bucket = int(
+        getattr(signal, "_bgx_formation_bucket", 0) or 0
+    )
+    if formation_timestamp <= 0 or formation_bucket <= 0:
+        formation_timestamp = float(time.time() if epoch is None else epoch)
+        formation_bucket = int(formation_timestamp // 900)
     setup_id = (
         f"{getattr(signal, 'symbol', 'UNKNOWN')}:"
         f"{str(getattr(signal, 'direction', 'UNKNOWN')).upper()}:"
