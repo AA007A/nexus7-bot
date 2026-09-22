@@ -235,12 +235,10 @@ def install(TradingEngine, log) -> None:
             available = float(state["available"])
             self.risk.balance_confirmed = True
 
-            # The legacy _open implementation uses risk.balance for its two
-            # immediate affordability checks. During that narrow call only,
-            # expose free collateral there; durable peak/drawdown was already
-            # updated from accountEquity above and is restored after _open.
-            if getattr(self, "_pilot_open_in_progress", False):
-                self.risk.balance = available
+            # Keep risk.balance semantically stable as authenticated account
+            # equity. The core engine reads _pilot_available_balance explicitly
+            # for pilot affordability checks, so free collateral is never
+            # published through the equity field.
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
                 return False
