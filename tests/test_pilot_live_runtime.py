@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bot import pilot_live_runtime as live
+from bot.engine import TradingEngine
 from bot.financial_state import validate_financial_state
 
 
@@ -248,6 +249,19 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             drawdown=engine.risk.drawdown,
         )
 
+    def test_core_affordability_uses_pilot_collateral_without_relabeling_equity(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=True)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        engine._pilot_available_balance = 11.9815151411
+        self.assertAlmostEqual(engine._entry_available_funds(), 11.9815151411)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+
+    def test_core_affordability_falls_back_to_risk_balance_outside_pilot(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=False)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        self.assertAlmostEqual(engine._entry_available_funds(), 21.5075351411)
 
 if __name__ == "__main__":
     unittest.main()
