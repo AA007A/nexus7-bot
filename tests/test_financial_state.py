@@ -54,6 +54,32 @@ class FinancialStateTests(unittest.TestCase):
                 hwm=42_709_241_923.064377, drawdown=.70,
             )
 
+    def test_bgx_missed_002_historical_state_fails_closed(self):
+        hwm = 63.7942573
+        historical_bad_equity = 11.9815151411
+        historical_reported_drawdown = 0.6628609525155488
+        derived = (hwm - historical_bad_equity) / hwm
+        self.assertAlmostEqual(derived, 0.8121850516300313)
+        with self.assertRaises(FinancialStateInvalid):
+            validate_financial_state(
+                equity=historical_bad_equity,
+                available_margin=historical_bad_equity,
+                hwm=hwm,
+                drawdown=historical_reported_drawdown,
+            )
+
+    def test_bgx_missed_002_consistent_account_equity_state_passes(self):
+        hwm = 63.7942573
+        account_equity = 21.5075351411
+        available_margin = 11.9815151411
+        drawdown = (hwm - account_equity) / hwm
+        state = validate_financial_state(
+            equity=account_equity,
+            available_margin=available_margin,
+            hwm=hwm,
+            drawdown=drawdown,
+        )
+        self.assertAlmostEqual(state.drawdown, 0.6628609525155488)
 
 if __name__ == "__main__":
     unittest.main()

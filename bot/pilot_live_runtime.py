@@ -181,6 +181,25 @@ def install(TradingEngine, log) -> None:
         if getattr(self, "paper_trade", False):
             return await original_connect(self, *args, **kwargs)
 
+        # Establish canonical accountEquity before the legacy connect routine
+        # performs its first RiskManager init/update. Available collateral is
+        # recorded separately and must never occupy the equity slot.
+        try:
+            startup_state = await account_semantics.read_account_state(self.client)
+            self._pilot_startup_account_equity = float(startup_state["equity"])
+            self._pilot_account_equity = float(startup_state["equity"])
+            self._pilot_available_balance = float(startup_state["available"])
+            self._pilot_balance_source = startup_state.get("available_source", "unknown")
+        except Exception as exc:
+            self._pilot_live_prelive_ready = False
+            self.risk.balance_confirmed = False
+            self.connected = False
+            log.critical(
+                "[PILOT_LIVE_STARTUP] result=BLOCKED reason=%s action=no_connect",
+                type(exc).__name__,
+            )
+            return None
+
         result = await original_connect(self, *args, **kwargs)
         if not getattr(self, "connected", False):
             self._pilot_live_prelive_ready = False
@@ -221,12 +240,10 @@ def install(TradingEngine, log) -> None:
             available = float(state["available"])
             self.risk.balance_confirmed = True
 
-            # The legacy _open implementation uses risk.balance for its two
-            # immediate affordability checks. During that narrow call only,
-            # expose free collateral there; durable peak/drawdown was already
-            # updated from accountEquity above and is restored after _open.
-            if getattr(self, "_pilot_open_in_progress", False):
-                self.risk.balance = available
+            # Keep risk.balance semantically stable as authenticated account
+            # equity. The core engine reads _pilot_available_balance explicitly
+            # for pilot affordability checks, so free collateral is never
+            # published through the equity field.
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
                 return False

@@ -1,8 +1,10 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot import pilot_live_runtime as live
+from bot.engine import TradingEngine
+from bot.financial_state import validate_financial_state
 
 
 class _Risk:
@@ -153,7 +155,7 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.original_open_called)
         engine.integrity.assess.assert_awaited_once()
 
-    async def test_entry_refresh_exposes_only_available_collateral_during_open(self):
+    async def test_entry_refresh_keeps_equity_authoritative_during_open(self):
         class Engine:
             _pilot_live_runtime_patched = False
 
@@ -161,9 +163,11 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.paper_trade = False
                 self.client = SimpleNamespace()
                 self.risk = _Risk()
+                self.risk.init(100.0)
                 self.integrity = _Integrity()
                 self.instruments = {"BTCUSDT": {}}
                 self._pilot_open_in_progress = True
+                self._pilot_available_balance = 25.0
 
             async def _connect(self):
                 self.connected = True
@@ -190,9 +194,234 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ok = await engine._refresh_entry_balance()
 
         self.assertTrue(ok)
-        self.assertEqual(engine.risk.balance, 25.0)
+        self.assertEqual(engine.risk.balance, 100.0)
+        self.assertEqual(engine._pilot_available_balance, 25.0)
         self.assertTrue(engine.risk.balance_confirmed)
 
+    async def test_historical_alias_transition_is_eliminated_at_source(self):
+        class Engine:
+            _pilot_live_runtime_patched = False
+
+            def __init__(self):
+                self.paper_trade = False
+                self.client = SimpleNamespace()
+                self.risk = _Risk()
+                self.risk._ready = True
+                self.risk.balance = 21.5075351411
+                self.risk.peak_balance = 63.7942573
+                self.risk.drawdown = 0.6628609525155488
+                self.integrity = _Integrity()
+                self.instruments = {"DOGEUSDT": {}}
+                self._pilot_open_in_progress = True
+                self._pilot_available_balance = 11.9815151411
+
+            async def _connect(self):
+                self.connected = True
+
+            async def _update_balance(self):
+                return None
+
+            async def _refresh_entry_balance(self):
+                return True
+
+            async def _open(self, sig):
+                return None
+
+        live.install(Engine, _Log())
+        engine = Engine()
+        state = {
+            "equity": 21.5075351411,
+            "available": 11.9815151411,
+            "available_source": "availableMargin",
+        }
+        with patch.object(
+            live, "_refresh_account", AsyncMock(return_value=state)
+        ):
+            ok = await engine._refresh_entry_balance()
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+        self.assertAlmostEqual(engine._pilot_available_balance, 11.9815151411)
+        validate_financial_state(
+            equity=engine.risk.balance,
+            available_margin=engine._pilot_available_balance,
+            hwm=engine.risk.peak_balance,
+            drawdown=engine.risk.drawdown,
+        )
+
+    def test_core_affordability_uses_pilot_collateral_without_relabeling_equity(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=True)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        engine._pilot_available_balance = 11.9815151411
+        self.assertAlmostEqual(engine._entry_available_funds(), 11.9815151411)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+
+    def test_core_affordability_falls_back_to_risk_balance_outside_pilot(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=False)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        self.assertAlmostEqual(engine._entry_available_funds(), 21.5075351411)
+
+
+    def test_core_affordability_missing_pilot_collateral_fails_closed_without_equity_fallback(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=True)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        self.assertEqual(engine._entry_available_funds(), 0.0)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+
+    def test_core_affordability_zero_pilot_collateral_remains_zero(self):
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.pilot = SimpleNamespace(enabled=True)
+        engine.risk = SimpleNamespace(balance=21.5075351411)
+        engine._pilot_available_balance = 0.0
+        self.assertEqual(engine._entry_available_funds(), 0.0)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+
+    async def test_non_pilot_startup_balance_keeps_legacy_get_balance_behavior(self):
+        class NonPilotEngine(TradingEngine):
+            _pilot_live_runtime_patched = False
+
+        engine = NonPilotEngine.__new__(NonPilotEngine)
+        engine.paper_trade = False
+        engine.client = SimpleNamespace(get_balance=AsyncMock(return_value=17.0))
+        value = await TradingEngine._startup_risk_balance(engine)
+        self.assertEqual(value, 17.0)
+        engine.client.get_balance.assert_awaited_once()
+
+    async def test_controlled_live_connect_uses_account_equity_from_first_risk_write(self):
+        class Client:
+            def __init__(self):
+                self.get_balance = AsyncMock(return_value=17.0)
+                self.ping = AsyncMock(return_value=True)
+                self.start_websocket = AsyncMock(return_value=None)
+                self.start_private_websocket = Mock(return_value=None)
+                self._instruments = {}
+
+            def get_instruments(self):
+                self._instruments = {
+                    "BTCUSDT": {
+                        "minQty": 1,
+                        "lotSize": 1,
+                        "qtyStep": 1,
+                        "multiplier": 1.0,
+                        "tickSize": 0.01,
+                        "minNotional": 0.0,
+                    }
+                }
+                return self._instruments
+
+        class Engine(TradingEngine):
+            _pilot_live_runtime_patched = False
+
+            async def _filter_viable_symbols(self):
+                self.viable_symbols = ["BTCUSDT"]
+
+            async def _load_existing_positions(self):
+                return None
+
+        client = Client()
+        engine = Engine(client)
+        engine.paper_trade = False
+
+        init_values = []
+        update_values = []
+        original_init = engine.risk.init
+        original_update = engine.risk.update
+
+        def record_init(value):
+            init_values.append(float(value))
+            return original_init(value)
+
+        def record_update(value):
+            update_values.append(float(value))
+            return original_update(value)
+
+        engine.risk.init = record_init
+        engine.risk.update = record_update
+
+        state = {
+            "equity": 21.5075351411,
+            "available": 11.9815151411,
+            "available_source": "availableMargin",
+            "accountEquity": "21.5075351411",
+            "availableBalance": "17.0",
+            "availableMargin": "11.9815151411",
+            "marginBalance": "18.8363",
+            "positionMargin": "12.1972",
+            "orderMargin": "0",
+        }
+
+        async def restore_hwm(risk, equity, strict=True):
+            risk.peak_balance = 63.7942573
+            risk.drawdown = (63.7942573 - float(equity)) / 63.7942573
+            return 63.7942573
+
+        live.install(Engine, _Log())
+        with patch.object(
+            live.account_semantics, "read_account_state", AsyncMock(return_value=state)
+        ) as read_state, patch.object(
+            live.capital_flows,
+            "reconcile_external_capital_flows",
+            AsyncMock(return_value={"applied": 0, "bootstrap": False}),
+        ), patch.object(
+            live, "restore_update_real_account_peak", AsyncMock(side_effect=restore_hwm)
+        ), patch.object(
+            live, "_run_readonly_preflight", AsyncMock(return_value=True)
+        ), patch(
+            "bot.engine.notify", AsyncMock()
+        ):
+            await engine._connect()
+
+        self.assertGreaterEqual(read_state.await_count, 2)
+        client.get_balance.assert_not_awaited()
+        self.assertTrue(init_values)
+        self.assertTrue(update_values)
+        self.assertEqual(set(init_values + update_values), {21.5075351411})
+        self.assertNotIn(17.0, init_values + update_values)
+        self.assertNotIn(11.9815151411, init_values + update_values)
+        self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
+        self.assertAlmostEqual(engine._pilot_available_balance, 11.9815151411)
+        self.assertAlmostEqual(engine.risk.peak_balance, 63.7942573)
+
+    async def test_controlled_live_connect_without_canonical_equity_fails_closed(self):
+        class Engine:
+            _pilot_live_runtime_patched = False
+
+            def __init__(self):
+                self.paper_trade = False
+                self.client = SimpleNamespace(get_balance=AsyncMock(return_value=17.0))
+                self.risk = _Risk()
+                self.connected = False
+
+            async def _connect(self):
+                self.connected = True
+                self.original_connect_called = True
+
+            async def _update_balance(self):
+                return None
+
+            async def _refresh_entry_balance(self):
+                return True
+
+            async def _open(self, sig):
+                return None
+
+        live.install(Engine, _Log())
+        engine = Engine()
+        engine.original_connect_called = False
+        with patch.object(
+            live.account_semantics,
+            "read_account_state",
+            AsyncMock(side_effect=RuntimeError("account overview unavailable")),
+        ):
+            result = await engine._connect()
+
+        self.assertIsNone(result)
+        self.assertFalse(engine.connected)
+        self.assertFalse(engine.original_connect_called)
+        engine.client.get_balance.assert_not_awaited()
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ BGX Capital Trading Engine v11.0
   ✅ WebSocket Bybit com reconnect automático + fallback REST
   ✅ Paper Trade mode funcional (PAPER_TRADE=true)
 """
-import asyncio, time, itertools, os
+import asyncio, time, itertools, os, math
 from datetime import datetime, timedelta, timezone
 import time
 import os
@@ -795,6 +795,28 @@ class TradingEngine:
         return cfg.MAX_RISK_PCT           # padrão (30%)
 
     # ── Connect ────────────────────────────────────────────────
+    async def _startup_risk_balance(self) -> float:
+        """Return the authority used for the first risk balance initialization.
+
+        Controlled LIVE publishes canonical KuCoin accountEquity before the
+        legacy connect routine runs. That mode must never initialize the equity
+        slot from availableBalance/availableMargin. PAPER and non-pilot callers
+        retain the existing get_balance() behavior unchanged.
+        """
+        controlled_live = (
+            not getattr(self, "paper_trade", False)
+            and bool(getattr(type(self), "_pilot_live_runtime_patched", False))
+        )
+        if controlled_live:
+            value = getattr(self, "_pilot_startup_account_equity", None)
+            if value is None:
+                raise RuntimeError("controlled LIVE startup equity unavailable")
+            value = float(value)
+            if not math.isfinite(value) or value < 0:
+                raise RuntimeError("controlled LIVE startup equity invalid")
+            return value
+        return await self.client.get_balance()
+
     async def _connect(self):
         try:
             # Ping é opcional — não bloqueia o bot se falhar
@@ -803,7 +825,7 @@ class TradingEngine:
             if not ping_ok:
                 log.warning("⚠️ Ping da exchange falhou — continuando mesmo assim (REST pode funcionar)")
 
-            bal = await self.client.get_balance()
+            bal = await self._startup_risk_balance()
             if bal < 0:
                 log.error("❌ Autenticação falhou")
                 self.connected = False
@@ -2616,6 +2638,17 @@ class TradingEngine:
             log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
             raise
 
+    def _entry_available_funds(self) -> float:
+        """Return the capital authority for immediate entry affordability.
+
+        Account equity remains in risk.balance. Controlled LIVE keeps KuCoin
+        free collateral separately in _pilot_available_balance so affordability
+        never changes the semantic meaning of the equity field.
+        """
+        if self.pilot.enabled:
+            return float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
+        return float(getattr(self.risk, "balance", 0.0) or 0.0)
+
     async def _refresh_entry_balance(self) -> bool:
         """Zero/negative is a valid account result; query failure is separate."""
         try:
@@ -2696,7 +2729,7 @@ class TradingEngine:
             asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
             if not await self._refresh_entry_balance():
                 return
-            fresh_bal = self.risk.balance
+            fresh_bal = self._entry_available_funds()
             # Piloto não permite fallback silencioso: same mandatory AI gate.
             if not self.pilot.can_open_pilot(self, self.client, sig.symbol, nx_dec):
                 return
@@ -3034,7 +3067,8 @@ class TradingEngine:
                             log.warning("[PAPER_LOSS_BUDGET] entry blocked: %s", exc)
                             return
                     required = qty * sig.entry * (1.0 / cfg.LEVERAGE + TAKER_FEE)
-                    if required > self.risk.balance:
+                    current_funds = self._entry_available_funds()
+                    if required > current_funds:
                         log.warning(f"[BALANCE] {sig.symbol} insufficient current funds")
                         return
                     _managed, _ = self.orders.get_or_create(
