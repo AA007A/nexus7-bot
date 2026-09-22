@@ -143,7 +143,7 @@ def _intrabar_fast_metrics(k15: list, direction: str) -> dict:
     return out
 
 
-_STRATEGY_STOP_GEOMETRY_EMITTED: set[str] = set()
+_STRATEGY_STOP_GEOMETRY_LAST: dict[tuple[str, str, str], str] = {}
 
 
 def _strategy_setup_id(signal, epoch: float | None = None) -> str:
@@ -168,7 +168,12 @@ def _emit_strategy_stop_geometry(signal, log, epoch: float | None = None) -> str
     if signal is None:
         return None
     setup_id = _strategy_setup_id(signal, epoch)
-    if setup_id in _STRATEGY_STOP_GEOMETRY_EMITTED:
+    dedup_key = (
+        str(getattr(signal, "symbol", "UNKNOWN")),
+        str(getattr(signal, "direction", "UNKNOWN")).upper(),
+        str(getattr(signal, "entry_type", "UNKNOWN")),
+    )
+    if _STRATEGY_STOP_GEOMETRY_LAST.get(dedup_key) == setup_id:
         return setup_id
     try:
         entry = float(signal.entry)
@@ -204,7 +209,7 @@ def _emit_strategy_stop_geometry(signal, log, epoch: float | None = None) -> str
             getattr(signal, "_bgx_1h_bias", "UNKNOWN"),
             getattr(signal, "_bgx_15m_bias", "UNKNOWN"),
         )
-        _STRATEGY_STOP_GEOMETRY_EMITTED.add(setup_id)
+        _STRATEGY_STOP_GEOMETRY_LAST[dedup_key] = setup_id
     except Exception as exc:
         try:
             log.warning(
