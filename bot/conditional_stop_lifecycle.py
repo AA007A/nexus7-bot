@@ -1,10 +1,10 @@
 """Durable ownership/idempotency lifecycle for BGX KuCoin conditional protection.
 
-This module owns only BGX-created conditional protection identified by the
-``bgx-stop-`` clientOid namespace.  It never adopts or cancels external orders.
-Trading policy (entry, sizing, leverage, SL/TP formulae) is intentionally out of
-scope: callers provide the desired trigger and this module only makes the
-resulting protection lifecycle idempotent and garbage-collectable.
+Only ``bgx-stop-`` orders are BGX-owned. During a live position, replacement
+cleanup is narrower still: only clientOids recorded in the durable slot for the
+same symbol/side/kind/lineage may be retired. Unknown/external orders are never
+adopted or cancelled. Flat cleanup may retire legacy BGX-prefixed stops for the
+proven-flat symbol because no live or pending exposure remains.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from bot.logger import log
 _REGISTRY_KEY = "conditional_protection_registry_v1"
 _BGX_PREFIX = "bgx-stop-"
 _AMBIGUITY_GRACE_S = 15.0
+_STOP_LIMIT = 50
 _CACHE = {}
 _LOCKS = {}
 
@@ -51,7 +52,11 @@ def _active(order: dict) -> bool:
 
 
 def _engine(client):
-    return getattr(client, "_engine", None)
+    engine = getattr(client, "_engine", None)
+    if engine is not None:
+        return engine
+    raw = getattr(client, "_client", None)
+    return getattr(raw, "_engine", None) if raw is not None else None
 
 
 def _cache_key(client):
@@ -67,14 +72,10 @@ def _lock(client):
 
 
 async def _validate_owner(client) -> bool:
-    """Require the existing LIVE ownership/fencing authority in real runtime.
-
-    Isolated unit clients intentionally have no engine and therefore no live
-    ownership object; they exercise pure lifecycle semantics without production
-    mutation authority.
-    """
+    """Require the existing production ownership/fencing authority."""
     engine = _engine(client)
     if engine is None:
+        # Isolated unit adapters have no production engine/lease.
         return True
     if not bool(getattr(engine, "_execution_ownership_valid", False)):
         return False
@@ -158,8 +159,17 @@ def _logical_oid(slot_key: str, trigger: str, generation: int = 0) -> str:
     return _BGX_PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:30]
 
 
+def _terminal_truth(data: dict) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    if "isActive" in data and data.get("isActive") is False:
+        return True
+    return str(data.get("status") or "").lower() in {
+        "done", "filled", "cancelled", "canceled", "triggered", "rejected"
+    }
+
+
 def protection_kind(order: dict, position_side: str) -> str:
-    """Classify an active closing conditional as SL/TP for one position side."""
     if not isinstance(order, dict):
         return ""
     side = str(order.get("side") or "").lower()
@@ -172,16 +182,26 @@ def protection_kind(order: dict, position_side: str) -> str:
     return ""
 
 
+async def owned_for_lineage(
+    client, symbol: str, order_side: str, kind: str, lineage: str, client_oid: str
+) -> bool:
+    state = await _load_registry(client)
+    rec = state.get("slots", {}).get(_slot_key(symbol, order_side, kind, lineage))
+    if not isinstance(rec, dict):
+        return False
+    return str(client_oid) in {str(x) for x in rec.get("owned_client_oids", [])}
+
+
 async def prepare_candidate(
     client, symbol: str, position_side: str, order_side: str, kind: str,
     lineage: str, trigger: str,
 ) -> dict:
-    """Return a deterministic candidate and whether one POST is permitted.
+    """Return one durable logical candidate for the desired protection state.
 
-    A PENDING slot suppresses cross-invocation resubmission.  After the grace
-    window, an authoritative byClientOid lookup may prove the previous attempt
-    terminal/absent; only then is a new generation allowed.  An unresolved
-    attempt never produces UUID A/B/C churn.
+    Ambiguous retries reuse the SAME clientOid. A new generation is allowed only
+    after authoritative truth proves the previous same-desired candidate became
+    terminal. Capacity-blocked candidates do not retry until inventory drops
+    below the exchange limit.
     """
     async with _lock(client):
         state = await _load_registry(client)
@@ -201,6 +221,13 @@ async def prepare_candidate(
                     "slot_key": key,
                 }
             oid = str(rec.get("client_oid") or "")
+            if rec.get("capacity_blocked") is True:
+                return {
+                    "client_oid": oid,
+                    "post_allowed": False,
+                    "reason": "capacity_blocked_reconcile_required",
+                    "slot_key": key,
+                }
             age = max(0.0, now - float(rec.get("attempted_at", now) or now))
             lookup = getattr(client, "get_order_by_client_oid", None)
             truth = None
@@ -210,27 +237,63 @@ async def prepare_candidate(
                 except Exception:
                     truth = None
             if isinstance(truth, dict) and truth:
-                if bool(truth.get("isActive", False)):
-                    return {"client_oid": oid, "post_allowed": False,
-                            "reason": "candidate_visible_active", "slot_key": key}
-                rec["status"] = "RESOLVED_TERMINAL"
-                rec["resolved_at"] = now
-                await _persist_registry(client, state, "candidate_terminal_truth")
-            elif age < _AMBIGUITY_GRACE_S:
-                return {"client_oid": oid, "post_allowed": False,
-                        "reason": "candidate_ambiguity_grace", "slot_key": key}
+                if truth.get("isActive") is True:
+                    return {
+                        "client_oid": oid,
+                        "post_allowed": False,
+                        "reason": "candidate_visible_active",
+                        "slot_key": key,
+                    }
+                if _terminal_truth(truth):
+                    rec["status"] = "RESOLVED_TERMINAL"
+                    rec["resolved_at"] = now
+                    await _persist_registry(client, state, "candidate_terminal_truth")
+                else:
+                    return {
+                        "client_oid": oid,
+                        "post_allowed": False,
+                        "reason": "candidate_truth_ambiguous",
+                        "slot_key": key,
+                    }
             else:
-                # No order is visible after a bounded grace period. Reuse the
-                # same logical desired state but advance generation only after
-                # the prior attempt's ambiguity window has expired.
-                rec["status"] = "RESOLVED_NOT_VISIBLE"
-                rec["resolved_at"] = now
-                await _persist_registry(client, state, "candidate_not_visible")
+                if age < _AMBIGUITY_GRACE_S:
+                    return {
+                        "client_oid": oid,
+                        "post_allowed": False,
+                        "reason": "candidate_ambiguity_grace",
+                        "slot_key": key,
+                    }
+                # Re-submit, if needed, with the SAME idempotency identity. This
+                # cannot create UUID A/B/C for one unresolved desired state.
+                rec["attempted_at"] = now
+                rec["updated_at"] = now
+                if not await _persist_registry(client, state, "candidate_same_identity_retry"):
+                    return {
+                        "client_oid": oid,
+                        "post_allowed": False,
+                        "reason": "ownership_or_persistence_unavailable",
+                        "slot_key": key,
+                    }
+                return {
+                    "client_oid": oid,
+                    "post_allowed": True,
+                    "reason": "retry_same_identity",
+                    "slot_key": key,
+                }
 
         generation = 0
-        if rec and rec.get("desired_trigger") == desired:
-            generation = int(rec.get("generation", 0) or 0) + 1
+        owned = []
+        previous_verified = ""
+        if rec:
+            owned = [str(x) for x in rec.get("owned_client_oids", []) if str(x)]
+            if rec.get("status") == "VERIFIED":
+                previous_verified = str(rec.get("client_oid") or "")
+            if rec.get("desired_trigger") == desired and rec.get("status") == "RESOLVED_TERMINAL":
+                generation = int(rec.get("generation", 0) or 0) + 1
+
         oid = _logical_oid(key, desired, generation)
+        if oid not in owned:
+            owned.append(oid)
         slots[key] = {
             "symbol": _canon_symbol(symbol),
             "position_side": str(position_side).lower(),
@@ -243,12 +306,23 @@ async def prepare_candidate(
             "status": "PENDING",
             "attempted_at": now,
             "updated_at": now,
+            "owned_client_oids": owned,
+            "previous_verified_client_oid": previous_verified,
+            "capacity_blocked": False,
         }
         if not await _persist_registry(client, state, "candidate_prepared"):
-            return {"client_oid": oid, "post_allowed": False,
-                    "reason": "ownership_or_persistence_unavailable", "slot_key": key}
-        return {"client_oid": oid, "post_allowed": True,
-                "reason": "new_candidate", "slot_key": key}
+            return {
+                "client_oid": oid,
+                "post_allowed": False,
+                "reason": "ownership_or_persistence_unavailable",
+                "slot_key": key,
+            }
+        return {
+            "client_oid": oid,
+            "post_allowed": True,
+            "reason": "new_candidate",
+            "slot_key": key,
+        }
 
 
 async def mark_verified(client, slot_key: str, order_id: str = "") -> bool:
@@ -261,6 +335,7 @@ async def mark_verified(client, slot_key: str, order_id: str = "") -> bool:
         rec["order_id"] = str(order_id or rec.get("order_id") or "")
         rec["verified_at"] = time.time()
         rec["updated_at"] = time.time()
+        rec["capacity_blocked"] = False
         return await _persist_registry(client, state, "candidate_verified")
 
 
@@ -277,15 +352,27 @@ async def mark_capacity_blocked(client, slot_key: str, observed_count: int) -> b
         return await _persist_registry(client, state, "kucoin_300004_capacity")
 
 
-async def _cancel_order(client, order_id: str) -> bool:
-    if not order_id:
+async def clear_capacity_if_recovered(client, slot_key: str, observed_count: int) -> bool:
+    """Permit the SAME pending identity to retry only after capacity is observed free."""
+    if int(observed_count) >= _STOP_LIMIT:
         return False
-    if not await _validate_owner(client):
+    async with _lock(client):
+        state = await _load_registry(client)
+        rec = state.setdefault("slots", {}).get(slot_key)
+        if not isinstance(rec, dict) or rec.get("capacity_blocked") is not True:
+            return False
+        rec["capacity_blocked"] = False
+        rec["attempted_at"] = 0.0
+        rec["updated_at"] = time.time()
+        return await _persist_registry(client, state, "stop_capacity_recovered")
+
+
+async def _cancel_order(client, order_id: str) -> bool:
+    if not order_id or not await _validate_owner(client):
         return False
     endpoint = f"/api/v1/orders/{quote(str(order_id), safe='')}"
     assert_exchange_mutation_allowed("DELETE", endpoint)
 
-    # Test/client adapters may expose a narrow single-order cancellation method.
     narrow = getattr(client, "cancel_order_by_id", None)
     if callable(narrow):
         return bool(await narrow(str(order_id)))
@@ -313,22 +400,32 @@ async def _cancel_order(client, order_id: str) -> bool:
         return False
 
 
-def inventory(orders, symbol: str, position_side: str, kind: str, canonical_oid: str) -> dict:
+def inventory(orders, symbol: str, position_side: str, kind: str, canonical_oid: str, lineage_oids=None) -> dict:
     same_symbol = [
         row for row in (orders or [])
         if _active(row) and _canon_symbol(row.get("symbol")) == _canon_symbol(symbol)
     ]
-    owned = [row for row in same_symbol if is_bgx_owned(row)]
+    bgx = [row for row in same_symbol if is_bgx_owned(row)]
     external = [row for row in same_symbol if not is_bgx_owned(row)]
-    same_kind = [row for row in owned if protection_kind(row, position_side) == kind]
+    allowed = {str(x) for x in (lineage_oids or []) if str(x)}
+    same_kind = [
+        row for row in bgx
+        if protection_kind(row, position_side) == kind
+        and (not allowed or str(row.get("clientOid") or "") in allowed)
+    ]
     superseded = [row for row in same_kind if str(row.get("clientOid") or "") != canonical_oid]
     canonical = [row for row in same_kind if str(row.get("clientOid") or "") == canonical_oid]
+    unknown_bgx = [
+        row for row in bgx
+        if allowed and str(row.get("clientOid") or "") not in allowed
+    ]
     return {
-        "owned": owned,
+        "bgx": bgx,
         "external": external,
         "same_kind": same_kind,
         "superseded": superseded,
         "canonical": canonical,
+        "unknown_bgx": unknown_bgx,
     }
 
 
@@ -336,26 +433,35 @@ async def cleanup_superseded(
     client, symbol: str, position_side: str, kind: str, canonical_oid: str,
     read_stop_orders,
 ) -> tuple[bool, int, int]:
-    """Cancel only superseded BGX-owned same-symbol/same-kind protection.
-
-    The canonical replacement must already be independently visible before any
-    cancellation occurs. External orders are never candidates.
-    """
+    """Create/verify has already succeeded; retire same-lineage BGX superseded stops."""
     if not await _validate_owner(client):
         return False, 0, 0
+    state = await _load_registry(client)
+    matching = None
+    for rec in state.get("slots", {}).values():
+        if not isinstance(rec, dict):
+            continue
+        owned = {str(x) for x in rec.get("owned_client_oids", [])}
+        if canonical_oid in owned:
+            matching = rec
+            break
+    if matching is None:
+        # Never adopt a legacy/unknown BGX stop as a live-lineage authority.
+        return False, 0, 0
+
+    lineage_oids = matching.get("owned_client_oids", [])
     before = await read_stop_orders(client, symbol)
     if before is None:
         return False, 0, 0
-    inv = inventory(before, symbol, position_side, kind, canonical_oid)
+    inv = inventory(before, symbol, position_side, kind, canonical_oid, lineage_oids)
     if not inv["canonical"]:
         return False, len(inv["superseded"]), len(inv["external"])
     for row in inv["superseded"]:
-        order_id = str(row.get("id") or row.get("orderId") or "")
-        await _cancel_order(client, order_id)
+        await _cancel_order(client, str(row.get("id") or row.get("orderId") or ""))
     after = await read_stop_orders(client, symbol)
     if after is None:
         return False, len(inv["superseded"]), len(inv["external"])
-    after_inv = inventory(after, symbol, position_side, kind, canonical_oid)
+    after_inv = inventory(after, symbol, position_side, kind, canonical_oid, lineage_oids)
     ok = bool(after_inv["canonical"]) and not after_inv["superseded"]
     return ok, len(inv["superseded"]), len(after_inv["external"])
 
@@ -364,7 +470,7 @@ async def cleanup_flat_symbol(
     engine, symbol: str, *, exchange_position_qty: float,
     active_entry_confirmed_absent: bool,
 ) -> bool:
-    """Remove only obsolete BGX-owned conditional protection for a proven-flat symbol."""
+    """Retire only BGX-owned protection after authoritative flat preconditions."""
     try:
         if not math.isfinite(float(exchange_position_qty)) or abs(float(exchange_position_qty)) > 0:
             return False
@@ -382,6 +488,7 @@ async def cleanup_flat_symbol(
         client = getattr(engine, "client", None)
         if client is None or not await _validate_owner(client):
             return False
+
         from bot.conditional_stop_protection import read_stop_orders
         before = await read_stop_orders(client, symbol)
         if before is None:
