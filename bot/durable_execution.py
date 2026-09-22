@@ -341,7 +341,12 @@ def _advance(order, state: OrderState, **info):
 
 
 async def reconcile_orders(engine) -> bool:
-    """Resolve restored non-terminal intents without ever resubmitting them."""
+    """Resolve restored non-terminal intents without ever resubmitting them.
+
+    LIVE startup uses the exact same authoritative exchange-order evaluator as
+    continuous runtime reconciliation. Position presence/flatness is never a
+    substitute for order truth.
+    """
     pending = list(engine.orders.pending_orders())
     if not pending:
         _clear(engine, "orders")
@@ -350,9 +355,6 @@ async def reconcile_orders(engine) -> bool:
     unresolved = []
     for order in pending:
         try:
-            if order.symbol in engine.positions:
-                _advance(order, OrderState.FILLED, source="STARTUP_POSITION")
-                continue
             if getattr(engine, "paper_trade", False):
                 terminal = (
                     OrderState.FAILED
@@ -368,23 +370,14 @@ async def reconcile_orders(engine) -> bool:
             if not data:
                 unresolved.append(order.client_oid)
                 continue
-            order_id = str(data.get("orderId") or data.get("id") or "")
-            if order_id:
-                engine.orders.index_order_id(order_id, order.client_oid)
-                if order.state == OrderState.SUBMITTING:
-                    order.transition(
-                        OrderState.SUBMITTED, order_id=order_id, source="STARTUP_REST"
-                    )
-            filled = float(data.get("filledSize", data.get("dealSize", 0)) or 0)
-            active = bool(data.get("isActive", False))
-            if filled > 0 and not active:
-                _advance(
-                    order, OrderState.FILLED, order_id=order_id,
-                    filled_qty=filled, source="STARTUP_REST",
-                )
-            elif not active and filled <= 0 and order.state == OrderState.SUBMITTED:
-                order.transition(OrderState.CANCELLED, source="STARTUP_REST")
-            if not order.is_terminal:
+            # Local import avoids a module-import cycle while making startup and
+            # continuous LIVE reconciliation share one authoritative state
+            # transition implementation.
+            from bot.durable_live_reconciliation import apply_exchange_order_truth
+            _, terminal = apply_exchange_order_truth(
+                engine, order, data, source="STARTUP_REST"
+            )
+            if not terminal:
                 unresolved.append(order.client_oid)
         except Exception as exc:
             log.error("[DURABLE_ORDER] reconcile %s failed: %s", order.client_oid, exc)
