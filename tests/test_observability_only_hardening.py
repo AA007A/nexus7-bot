@@ -60,7 +60,7 @@ def _strategy_signal(entry_type="PULLBACK"):
 
 class StrategyStopGeometryObservabilityTests(unittest.TestCase):
     def setUp(self):
-        pullback._STRATEGY_STOP_GEOMETRY_EMITTED.clear()
+        pullback._STRATEGY_STOP_GEOMETRY_LAST.clear()
 
     def test_pullback_block_still_emits_complete_geometry_and_linked_setup_id(self):
         sig = _strategy_signal("PULLBACK")
@@ -123,7 +123,7 @@ class StrategyStopGeometryObservabilityTests(unittest.TestCase):
 
     def test_geometry_event_covers_all_entry_types(self):
         for idx, entry_type in enumerate(("BOS_BREAK", "MOMENTUM", "PULLBACK")):
-            pullback._STRATEGY_STOP_GEOMETRY_EMITTED.clear()
+            pullback._STRATEGY_STOP_GEOMETRY_LAST.clear()
             sig = _strategy_signal(entry_type)
 
             class Analyzer:
