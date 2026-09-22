@@ -15,6 +15,7 @@ from bot.order_state import OrderState
 
 
 _MIN_INTERVAL_S = 10.0
+_TERMINAL_STATUS = {"done", "filled", "cancelled", "canceled", "rejected", "reject"}
 
 
 def _canon_symbol(value: str) -> str:
@@ -50,10 +51,44 @@ async def _owner_valid(engine) -> bool:
         return False
 
 
+def _cancel_terminal(order, *, order_id: str, filled: float, source: str) -> bool:
+    """Move one non-terminal order to a non-fill terminal state monotonically."""
+    if order.is_terminal:
+        return False
+    if order.state == OrderState.CREATED:
+        order.transition(OrderState.FAILED, source=source)
+        return True
+    if order.state == OrderState.SUBMITTING:
+        order.transition(OrderState.SUBMITTED, order_id=order_id, source=source)
+    order.transition(
+        OrderState.CANCELLED,
+        order_id=order_id,
+        filled_qty=filled,
+        source=source,
+    )
+    return True
+
+
+def _reject_terminal(order, *, order_id: str, source: str) -> bool:
+    """Represent authoritative rejection using only states legal in the FSM."""
+    if order.is_terminal:
+        return False
+    if order.state == OrderState.CREATED:
+        order.transition(OrderState.FAILED, source=source)
+        return True
+    if order.state == OrderState.PARTIALLY_FILLED:
+        # A partially executed order cannot be rewritten as a zero-fill reject;
+        # terminal exchange truth means the remainder is no longer executable.
+        order.transition(OrderState.CANCELLED, order_id=order_id, source=source)
+        return True
+    order.transition(OrderState.REJECTED, order_id=order_id, source=source)
+    return True
+
+
 def _transition_from_truth(engine, order, data: dict) -> tuple[bool, bool]:
     """Apply one authoritative REST snapshot.
 
-    Returns ``(changed, terminal)``.  The durable requested quantity is stored
+    Returns ``(changed, terminal)``. The durable requested quantity is stored
     in KuCoin contract units, matching ``filledSize``/``dealSize``.
     """
     if not isinstance(data, dict) or not data:
@@ -80,16 +115,24 @@ def _transition_from_truth(engine, order, data: dict) -> tuple[bool, bool]:
     if requested <= 0:
         raise ValueError("invalid durable requested quantity")
 
-    active = bool(data.get("isActive", False))
+    has_active_flag = "isActive" in data
+    active = bool(data.get("isActive")) if has_active_flag else None
     status = str(data.get("status") or "").strip().lower()
     cancel_exists = bool(data.get("cancelExist", False))
+    terminal_truth = (
+        (has_active_flag and active is False)
+        or status in _TERMINAL_STATUS
+        or cancel_exists
+    )
     tolerance = max(1e-9, requested * 1e-9)
     changed = False
 
-    # Preserve normal monotonic progression while the exchange still considers
-    # the order active. This is state reconciliation only; no accounting side
-    # effect is invoked here.
-    if active:
+    # Preserve normal monotonic progression while exchange truth explicitly says
+    # active. Missing isActive is never treated as false.
+    if active is True:
+        if order.state == OrderState.CREATED:
+            order.transition(OrderState.SUBMITTING, source="LIVE_REST")
+            changed = True
         if order.state == OrderState.SUBMITTING:
             order.transition(
                 OrderState.SUBMITTED,
@@ -117,10 +160,18 @@ def _transition_from_truth(engine, order, data: dict) -> tuple[bool, bool]:
                 changed = True
         return changed, order.is_terminal
 
-    # Inactive/completed is not automatically FILLED. A full terminal fill must
-    # cover the durable requested contract quantity. This specifically avoids
-    # classifying a partial execution + cancelled remainder as a full fill.
+    # An incomplete REST payload must not become terminal merely because
+    # ``isActive`` was omitted. Wait for explicit terminal exchange truth.
+    if not terminal_truth:
+        return False, False
+
+    # Full terminal execution requires the exchange's executed contract count to
+    # cover the durable requested quantity. Flat position is deliberately absent
+    # from this predicate.
     if filled + tolerance >= requested:
+        if order.state == OrderState.CREATED:
+            order.transition(OrderState.SUBMITTING, source="LIVE_REST")
+            changed = True
         if order.state == OrderState.SUBMITTING:
             order.transition(
                 OrderState.SUBMITTED,
@@ -136,36 +187,26 @@ def _transition_from_truth(engine, order, data: dict) -> tuple[bool, bool]:
                 source="LIVE_REST",
             )
             changed = True
-        return changed, True
+        return changed, order.is_terminal
 
-    # An inactive order with less than requested execution is terminal but not a
-    # full fill. KuCoin uses cancelExist/status to expose cancellation, while a
-    # done inactive order with partial size is equivalent for lifecycle purposes.
-    if status in {"rejected", "reject"} and order.state != OrderState.PARTIALLY_FILLED:
-        if order.state == OrderState.SUBMITTING:
-            order.transition(OrderState.REJECTED, source="LIVE_REST")
-        elif order.state == OrderState.SUBMITTED:
-            order.transition(OrderState.REJECTED, source="LIVE_REST")
-        changed = True
-        return changed, True
+    # Partial execution + cancelled/done remainder is terminal, but is not a
+    # false full fill. Rejected zero-fill orders retain rejection semantics.
+    if status in {"rejected", "reject"}:
+        changed = _reject_terminal(
+            order,
+            order_id=remote_order_id,
+            source="LIVE_REST",
+        ) or changed
+        return changed, order.is_terminal
 
-    if cancel_exists or status in {"cancelled", "canceled", "done"} or filled < requested:
-        if order.state == OrderState.SUBMITTING:
-            order.transition(
-                OrderState.SUBMITTED,
-                order_id=remote_order_id,
-                source="LIVE_REST",
-            )
-            changed = True
-        if not order.is_terminal:
-            order.transition(
-                OrderState.CANCELLED,
-                order_id=remote_order_id,
-                filled_qty=filled,
-                source="LIVE_REST",
-            )
-            changed = True
-        return changed, True
+    if cancel_exists or status in {"cancelled", "canceled", "done", "filled"} or active is False:
+        changed = _cancel_terminal(
+            order,
+            order_id=remote_order_id,
+            filled=filled,
+            source="LIVE_REST",
+        ) or changed
+        return changed, order.is_terminal
 
     return changed, order.is_terminal
 
