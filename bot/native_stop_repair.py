@@ -44,13 +44,16 @@ def _matches(order, body, position=None, instrument_info=None):
     try:
         semantic_match = (
             _order_active(order)
-            and _normalized_symbol(order.get("symbol", "")) == _normalized_symbol(body["symbol"])
+            and _normalized_symbol(order.get("symbol", ""))
+            == _normalized_symbol(body["symbol"])
             and str(order.get("side", "")).lower() == body["side"]
             and (order.get("closeOrder") is True or order.get("reduceOnly") is True)
             and str(order.get("stop", "")).lower() == body["stop"]
             and str(order.get("stopPriceType") or body["stopPriceType"]).upper()
             == body["stopPriceType"]
-            and _same_trigger_price(order.get("stopPrice"), body["stopPrice"], instrument_info)
+            and _same_trigger_price(
+                order.get("stopPrice"), body["stopPrice"], instrument_info
+            )
         )
         if not semantic_match or position is None:
             return False
@@ -60,7 +63,9 @@ def _matches(order, body, position=None, instrument_info=None):
         if position_qty <= 0:
             return False
         position_base = _to_base_size(
-            position_qty, position.get("sizeUnit", "CONTRACTS"), instrument_info
+            position_qty,
+            position.get("sizeUnit", "CONTRACTS"),
+            instrument_info,
         )
         covered = _to_base_size(
             order.get("size", order.get("qty", 0)),
@@ -75,14 +80,15 @@ def _matches(order, body, position=None, instrument_info=None):
         return False
 
 
-def _exact_bgx_matches(orders, body, position, instrument_info):
+def _exact_matches(orders, body, position, instrument_info):
     return sorted(
         [
             row for row in (orders or [])
-            if lifecycle.is_bgx_owned(row)
-            and _matches(row, body, position, instrument_info)
+            if _matches(row, body, position, instrument_info)
         ],
-        key=lambda row: float(row.get("updatedAt", row.get("createdAt", 0)) or 0),
+        key=lambda row: float(
+            row.get("updatedAt", row.get("createdAt", 0)) or 0
+        ),
         reverse=True,
     )
 
@@ -98,7 +104,8 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
         pos = next(
             (
                 p for p in positions
-                if p.get("symbol") == symbol and abs(_number(p.get("size"))) > 0
+                if p.get("symbol") == symbol
+                and abs(_number(p.get("size"))) > 0
             ),
             None,
         )
@@ -124,13 +131,18 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             below = long if kind == "SL" else not long
             trigger = _number(rounded)
             if kind == "SL":
-                invalid = (long and trigger >= reference) or ((not long) and trigger <= reference)
+                invalid = (long and trigger >= reference) or (
+                    (not long) and trigger <= reference
+                )
             else:
-                invalid = (long and trigger <= reference) or ((not long) and trigger >= reference)
+                invalid = (long and trigger <= reference) or (
+                    (not long) and trigger >= reference
+                )
             if invalid:
                 log.error(
                     "[NATIVE_STOP_REPAIR] symbol=%s kind=%s invalid_trigger_side",
-                    symbol, kind,
+                    symbol,
+                    kind,
                 )
                 return False
 
@@ -145,11 +157,36 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 reduceOnly=True,
             )
 
-            # Price equivalence alone is not ownership/lineage authority. A
-            # visible stop is canonical only when its clientOid is in the durable
-            # slot for this exact live lineage.
+            exact_rows = _exact_matches(orders, body, pos, instrument_info)
+
+            # An external exact stop may already provide valid exchange
+            # protection (notably across restart). Respect it without adopting,
+            # persisting, renaming, or cancelling it. This preserves the legacy
+            # no-duplicate behavior while keeping ownership boundaries strict.
+            external_exact = next(
+                (row for row in exact_rows if not lifecycle.is_bgx_owned(row)),
+                None,
+            )
+            if external_exact is not None:
+                log.info(
+                    "[PROTECTION_READBACK] symbol=%s kind=%s "
+                    "canonical_client_oid=EXTERNAL_UNOWNED superseded_bgx=0 "
+                    "external=1 desired_trigger=%s verified_trigger=%s "
+                    "cleanup_status=NOT_OWNED",
+                    symbol,
+                    kind,
+                    rounded,
+                    external_exact.get("stopPrice"),
+                )
+                continue
+
+            # Price equivalence alone does not authorize BGX ownership/lineage.
+            # A BGX stop is canonical only when its clientOid was persisted in
+            # the slot for this exact live lineage.
             exact = None
-            for row in _exact_bgx_matches(orders, body, pos, instrument_info):
+            for row in exact_rows:
+                if not lifecycle.is_bgx_owned(row):
+                    continue
                 oid = str(row.get("clientOid") or "")
                 if await lifecycle.owned_for_lineage(
                     client, symbol, body["side"], kind, lineage, oid
@@ -158,15 +195,28 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     break
             if exact is not None:
                 canonical_oid = str(exact.get("clientOid") or "")
-                cleanup_ok, superseded, external = await lifecycle.cleanup_superseded(
-                    client, symbol, side, kind, canonical_oid, read_stop_orders
+                cleanup_ok, superseded, external = (
+                    await lifecycle.cleanup_superseded(
+                        client,
+                        symbol,
+                        side,
+                        kind,
+                        canonical_oid,
+                        read_stop_orders,
+                    )
                 )
                 log.info(
-                    "[PROTECTION_READBACK] symbol=%s kind=%s canonical_client_oid=%s "
-                    "superseded_bgx=%s external=%s desired_trigger=%s "
-                    "verified_trigger=%s cleanup_status=%s",
-                    symbol, kind, canonical_oid, superseded, external, rounded,
-                    exact.get("stopPrice"), "VERIFIED" if cleanup_ok else "UNCONFIRMED",
+                    "[PROTECTION_READBACK] symbol=%s kind=%s "
+                    "canonical_client_oid=%s superseded_bgx=%s external=%s "
+                    "desired_trigger=%s verified_trigger=%s cleanup_status=%s",
+                    symbol,
+                    kind,
+                    canonical_oid,
+                    superseded,
+                    external,
+                    rounded,
+                    exact.get("stopPrice"),
+                    "VERIFIED" if cleanup_ok else "UNCONFIRMED",
                 )
                 if not cleanup_ok:
                     return False
@@ -185,12 +235,10 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 str(rounded),
             )
 
-            # A capacity block is sticky: do not POST again while the exchange
-            # still reports 50 stops. If capacity later becomes free, retry the
-            # SAME logical identity rather than minting a new clientOid.
             if (
                 not candidate.get("post_allowed")
-                and candidate.get("reason") == "capacity_blocked_reconcile_required"
+                and candidate.get("reason")
+                == "capacity_blocked_reconcile_required"
                 and isinstance(orders, list)
                 and len(orders) < 50
             ):
@@ -210,16 +258,21 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
             body["clientOid"] = candidate["client_oid"]
             if not candidate.get("post_allowed"):
                 log.error(
-                    "[NATIVE_STOP_REPAIR] symbol=%s kind=%s readback_unconfirmed "
-                    "candidate=%s reason=%s resubmit=false",
-                    symbol, kind, body["clientOid"], candidate.get("reason"),
+                    "[NATIVE_STOP_REPAIR] symbol=%s kind=%s "
+                    "readback_unconfirmed candidate=%s reason=%s resubmit=false",
+                    symbol,
+                    kind,
+                    body["clientOid"],
+                    candidate.get("reason"),
                 )
                 return False
 
             result = None
             capacity_error = False
             try:
-                result = await client._post("/api/v1/orders", body, single_attempt=True)
+                result = await client._post(
+                    "/api/v1/orders", body, single_attempt=True
+                )
             except Exception as exc:
                 capacity_error = "300004" in str(exc)
                 if capacity_error:
@@ -229,12 +282,14 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     log.error(
                         "[NATIVE_STOP_CAPACITY] symbol=%s code=300004 stops=%s "
                         "action=RECONCILE_NO_RESUBMIT",
-                        symbol, len(orders),
+                        symbol,
+                        len(orders),
                     )
                 else:
                     log.warning(
                         "[NATIVE_STOP_REPAIR] symbol=%s post_unconfirmed=%s",
-                        symbol, type(exc).__name__,
+                        symbol,
+                        type(exc).__name__,
                     )
 
             confirmed = None
@@ -247,7 +302,8 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 confirmed = next(
                     (
                         row for row in orders
-                        if str(row.get("clientOid") or "") == body["clientOid"]
+                        if str(row.get("clientOid") or "")
+                        == body["clientOid"]
                         and _matches(row, body, pos, instrument_info)
                     ),
                     None,
@@ -256,9 +312,6 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     break
 
             if confirmed is None:
-                # Current KuCoin transport logs permanent 300004 then returns {}.
-                # A full authoritative inventory + empty POST result is therefore
-                # also a capacity signal. It remains sticky until count < 50.
                 if (
                     isinstance(orders, list)
                     and len(orders) >= 50
@@ -270,12 +323,15 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     log.error(
                         "[NATIVE_STOP_CAPACITY] symbol=%s code=300004 stops=%s "
                         "action=RECONCILE_NO_RESUBMIT",
-                        symbol, len(orders),
+                        symbol,
+                        len(orders),
                     )
                 log.error(
-                    "[NATIVE_STOP_REPAIR] symbol=%s kind=%s readback_unconfirmed "
-                    "candidate=%s resubmit=false",
-                    symbol, kind, body["clientOid"],
+                    "[NATIVE_STOP_REPAIR] symbol=%s kind=%s "
+                    "readback_unconfirmed candidate=%s resubmit=false",
+                    symbol,
+                    kind,
+                    body["clientOid"],
                 )
                 return False
 
@@ -284,15 +340,28 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 candidate["slot_key"],
                 str(confirmed.get("id") or confirmed.get("orderId") or ""),
             )
-            cleanup_ok, superseded, external = await lifecycle.cleanup_superseded(
-                client, symbol, side, kind, body["clientOid"], read_stop_orders
+            cleanup_ok, superseded, external = (
+                await lifecycle.cleanup_superseded(
+                    client,
+                    symbol,
+                    side,
+                    kind,
+                    body["clientOid"],
+                    read_stop_orders,
+                )
             )
             log.info(
-                "[PROTECTION_READBACK] symbol=%s kind=%s canonical_client_oid=%s "
-                "superseded_bgx=%s external=%s desired_trigger=%s "
-                "verified_trigger=%s cleanup_status=%s",
-                symbol, kind, body["clientOid"], superseded, external, rounded,
-                confirmed.get("stopPrice"), "VERIFIED" if cleanup_ok else "UNCONFIRMED",
+                "[PROTECTION_READBACK] symbol=%s kind=%s "
+                "canonical_client_oid=%s superseded_bgx=%s external=%s "
+                "desired_trigger=%s verified_trigger=%s cleanup_status=%s",
+                symbol,
+                kind,
+                body["clientOid"],
+                superseded,
+                external,
+                rounded,
+                confirmed.get("stopPrice"),
+                "VERIFIED" if cleanup_ok else "UNCONFIRMED",
             )
             if not cleanup_ok:
                 return False
@@ -301,14 +370,19 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 return False
 
             log.info(
-                "[NATIVE_STOP_REPAIR] symbol=%s kind=%s trigger=%s closeOrder=true "
-                "confirmed=true canonical_client_oid=%s superseded_cleanup=verified",
-                symbol, kind, rounded, body["clientOid"],
+                "[NATIVE_STOP_REPAIR] symbol=%s kind=%s trigger=%s "
+                "closeOrder=true confirmed=true canonical_client_oid=%s "
+                "superseded_cleanup=verified",
+                symbol,
+                kind,
+                rounded,
+                body["clientOid"],
             )
         return True
     except Exception as exc:
         log.error(
             "[NATIVE_STOP_REPAIR] symbol=%s failed=%s",
-            symbol, type(exc).__name__,
+            symbol,
+            type(exc).__name__,
         )
         return False
