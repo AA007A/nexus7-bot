@@ -1,8 +1,8 @@
 """Repair KuCoin Futures protection with verified conditional closing orders.
 
-The desired SL/TP is still supplied by the existing trading policy.  This
-module changes only lifecycle mechanics: BGX-owned protection is deterministic
-across retries, a replacement is verified before superseded BGX stops are
+The desired SL/TP is still supplied by the existing trading policy. This module
+changes only lifecycle mechanics: BGX-owned protection is deterministic across
+retries, a replacement is verified before same-lineage superseded BGX stops are
 retired, and external/user-created orders are never adopted or cancelled.
 """
 import asyncio
@@ -52,9 +52,7 @@ def _matches(order, body, position=None, instrument_info=None):
             == body["stopPriceType"]
             and _same_trigger_price(order.get("stopPrice"), body["stopPrice"], instrument_info)
         )
-        if not semantic_match:
-            return False
-        if position is None:
+        if not semantic_match or position is None:
             return False
         if order.get("closeOrder") is True:
             return True
@@ -77,16 +75,16 @@ def _matches(order, body, position=None, instrument_info=None):
         return False
 
 
-def _existing_bgx_exact(orders, body, position, instrument_info):
-    """Return one already-visible BGX-owned exact desired protection order."""
-    matches = [
-        row for row in (orders or [])
-        if lifecycle.is_bgx_owned(row)
-        and _matches(row, body, position, instrument_info)
-    ]
-    if not matches:
-        return None
-    return max(matches, key=lambda row: float(row.get("updatedAt", row.get("createdAt", 0)) or 0))
+def _exact_bgx_matches(orders, body, position, instrument_info):
+    return sorted(
+        [
+            row for row in (orders or [])
+            if lifecycle.is_bgx_owned(row)
+            and _matches(row, body, position, instrument_info)
+        ],
+        key=lambda row: float(row.get("updatedAt", row.get("createdAt", 0)) or 0),
+        reverse=True,
+    )
 
 
 async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
@@ -147,9 +145,17 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 reduceOnly=True,
             )
 
-            # A visible BGX-owned exact stop is already authoritative exchange
-            # truth. It can become canonical without creating another order.
-            exact = _existing_bgx_exact(orders, body, pos, instrument_info)
+            # Price equivalence alone is not ownership/lineage authority. A
+            # visible stop is canonical only when its clientOid is in the durable
+            # slot for this exact live lineage.
+            exact = None
+            for row in _exact_bgx_matches(orders, body, pos, instrument_info):
+                oid = str(row.get("clientOid") or "")
+                if await lifecycle.owned_for_lineage(
+                    client, symbol, body["side"], kind, lineage, oid
+                ):
+                    exact = row
+                    break
             if exact is not None:
                 canonical_oid = str(exact.get("clientOid") or "")
                 cleanup_ok, superseded, external = await lifecycle.cleanup_superseded(
@@ -178,8 +184,30 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 lineage,
                 str(rounded),
             )
-            body["clientOid"] = candidate["client_oid"]
 
+            # A capacity block is sticky: do not POST again while the exchange
+            # still reports 50 stops. If capacity later becomes free, retry the
+            # SAME logical identity rather than minting a new clientOid.
+            if (
+                not candidate.get("post_allowed")
+                and candidate.get("reason") == "capacity_blocked_reconcile_required"
+                and isinstance(orders, list)
+                and len(orders) < 50
+            ):
+                if await lifecycle.clear_capacity_if_recovered(
+                    client, candidate["slot_key"], len(orders)
+                ):
+                    candidate = await lifecycle.prepare_candidate(
+                        client,
+                        symbol,
+                        side,
+                        body["side"],
+                        kind,
+                        lineage,
+                        str(rounded),
+                    )
+
+            body["clientOid"] = candidate["client_oid"]
             if not candidate.get("post_allowed"):
                 log.error(
                     "[NATIVE_STOP_REPAIR] symbol=%s kind=%s readback_unconfirmed "
@@ -189,10 +217,12 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                 return False
 
             result = None
+            capacity_error = False
             try:
                 result = await client._post("/api/v1/orders", body, single_attempt=True)
             except Exception as exc:
-                if "300004" in str(exc):
+                capacity_error = "300004" in str(exc)
+                if capacity_error:
                     await lifecycle.mark_capacity_blocked(
                         client, candidate["slot_key"], len(orders)
                     )
@@ -226,11 +256,14 @@ async def set_stops(client, symbol, sl, tp, kucoin_mod, log):
                     break
 
             if confirmed is None:
-                # KuCoin's client currently returns {} for permanent 300004.
-                # A 50-item authoritative stop inventory therefore provides a
-                # bounded capacity signal even when the transport swallowed the
-                # numeric code after logging it.
-                if isinstance(orders, list) and len(orders) >= 50 and not result:
+                # Current KuCoin transport logs permanent 300004 then returns {}.
+                # A full authoritative inventory + empty POST result is therefore
+                # also a capacity signal. It remains sticky until count < 50.
+                if (
+                    isinstance(orders, list)
+                    and len(orders) >= 50
+                    and (capacity_error or not result)
+                ):
                     await lifecycle.mark_capacity_blocked(
                         client, candidate["slot_key"], len(orders)
                     )
