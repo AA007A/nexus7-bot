@@ -125,7 +125,7 @@ class TruthExporter:
                 "provenance_hashes": snapshot.get("provenance_hashes", {}),
                 "reason": reason,
                 "reported_dropped_event_count": runtime_truth.RECORDER.reported_dropped_total(),
-                "stream_sealed": bool(snapshot.get("stream_sealed", False)),
+                "stream_sealed": bool(snapshot.get("stream_sealed", False) or reason == "SHUTDOWN_BEST_EFFORT"),
             }
         except Exception:
             return None
@@ -151,6 +151,7 @@ class TruthExporter:
                         await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, _FLUSH_SECONDS))
                     except asyncio.TimeoutError:
                         pass
+            runtime_truth.emit("MARKET_STREAM_SEAL", payload={"reason": "SHUTDOWN_BEST_EFFORT"})
             batch = runtime_truth.RECORDER.drain(_BATCH_MAX_EVENTS, _BATCH_MAX_BYTES)
             if batch:
                 await self._export_events(session, batch)
