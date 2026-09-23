@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 from bot import durable_reconcile_hardening as hardening
 from bot import order_state
+from bot import pilot_submission_counter as provenance
 from bot.order_state import OrderRegistry, OrderState
 
 
@@ -59,7 +60,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         )
         return engine
 
-    async def test_restored_created_intent_is_terminalized_without_exchange_io(self):
+    async def test_restored_created_legacy_intent_remains_fail_closed_without_provenance(self):
         durable = self._durable()
         hardening.install(durable, order_state, _Log())
         engine = self._engine()
@@ -67,11 +68,35 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
 
         ok = await durable.reconcile_orders(engine)
 
+        self.assertFalse(ok)
+        self.assertEqual(order.state, OrderState.CREATED)
+        self.assertFalse(order.is_terminal)
+        engine.client.get_order_status.assert_not_awaited()
+        engine.client.get_order_by_client_oid.assert_not_awaited()
+        self.assertFalse(engine._durable_state_ok)
+        self.assertEqual(len(engine.orders.pending_orders()), 1)
+
+    async def test_created_with_canonical_proven_not_dispatched_terminalizes_failed(self):
+        durable = self._durable()
+        hardening.install(durable, order_state, _Log())
+        engine = self._engine()
+        order, _ = engine.orders.get_or_create("bgx7-created-proven", "XRPUSDT", "Sell", 10.0)
+        provenance._record_same_state(
+            order,
+            dispatch_attempted=False,
+            predispatch_abort_reason="TEST_AUTHORITATIVE_PRE_DISPATCH_DENIAL",
+            exchange_dispatch="NONE",
+        )
+
+        ok = await durable.reconcile_orders(engine)
+
         self.assertTrue(ok)
         self.assertEqual(order.state, OrderState.FAILED)
+        self.assertTrue(order.is_terminal)
         engine.client.get_order_status.assert_not_awaited()
         engine.client.get_order_by_client_oid.assert_not_awaited()
         self.assertTrue(engine._durable_state_ok)
+        self.assertEqual(len(engine.orders.pending_orders()), 0)
 
     async def test_order_id_recovers_filled_submitting_intent(self):
         durable = self._durable()
@@ -107,7 +132,7 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
         engine.client.get_order_by_client_oid.assert_not_awaited()
         self.assertFalse(engine._durable_state_ok)
 
-    async def test_stale_absent_submitting_is_terminalized_only_when_account_flat(self):
+    async def test_stale_absent_submitting_without_provenance_remains_fail_closed_when_flat(self):
         durable = self._durable()
         hardening.install(durable, order_state, _Log())
         engine = self._engine()
@@ -117,14 +142,16 @@ class DurableReconcileHardeningTests(unittest.IsolatedAsyncioTestCase):
 
         ok = await durable.reconcile_orders(engine)
 
-        self.assertTrue(ok)
-        self.assertEqual(order.state, OrderState.FAILED)
+        self.assertFalse(ok)
+        self.assertEqual(order.state, OrderState.SUBMITTING)
+        self.assertFalse(order.is_terminal)
         engine.client.get_order_by_client_oid.assert_awaited_once_with("bgx7-stale")
         engine.client.get_positions.assert_awaited_once()
         engine.client._get.assert_awaited_once_with(
             "/api/v1/orders", {"status": "active"}, auth=True
         )
-        self.assertTrue(engine._durable_state_ok)
+        self.assertFalse(engine._durable_state_ok)
+        self.assertEqual(len(engine.orders.pending_orders()), 1)
 
     async def test_stale_submitting_with_position_stays_fail_closed(self):
         durable = self._durable()
