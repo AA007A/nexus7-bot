@@ -25,6 +25,7 @@ def install() -> None:
     from bot.integrity import IntegrityGuard
     from bot import runtime_hardening as _rh
     from bot import runtime_overlays as _runtime_overlays
+    from bot import runtime_truth_hooks as _runtime_truth_hooks
     from bot import paper_e2e as _paper_e2e
     from bot import paper_lifecycle as _paper_lifecycle
     from bot import paper_wallet as _paper_wallet
@@ -153,40 +154,40 @@ def install() -> None:
     _shadow_mode_observability.install(_log)
     _nexus_decision_dedupe.install(_log)
     _nexus_grade_display.install(_notifier, _log)
-    # Optional enrichment is scored before structure semantics and the
-    # closed-candle parity wrapper so production decisions and read-only score
-    # decomposition use exactly the same component denominator.
     _nexus_optional_evidence.install(_nexus_ai, _log)
     _nexus_structure_semantics.install(_nexus_ai, _log)
     _nexus_decision_consistency.install(_nexus_ai, _log)
-    # Cost calibration changes only the EV cost inputs. It must sit after the
-    # decision-consistency wrapper but before final veto observability so the
-    # latter records the exact calibrated decision that execution receives.
     _nexus_live_cost_calibration.install(TradingEngine, _nexus_ai, _log)
-    # Observe the final NEXUS decision wrapper so early vetoes expose the exact
-    # model snapshot that caused them, without changing any decision state.
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)
+
+    # Runtime-truth stage wrappers are deliberately interleaved with the
+    # existing strategy wrapper installation order. Each wrapper records the
+    # result it receives and returns the exact same object unchanged.
+    _runtime_truth_hooks.install_canonical_stage(_strategy.Analyzer)
     _adaptive_mtf_entry.install(_strategy.Analyzer, _strategy, _log)
-    # Installed before market-data integrity so the outer timestamp wrapper
-    # feeds this guard the prepared closed-candle series with one disposable
-    # sentinel; the guard drops exactly that sentinel before indicators.
+    _runtime_truth_hooks.install_adaptive_stage(_strategy.Analyzer)
     _pullback_confirmation_hardening.install(_strategy.Analyzer, _log)
-    # Must wrap the final strategy stack (canonical + adaptive) so both paths
-    # receive the same timestamp-confirmed candle view. It also guards KuCoin WS
-    # kline volume before that data can enter the cache.
+    _runtime_truth_hooks.install_pullback_stage(_strategy.Analyzer)
+    # This wrapper must be immediately inside market_data_integrity so it sees
+    # the exact timestamp-prepared series delegated by that outer authority.
+    _runtime_truth_hooks.install_analysis_authority_inner(_strategy.Analyzer)
     _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
 
-    # The core engine reaches the legacy pre-trade score only after an exact
-    # fail-closed NEXUS approval. In controlled LIVE, keep that older score as
-    # telemetry rather than a second contradictory soft-score authority. All
-    # independent risk/execution hard gates remain downstream and unchanged.
     if _pilot_release_control.live_pilot_release_authorized():
         _legacy_pretrade_advisory.install(TradingEngine, _score, _log)
 
     _runtime_overlays.install(TradingEngine, _log)
 
-    builtins._nexus_runtime_bootstrap_installed = True
-    _log.info(
-        "[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap"
+    # Transport/cache hooks are installed after market_data_integrity so the WS
+    # cache observer sees the original parsed KuCoin payload before the
+    # integrity wrapper rewrites its activity field, while cache hashes are
+    # sampled only after the existing mutation path has completed.
+    _runtime_truth_hooks.install_transport_and_cache(_kucoin.KuCoinClient)
+    _runtime_truth_hooks.install_marketdata_outer(_strategy.Analyzer, TradingEngine)
+    _runtime_truth_hooks.install_engine_and_downstream(
+        TradingEngine, _kucoin.KuCoinClient, _score, _nexus_ai
     )
+
+    builtins._nexus_runtime_bootstrap_installed = True
+    _log.info("[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap")
