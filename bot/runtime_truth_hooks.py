@@ -12,6 +12,7 @@ import time
 import uuid
 
 from bot import runtime_truth as truth
+from bot import runtime_truth_rest as truth_rest
 
 _SIGNAL_EVALUATIONS: dict[int, tuple[str, str]] = {}
 _ACTIVE_CLIENT = contextvars.ContextVar("bgx_truth_active_client", default=None)
@@ -170,6 +171,7 @@ def install_transport_and_cache(KuCoinClient):
                 # Explicit class dispatch keeps the existing aiohttp response body
                 # cache semantics while remaining statically provable by selfcheck.
                 raw = await aiohttp.ClientResponse.read(self)
+                truth_rest.remember_raw_kline_fields(raw)
                 event_id = truth.capture_rest_response(
                     "/api/v1/kline/query", dict(self.url.query), int(self.status), raw
                 )
@@ -271,6 +273,20 @@ def install_transport_and_cache(KuCoinClient):
         after = [dict(x) for x in list((getattr(self, "_kline_cache", {}) or {}).get(key, []))]
         source = truth.current_rest_purpose()
         raw_id = _LAST_REST_EVENT_ID.get()
+        raw_fields_by_ts = truth_rest.current_raw_kline_fields()
+        returned_rows = [dict(x) for x in list(result or [])]
+        returned_raw_fields = []
+        for row in returned_rows:
+            candle_ts = int(row.get("ts", 0) or 0)
+            raw_fields = dict(raw_fields_by_ts.get(candle_ts, {"candle_ts": candle_ts}))
+            returned_raw_fields.append(raw_fields)
+            truth.RECORDER.register_provenance(symbol, str(interval), candle_ts, {
+                "candle_ts": candle_ts,
+                "source": source,
+                "raw_event_id": raw_id,
+                "raw_volume_fields": raw_fields,
+                "normalized_activity": row.get("v"),
+            })
         truth.emit("MARKET_CACHE_MUTATION", symbol=symbol, timeframe=str(interval), payload={
             "cache_key": f"{symbol}|{interval}",
             "CACHE_BEFORE_HASH": truth.cache_data_hash(before),
@@ -281,14 +297,13 @@ def install_transport_and_cache(KuCoinClient):
             "normalized_row_before": before[-1] if before else None,
             "normalized_row_after": after[-1] if after else None,
             "series_after": after,
-            "raw_volume_fields": {"source": "REST_RAW_EVENT", "raw_event_id": raw_id},
+            "raw_volume_fields": {
+                "source": "REST_RAW_EVENT",
+                "raw_event_id": raw_id,
+                "rows": returned_raw_fields,
+            },
             "normalized_activity_field": None if not after else {"name": "v", "value": after[-1].get("v")},
         })
-        # Attribute only rows returned by this REST request. Existing cache rows
-        # retain their prior provenance until the cache mutation actually
-        # supersedes the same timestamp.
-        returned_rows = [dict(x) for x in list(result or [])]
-        _register_series_provenance(symbol, str(interval), returned_rows, source, raw_id)
         return result
 
     KuCoinClient.get_klines = get_klines_with_truth
