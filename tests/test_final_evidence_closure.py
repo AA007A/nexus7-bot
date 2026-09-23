@@ -156,7 +156,8 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
 
     async def test_restart_A_before_post_known_terminal_no_duplicate(self):
         from bot import durable_reconcile_hardening as h, order_state
-        from bot.order_state import OrderRegistry
+        from bot import pilot_submission_counter as provenance
+        from bot.order_state import OrderRegistry, OrderState
         class L:
             info=warning=critical=error=staticmethod(lambda *a,**k:None)
         async def original(e): return False
@@ -166,9 +167,17 @@ class FinalEvidenceClosure(unittest.IsolatedAsyncioTestCase):
         d=SimpleNamespace(reconcile_orders=original,persist_orders=persist,_clear=clear,_block=block,_advance=lambda *a,**k:None)
         h.install(d,order_state,L())
         e=SimpleNamespace(orders=OrderRegistry(),client=SimpleNamespace(get_order_status=AsyncMock(),get_order_by_client_oid=AsyncMock(),get_positions=AsyncMock(),_get=AsyncMock()),errors=set(),_durable_state_ok=False,persist_reasons=[])
-        e.orders.get_or_create("bgx7-restart-a","BTCUSDT","Buy",1)
+        order,_=e.orders.get_or_create("bgx7-restart-a","BTCUSDT","Buy",1)
+        provenance._record_same_state(
+            order,
+            dispatch_attempted=False,
+            predispatch_abort_reason="TEST_KNOWN_PRE_POST_ABORT",
+            exchange_dispatch="NONE",
+        )
         self.assertTrue(await d.reconcile_orders(e))
+        self.assertEqual(order.state, OrderState.FAILED)
         e.client.get_order_by_client_oid.assert_not_awaited()
+        e.client.get_order_status.assert_not_awaited()
 
     async def test_restart_B_after_accept_before_ack_lookup_no_second_post(self):
         c=kucoin.KuCoinClient(); c._execution_ownership=object(); c._ensure_session=AsyncMock(); c._throttle=AsyncMock(); c._auth_headers=lambda *a,**k:{}
