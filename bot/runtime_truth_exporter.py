@@ -72,7 +72,7 @@ class TruthExporter:
             self._task.cancel()
         self._task = None
 
-    async def _post(self, session: aiohttp.ClientSession, path: str, body: dict) -> bool:
+    async def _post_sink(self, session: aiohttp.ClientSession, path: str, body: dict) -> bool:
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         for attempt in range(max(1, _MAX_RETRIES)):
@@ -100,7 +100,7 @@ class TruthExporter:
                 "events": batch,
                 "reported_dropped_event_count": runtime_truth.RECORDER.reported_dropped_total(),
             }
-            if await self._post(session, "/v1/events/batch", body):
+            if await self._post_sink(session, "/v1/events/batch", body):
                 self.exported_events += len(batch)
             else:
                 runtime_truth.RECORDER.mark_export_drop(len(batch))
@@ -144,7 +144,7 @@ class TruthExporter:
                 if reason is not None:
                     checkpoint = self._checkpoint(reason)
                     if checkpoint is not None:
-                        await self._post(session, "/v1/checkpoints", checkpoint)
+                        await self._post_sink(session, "/v1/checkpoints", checkpoint)
                     self._last_checkpoint = now
                 if not batch and reason is None:
                     try:
@@ -156,7 +156,7 @@ class TruthExporter:
                 await self._export_events(session, batch)
             checkpoint = self._checkpoint("SHUTDOWN_BEST_EFFORT")
             if checkpoint is not None:
-                await self._post(session, "/v1/checkpoints", checkpoint)
+                await self._post_sink(session, "/v1/checkpoints", checkpoint)
 
     def metrics(self) -> dict:
         return {
