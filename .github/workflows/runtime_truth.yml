@@ -1,0 +1,41 @@
+name: Runtime Truth Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bot/runtime_truth.py'
+      - 'bot/runtime_truth_exporter.py'
+      - 'bot/runtime_truth_hooks.py'
+      - 'bot/runtime_bootstrap.py'
+      - 'tests/test_runtime_truth_*.py'
+      - '.github/workflows/runtime_truth.yml'
+  push:
+    branches:
+      - 'observability/runtime-truth-v1'
+
+jobs:
+  runtime-truth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile candidate
+        run: python -m compileall -q bot/runtime_truth.py bot/runtime_truth_exporter.py bot/runtime_truth_hooks.py bot/runtime_bootstrap.py tests/test_runtime_truth_*.py
+      - name: Producer core
+        run: python -m unittest tests.test_runtime_truth_core -v
+      - name: Semantic and authority invariance
+        run: python -m unittest tests.test_runtime_truth_semantics -v
+      - name: Exchange isolation and secret safety
+        run: python -m unittest tests.test_runtime_truth_security -v
+      - name: Full production strategy stack OFF versus ON
+        run: python -m unittest tests.test_runtime_truth_full_stack -v
+      - name: Measured performance and saturation
+        run: python -m unittest tests.test_runtime_truth_performance -v
