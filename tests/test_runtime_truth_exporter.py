@@ -64,6 +64,47 @@ class RuntimeTruthExporterTests(unittest.TestCase):
         finally:
             truth._ENABLED, truth.RECORDER = old_enabled, old_recorder
 
+    def test_shutdown_checkpoint_is_explicitly_sealed(self):
+        old_enabled, old_recorder = truth._ENABLED, truth.RECORDER
+        try:
+            truth._ENABLED = True
+            truth.RECORDER = truth.Recorder(); truth.RECORDER.enabled = True
+            truth.RECORDER.register_checkpoint_provider(lambda: {
+                "cache_state": {}, "provenance": {},
+                "cache_data_hashes": {}, "provenance_hashes": {},
+            })
+            exporter = TruthExporter()
+            checkpoint = exporter._checkpoint("SHUTDOWN_BEST_EFFORT")
+            self.assertTrue(checkpoint["stream_sealed"])
+        finally:
+            truth._ENABLED, truth.RECORDER = old_enabled, old_recorder
+
+    def test_shutdown_consumes_new_sequence_before_final_checkpoint(self):
+        old_enabled, old_recorder = truth._ENABLED, truth.RECORDER
+        try:
+            truth._ENABLED = True
+            truth.RECORDER = truth.Recorder(); truth.RECORDER.enabled = True
+            truth.RECORDER.register_checkpoint_provider(lambda: {
+                "cache_state": {}, "provenance": {},
+                "cache_data_hashes": {}, "provenance_hashes": {},
+            })
+            exporter = TruthExporter()
+            exporter.enabled = True
+            exporter.base_url = "https://sink.invalid"
+            exporter.token = "telemetry-only"
+            exporter._post_sink = AsyncMock(return_value=True)
+            exporter._stop.set()
+            asyncio.run(exporter._run())
+            self.assertEqual(truth.RECORDER.current_sequence, 1)
+            calls = exporter._post_sink.await_args_list
+            self.assertEqual(calls[0].args[1], "/v1/events/batch")
+            self.assertEqual(calls[0].args[2]["events"][0]["event_type"], "MARKET_STREAM_SEAL")
+            self.assertEqual(calls[1].args[1], "/v1/checkpoints")
+            self.assertEqual(calls[1].args[2]["sequence_watermark"], 1)
+            self.assertTrue(calls[1].args[2]["stream_sealed"])
+        finally:
+            truth._ENABLED, truth.RECORDER = old_enabled, old_recorder
+
 
 if __name__ == "__main__":
     unittest.main()
