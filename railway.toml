@@ -3,7 +3,5 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-healthcheckPath = "/service_ready"
-healthcheckTimeout = 120
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+startCommand = "python -u research/policy_a_parity.py"
+restartPolicyType = "never"
