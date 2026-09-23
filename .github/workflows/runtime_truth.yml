@@ -31,6 +31,10 @@ jobs:
         run: python -m compileall -q bot/runtime_truth.py bot/runtime_truth_exporter.py bot/runtime_truth_hooks.py bot/runtime_bootstrap.py tests/test_runtime_truth_*.py
       - name: Producer core
         run: python -m unittest tests.test_runtime_truth_core -v
+      - name: REST WS reconnect provenance
+        run: python -m unittest tests.test_runtime_truth_provenance -v
+      - name: Exporter fail-open and UTC batching
+        run: python -m unittest tests.test_runtime_truth_exporter -v
       - name: Semantic and authority invariance
         run: python -m unittest tests.test_runtime_truth_semantics -v
       - name: Exchange isolation and secret safety
