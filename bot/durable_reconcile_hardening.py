@@ -20,14 +20,11 @@ def _active_items(payload):
 
 
 async def _prove_absent_and_flat(engine, order, log) -> bool:
-    """Return True only after three independent authenticated read checks.
+    """Prove only that a stale intent is not active *now*.
 
-    1) exact clientOid lookup is absent;
-    2) account has no open positions;
-    3) account has no active orders.
-
-    Any exception or malformed payload fails closed. This proves only that the
-    stale intent is not live *now*; it does not rewrite historical PnL.
+    This diagnostic evidence is deliberately not dispatch provenance. Current
+    absence, account flatness and zero active orders cannot prove that an order
+    was never historically dispatched.
     """
     try:
         by_oid = await engine.client.get_order_by_client_oid(order.client_oid)
@@ -45,10 +42,18 @@ async def _prove_absent_and_flat(engine, order, log) -> bool:
         return True
     except Exception as exc:
         log.error(
-            "[DURABLE_RECONCILE] flat-proof failed clientOid=%s: %s",
+            "[DURABLE_RECONCILE] current-absence proof failed clientOid=%s: %s",
             order.client_oid, exc,
         )
         return False
+
+
+def _proven_not_dispatched(order) -> tuple[bool, str]:
+    """Consume the canonical BGX-PREDISPATCH-001 durable provenance."""
+    from bot import pilot_submission_counter as provenance
+
+    attempted, abort_reason = provenance._provenance(order)
+    return attempted is False and bool(abort_reason), abort_reason
 
 
 def install(durable_module, order_state_module, log) -> None:
@@ -80,17 +85,21 @@ def install(durable_module, order_state_module, log) -> None:
                 order.order_id or "NONE", age_s,
             )
 
-            if order.state == OrderState.CREATED:
+            proven_not_dispatched, abort_reason = _proven_not_dispatched(order)
+            if (
+                proven_not_dispatched
+                and order.state in (OrderState.CREATED, OrderState.SUBMITTING)
+            ):
                 order.transition(
                     OrderState.FAILED,
-                    source="STARTUP_NEVER_DISPATCHED",
-                    reason="restored_created_intent",
+                    source="STARTUP_PROVEN_NOT_DISPATCHED",
+                    reason=abort_reason,
                 )
                 changed = True
                 log.warning(
-                    "[DURABLE_RECONCILE] terminalized pre-dispatch intent "
-                    "clientOid=%s symbol=%s CREATED->FAILED execution_effect=NONE",
-                    order.client_oid, order.symbol,
+                    "[DURABLE_RECONCILE] terminalized proven pre-dispatch intent "
+                    "clientOid=%s symbol=%s state=FAILED reason=%s execution_effect=NONE",
+                    order.client_oid, order.symbol, abort_reason,
                 )
                 continue
 
@@ -140,27 +149,22 @@ def install(durable_module, order_state_module, log) -> None:
                         changed = True
                         continue
 
-            # A SUBMITTING intent without orderId is ambiguous immediately after
-            # a crash. After a conservative age, it may be terminalized only if
-            # the exact clientOid is absent AND the whole account is flat with no
-            # active exchange orders. Any uncertain read remains fail-closed.
+            # Legacy CREATED/SUBMITTING records can predate durable dispatch
+            # provenance. Current absence, flatness, zero active orders and age
+            # are not historical proof that POST was never crossed. Preserve
+            # ambiguity as non-terminal so startup remains fail-closed.
             if (
-                order.state == OrderState.SUBMITTING
+                order.state in (OrderState.CREATED, OrderState.SUBMITTING)
                 and not order.order_id
                 and age_s >= STALE_SUBMITTING_AGE_S
-                and await _prove_absent_and_flat(engine, order, log)
             ):
-                order.transition(
-                    OrderState.FAILED,
-                    source="STARTUP_STALE_ABSENT_FLAT",
-                    reason="client_oid_absent_account_flat_no_active_orders",
-                )
-                changed = True
+                not_active_now = await _prove_absent_and_flat(engine, order, log)
                 log.warning(
-                    "[DURABLE_RECONCILE] stale intent terminalized clientOid=%s "
-                    "symbol=%s SUBMITTING->FAILED age_s=%.1f proof=absent+flat+no_active "
-                    "execution_effect=NONE",
-                    order.client_oid, order.symbol, age_s,
+                    "[DURABLE_RECONCILE] legacy dispatch ambiguity preserved "
+                    "clientOid=%s symbol=%s state=%s age_s=%.1f not_active_now=%s "
+                    "historical_not_dispatched_proven=false execution_effect=NONE",
+                    order.client_oid, order.symbol, order.state.value, age_s,
+                    str(not_active_now).lower(),
                 )
 
         if changed:
@@ -189,6 +193,6 @@ def install(durable_module, order_state_module, log) -> None:
     durable_module.reconcile_orders = reconcile_orders_hardened
     durable_module._startup_reconcile_hardening_installed = True
     log.info(
-        "[DURABLE_RECONCILE] startup hardening installed: pre-dispatch CREATED "
-        "terminalization + orderId recovery + stale absent/flat proof; no exchange mutations"
+        "[DURABLE_RECONCILE] startup hardening installed: canonical pre-dispatch "
+        "provenance + orderId recovery + fail-closed legacy ambiguity; no exchange mutations"
     )
