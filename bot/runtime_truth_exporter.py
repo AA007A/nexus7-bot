@@ -24,6 +24,21 @@ _TIMEOUT_SECONDS = float(os.environ.get("BGX_TRUTH_EXPORT_TIMEOUT_SECONDS", "2.0
 _CHECKPOINT_SECONDS = float(os.environ.get("BGX_TRUTH_CHECKPOINT_SECONDS", "900"))
 
 
+def _utc_day(event: dict) -> str:
+    return str(event.get("timestamp_utc", ""))[:10]
+
+
+def _split_by_utc_day(events: list[dict]) -> list[list[dict]]:
+    """Keep sink batches within one UTC day without reordering events."""
+    groups: list[list[dict]] = []
+    for event in events:
+        if not groups or _utc_day(groups[-1][-1]) != _utc_day(event):
+            groups.append([event])
+        else:
+            groups[-1].append(event)
+    return groups
+
+
 class TruthExporter:
     def __init__(self):
         self.enabled = runtime_truth.enabled()
@@ -79,6 +94,17 @@ class TruthExporter:
                 await asyncio.sleep(min(0.25 * (2 ** attempt), 1.0))
         return False
 
+    async def _export_events(self, session: aiohttp.ClientSession, events: list[dict]) -> None:
+        for batch in _split_by_utc_day(events):
+            body = {
+                "events": batch,
+                "reported_dropped_event_count": runtime_truth.RECORDER.reported_dropped_total(),
+            }
+            if await self._post(session, "/v1/events/batch", body):
+                self.exported_events += len(batch)
+            else:
+                runtime_truth.RECORDER.mark_export_drop(len(batch))
+
     def _checkpoint(self, reason: str) -> dict | None:
         provider = runtime_truth.RECORDER.checkpoint_provider()
         if provider is None:
@@ -110,11 +136,7 @@ class TruthExporter:
             while not self._stop.is_set():
                 batch = runtime_truth.RECORDER.drain(_BATCH_MAX_EVENTS, _BATCH_MAX_BYTES)
                 if batch:
-                    body = {"events": batch, "reported_dropped_event_count": runtime_truth.RECORDER.reported_dropped_total()}
-                    if await self._post(session, "/v1/events/batch", body):
-                        self.exported_events += len(batch)
-                    else:
-                        runtime_truth.RECORDER.mark_export_drop(len(batch))
+                    await self._export_events(session, batch)
                 reason = runtime_truth.RECORDER.pop_checkpoint_request()
                 now = time.monotonic()
                 if reason is None and _CHECKPOINT_SECONDS > 0 and now - self._last_checkpoint >= _CHECKPOINT_SECONDS:
@@ -129,12 +151,9 @@ class TruthExporter:
                         await asyncio.wait_for(self._stop.wait(), timeout=max(0.05, _FLUSH_SECONDS))
                     except asyncio.TimeoutError:
                         pass
-            # best-effort final bounded flush; no unbounded shutdown wait
             batch = runtime_truth.RECORDER.drain(_BATCH_MAX_EVENTS, _BATCH_MAX_BYTES)
             if batch:
-                body = {"events": batch, "reported_dropped_event_count": runtime_truth.RECORDER.reported_dropped_total()}
-                if not await self._post(session, "/v1/events/batch", body):
-                    runtime_truth.RECORDER.mark_export_drop(len(batch))
+                await self._export_events(session, batch)
             checkpoint = self._checkpoint("SHUTDOWN_BEST_EFFORT")
             if checkpoint is not None:
                 await self._post(session, "/v1/checkpoints", checkpoint)
