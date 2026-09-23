@@ -1,11 +1,11 @@
 FROM python:3.12-slim
 WORKDIR /snapshot
 ARG DATASET_URL=https://kucoin-futures-dataset-runner-production.up.railway.app/output/dataset.zip
-ARG DATASET_SHA256=2dafd60c53d492415c6b0562709ccfa4d2ace9bdc82c3c1406c8ca308494cd6e
+ARG DATASET_SHA256=a838545afefdf4d22cf5a8509f112a683140b608dbd21b3f4cb5e150f3668038
 RUN python - <<'PY'
 import hashlib, os, urllib.request, zipfile, pathlib
 url=os.environ.get('DATASET_URL') or 'https://kucoin-futures-dataset-runner-production.up.railway.app/output/dataset.zip'
-expected=os.environ.get('DATASET_SHA256') or '2dafd60c53d492415c6b0562709ccfa4d2ace9bdc82c3c1406c8ca308494cd6e'
+expected=os.environ.get('DATASET_SHA256') or 'a838545afefdf4d22cf5a8509f112a683140b608dbd21b3f4cb5e150f3668038'
 root=pathlib.Path('/data/bgx-missed-market-002'); root.mkdir(parents=True,exist_ok=True)
 payload=urllib.request.urlopen(url,timeout=60).read()
 actual=hashlib.sha256(payload).hexdigest()
