@@ -189,8 +189,9 @@ def install() -> None:
         TradingEngine, _kucoin.KuCoinClient, _score, _nexus_ai
     )
 
-    # Read-only: one sanitized line with the whitelisted non-secret policy
-    # values and their sha256, so a replay can prove configuration parity.
+    # Read-only: one sanitized LIVE_POLICY_OBSERVATION_V2 line (whitelisted
+    # non-secret policy values, their sha256 and the platform code/deployment
+    # identity). Content evidence only; provenance is verified at Stage C.
     from bot import policy_attestation as _policy_attestation
     _policy_attestation.install(_log)
 

@@ -17,15 +17,18 @@ BOTH layers:
 * CANDIDATE_RESEARCH (signal edge, RESOLVED outcomes only): approved
   expectancy > 0; horizon-aware block authority lower bound > 0, recomputed
   here from block intervals whose length >= the max resolved outcome horizon
-  (re-derived by the gate) and that span >= 30 independent blocks; uplift
+  (re-derived by the gate) and that span >= 30 resampling blocks; uplift
   authority lower bound > 0; censoring not material; temporal folds.
 * PORTFOLIO_EXECUTION_REPLAY (executable edge): net expectancy > 0, marked
   AND realized final equity > start, no material portfolio censoring,
   walk-forward folds positive (the path bootstrap is non-authoritative), max
   equity drawdown within the research limit, enough trades and contributing
   symbols, accounting invariants proven.
-* POLICY PARITY: a sha256-verified LIVE non-secret policy attestation that
-  matches the replay manifest.
+* POLICY CONTENT: research promotion allows LIVE_POLICY_OBSERVATION_PENDING
+  or POLICY_CONTENT_MATCH; a mismatched or invalid observation blocks. Content
+  match is integrity only, never provenance. LIVE provenance, exact deployment
+  SHA, protection evidence and human approval are Stage-C checks
+  (``evaluate_live`` / ``bot.live_release_evidence``).
 * REPLAY PARITY: exit parity, pre-trade gate parity and portfolio parity
   complete; pinned replay policy manifest present; closed-candle sentinel
   verified.
@@ -65,9 +68,6 @@ class GatePolicy:
     min_temporal_folds_positive: int = 3
     min_resampling_blocks: int = 30
     min_walk_forward_folds_positive: int = 3
-    # RESEARCH gate: a pending LIVE attestation is allowed (never means
-    # production-ready). LIVE gate: ATTESTED_MATCH is mandatory.
-    require_live_policy_attestation: bool = False
     min_history_days: float = 150.0
     require_context_parity: bool = True
     cost_stress_scenarios: tuple[str, ...] = ("fees_plus_50pct", "slippage_x2")
@@ -75,8 +75,11 @@ class GatePolicy:
 
 RESEARCH_GATE = "RESEARCH_PROMOTION_GATE"
 LIVE_GATE = "LIVE_RELEASE_GATE"
-LIVE_ATTESTATION_PENDING = "LIVE_ATTESTATION_PENDING"
-PENDING_STATES = frozenset({LIVE_ATTESTATION_PENDING})
+# Policy CONTENT states from the replay (never provenance; see policy_attestation).
+POLICY_OBSERVATION_PENDING = "LIVE_POLICY_OBSERVATION_PENDING"
+POLICY_CONTENT_MATCH = "POLICY_CONTENT_MATCH"
+RESEARCH_ALLOWED_POLICY_STATES = frozenset({POLICY_OBSERVATION_PENDING, POLICY_CONTENT_MATCH})
+REAL_ORDER_ENABLEMENT = "HUMAN_ACTION_REQUIRED"
 
 
 @dataclass
@@ -85,23 +88,31 @@ class GateResult:
     blockers: list[str] = field(default_factory=list)
     exit_code: int = EXIT_BLOCKED
     gate: str = RESEARCH_GATE
-    live_policy_attestation: str | None = None
+    policy_content: str | None = None
+    stages: dict = field(default_factory=dict)
+    source_authenticated: bool = False
 
     def to_dict(self) -> dict:
         live = self.gate == LIVE_GATE
+        stages = {"RESEARCH_PROMOTION": "PASS" if (self.promote and not live) else "BLOCK",
+                  "PRELIVE_EVIDENCE": "BLOCK", "LIVE_RELEASE_PRECONDITIONS": "BLOCK",
+                  **self.stages, "REAL_ORDER_ENABLEMENT": REAL_ORDER_ENABLEMENT}
         return {
             "gate": self.gate,
             "verdict": ("PASS" if self.promote else "BLOCK"),
             "blockers": sorted(set(self.blockers)),
             "exit_code": self.exit_code,
-            "live_policy_attestation": self.live_policy_attestation,
-            # Only the LIVE gate can ever state production readiness. Even then
-            # enabling real orders remains a manual, human-authorized action.
-            "production_ready": bool(live and self.promote),
+            "policy_content": self.policy_content,
+            "stages": stages,
+            "live_provenance_authenticated": bool(self.source_authenticated),
+            # production_ready only from the LIVE gate, only when every Stage-C
+            # precondition passed on SOURCE-AUTHENTICATED evidence. Local CLI
+            # arguments can never produce it.
+            "production_ready": bool(live and self.promote and self.source_authenticated),
             "authorizes_real_trading": False,
-            "meaning": ("all automated LIVE preconditions met; real orders still require the "
-                        "explicit human enablement step" if live else
-                        "research/code-merge evidence only; NEVER production readiness"),
+            "meaning": ("all automated Stage-C preconditions met on source-authenticated "
+                        "evidence; real orders still require the human enablement step" if live
+                        else "research/code-merge evidence only; NEVER production readiness"),
         }
 
 
@@ -159,22 +170,51 @@ def block_only_authority(section: dict, *, required_ms: int | None,
         valid.append((lo, hi))
         usable_ivs.append((ms, iv))
     if usable_ivs:
-        # Predeclared residual-dependence rule, recomputed from the reported ACF.
+        # Predeclared residual-dependence rule, RECOMPUTED here from the
+        # per-block aggregate series (block means); stored ACF values are only
+        # cross-checked, never trusted.
         _, longest = max(usable_ivs, key=lambda x: x[0])
-        rd = longest.get("residual_dependence")
-        if not isinstance(rd, dict):
-            return None, None, "RESIDUAL_DEPENDENCE_NOT_REPORTED"
-        band = _num(rd.get("band"))
-        acfs = [_num(v) for v in (rd.get("acf") or {}).values()]
-        if band is None or not acfs or any(a is None for a in acfs):
-            return None, None, "RESIDUAL_DEPENDENCE_NOT_REPORTED"
-        if any(abs(a) > band for a in acfs):
-            return None, None, "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
+        status = residual_dependence_recompute(longest)
+        if status is not None:
+            return None, None, status
     if valid:
         return min(lo for lo, _ in valid), max(hi for _, hi in valid), "VALID"
     if not long_enough:
         return None, None, "AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON"
     return None, None, "INSUFFICIENT_RESAMPLING_BLOCKS"
+
+
+def residual_dependence_recompute(iv: dict) -> str | None:
+    """Recompute lag-1..3 ACF and the 2/sqrt(n) band from the block-mean series.
+
+    Returns None when there is no significant residual dependence, otherwise a
+    fail-closed status. The series also re-derives the resampling-block count.
+    """
+    from bot import nexus_oos_inference as inf
+    rd = iv.get("residual_dependence")
+    series = rd.get("series") if isinstance(rd, dict) else None
+    means = series.get("means") if isinstance(series, dict) else None
+    counts = series.get("counts") if isinstance(series, dict) else None
+    if not isinstance(means, list) or not isinstance(counts, list) or len(means) != len(counts):
+        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+    vals = [_num(m) for m in means]
+    if any(v is None for v in vals) or any(not isinstance(c, int) or c < 1 for c in counts):
+        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+    n = len(vals)
+    if n < 10 or n != _num(iv.get("resampling_blocks")):
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    band = 2 / math.sqrt(n)
+    acf = inf.acf_from_series(vals)
+    if any(v is None for v in acf.values()):
+        return "RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
+    reported = rd.get("acf") or {}
+    for k, v in acf.items():
+        r = _num(reported.get(k))
+        if r is None or abs(r - v) > 1e-9:
+            return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    if any(abs(v) > band for v in acf.values()):
+        return "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
+    return None
 
 
 def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks) -> float | None:
@@ -272,11 +312,10 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if not isinstance(manifest, dict) or not manifest.get("policy_sha256"):
         b.append("REPLAY_POLICY_MANIFEST_MISSING")
     parity_state = artifact.get("policy_parity")
-    if parity_state not in ("ATTESTED_MATCH", *PENDING_STATES):
-        # A mismatched or invalid attestation blocks even research promotion.
-        b.append("LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID")
-    if policy.require_live_policy_attestation and parity_state != "ATTESTED_MATCH":
-        b.append("LIVE_POLICY_NOT_ATTESTED")
+    if parity_state not in RESEARCH_ALLOWED_POLICY_STATES:
+        # Mismatched or invalid policy CONTENT blocks even research promotion.
+        # Research promotion never depends on LIVE provenance.
+        b.append("POLICY_CONTENT_MISMATCH_OR_INVALID")
 
     symbols = artifact.get("symbols")
     if not isinstance(symbols, list) or not symbols:
@@ -401,33 +440,42 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
             b.append(f"METHODOLOGY_{flag.upper()}_NOT_CONFIRMED")
 
     b = sorted(set(b))
-    pending = (LIVE_ATTESTATION_PENDING if parity_state in PENDING_STATES else parity_state)
     return GateResult(not b, b, EXIT_PROMOTE if not b else EXIT_BLOCKED,
-                      gate=RESEARCH_GATE, live_policy_attestation=pending)
+                      gate=RESEARCH_GATE, policy_content=parity_state)
 
 
-def evaluate_live(artifact: dict, *, candidate_sha: str | None, protection_readiness: str | None,
-                  human_authorization: str | None, policy: GatePolicy = GatePolicy()) -> GateResult:
-    """LIVE_RELEASE_GATE (stage C). Everything the research gate requires, plus
-    the exact candidate SHA, an ATTESTED_MATCH live policy, protection-readiness
-    evidence and an explicit human authorization. Never deploys anything."""
+def evaluate_live(artifact: dict, evidence=None, *, sources=None, now=None,
+                  policy: GatePolicy = GatePolicy()) -> GateResult:
+    """LIVE_RELEASE_GATE (stage C). Never deploys, never mutates anything.
+
+    Requires the research gate (with full context parity) AND a
+    BGX_LIVE_RELEASE_EVIDENCE_V1 envelope whose every claim is confirmed by
+    trusted read-only sources (``bot.live_release_evidence``): Railway
+    deployment metadata, the runtime policy observation from that deployment's
+    logs, exact-SHA CI runs, structured protection evidence and a structured
+    human approval record. Without trusted sources the verdict is BLOCK.
+    """
     from dataclasses import replace as _replace
-    res = evaluate(artifact, _replace(policy, require_live_policy_attestation=True,
-                                      require_context_parity=True))
-    b = list(res.blockers)
-    art_sha = (artifact or {}).get("candidate_sha") if isinstance(artifact, dict) else None
-    if not candidate_sha or not art_sha or str(art_sha) != str(candidate_sha):
-        b.append("CANDIDATE_SHA_NOT_EXACT")
-    if str(protection_readiness or "").strip().upper() != "PASS":
-        b.append("PROTECTION_READINESS_NOT_PROVEN")
-    if not str(human_authorization or "").strip():
-        b.append("HUMAN_AUTHORIZATION_MISSING")
+    from bot import live_release_evidence as lre
+    res = evaluate(artifact, _replace(policy, require_context_parity=True))
+    ev = lre.verify(evidence, artifact=artifact if isinstance(artifact, dict) else None,
+                    sources=sources, now=now)
+    comp = ev["components"]
+    b = list(res.blockers) + list(ev["blockers"])
+    prelive = all(comp[k] == "PASS" for k in ("POLICY_CONTENT_MATCH", "LIVE_PROVENANCE_AUTHENTICATED",
+                                              "EXACT_DEPLOYMENT_SHA_MATCH", "CI_EVIDENCE"))
+    live_ok = prelive and res.promote and all(v == "PASS" for v in comp.values())
     b = sorted(set(b))
     code = res.exit_code if res.exit_code in (EXIT_MISSING, EXIT_CORRUPT) else (
-        EXIT_PROMOTE if not b else EXIT_BLOCKED)
-    return GateResult(not b, b, code, gate=LIVE_GATE,
-                      live_policy_attestation=(artifact or {}).get("policy_parity")
-                      if isinstance(artifact, dict) else None)
+        EXIT_PROMOTE if (live_ok and not b) else EXIT_BLOCKED)
+    stages = {"RESEARCH_PROMOTION": "PASS" if res.promote else "BLOCK",
+              "PRELIVE_EVIDENCE": "PASS" if prelive else "BLOCK",
+              "LIVE_RELEASE_PRECONDITIONS": "PASS" if (live_ok and not b) else "BLOCK",
+              "evidence_components": comp}
+    return GateResult(bool(live_ok and not b), b, code, gate=LIVE_GATE,
+                      policy_content=(artifact or {}).get("policy_parity")
+                      if isinstance(artifact, dict) else None,
+                      stages=stages, source_authenticated=ev["source_authenticated"])
 
 
 def _load(path: str | Path):
@@ -455,17 +503,22 @@ def main(argv=None) -> int:
         "--allow-incomplete-context-parity", action="store_true",
         help="Research gate only. Never passed by the PR workflow; ignored by the live gate.",
     )
-    parser.add_argument("--candidate-sha", default=None)
-    parser.add_argument("--protection-readiness", default=None,
-                        help="PASS only when protection readiness evidence exists (live gate).")
-    parser.add_argument("--human-authorization", default=None,
-                        help="Named human authorization reference (live gate).")
+    parser.add_argument("--release-evidence", default=None,
+                        help="BGX_LIVE_RELEASE_EVIDENCE_V1 JSON (live gate). Its claims are "
+                             "verified only against trusted read-only sources; no such source "
+                             "is configured in this CLI, so the live gate BLOCKS.")
     args = parser.parse_args(argv)
     if args.gate == "live":
         data, err = _load(args.artifact)
-        result = err if err is not None else evaluate_live(
-            data, candidate_sha=args.candidate_sha, protection_readiness=args.protection_readiness,
-            human_authorization=args.human_authorization)
+        evidence = None
+        if args.release_evidence:
+            try:
+                evidence = Path(args.release_evidence).read_text(encoding="utf-8")
+            except OSError:
+                evidence = "UNREADABLE"
+        # No trusted control-plane provider exists in this repository: the CLI
+        # can never authenticate provenance, so it can never pass Stage C.
+        result = err if err is not None else evaluate_live(data, evidence, sources=None)
         if err is not None:
             result.gate = LIVE_GATE
     else:

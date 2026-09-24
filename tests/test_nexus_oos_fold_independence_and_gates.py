@@ -5,9 +5,10 @@
 3. Long trades increase the embargo automatically.
 4. Four folds that do not fit -> INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS.
 5. The fold count is never increased by shrinking the embargo.
-6. The LIVE_RELEASE_GATE requires ATTESTED_MATCH.
-7. The research gate may report LIVE_ATTESTATION_PENDING without claiming
-   production readiness.
+6. The LIVE_RELEASE_GATE cannot pass without source-authenticated evidence
+   (see tests/test_live_release_evidence.py for the full Stage-C contract).
+7. The research gate may report LIVE_POLICY_OBSERVATION_PENDING without
+   claiming production readiness.
 8. A successful research gate never yields PRODUCTION_READY = YES.
 9. Significant residual dependence at the longest usable block fails closed.
 """
@@ -208,51 +209,35 @@ class EmbargoIsNeverShrunk(unittest.TestCase):
         self.assertIn("PORTFOLIO_FOLDS_NOT_INDEPENDENT", r.blockers)
 
 
-def _live(a, **over):
-    kw = {"candidate_sha": a.get("candidate_sha"), "protection_readiness": "PASS",
-          "human_authorization": "operator-signoff-ref"}
-    kw.update(over)
-    return gate.evaluate_live(a, **kw)
-
-
 class StagedGates(unittest.TestCase):
-    def test_live_gate_requires_attested_match(self):
+    def test_live_gate_blocks_without_authenticated_evidence(self):
         a = _passing_artifact()
-        ok = _live(a)
-        self.assertTrue(ok.promote, ok.blockers)
-        self.assertTrue(ok.to_dict()["production_ready"])
-        self.assertFalse(ok.to_dict()["authorizes_real_trading"])
-        for status in (gate.LIVE_ATTESTATION_PENDING, "ATTESTED_MISMATCH", "ATTESTATION_INVALID", None):
+        for status in (gate.POLICY_OBSERVATION_PENDING, gate.POLICY_CONTENT_MATCH):
             b = copy.deepcopy(a)
             b["policy_parity"] = status
-            r = _live(b)
+            r = gate.evaluate_live(b, None)
             self.assertFalse(r.promote)
-            self.assertIn("LIVE_POLICY_NOT_ATTESTED", r.blockers)
-            self.assertFalse(r.to_dict()["production_ready"])
+            self.assertIn("LIVE_PROVENANCE_SOURCE_UNAVAILABLE", r.blockers)
+            d = r.to_dict()
+            self.assertFalse(d["production_ready"])
+            self.assertEqual(d["stages"]["RESEARCH_PROMOTION"], "PASS")
+            self.assertEqual(d["stages"]["LIVE_RELEASE_PRECONDITIONS"], "BLOCK")
+            self.assertEqual(d["stages"]["REAL_ORDER_ENABLEMENT"], "HUMAN_ACTION_REQUIRED")
 
-    def test_live_gate_requires_exact_sha_protection_and_human(self):
+    def test_research_gate_passes_with_pending_observation_without_readiness(self):
         a = _passing_artifact()
-        self.assertIn("CANDIDATE_SHA_NOT_EXACT", _live(a, candidate_sha="d" * 40).blockers)
-        self.assertIn("CANDIDATE_SHA_NOT_EXACT", _live(a, candidate_sha=None).blockers)
-        self.assertIn("PROTECTION_READINESS_NOT_PROVEN", _live(a, protection_readiness=None).blockers)
-        self.assertIn("HUMAN_AUTHORIZATION_MISSING", _live(a, human_authorization=" ").blockers)
-        b = copy.deepcopy(a)
-        b["historical_context_parity_complete"] = False
-        self.assertIn("HISTORICAL_CONTEXT_PARITY_INCOMPLETE", _live(b).blockers)
-
-    def test_research_gate_passes_with_pending_attestation_without_readiness(self):
-        a = _passing_artifact()
-        a["policy_parity"] = gate.LIVE_ATTESTATION_PENDING
+        a["policy_parity"] = gate.POLICY_OBSERVATION_PENDING
         r = gate.evaluate(a)
         self.assertTrue(r.promote, r.blockers)
         d = r.to_dict()
         self.assertEqual(d["gate"], gate.RESEARCH_GATE)
         self.assertEqual(d["verdict"], "PASS")
-        self.assertEqual(d["live_policy_attestation"], "LIVE_ATTESTATION_PENDING")
+        self.assertEqual(d["policy_content"], "LIVE_POLICY_OBSERVATION_PENDING")
+        self.assertEqual(d["stages"]["RESEARCH_PROMOTION"], "PASS")
         self.assertFalse(d["production_ready"])
 
     def test_successful_research_gate_never_production_ready(self):
-        for status in ("ATTESTED_MATCH", gate.LIVE_ATTESTATION_PENDING):
+        for status in (gate.POLICY_CONTENT_MATCH, gate.POLICY_OBSERVATION_PENDING):
             a = _passing_artifact()
             a["policy_parity"] = status
             with tempfile.TemporaryDirectory() as tmp:
@@ -273,7 +258,7 @@ class StagedGates(unittest.TestCase):
             path = Path(tmp) / "a.json"
             path.write_text(json.dumps(a), encoding="utf-8")
             with redirect_stdout(io.StringIO()):
-                code = gate.main([str(path), "--gate", "live", "--candidate-sha", a["candidate_sha"]])
+                code = gate.main([str(path), "--gate", "live"])
         self.assertNotEqual(code, gate.EXIT_PROMOTE)
 
 
@@ -302,16 +287,45 @@ class ResidualDependenceFailsClosed(unittest.TestCase):
                 self.assertEqual(set(iv["residual_dependence"]["acf"]), {"1", "2", "3"})
 
     def test_gate_fails_closed_on_dependence_at_longest_usable_block(self):
+        from tests.test_nexus_oos_promotion_gate import residual
         a = _passing_artifact()
         sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
         longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
-        longest["residual_dependence"]["acf"]["2"] = 0.6        # shorter blocks stay clean
+        n = longest["resampling_blocks"]
+        # Persistent regime across blocks; shorter blocks stay clean.
+        longest["residual_dependence"] = residual(
+            [round(math.sin(2 * math.pi * i / 20.0), 12) for i in range(n)])
         r = gate.evaluate(a)
         self.assertFalse(r.promote)
         self.assertIn("RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK", r.blockers)
         self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", r.blockers)
+
+    def test_gate_recomputes_from_series_and_rejects_tampered_acf(self):
+        from tests.test_nexus_oos_promotion_gate import residual
+        a = _passing_artifact()
+        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
+        n = longest["resampling_blocks"]
+        rd = residual([round(math.sin(2 * math.pi * i / 20.0), 12) for i in range(n)])
+        rd["acf"] = {"1": 0.01, "2": 0.0, "3": -0.01}   # stored values claim "clean"
+        rd["significant"] = False
+        longest["residual_dependence"] = rd
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT", gate.evaluate(a).blockers)
+        del rd["series"]
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_MISSING", gate.evaluate(a).blockers)
         del longest["residual_dependence"]
-        self.assertIn("RESIDUAL_DEPENDENCE_NOT_REPORTED", gate.evaluate(a).blockers)
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_MISSING", gate.evaluate(a).blockers)
+
+    def test_inference_series_reproduces_reported_acf(self):
+        res = inf.dependence_aware_mean(self._persistent_rows(), samples=200)
+        for iv in res["block_intervals"]:
+            rd = iv["residual_dependence"]
+            if rd is None:
+                continue
+            self.assertEqual(rd["n_blocks"], iv["resampling_blocks"])
+            if rd["n_blocks"] >= 10:          # below 10 blocks no ACF is reported
+                self.assertEqual(inf.acf_from_series(rd["series"]["means"]), rd["acf"])
+            self.assertEqual(len(rd["series"]["counts"]), rd["n_blocks"])
 
 
 if __name__ == "__main__":

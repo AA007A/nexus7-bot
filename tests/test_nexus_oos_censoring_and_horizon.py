@@ -278,32 +278,50 @@ class OutcomeWindows(unittest.TestCase):
             _manifest(OUTCOME_LOOKFORWARD_BARS=100)
 
 
+IDENT_ENV = {"RAILWAY_GIT_COMMIT_SHA": "a" * 40, "RAILWAY_DEPLOYMENT_ID": "dep-123",
+             "RAILWAY_SERVICE_ID": "svc-raw-id", "RAILWAY_ENVIRONMENT_ID": "env-raw-id"}
+
+
+def _obs_line(values, env=IDENT_ENV):
+    return pa.observation_line(values, pa.runtime_identity(env))
+
+
 class LivePolicyAttestation(unittest.TestCase):
+    """Policy OBSERVATION: content/integrity only, never provenance."""
+
     def test_line_contains_only_whitelisted_non_secret_values(self):
         secrets = {"KUCOIN_API_KEY": "SECRETKEY123", "KUCOIN_API_SECRET": "SHHH999",
                    "DATABASE_URL": "postgres://u:pw@host/db", "TELEGRAM_TOKEN": "tok-777"}
-        with patch.dict(os.environ, secrets):
-            line = pa.attestation_line(pa.runtime_policy())
-        for v in secrets.values():
+        with patch.dict(os.environ, {**secrets, **IDENT_ENV}):
+            line = pa.observation_line(pa.runtime_policy(), pa.runtime_identity())
+        for v in list(secrets.values()) + ["svc-raw-id", "env-raw-id"]:
             self.assertNotIn(v, line)
-        keys = [t.split("=")[0] for t in line.split()[2:]]
-        self.assertEqual(tuple(keys), pa.ATTESTED_KEYS)
-        self.assertTrue(line.startswith(pa.TAG + " sha256="))
+        tokens = [t.split("=")[0] for t in line.split()[1:]]
+        self.assertEqual(tuple(tokens), pa.IDENTITY_FIELDS + pa.ATTESTED_KEYS)
+        self.assertTrue(line.startswith(pa.TAG + " format=2 candidate_sha=" + "a" * 40))
+        self.assertIn("service_id_hash=" + pa.id_hash("svc-raw-id"), line)
 
-    def test_parse_verifies_hash_and_whitelist(self):
-        line = pa.attestation_line(pa.manifest_values(rm.load()))
-        self.assertEqual(pa.parse(line)["sha256"], pa.digest(pa.manifest_values(rm.load())))
+    def test_parse_verifies_hash_whitelist_and_identity(self):
+        line = _obs_line(pa.manifest_values(rm.load()))
+        parsed = pa.parse(line)
+        self.assertEqual(parsed["sha256"], pa.digest(pa.manifest_values(rm.load())))
+        self.assertEqual(parsed["identity"]["deployment_id"], "dep-123")
         with self.assertRaises(ValueError):
             pa.parse(line.replace("LEVERAGE=50", "LEVERAGE=20"))
         with self.assertRaises(ValueError):
             pa.parse(line + " API_KEY=1")
+        with self.assertRaises(ValueError):
+            pa.parse(line.replace("format=2 ", ""))
 
-    def test_compare_statuses(self):
+    def test_compare_statuses_are_content_only(self):
         m = rm.load()
-        self.assertEqual(pa.compare(m, None)["status"], pa.STATUS_NOT_ATTESTED)
-        self.assertEqual(pa.compare(m, pa.attestation_line(pa.manifest_values(m)))["status"], pa.STATUS_MATCH)
+        self.assertEqual(pa.compare(m, None)["status"], pa.STATUS_PENDING)
+        res = pa.compare(m, _obs_line(pa.manifest_values(m)))
+        self.assertEqual(res["status"], pa.STATUS_MATCH)
+        self.assertEqual(res["status"], "POLICY_CONTENT_MATCH")
+        self.assertEqual(res["provenance"], "UNAUTHENTICATED")
         other = dict(pa.manifest_values(m), LEVERAGE=20)
-        res = pa.compare(m, "2026 WARNING " + pa.attestation_line(other))
+        res = pa.compare(m, "2026 WARNING " + _obs_line(other))
         self.assertEqual(res["status"], pa.STATUS_MISMATCH)
         self.assertEqual(res["mismatches"], {"LEVERAGE": {"replay": "50", "live": "20"}})
         self.assertEqual(pa.compare(m, "garbage")["status"], pa.STATUS_INVALID)
@@ -311,15 +329,13 @@ class LivePolicyAttestation(unittest.TestCase):
     def test_pending_is_research_only_and_mismatch_blocks_everywhere(self):
         from tests.test_nexus_oos_promotion_gate import _passing_artifact
         a = copy.deepcopy(_passing_artifact())
-        a["policy_parity"] = pa.STATUS_NOT_ATTESTED
-        self.assertEqual(pa.STATUS_NOT_ATTESTED, gate.LIVE_ATTESTATION_PENDING)
+        a["policy_parity"] = pa.STATUS_PENDING
+        self.assertEqual(pa.STATUS_PENDING, gate.POLICY_OBSERVATION_PENDING)
         self.assertTrue(gate.evaluate(a).promote)
-        self.assertIn("LIVE_POLICY_NOT_ATTESTED", gate.evaluate_live(
-            a, candidate_sha=a["candidate_sha"], protection_readiness="PASS",
-            human_authorization="operator").blockers)
+        self.assertFalse(gate.evaluate_live(a, None).promote)
         for status in (pa.STATUS_MISMATCH, pa.STATUS_INVALID, None):
             a["policy_parity"] = status
-            self.assertIn("LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID", gate.evaluate(a).blockers)
+            self.assertIn("POLICY_CONTENT_MISMATCH_OR_INVALID", gate.evaluate(a).blockers)
 
     def test_bootstrap_installs_attestation_log(self):
         src = (rm.DEFAULT_PATH.parent.parent / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")

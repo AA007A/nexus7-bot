@@ -1190,7 +1190,7 @@ CANONICAL_BLOCKER_KEYS = (
 
 async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
                           research: bool = True, manifest_path: str | None = None,
-                          live_policy_attestation: str | None = None,
+                          policy_observation_fixture: str | None = None,
                           candidate_sha: str | None = None) -> dict:
     # Install the production wrapper stack in a PAPER-safe process. No exchange
     # mutation methods are called by this replay.
@@ -1302,13 +1302,16 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         ex, pre = xp.exit_parity_status(), xp.pretrade_parity_status()
         from bot import policy_attestation as pa
         artifact["replay_policy_manifest"] = manifest.report()
-        att = pa.compare(manifest, live_policy_attestation)
-        artifact["live_policy_attestation"] = att
+        # A supplied observation is a RESEARCH FIXTURE: content comparison only,
+        # provenance UNAUTHENTICATED. Stage C re-reads it from the deployment.
+        att = pa.compare(manifest, policy_observation_fixture)
+        artifact["live_policy_observation"] = att
         artifact["policy_parity"] = att["status"]
-        # A pending attestation is not a research blocker (stage A); only the
+        artifact["policy_provenance"] = att["provenance"]
+        # A pending observation is not a research blocker (stage A); only the
         # LIVE_RELEASE_GATE requires ATTESTED_MATCH. Mismatch/invalid block always.
-        if att["status"] not in (pa.STATUS_MATCH, pa.STATUS_NOT_ATTESTED):
-            blockers.append("LIVE_POLICY_ATTESTATION_" + att["status"])
+        if att["status"] not in (pa.STATUS_MATCH, pa.STATUS_PENDING):
+            blockers.append(att["status"])
         artifact["replay_parity"] = {
             "exit_parity_matrix": list(xp.EXIT_PARITY_MATRIX),
             "pretrade_gate_matrix": list(xp.PRETRADE_GATE_MATRIX),
@@ -1429,24 +1432,25 @@ def main(argv=None) -> int:
     parser.add_argument("--output", default="artifacts/nexus_oos_real_replay.json")
     parser.add_argument("--policy-manifest", default=None,
                         help="Pinned replay policy (default research/replay_policy_manifest.json).")
-    parser.add_argument("--live-policy-attestation", default=None,
-                        help="File with one [NON_SECRET_POLICY_ATTESTATION] line copied from LIVE logs.")
+    parser.add_argument("--policy-observation-fixture", default=None,
+                        help="RESEARCH/TEST FIXTURE only: a [LIVE_POLICY_OBSERVATION_V2] line. "
+                             "Content comparison only; never LIVE provenance.")
     parser.add_argument("--candidate-sha", default=None,
                         help="Exact commit SHA the replay ran on (recorded for the live gate).")
     parser.add_argument("--no-research", action="store_true",
                         help="Skip research sections (faster; no promotion evidence).")
     args = parser.parse_args(argv)
-    attestation = None
-    if args.live_policy_attestation:
+    fixture = None
+    if args.policy_observation_fixture:
         try:
-            attestation = Path(args.live_policy_attestation).read_text(encoding="utf-8")
+            fixture = Path(args.policy_observation_fixture).read_text(encoding="utf-8")
         except OSError:
-            attestation = "UNREADABLE"
+            fixture = "UNREADABLE"
     try:
         report = asyncio.run(run_real_replay(args.symbols, limit_15m=args.limit_15m,
                                              research=not args.no_research,
                                              manifest_path=args.policy_manifest,
-                                             live_policy_attestation=attestation,
+                                             policy_observation_fixture=fixture,
                                              candidate_sha=args.candidate_sha))
     except ManifestError as exc:
         print(json.dumps({"status": "REPLAY_POLICY_MANIFEST_INVALID", "error": str(exc)}))

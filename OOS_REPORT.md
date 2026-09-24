@@ -418,7 +418,7 @@ The `0c3ebc1` replay is **DIAGNOSTIC_ONLY** because of two defects fixed here.
    - `open_positions_at_end`, plus worst and best bounds.
    `PORTFOLIO_CENSORING_MATERIAL` is set when a censored position was still open before the last candidate (the later path is unknowable) or when the bounds straddle the starting equity.
 7. **The path bootstrap is `APPROXIMATE_NON_AUTHORITATIVE`.** It splices a position's real future into a neighbouring synthetic block drawn from an unrelated period. Portfolio robustness authority is now walk-forward: four purged, embargoed calendar folds on the real market timeline (§C.9). A fold counts only if its marked and realized returns are both positive and its censoring is not material. The gate requires 3 of 4.
-8. **Live policy attestation.** At startup the bot logs one line, `[NON_SECRET_POLICY_ATTESTATION] sha256=… KEY=VALUE …`, containing only a whitelist of 30 numeric policy keys. The replay compares that sha256 with its manifest's. Without a LIVE line, `policy_parity = LIVE_ATTESTATION_PENDING`: the research gate may pass, the live release gate blocks with `LIVE_POLICY_NOT_ATTESTED` (§C.9). A mismatched or invalid attestation blocks both gates. Nothing is read from Railway, and this code is not deployed in this phase.
+8. **Live policy observation** (superseded wording; see §C.10). At startup the bot logs one line, `[NON_SECRET_POLICY_ATTESTATION] sha256=… KEY=VALUE …`, containing only a whitelist of 30 numeric policy keys. The replay compares that sha256 with its manifest's. Without a LIVE line, `policy_parity = LIVE_ATTESTATION_PENDING`: the research gate may pass, the live release gate blocks with `LIVE_POLICY_NOT_ATTESTED` (§C.9). A mismatched or invalid attestation blocks both gates. Nothing is read from Railway, and this code is not deployed in this phase.
 
 ### C.9 Fold independence, residual dependence and staged gates (after `07a5a6a`)
 In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward folds were contiguous slices, so a trade decided late in fold K could resolve inside fold K+1. Their fold conclusions are **NON_AUTHORITATIVE**. Fixed here:
@@ -438,7 +438,7 @@ In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward
 
    The replay asserts `max(outcome_end_ts in K) < min(decision_ts in K+1)`.
 3. **Portfolio folds** (`walk_forward_folds`). Each fold's trades are truncated at its outcome-window end. A still-open position becomes `RIGHT_CENSORED_FOLD_END`, is marked, and is never carried into the next fold. `fold_account_state = RESET_FOR_REGIME_ROBUSTNESS`: every fold restarts from the starting equity. This is a regime-robustness test and is distinct from the continuous portfolio replay (`portfolio_replay` top level), which is never reset.
-4. **Artifact metadata and gate recomputation.** Both fold sections carry `folds_overlap_free`, `fold_embargo_ms`, `fold_required_horizon_ms`, `folds_authoritative` and `folds_total`. The gate recomputes independence from the fold dates:
+4. **Artifact metadata and gate check.** Both fold sections carry `folds_overlap_free`, `fold_embargo_ms`, `fold_required_horizon_ms`, `folds_authoritative` and `folds_total`. The gate re-derives independence from the reported fold dates:
    - embargo ≥ reported horizon ≥ the gate's own re-derived horizon;
    - gap between folds ≥ horizon + embargo;
    - `max_market_ts_used` < next `decision_start_ts`.
@@ -446,15 +446,24 @@ In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward
    It blocks with `TEMPORAL_FOLDS_NOT_INDEPENDENT` or `PORTFOLIO_FOLDS_NOT_INDEPENDENT`. It never trusts the flag alone.
 5. **Terminology.** `independent_blocks` is renamed `resampling_blocks`. Non-overlapping blocks are not claimed to be independent.
 6. **Residual-dependence rule (predeclared).** For every block length at or above the required horizon, the artifact reports the lag-1/2/3 ACF of consecutive block means with a 2/√n band. If any |ACF| exceeds the band at the **longest otherwise-usable** length, no length carries authority (`RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK` ⇒ INSUFFICIENT_EVIDENCE). A shorter block is never substituted. The gate recomputes this from the reported ACF.
-7. **Staged gates.** `python -m bot.nexus_oos_promotion_gate --gate research|live`.
+7. **Staged gates.** `python -m bot.nexus_oos_promotion_gate --gate research|live`. Superseded by §C.10: the live gate now needs source-authenticated Stage-C evidence.
 
-   | Stage | Gate | Attestation | Meaning |
-   |---|---|---|---|
-   | A: research / code merge | `RESEARCH_PROMOTION_GATE` | `LIVE_ATTESTATION_PENDING` or `ATTESTED_MATCH` | Research evidence only. `production_ready` is always false. |
-   | B: pre-live / shadow attestation | none (operator captures the LIVE line) | Produces the `[NON_SECRET_POLICY_ATTESTATION]` line | Not created in this phase. |
-   | C: live release | `LIVE_RELEASE_GATE` | `ATTESTED_MATCH` required | Everything in A, plus the exact `candidate_sha`, protection readiness `PASS`, explicit human authorization, and full context parity. Only this gate can report `production_ready = true`. Even then `authorizes_real_trading` is false: enabling orders stays a manual step. |
-
-   Attestation is not removed from production safety. It moves to the stage where it can be produced. CI runs the live gate as informational only; it cannot pass there because no protection readiness or human authorization is supplied.
+### C.10 LIVE release evidence authenticity (after `c0b1472`)
+1. **Content is not provenance.** sha256 of a plaintext policy payload proves integrity only.
+   - The states are renamed: `LIVE_POLICY_OBSERVATION_PENDING`, `POLICY_CONTENT_MATCH`, `POLICY_CONTENT_MISMATCH` and `POLICY_OBSERVATION_INVALID`.
+   - Every replay artifact records `policy_provenance = UNAUTHENTICATED`. Nothing is called cryptographic LIVE attestation.
+2. **The runtime line carries code identity.** `LIVE_POLICY_OBSERVATION_V2` adds the format version, `candidate_sha`, `deployment_id`, hashed service and environment IDs, and `generated_at`. It contains no secrets.
+3. **No committed LIVE evidence.** The workflow no longer reads `research/live_policy_attestation.txt`. The replay flag is now `--policy-observation-fixture` (research/test only), and the PR workflow never passes it.
+4. **The Stage-C evidence contract** (`BGX_LIVE_RELEASE_EVIDENCE_V1`, RELEASE_EVIDENCE.md) is implemented as a schema, parser and verifier.
+   - Every claim is re-read from a read-only `TrustedSources` provider: Railway deployment metadata, that deployment's logs, exact-SHA CI runs, and approval records.
+   - Checks: exact deployment SHA (artifact = envelope = deployment commit = runtime line); pinned service and environment; stale-evidence limits fixed in advance.
+   - Protection evidence is structured and bound by a digest; human approval is a structured record.
+   - No trusted provider exists yet, so `LIVE_RELEASE_EVIDENCE = BLOCK`.
+5. **Stages:** `RESEARCH_PROMOTION`, `PRELIVE_EVIDENCE` and `LIVE_RELEASE_PRECONDITIONS`, plus `REAL_ORDER_ENABLEMENT = HUMAN_ACTION_REQUIRED`. `production_ready` is emitted only on source-authenticated evidence, never from local CLI arguments.
+6. **Residual-dependence recomputation.** The artifact now carries a compact per-block series (block ids, block means, counts; no individual trades) for every block length at or above the horizon.
+   - The gate recomputes the lag-1/2/3 ACF, the 2/√n band and the resampling-block count from that series. A stored ACF that differs from the recomputation is blocked (`RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT`), and a missing series fails closed.
+   - The rule itself is unchanged: significant dependence at the longest usable block ⇒ INSUFFICIENT_EVIDENCE, with no shorter substitute.
+7. The fold implementation of §C.9 is unchanged.
 
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.

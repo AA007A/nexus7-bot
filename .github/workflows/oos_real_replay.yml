@@ -64,7 +64,7 @@ on:
       - "bot/decision_affecting_paths.py"
       - "bot/nexus_oos_promotion_gate.py"
       - "research/replay_policy_manifest.json"
-      - "research/live_policy_attestation.txt"
+      - "bot/live_release_evidence.py"
       - "bot/policy_attestation.py"
       - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
@@ -80,10 +80,11 @@ on:
 # Staged gates (see RELEASE_READINESS.md):
 #   RESEARCH_PROMOTION_GATE (stage A, code merge): strict; FAILS this job unless
 #     every research condition in bot/nexus_oos_promotion_gate.py is met. It may
-#     pass with LIVE_ATTESTATION_PENDING and never means PRODUCTION_READY=YES.
-#   LIVE_RELEASE_GATE (stage C): requires ATTESTED_MATCH, the exact SHA,
-#     protection readiness and explicit human authorization. Reported here for
-#     information only; it is never satisfiable from CI alone.
+#     pass with LIVE_POLICY_OBSERVATION_PENDING and never means PRODUCTION_READY=YES.
+#   LIVE_RELEASE_GATE (stage C): requires a BGX_LIVE_RELEASE_EVIDENCE_V1 envelope
+#     verified against trusted read-only sources (RELEASE_EVIDENCE.md). No such
+#     source exists in CI, so it is reported for information only and BLOCKS.
+# No LIVE policy evidence is read from the repository.
 
 jobs:
   replay:
@@ -126,20 +127,14 @@ jobs:
           python -m unittest tests.test_nexus_oos_execution_parity -v
           python -m unittest tests.test_nexus_oos_censoring_and_horizon -v
           python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v
+          python -m unittest tests.test_live_release_evidence -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
-          # A LIVE attestation line is used only if an operator committed one
-          # (copied from the LIVE startup log); nothing is read from Railway.
-          ATTEST=()
-          if [ -f research/live_policy_attestation.txt ]; then
-            ATTEST=(--live-policy-attestation research/live_policy_attestation.txt)
-          fi
           python -m bot.nexus_oos_real_replay_corrected \
             --symbols $OOS_SYMBOLS \
             --limit-15m "$OOS_LIMIT_15M" \
             --policy-manifest research/replay_policy_manifest.json \
-            "${ATTEST[@]}" \
             --candidate-sha "$(git rev-parse HEAD)" \
             --output artifacts/nexus_oos_real_replay.json
 
@@ -170,7 +165,8 @@ jobs:
               'unavailable_symbols': p.get('unavailable_symbols'),
               'replay_policy_manifest': {k: (p.get('replay_policy_manifest') or {}).get(k) for k in ('policy_source', 'policy_sha256', 'differs_from_code_default')},
               'policy_parity': p.get('policy_parity'),
-              'live_policy_attestation': {k: (p.get('live_policy_attestation') or {}).get(k) for k in ('status', 'replay_policy_sha', 'live_policy_sha', 'mismatches', 'error')},
+              'policy_provenance': p.get('policy_provenance'),
+              'live_policy_observation': {k: (p.get('live_policy_observation') or {}).get(k) for k in ('status', 'provenance', 'replay_policy_sha', 'live_policy_sha', 'mismatches', 'error')},
               'replay_parity': {k: rp.get(k) for k in ('exit_parity_complete', 'exit_parity_blocking_rules', 'pretrade_parity_complete', 'pretrade_parity_blocking_gates', 'portfolio_parity_complete', 'tp1_equals_tp2_root_cause')},
               'methodology': p.get('methodology'),
               'parity_attribution': p.get('parity_attribution'),
@@ -221,10 +217,10 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          # Never passes from CI: no protection readiness or human authorization
-          # is supplied here. Reported so the live blockers are visible.
+          # Never passes from CI: no trusted control-plane source and no Stage-C
+          # evidence envelope exist here. Reported so the live blockers are visible.
           python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json \
-            --gate live --candidate-sha "$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+            --gate live | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Research promotion gate (strict)

@@ -15,8 +15,26 @@ from bot import nexus_oos_promotion_gate as gate
 
 DAY = 86_400_000
 D0 = 1_735_689_600_000   # 2025-01-01T00:00Z
-CLEAN_ACF = {"n_blocks": 60, "band": 0.26, "acf": {"1": 0.05, "2": -0.04, "3": 0.02},
-             "significant": False}
+
+
+def residual(means):
+    """Residual-dependence report exactly as inference emits it (from a series)."""
+    n = len(means)
+    acf = inf.acf_from_series(means)
+    band = 2 / n ** 0.5
+    return {"n_blocks": n, "band": band, "acf": acf,
+            "significant": any(abs(v) > band for v in acf.values()),
+            "series": {"block_ids": list(range(n)), "means": list(means), "counts": [3] * n}}
+
+
+def clean_series(n):
+    import random
+    for seed in range(1000):
+        rng = random.Random(seed)
+        m = [round(rng.gauss(0.1, 0.3), 12) for _ in range(n)]
+        if not residual(m)["significant"]:
+            return m
+    raise AssertionError("no clean series")
 
 
 def _folds(*, positive_key, required_ms=DAY, span_days=180):
@@ -34,7 +52,7 @@ def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60,
     """Block intervals for 1/2/3-day blocks; horizon in the fixture is < 1 day,
     so all three are long enough; ``blocks`` = independent blocks per length."""
     ivs = [{"block_ms": d * DAY, "block_days": d, "ci": [lo, hi], "resampling_blocks": n,
-            "authoritative": n >= 30, "residual_dependence": copy.deepcopy(CLEAN_ACF)}
+            "authoritative": n >= 30, "residual_dependence": residual(clean_series(n))}
            for d, (lo, hi), n in zip((1, 2, 3), ((lo24, hi24), (lo48, hi48), (lo72, hi72)), blocks)]
     valid = [iv["ci"] for iv in ivs if iv["authoritative"]]
     lo = min(c[0] for c in valid) if valid else None
@@ -48,7 +66,8 @@ def _passing_artifact():
     return {
         "authority_model": "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2",
         "status": "AI_EDGE_PROVEN",
-        "policy_parity": "ATTESTED_MATCH",
+        "policy_parity": "POLICY_CONTENT_MATCH",
+        "live_policy_observation": {"replay_policy_sha": "e" * 64},
         "candidate_sha": "c" * 40,
         "blockers": [],
         "historical_context_parity_complete": True,
@@ -234,7 +253,7 @@ class PromotionGateTests(unittest.TestCase):
             "CENSORING_MATERIAL": lambda a: cr(a)["censoring"].update(censoring_material=True),
             "CENSORING_REPORT_MISSING": lambda a: cr(a).pop("censoring"),
             "INSUFFICIENT_RESAMPLING_BLOCKS": lambda a: cr(a)["sample_adequacy"].update(resampling_blocks_approved=12),
-            "LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID": lambda a: a.update(policy_parity="ATTESTED_MISMATCH"),
+            "POLICY_CONTENT_MISMATCH_OR_INVALID": lambda a: a.update(policy_parity="POLICY_CONTENT_MISMATCH"),
             "INSUFFICIENT_PORTFOLIO_TRADES": lambda a: a["portfolio_replay"].update(total_trades=10),
             "TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING": lambda a: a["portfolio_replay"].update(contributing_symbols=1),
         }

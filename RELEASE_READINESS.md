@@ -24,7 +24,7 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 | **PORTFOLIO_EDGE** | **Failed** | Portfolio replay −49.4%, max drawdown 50.3%, halted by the drawdown hard gate; −0.788 R per trade. |
 | **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). |
 | **STATISTICAL_AUTHORITY** | **Horizon-aware (see OOS_REPORT §C.8)** | Authority only for blocks ≥ the max resolved outcome horizon with ≥ 30 resampling blocks and no significant residual block dependence at the longest usable length. Censored outcomes are excluded and the censoring must be immaterial. Fold robustness needs purged, embargoed calendar folds (§C.9). The `0c3ebc1` replay is diagnostic only; the `07a5a6a` fold results are non-authoritative. |
-| **POLICY_PARITY** | **Pending (stage B)** | `LIVE_ATTESTATION_PENDING`. The attestation mechanism exists, but no LIVE line has been captured; this phase does not deploy. Allowed by the research gate; the live release gate requires `ATTESTED_MATCH`. |
+| **POLICY_PARITY** | **Content only; provenance not authenticated** | `LIVE_POLICY_OBSERVATION_PENDING`. The startup line (`LIVE_POLICY_OBSERVATION_V2`) proves payload integrity, not source. `POLICY_CONTENT_MATCH` ≠ authenticated LIVE evidence. LIVE provenance requires the Stage-C verifier (RELEASE_EVIDENCE.md), which has no trusted source yet. |
 | **REPLAY_PARITY** | **INCOMPLETE** | Production exits and pre-trade gates are traced and classified (OOS_REPORT §C). Exits are bar-approximated. Spread/depth, market-risk feeds, the pilot session cap and private CROSS MMR are not replayable. The gate blocks with EXIT/PRETRADE/PORTFOLIO_PARITY_INCOMPLETE. |
 | **RELEASE_READINESS** | **Not ready** | See blockers. |
 
@@ -38,7 +38,7 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 7. **Horizon.** 180 days (7 months) is covered; 365 days or more needs sharding. Multi-year durability: INSUFFICIENT EVIDENCE.
 8. **The probability heuristic is miscalibrated**, and confidence is anti-predictive. It stays telemetry/veto only.
 9. **Strategy-level gates are not ablated** (refactor required).
-9a. **Live policy parity is not attested** (no `[NON_SECRET_POLICY_ATTESTATION]` line from LIVE yet). The `LIVE_RELEASE_GATE` blocks on this.
+9a. **LIVE release evidence is not source-authenticated.** No read-only Railway/CI/approval provider exists yet, so the `LIVE_RELEASE_GATE` blocks (`LIVE_PROVENANCE_SOURCE_UNAVAILABLE`). See RELEASE_EVIDENCE.md.
 9b. **Production capacity facts.** At most one concurrent LIVE position, and 2 new orders per process session. Trailing after TP1 uses an un-rescaled peak (P1-17).
 10. **PAPER and SHADOW validation** of this candidate have not been performed.
 11. **Production state.** Live drawdown is 59.40%, above the 50% limit. Once deployed, this code blocks all new entries until an operator performs a reviewed HWM rebase or equity recovers. That is the intended outcome.
@@ -48,9 +48,9 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 ## Release stages
 | Stage | What | Gate | Status |
 |---|---|---|---|
-| A | Research / code merge | `RESEARCH_PROMOTION_GATE` (strict in CI). `LIVE_ATTESTATION_PENDING` allowed. Never means PRODUCTION_READY = YES | Runs on every PR head |
-| B | Pre-live / shadow attestation: capture the LIVE `[NON_SECRET_POLICY_ATTESTATION]` line | none | **Not started.** Not created in this phase |
-| C | Live release | `LIVE_RELEASE_GATE`: exact SHA, `ATTESTED_MATCH`, protection readiness, risk gates, CI evidence, explicit human authorization | Blocked |
+| A | Research / code merge | `RESEARCH_PROMOTION_GATE` (strict in CI). `LIVE_POLICY_OBSERVATION_PENDING` allowed; independent of LIVE provenance. Never means PRODUCTION_READY = YES | Runs on every PR head |
+| B | Pre-live evidence (`PRELIVE_EVIDENCE`): policy content match + source-authenticated provenance + exact deployment SHA + exact-SHA CI | verifier (`bot/live_release_evidence.py`) | **Blocked**: no trusted source provider exists yet |
+| C | Live release (`LIVE_RELEASE_PRECONDITIONS`) | `LIVE_RELEASE_GATE`: a `BGX_LIVE_RELEASE_EVIDENCE_V1` envelope whose claims are all confirmed from trusted read-only sources, plus structured protection evidence and a structured human approval (RELEASE_EVIDENCE.md). `REAL_ORDER_ENABLEMENT = HUMAN_ACTION_REQUIRED` | Blocked |
 
 ## Verdict
 The engineering and risk-control hardening is done and tested offline. The trading strategy has measured negative expectancy, and its NEXUS filter has no statistically established edge. Deploying it would expose capital to a strategy with negative expected value.

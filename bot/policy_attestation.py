@@ -1,23 +1,29 @@
-"""Non-secret LIVE policy attestation (read-only, never mutates anything).
+"""Non-secret LIVE policy OBSERVATION (read-only, never mutates anything).
 
-Problem: the committed replay manifest proves only that the CI runtime equals
-the manifest. It does not prove that the manifest equals the LIVE runtime,
-whose Railway variables are not readable from the repository.
+What this is: at startup the bot logs ONE sanitized line
 
-Mechanism: the running bot logs ONE line at startup
+    [LIVE_POLICY_OBSERVATION_V2] format=2 candidate_sha=<git sha>
+        deployment_id=<id> service_id_hash=<sha256> environment_id_hash=<sha256>
+        generated_at=<UTC ISO> policy_sha256=<hex> LEVERAGE=50 MAX_RISK_PCT=0.01 ...
 
-    [NON_SECRET_POLICY_ATTESTATION] sha256=<hex> LEVERAGE=50 MAX_RISK_PCT=0.01 ...
+with the whitelisted policy values, the sha256 of their canonical payload and
+the code/deployment identity the platform exposes to the process
+(RAILWAY_GIT_COMMIT_SHA, RAILWAY_DEPLOYMENT_ID; service/environment IDs are
+hashed). The replay recomputes the same canonical payload from its manifest.
 
-containing ONLY the whitelisted policy keys below, each rendered canonically,
-plus the sha256 of that canonical payload. The replay computes the same
-canonical payload from its manifest and compares hashes. The operator copies
-the line from the LIVE logs into a file and passes it to the replay
-(``--live-policy-attestation``); nothing is fetched from Railway.
+What this is NOT: authentication. sha256 of a plaintext payload proves only
+payload INTEGRITY. Anyone who knows the policy values can build the same line.
+A matching line is therefore reported as ``POLICY_CONTENT_MATCH`` with
+``provenance = UNAUTHENTICATED``. Source provenance (the line came from THIS
+deployment of THIS commit in THIS environment) is established only by the
+Stage-C release verifier (``bot/live_release_evidence.py``), which reads the
+deployment metadata and that deployment's logs from a trusted, read-only
+control-plane source. A line supplied to the replay is a research fixture.
 
-Security: values come from an explicit whitelist of numeric policy settings.
-No environment variable is enumerated, and API keys, URLs, tokens and
-passwords can never appear. A value that cannot be read renders as
-``UNAVAILABLE`` (the hash then cannot match a manifest).
+Security: values come from an explicit whitelist of numeric policy settings
+plus four platform identity variables. No other environment variable is
+enumerated; API keys, URLs, tokens and passwords can never appear. A value that
+cannot be read renders as ``UNAVAILABLE``.
 """
 from __future__ import annotations
 
@@ -25,7 +31,19 @@ import hashlib
 import math
 import re
 
-TAG = "[NON_SECRET_POLICY_ATTESTATION]"
+TAG = "[LIVE_POLICY_OBSERVATION_V2]"
+FORMAT_VERSION = "2"
+IDENTITY_FIELDS = ("format", "candidate_sha", "deployment_id", "service_id_hash",
+                   "environment_id_hash", "generated_at", "policy_sha256")
+_IDENTITY_RE = {
+    "format": re.compile(r"^2$"),
+    "candidate_sha": re.compile(r"^([0-9a-f]{40}|UNAVAILABLE)$"),
+    "deployment_id": re.compile(r"^([A-Za-z0-9-]{1,64}|UNAVAILABLE)$"),
+    "service_id_hash": re.compile(r"^([0-9a-f]{64}|UNAVAILABLE)$"),
+    "environment_id_hash": re.compile(r"^([0-9a-f]{64}|UNAVAILABLE)$"),
+    "generated_at": re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"),
+    "policy_sha256": re.compile(r"^[0-9a-f]{64}$"),
+}
 
 # Whitelist. Every key is a numeric/boolean policy value; order is fixed.
 ATTESTED_KEYS: tuple[str, ...] = (
@@ -42,12 +60,12 @@ _VALUE_RE = re.compile(r"^(-?[0-9.eE+-]+|true|false|UNAVAILABLE)$")
 
 RUNTIME_ERRORS: dict = {}
 
-# Stage A (research/code merge): no LIVE line yet. Allowed by the research
-# gate; the LIVE_RELEASE_GATE requires STATUS_MATCH.
-STATUS_NOT_ATTESTED = "LIVE_ATTESTATION_PENDING"
-STATUS_MATCH = "ATTESTED_MATCH"
-STATUS_MISMATCH = "ATTESTED_MISMATCH"
-STATUS_INVALID = "ATTESTATION_INVALID"
+# Content comparison only. None of these states is provenance.
+STATUS_PENDING = "LIVE_POLICY_OBSERVATION_PENDING"   # no observation supplied (stage A)
+STATUS_MATCH = "POLICY_CONTENT_MATCH"
+STATUS_MISMATCH = "POLICY_CONTENT_MISMATCH"
+STATUS_INVALID = "POLICY_OBSERVATION_INVALID"
+PROVENANCE_UNAUTHENTICATED = "UNAUTHENTICATED"
 
 
 def render(value) -> str:
@@ -70,8 +88,33 @@ def digest(values: dict) -> str:
     return hashlib.sha256(canonical(values).encode("utf-8")).hexdigest()
 
 
-def attestation_line(values: dict) -> str:
-    return f"{TAG} sha256={digest(values)} {canonical(values)}"
+def id_hash(value) -> str:
+    """sha256 of a platform identifier (service/environment IDs are not logged raw)."""
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest() if value else "UNAVAILABLE"
+
+
+def runtime_identity(env=None, now=None) -> dict:
+    """Code/deployment identity exposed by the platform. Read-only; no secrets."""
+    import datetime as _dt
+    import os
+    env = os.environ if env is None else env
+    sha = str(env.get("RAILWAY_GIT_COMMIT_SHA") or "").strip().lower()
+    dep = str(env.get("RAILWAY_DEPLOYMENT_ID") or "").strip()
+    ident = {
+        "format": FORMAT_VERSION,
+        "candidate_sha": sha if _IDENTITY_RE["candidate_sha"].match(sha or "-") else "UNAVAILABLE",
+        "deployment_id": dep if _IDENTITY_RE["deployment_id"].match(dep or "-") and dep else "UNAVAILABLE",
+        "service_id_hash": id_hash(str(env.get("RAILWAY_SERVICE_ID") or "").strip()),
+        "environment_id_hash": id_hash(str(env.get("RAILWAY_ENVIRONMENT_ID") or "").strip()),
+        "generated_at": (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    return ident
+
+
+def observation_line(values: dict, identity: dict) -> str:
+    ident = {**identity, "policy_sha256": digest(values)}
+    head = " ".join(f"{k}={ident[k]}" for k in IDENTITY_FIELDS)
+    return f"{TAG} {head} {canonical(values)}"
 
 
 def runtime_policy() -> dict:
@@ -135,54 +178,77 @@ def manifest_values(manifest) -> dict:
 
 
 def parse(line: str) -> dict:
-    """Parse and verify one attestation line. Raises ValueError if invalid."""
+    """Parse one observation line and verify payload INTEGRITY only.
+
+    Raises ValueError if malformed. Success says nothing about who wrote it.
+    """
     text = str(line).strip()
     idx = text.find(TAG)
     if idx < 0:
-        raise ValueError("attestation tag not found")
-    parts = text[idx + len(TAG):].split()
-    if not parts or not parts[0].startswith("sha256="):
-        raise ValueError("sha256 missing")
-    claimed = parts[0][len("sha256="):]
-    kv = {}
-    for token in parts[1:]:
+        raise ValueError("observation tag not found")
+    tokens = text[idx + len(TAG):].split()
+    ident, kv = {}, {}
+    for token in tokens:
         if "=" not in token:
             raise ValueError("malformed token")
         k, v = token.split("=", 1)
-        if k not in ATTESTED_KEYS or not _VALUE_RE.match(v):
+        if k in _IDENTITY_RE:
+            if k in ident or not _IDENTITY_RE[k].match(v):
+                raise ValueError(f"bad identity field: {k}")
+            ident[k] = v
+        elif k in ATTESTED_KEYS and _VALUE_RE.match(v):
+            kv[k] = v
+        else:
             raise ValueError(f"unexpected key or value: {k}")
-        kv[k] = v
+    if tuple(ident) != IDENTITY_FIELDS:
+        raise ValueError("identity fields missing or out of order")
     if tuple(kv) != ATTESTED_KEYS:
         raise ValueError("key set/order differs from the whitelist")
     payload = " ".join(f"{k}={kv[k]}" for k in ATTESTED_KEYS)
-    if hashlib.sha256(payload.encode("utf-8")).hexdigest() != claimed:
-        raise ValueError("sha256 does not match payload")
-    return {"sha256": claimed, "values": kv}
+    if hashlib.sha256(payload.encode("utf-8")).hexdigest() != ident["policy_sha256"]:
+        raise ValueError("policy_sha256 does not match payload")
+    return {"sha256": ident["policy_sha256"], "identity": ident, "values": kv}
 
 
-def compare(manifest, attestation_text: str | None) -> dict:
+def find_observations(lines) -> list[dict]:
+    """Every valid observation in ``lines`` (invalid ones are skipped)."""
+    out = []
+    for line in lines or ():
+        if TAG in str(line):
+            try:
+                out.append(parse(line))
+            except ValueError:
+                continue
+    return out
+
+
+def compare(manifest, observation_text: str | None) -> dict:
+    """POLICY CONTENT comparison against the replay manifest (never provenance)."""
     replay_sha = digest(manifest_values(manifest))
     base = {"replay_policy_sha": replay_sha, "attested_keys": list(ATTESTED_KEYS),
-            "secrets_included": False}
-    if not attestation_text:
-        return {**base, "status": STATUS_NOT_ATTESTED, "live_policy_sha": None,
-                "note": "no LIVE attestation supplied; manifest values are PRODUCTION_REPORTED or "
-                        "CODE_DEFAULT only"}
+            "secrets_included": False, "provenance": PROVENANCE_UNAUTHENTICATED,
+            "meaning": "payload integrity/content only; source provenance is verified only "
+                       "by the Stage-C release verifier from trusted control-plane data"}
+    if not observation_text:
+        return {**base, "status": STATUS_PENDING, "live_policy_sha": None,
+                "note": "no LIVE policy observation supplied; manifest values are "
+                        "PRODUCTION_REPORTED or CODE_DEFAULT only"}
     try:
-        live = parse(attestation_text)
+        live = parse(observation_text)
     except ValueError as exc:
         return {**base, "status": STATUS_INVALID, "live_policy_sha": None, "error": str(exc)}
     mine = {k: render(v) for k, v in manifest_values(manifest).items()}
     mismatches = {k: {"replay": mine[k], "live": live["values"][k]}
                   for k in ATTESTED_KEYS if mine[k] != live["values"][k]}
     return {**base, "status": STATUS_MATCH if live["sha256"] == replay_sha else STATUS_MISMATCH,
-            "live_policy_sha": live["sha256"], "mismatches": mismatches}
+            "live_policy_sha": live["sha256"], "observation_identity": live["identity"],
+            "source": "RESEARCH_FIXTURE", "mismatches": mismatches}
 
 
 def install(log) -> str:
-    """Log the attestation line once at startup (visible on failure)."""
+    """Log the observation line once at startup (visible on failure)."""
     try:
-        line = attestation_line(runtime_policy())
+        line = observation_line(runtime_policy(), runtime_identity())
     except Exception as exc:
         log.error("%s status=UNAVAILABLE error=%s", TAG, type(exc).__name__)
         return ""
