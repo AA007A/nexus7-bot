@@ -15,21 +15,25 @@ def test_runtime_truth_ws_compat_adds_anext_and_delegates_recv(monkeypatch):
 
     monkeypatch.setenv("BGX_RUNTIME_TRUTH_ENABLED", "true")
     had_anext = hasattr(WebSocketCommonProtocol, "__anext__")
-    previous = getattr(WebSocketCommonProtocol, "__anext__", None)
+    previous_anext = getattr(WebSocketCommonProtocol, "__anext__", None)
+    previous_recv = WebSocketCommonProtocol.recv
     if had_anext:
         delattr(WebSocketCommonProtocol, "__anext__")
 
-    class FakeProtocol:
-        async def recv(self):
-            return "frame"
+    async def fake_recv(self):
+        return "frame"
+
+    WebSocketCommonProtocol.recv = fake_recv
+    protocol = object.__new__(WebSocketCommonProtocol)
 
     try:
         assert runtime_truth_ws_compat.install() is True
         method = WebSocketCommonProtocol.__anext__
-        assert asyncio.run(method(FakeProtocol())) == "frame"
+        assert asyncio.run(method(protocol)) == "frame"
         assert runtime_truth_ws_compat.install() is False
     finally:
+        WebSocketCommonProtocol.recv = previous_recv
         if hasattr(WebSocketCommonProtocol, "__anext__"):
             delattr(WebSocketCommonProtocol, "__anext__")
         if had_anext:
-            setattr(WebSocketCommonProtocol, "__anext__", previous)
+            setattr(WebSocketCommonProtocol, "__anext__", previous_anext)
