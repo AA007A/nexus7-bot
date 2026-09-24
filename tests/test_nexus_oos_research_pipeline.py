@@ -195,3 +195,11 @@ class ResearchStatisticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosticsDoesNotCountResearchVariants(unittest.TestCase):
+    def test_diagnostics_runs_replay_without_research_variants(self):
+        import inspect
+        from bot import nexus_oos_replay_diagnostics as diag
+        self.assertIn("run_real_replay(symbols, limit_15m=limit_15m, research=False)",
+                      inspect.getsource(diag.run))

@@ -82,7 +82,8 @@ async def run(symbols: list[str], limit_15m: int) -> dict:
 
     nexus_ai.decide = instrumented
     try:
-        report = await run_real_replay(symbols, limit_15m=limit_15m)
+        # research=False: variant decisions would inflate the instrumented counts.
+        report = await run_real_replay(symbols, limit_15m=limit_15m, research=False)
     finally:
         nexus_ai.decide = original
 
