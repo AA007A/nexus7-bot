@@ -11,10 +11,17 @@ is met, and non-zero otherwise (including missing or corrupt artifacts):
 
     python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json
 
-Uplift of NEXUS over a losing baseline is NOT sufficient: the approved
-strategy itself must have positive net expectancy with a positive lower
-bootstrap bound (``APPROVED_EXPECTANCY_NOT_POSITIVE`` /
-``APPROVED_EXPECTANCY_CI_NOT_POSITIVE``).
+Uplift of NEXUS over a losing baseline is NOT sufficient. Promotion needs
+BOTH layers:
+
+* CANDIDATE_RESEARCH (signal edge): approved expectancy > 0 and its
+  dependence-aware (UTC-block bootstrap) lower bound > 0; uplift authority
+  lower bound > 0; adequate unique temporal blocks / effective sample.
+* PORTFOLIO_EXECUTION_REPLAY (executable edge): net expectancy > 0, final
+  equity > starting equity, robustness lower bound > 0, max equity drawdown
+  within the research limit, enough trades and contributing symbols.
+
+IID row-bootstrap intervals are diagnostics and never carry authority.
 
 Exit codes: 0 PROMOTE, 1 BLOCKED (evidence insufficient/negative),
 2 ARTIFACT_MISSING, 3 ARTIFACT_CORRUPT.
@@ -37,6 +44,10 @@ EXIT_CORRUPT = 3
 class GatePolicy:
     min_baseline_samples: int = 200
     min_approved_samples: int = 100
+    min_approved_unique_blocks: int = 60
+    min_approved_effective_n: float = 100.0
+    min_portfolio_trades: int = 50
+    min_portfolio_contributing_symbols: int = 4
     min_symbols_contributing: int = 4
     max_symbol_share_of_positive_r: float = 0.50
     max_period_share_of_positive_r: float = 0.50
@@ -102,11 +113,6 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if nexus_exp is None or nexus_exp <= 0:
         b.append("APPROVED_EXPECTANCY_NOT_POSITIVE")
 
-    perf = ((artifact.get("performance") or {}).get("approved")) or {}
-    appr_lo = _num(perf.get("expectancy_ci_low_r"))
-    if appr_lo is None or appr_lo <= 0:
-        b.append("APPROVED_EXPECTANCY_CI_NOT_POSITIVE")
-
     parity = artifact.get("historical_context_parity_complete")
     if parity is None:
         parity = all(
@@ -126,7 +132,32 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         if not days or any(d is None or d < policy.min_history_days for d in days):
             b.append("HISTORY_HORIZON_TOO_SHORT")
 
-    conc = artifact.get("concentration") or {}
+    rob = ((artifact.get("robustness") or {}).get("summary")) or {}
+    folds_pos = _num(rob.get("temporal_folds_positive_uplift"))
+    if folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
+        b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
+
+    # ── CANDIDATE_RESEARCH (signal edge, dependence-aware) ──
+    cand = artifact.get("candidate_research")
+    if not isinstance(cand, dict):
+        b.append("CANDIDATE_RESEARCH_MISSING")
+        cand = {}
+    infer = cand.get("inference") or {}
+    appr_lo = _num((infer.get("approved_expectancy") or {}).get("authority_ci_low"))
+    if appr_lo is None or appr_lo <= 0:
+        b.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
+    up_lo = _num((infer.get("uplift_vs_baseline") or {}).get("authority_ci_low"))
+    if up_lo is None or up_lo <= 0:
+        b.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
+    eff = ((cand.get("effective_sample") or {}).get("approved")) or {}
+    blocks = _num(eff.get("unique_blocks"))
+    if blocks is None or blocks < policy.min_approved_unique_blocks:
+        b.append("INSUFFICIENT_UNIQUE_TEMPORAL_BLOCKS")
+    n_eff = _num(eff.get("effective_n"))
+    if n_eff is None or n_eff < policy.min_approved_effective_n:
+        b.append("INSUFFICIENT_EFFECTIVE_SAMPLE")
+
+    conc = cand.get("concentration") or {}
     sym_c = conc.get("approved_by_symbol") or {}
     contributing = _num(sym_c.get("groups_positive"))
     if contributing is None or contributing < policy.min_symbols_contributing:
@@ -139,16 +170,37 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if pshare is None or pshare > policy.max_period_share_of_positive_r:
         b.append("SINGLE_PERIOD_DOMINATES")
 
-    rob = ((artifact.get("robustness") or {}).get("summary")) or {}
-    folds_pos = _num(rob.get("temporal_folds_positive_uplift"))
-    if folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
-        b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
-
-    stress = artifact.get("cost_stress_approved") or {}
+    stress = cand.get("cost_stress_approved") or {}
     for name in policy.cost_stress_scenarios:
         exp = _num((stress.get(name) or {}).get("net_expectancy_r"))
         if exp is None or exp <= 0:
             b.append(f"COST_STRESS_FAILS_{name.upper()}")
+
+    # ── PORTFOLIO_EXECUTION_REPLAY (executable edge) ──
+    port = artifact.get("portfolio_replay")
+    if not isinstance(port, dict):
+        b.append("PORTFOLIO_REPLAY_MISSING")
+    else:
+        p_exp = _num(port.get("net_expectancy_r"))
+        if p_exp is None or p_exp <= 0:
+            b.append("PORTFOLIO_EXPECTANCY_NOT_POSITIVE")
+        start, end = _num(port.get("starting_equity")), _num(port.get("ending_equity"))
+        if start is None or end is None or end <= start:
+            b.append("PORTFOLIO_FINAL_EQUITY_NOT_ABOVE_START")
+        mdd, limit = _num(port.get("portfolio_max_drawdown")), _num(port.get("research_max_drawdown_limit"))
+        if mdd is None or limit is None or mdd > limit:
+            b.append("PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT")
+        p_lo = _num((port.get("robustness") or {}).get("authority_ci_low"))
+        if p_lo is None:
+            b.append("PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE")
+        elif p_lo <= 0:
+            b.append("PORTFOLIO_ROBUSTNESS_CI_NOT_POSITIVE")
+        trades = _num(port.get("total_trades"))
+        if trades is None or trades < policy.min_portfolio_trades:
+            b.append("INSUFFICIENT_PORTFOLIO_TRADES")
+        csym = _num(port.get("contributing_symbols"))
+        if csym is None or csym < policy.min_portfolio_contributing_symbols:
+            b.append("TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING")
 
     method = artifact.get("methodology") or {}
     for flag in ("closed_candles_only", "historical_clock_frozen", "fees_included",

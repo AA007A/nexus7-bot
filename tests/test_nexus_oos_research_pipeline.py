@@ -94,25 +94,45 @@ class ResearchPipelineTests(unittest.TestCase):
     def test_research_sections_present(self):
         a = self.artifact
         self.assertGreater(a["report"]["baseline_candidates"], 20)
-        for key in ("performance", "segments_approved", "segments_baseline", "concentration",
-                    "cost_stress_approved", "break_even_cost_multiplier", "exit_variants_approved",
-                    "ablation", "context_ablation", "strategy_gate_ablation",
-                    "threshold_research", "probability_calibration", "robustness"):
-            self.assertIn(key, a, key)
-        base = a["performance"]["baseline"]
+        self.assertIn("robustness", a)
+        self.assertIn("portfolio_replay", a)
+        c = a["candidate_research"]
+        self.assertEqual(c["layer"], "CANDIDATE_RESEARCH")
+        for key in ("performance", "inference", "effective_sample", "segments_approved",
+                    "segments_baseline", "concentration", "cost_stress_approved",
+                    "break_even_cost_multiplier", "exit_variants_approved", "ablation",
+                    "context_ablation", "strategy_gate_ablation", "threshold_research",
+                    "probability_calibration", "regime_parity"):
+            self.assertIn(key, c, key)
+        for key in ("performance", "segments_approved", "ablation"):
+            self.assertNotIn(key, a, "candidate metrics must not leak to top level")
+        base = c["performance"]["baseline"]
         for metric in ("win_rate", "loss_rate", "breakeven_rate", "avg_r", "median_r",
                        "profit_factor", "gross_expectancy_r", "net_expectancy_r",
                        "total_fees_r", "total_slippage_r", "funding_contribution_r",
-                       "max_drawdown_r", "longest_losing_streak", "longest_winning_streak",
+                       "candidate_sequence_drawdown_r", "longest_losing_streak", "longest_winning_streak",
                        "p05_r", "expectancy_ci_low_r", "ratio_convention"):
             self.assertIn(metric, base, metric)
-        self.assertEqual(set(a["segments_baseline"]["regime"]) >= set(res.REQUIRED_REGIMES), True)
-        self.assertEqual(set(a["cost_stress_baseline"]), set(replay.COST_SCENARIOS))
-        self.assertEqual(set(a["ablation"]), set(replay.NEXUS_VARIANTS))
-        self.assertEqual(a["threshold_research"]["runtime_threshold_changed"], False)
+        self.assertEqual(set(c["segments_baseline"]["research_regime"]) >= set(res.REQUIRED_REGIMES), True)
+        self.assertIn("production_regime", c["segments_baseline"])
+        self.assertEqual(set(c["cost_stress_baseline"]), set(replay.COST_SCENARIOS))
+        self.assertEqual(set(c["ablation"]), set(replay.NEXUS_VARIANTS))
+        self.assertEqual(c["threshold_research"]["runtime_threshold_changed"], False)
+        self.assertEqual(c["threshold_research"]["split_method"], "PURGED_EMBARGOED_TEMPORAL_50_25_25")
+        inf = c["inference"]["approved_expectancy"] if c["performance"]["approved"]["trades"] else c["inference"]["baseline_expectancy"]
+        for k in ("iid_ci", "block24h_ci", "block48h_ci", "authority_ci_low"):
+            self.assertIn(k, inf)
+        eff = c["effective_sample"]["baseline"]
+        for k in ("rows", "unique_utc_days", "unique_blocks", "symbols", "effective_n"):
+            self.assertIn(k, eff)
+        p = a["portfolio_replay"]
+        self.assertEqual(p["layer"], "PORTFOLIO_EXECUTION_REPLAY")
+        for k in ("starting_equity", "ending_equity", "portfolio_max_drawdown", "skipped",
+                  "max_concurrent_positions", "by_month"):
+            self.assertIn(k, p)
 
     def test_costs_monotone(self):
-        cs = self.artifact["cost_stress_baseline"]
+        cs = self.artifact["candidate_research"]["cost_stress_baseline"]
         self.assertLess(cs["combined_adverse"]["net_expectancy_r"], cs["current"]["net_expectancy_r"])
         self.assertLessEqual(cs["fees_plus_50pct"]["net_expectancy_r"], cs["fees_plus_25pct"]["net_expectancy_r"])
 
@@ -129,7 +149,7 @@ class ResearchPipelineTests(unittest.TestCase):
     def test_rows_have_no_future_timestamp_leak(self):
         # Every research regime label is computed from windows closed at the
         # decision time; buckets are finite labels.
-        for seg in self.artifact["segments_baseline"]["volatility_bucket"]:
+        for seg in self.artifact["candidate_research"]["segments_baseline"]["volatility_bucket"]:
             self.assertIsInstance(seg, str)
 
 
@@ -141,7 +161,7 @@ class ResearchStatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(p["win_rate"], 0.4)
         self.assertAlmostEqual(p["breakeven_rate"], 0.2)
         self.assertAlmostEqual(p["profit_factor"], 1.5)
-        self.assertAlmostEqual(p["max_drawdown_r"], 1.0)
+        self.assertAlmostEqual(p["candidate_sequence_drawdown_r"], 1.0)
         self.assertEqual(p["longest_losing_streak"], 1)
         self.assertIsNone(p["cvar05_r"])  # sample too small
         self.assertEqual(p["ratio_convention"], "PER_TRADE_NOT_ANNUALIZED")
@@ -153,14 +173,16 @@ class ResearchStatisticsTests(unittest.TestCase):
             # Threshold 90 looks great ONLY in the final test split.
             score = 91 if i % 2 else 61
             r = (5.0 if score == 91 else -1.0) if test_part else (-1.0 if score == 91 else 0.5)
-            rows.append({"ts": i, "r": r, "gates_passed": True, "nexus_score": score,
-                         "nexus_regime": "TRENDING_UP", "symbol": "X", "regime": "RANGE"})
-        tr = res.threshold_research(rows, (60, 90), 60, min_trades=10)
+            ts = 1_760_000_000_000 + i * 3_600_000
+            rows.append({"ts": ts, "outcome_end_ts": ts + 3_600_000, "r": r, "gates_passed": True,
+                         "nexus_score": score, "nexus_regime": "TRENDING_UP", "symbol": "X",
+                         "production_regime": "RANGE"})
+        tr = res.threshold_research(rows, (60, 90), 60, min_trades=10, min_blocks=3)
         self.assertEqual(tr["selected_threshold"], 60)
 
     def test_calibration_refuses_tiny_sample(self):
-        rows = [{"ts": i, "r": 1.0 if i % 3 else -1.0, "approved": True, "nexus_confidence": 60.0}
-                for i in range(50)]
+        rows = [{"ts": 1_760_000_000_000 + i * 3_600_000, "r": 1.0 if i % 3 else -1.0,
+                 "approved": True, "nexus_confidence": 60.0} for i in range(50)]
         from bot.nexus_probability import heuristic_win_probability
         rep = res.calibration_report(rows, heuristic_win_probability)
         self.assertEqual(rep["status"], "INSUFFICIENT_EVIDENCE")
@@ -174,10 +196,10 @@ class ResearchStatisticsTests(unittest.TestCase):
 
     def test_paired_ablation_direction(self):
         rows = []
-        for i in range(200):
+        for i in range(400):
             good = i % 2 == 0
-            rows.append({"ts": i, "r": 1.0 if good else -1.0, "approved": good,
-                         "variants": {"minus_X": True}})
+            rows.append({"ts": 1_760_000_000_000 + i * 3_600_000, "r": 1.0 if good else -1.0,
+                         "approved": good, "variants": {"minus_X": True}})
         out = res.paired_ablation(rows, "minus_X")
         self.assertGreater(out["delta_expectancy_r"], 0)
         self.assertEqual(out["verdict"], "COMPONENT_ADDS_EXPECTANCY")

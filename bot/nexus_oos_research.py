@@ -10,6 +10,10 @@ Conventions
   timestamp. ``r`` is its net R multiple under the current cost model (fees,
   slippage, funding included). ``approved`` is the NEXUS decision at the
   production threshold.
+* ``candidate_sequence_drawdown_r`` is the drawdown of the cumulative R of
+  candidates in decision order. Candidates overlap in time, so this is NOT an
+  account drawdown; only ``nexus_oos_portfolio_replay`` reports account/equity
+  drawdown (``portfolio_max_drawdown``).
 * Sharpe/Sortino-like ratios here are PER-TRADE ratios (mean R / std R over
   trades). They are NOT annualized time-series Sharpe ratios and must not be
   compared to one.
@@ -127,7 +131,7 @@ def performance(rows: Sequence[dict], *, with_ci: bool = True) -> dict:
         "total_fees_r": _sum("fees_r"),
         "total_slippage_r": _sum("slippage_r"),
         "funding_contribution_r": _sum("funding_r"),
-        "max_drawdown_r": _max_drawdown_r(rs),
+        "candidate_sequence_drawdown_r": _max_drawdown_r(rs),
         "longest_winning_streak": win_streak,
         "longest_losing_streak": loss_streak,
         "p05_r": _percentile(srt, 0.05) if n >= 20 else None,
@@ -158,7 +162,7 @@ def compact(rows: Sequence[dict]) -> dict:
         "total_net_r": sum(rs),
         "win_rate": len(wins) / n,
         "profit_factor": (sum(wins) / sum(losses)) if losses and sum(losses) > 0 else None,
-        "max_drawdown_r": _max_drawdown_r(rs),
+        "candidate_sequence_drawdown_r": _max_drawdown_r(rs),
         "expectancy_ci_low_r": lo,
         "expectancy_ci_high_r": hi,
     }
@@ -266,7 +270,7 @@ def bucket(value, edges: Sequence[float], labels: Sequence[str] | None = None) -
 
 
 SEGMENT_KEYS = (
-    "symbol", "regime", "direction", "entry_type", "score_bucket",
+    "symbol", "production_regime", "research_regime", "direction", "entry_type", "score_bucket",
     "confidence_bucket", "utc_hour_bucket", "volatility_bucket", "adx_bucket",
     "volume_bucket",
 )
@@ -278,7 +282,7 @@ def segments(rows: Sequence[dict]) -> dict:
         groups: dict = defaultdict(list)
         for r in rows:
             groups[str(r.get(key, "UNKNOWN"))].append(r)
-        if key == "regime":
+        if key == "research_regime":
             for label in REQUIRED_REGIMES:
                 groups.setdefault(label, [])
         out[key] = {k: compact(v) for k, v in sorted(groups.items())}
@@ -305,6 +309,8 @@ def concentration(rows: Sequence[dict], key: str) -> dict:
 
 # ── chronological split and threshold research ───────────────────────────────
 def chronological_split(rows: Sequence[dict], fractions=(0.5, 0.25, 0.25)) -> dict:
+    """Legacy row-order split WITHOUT purge/embargo. Not used for any decision;
+    use ``nexus_oos_inference.purged_split``."""
     ordered = sorted(rows, key=lambda r: r["ts"])
     n = len(ordered)
     a = int(n * fractions[0])
@@ -326,52 +332,84 @@ def approved_at(row: dict, threshold: float) -> bool:
 
 
 def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
-                       runtime_threshold: float, *, min_trades: int = 30) -> dict:
-    """Select on TRAIN, confirm on VALIDATION, report TEST without selection.
+                       runtime_threshold: float, *, min_trades: int = 30,
+                       min_blocks: int = 10) -> dict:
+    """TRAIN discovers, VALIDATION confirms, FINAL TEST is reported exactly once.
 
-    Selection rule (train only): the threshold with the highest lower bootstrap
-    bound of expectancy among thresholds with >= min_trades. A choice is
-    ``stable`` only if both neighbours also have a positive train lower bound
-    and the validation lower bound is positive. The test split is never used
-    for selection. The runtime threshold is never changed by this function.
+    Splits are purged and embargoed (``nexus_oos_inference.purged_split``).
+    Selection (TRAIN only): the threshold with the highest dependence-aware
+    (block-bootstrap authority) lower bound among thresholds with enough trades
+    and blocks. A selection is a stable plateau only if both neighbours also
+    have a positive TRAIN authority lower bound. VALIDATION must confirm with a
+    positive authority lower bound. FINAL TEST is evaluated only for the single
+    selected threshold; if it fails, the experiment is reported FAILED and no
+    other threshold is selected. The runtime threshold is never changed.
     """
-    split = chronological_split(rows)
+    from bot import nexus_oos_inference as inf
+
+    split = inf.purged_split(rows)
+    parts = {k: split[k] for k in ("train", "validation")}
     table = []
     for t in thresholds:
         entry = {"threshold": t}
-        for name, part in split.items():
-            sel = [r for r in part if approved_at(r, t)]
+        for name, part in parts.items():
+            sel_fn = (lambda r, _t=t: approved_at(r, _t))
+            sel = [r for r in part if sel_fn(r)]
             m = compact(sel)
             m["frequency"] = (len(sel) / len(part)) if part else None
+            m["blocks"] = len({inf.block_id(r["ts"]) for r in sel})
+            dep = inf.dependence_aware_mean(part, sel_fn, samples=1000) if sel else {}
+            m["authority_ci_low_r"] = dep.get("authority_ci_low")
+            m["authority_ci_high_r"] = dep.get("authority_ci_high")
+            m["block24h_ci"] = dep.get("block24h_ci")
             m["symbol_concentration"] = concentration(sel, "symbol")["top_share_of_positive_r"] if sel else None
-            m["regime_concentration"] = concentration(sel, "regime")["top_share_of_positive_r"] if sel else None
+            m["regime_concentration"] = concentration(sel, "production_regime")["top_share_of_positive_r"] if sel else None
             entry[name] = m
         table.append(entry)
 
     def train_lo(e):
         tr = e["train"]
-        return tr.get("expectancy_ci_low_r") if tr.get("trades", 0) >= min_trades else None
+        if tr.get("trades", 0) < min_trades or tr.get("blocks", 0) < min_blocks:
+            return None
+        return tr.get("authority_ci_low_r")
 
     eligible = [e for e in table if train_lo(e) is not None]
     selected = max(eligible, key=train_lo) if eligible else None
     stable = False
+    validation_ok = False
+    final_test = None
+    status = "NO_ELIGIBLE_THRESHOLD"
     if selected is not None:
         i = table.index(selected)
         neighbours = [table[j] for j in (i - 1, i + 1) if 0 <= j < len(table)]
-        stable = (
-            len(neighbours) == 2
-            and all((train_lo(nb) or -1) > 0 for nb in neighbours)
-            and (train_lo(selected) or -1) > 0
-            and (selected["validation"].get("expectancy_ci_low_r") or -1) > 0
-        )
+        stable = (len(neighbours) == 2 and all((train_lo(nb) or -1) > 0 for nb in neighbours)
+                  and (train_lo(selected) or -1) > 0)
+        validation_ok = (selected["validation"].get("authority_ci_low_r") or -1) > 0
+        if not validation_ok:
+            status = "NOT_CONFIRMED_ON_VALIDATION"
+        else:
+            # FINAL TEST: consulted exactly once, for the selected threshold only.
+            t = selected["threshold"]
+            test_rows = split["test"]
+            sel = [r for r in test_rows if approved_at(r, t)]
+            final_test = compact(sel)
+            dep = inf.dependence_aware_mean(test_rows, lambda r: approved_at(r, t), samples=1000) if sel else {}
+            final_test["authority_ci_low_r"] = dep.get("authority_ci_low")
+            final_test["authority_ci_high_r"] = dep.get("authority_ci_high")
+            status = ("CONFIRMED_ON_FINAL_TEST" if (final_test.get("authority_ci_low_r") or -1) > 0
+                      else "EXPERIMENT_FAILED_ON_FINAL_TEST")
     return {
-        "split": {k: len(v) for k, v in split.items()},
-        "split_method": "CHRONOLOGICAL_50_25_25_POOLED",
+        "split": inf.split_summary(split),
+        "split_method": "PURGED_EMBARGOED_TEMPORAL_50_25_25",
         "runtime_threshold": runtime_threshold,
         "runtime_threshold_changed": False,
-        "selection_rule": "max TRAIN lower-CI expectancy, n>=%d; TEST never used" % min_trades,
+        "selection_rule": ("max TRAIN block-bootstrap authority lower CI (n>=%d, blocks>=%d); "
+                           "VALIDATION confirms; FINAL TEST consulted once" % (min_trades, min_blocks)),
         "selected_threshold": selected["threshold"] if selected else None,
         "selected_is_stable_plateau": stable,
+        "validation_confirmed": validation_ok,
+        "final_test": final_test,
+        "status": status,
         "table": table,
     }
 
@@ -383,50 +421,44 @@ def paired_ablation(rows: Sequence[dict], variant_key: str, *,
                     samples: int = BOOTSTRAP_SAMPLES, seed: int = SEED) -> dict:
     """FULL approved set vs variant approved set on the SAME candidate population.
 
-    Each bootstrap draw resamples candidates and recomputes both approved
-    subsets from the same draw (they are dependent). Δ = full − variant, so a
-    positive Δ means the removed component was adding expectancy.
+    Δ = full − variant (positive: the removed component adds expectancy).
+    IID and 24h/48h UTC-block bootstrap intervals are reported; the verdict
+    uses only the dependence-aware authority interval.
     """
-    full = [r for r in rows if r.get("approved")]
-    var = [r for r in rows if (r.get("variants") or {}).get(variant_key)]
+    from bot import nexus_oos_inference as inf
+
+    full_sel = lambda r: bool(r.get("approved"))  # noqa: E731
+    var_sel = lambda r: bool((r.get("variants") or {}).get(variant_key))  # noqa: E731
+    full = [r for r in rows if full_sel(r)]
+    var = [r for r in rows if var_sel(r)]
     fm, vm = compact(full), compact(var)
-    delta = None
-    if fm.get("trades") and vm.get("trades"):
-        delta = fm["net_expectancy_r"] - vm["net_expectancy_r"]
-    rng = random.Random(seed)
-    n = len(rows)
-    diffs = []
-    if n >= 2:
-        for _ in range(samples):
-            draw = [rows[rng.randrange(n)] for _ in range(n)]
-            a = [float(r["r"]) for r in draw if r.get("approved")]
-            b = [float(r["r"]) for r in draw if (r.get("variants") or {}).get(variant_key)]
-            if a and b:
-                diffs.append(sum(a) / len(a) - sum(b) / len(b))
-    diffs.sort()
-    lo = diffs[int(0.025 * len(diffs))] if len(diffs) >= 100 else None
-    hi = diffs[min(len(diffs) - 1, int(0.975 * len(diffs)))] if len(diffs) >= 100 else None
+    dep = inf.dependence_aware_diff(rows, full_sel, var_sel, samples=samples)
+    lo, hi = dep["authority_ci_low"], dep["authority_ci_high"]
     if (fm.get("trades", 0) < MIN_ABLATION_TRADES or vm.get("trades", 0) < MIN_ABLATION_TRADES
             or lo is None or hi is None):
         verdict = "INSUFFICIENT_EVIDENCE"
     elif lo > 0:
         verdict = "COMPONENT_ADDS_EXPECTANCY"
-    elif hi is not None and hi < 0:
+    elif hi < 0:
         verdict = "COMPONENT_HURTS_EXPECTANCY"
     else:
-        verdict = "NO_ROBUST_DIFFERENCE_SIMPLIFICATION_CANDIDATE"
+        verdict = "NO_ROBUST_DIFFERENCE"
     return {
         "full": fm, "variant": vm,
-        "delta_expectancy_r": delta,
+        "delta_expectancy_r": dep["delta"],
+        "delta_iid_ci": dep["iid_ci"],
+        "delta_block24h_ci": dep["block24h_ci"],
+        "delta_block48h_ci": dep["block48h_ci"],
         "delta_ci_low_r": lo, "delta_ci_high_r": hi,
         "delta_profit_factor": (
             (fm.get("profit_factor") or 0) - (vm.get("profit_factor") or 0)
             if fm.get("profit_factor") is not None and vm.get("profit_factor") is not None else None),
-        "delta_max_drawdown_r": (
-            fm.get("max_drawdown_r", 0) - vm.get("max_drawdown_r", 0)
+        "delta_candidate_sequence_drawdown_r": (
+            fm.get("candidate_sequence_drawdown_r", 0) - vm.get("candidate_sequence_drawdown_r", 0)
             if fm.get("trades") and vm.get("trades") else None),
         "delta_approvals": fm.get("trades", 0) - vm.get("trades", 0),
         "verdict": verdict,
+        "verdict_basis": "DEPENDENCE_AWARE_BLOCK_BOOTSTRAP",
     }
 
 
@@ -519,41 +551,66 @@ def _fit_platt(xs, ys, iters: int = 50):
 
 
 def calibration_report(rows: Sequence[dict], heuristic: Callable[[float], float]) -> dict:
-    """Heuristic p vs outcomes; Platt fit on TRAIN only; evaluated on TEST.
+    """Heuristic p vs outcomes with purged TRAIN / CALIBRATION / FINAL TEST.
 
-    Outcome y = 1 when net R > 0. Calibration is reported as NOT_ATTEMPTED
-    when the train/test samples are below the minimums (no tiny-sample fits).
+    Outcome y = 1 when net R > 0. Platt scaling is fitted on CALIBRATION only
+    and evaluated once on FINAL TEST against a base-rate predictor (rate from
+    TRAIN+CALIBRATION). ``promotion_eligible`` requires adequate samples,
+    Brier AND log-loss improvement over the base rate, ECE <= 0.05, and a
+    positive 24h-block-bootstrap lower bound of the Brier improvement
+    (stability across blocks). Otherwise the heuristic stays telemetry only.
     """
+    from bot import nexus_oos_inference as inf
+
     usable = [r for r in rows if r.get("nexus_confidence") is not None and r.get("approved")]
-    split = chronological_split(usable, (0.6, 0.0, 0.4))
-    train, test = split["train"], split["test"]
-    out: dict = {"approved_rows": len(usable), "train": len(train), "test": len(test),
-                 "outcome_definition": "net_r > 0", "method": "PLATT_ON_TRAIN_EVAL_ON_TEST"}
+    split = inf.purged_split(usable, (0.4, 0.3, 0.3))
+    train, calib, test = split["train"], split["validation"], split["test"]
+    out: dict = {"approved_rows": len(usable), "train": len(train), "calibration": len(calib),
+                 "test": len(test), "split": inf.split_summary(split),
+                 "outcome_definition": "net_r > 0",
+                 "method": "PLATT_ON_CALIBRATION_EVAL_ON_FINAL_TEST", "promotion_eligible": False}
     if not test:
         out["status"] = "INSUFFICIENT_EVIDENCE"
+        out["calibrated"] = None
         return out
     ys = [1 if float(r["r"]) > 0 else 0 for r in test]
     heur = [heuristic(float(r["nexus_confidence"])) for r in test]
-    base_rate = (sum(1 for r in train if float(r["r"]) > 0) / len(train)) if train else 0.5
+    ref = train + calib
+    base_rate = (sum(1 for r in ref if float(r["r"]) > 0) / len(ref)) if ref else 0.5
     rel, ece = _reliability(heur, ys)
     out["heuristic_on_test"] = {"brier": _brier(heur, ys), "log_loss": _logloss(heur, ys),
                                 "ece": ece, "reliability": rel}
     base = [base_rate] * len(ys)
-    out["base_rate_on_test"] = {"base_rate_from_train": base_rate, "brier": _brier(base, ys),
+    out["base_rate_on_test"] = {"base_rate": base_rate, "brier": _brier(base, ys),
                                 "log_loss": _logloss(base, ys)}
-    if len(train) < MIN_CALIBRATION_TRAIN or len(test) < MIN_CALIBRATION_TEST:
+    if len(calib) < MIN_CALIBRATION_TRAIN or len(test) < MIN_CALIBRATION_TEST:
         out["status"] = "INSUFFICIENT_EVIDENCE"
         out["calibrated"] = None
         return out
-    xs_tr = [float(r["nexus_confidence"]) / 100.0 for r in train]
-    ys_tr = [1 if float(r["r"]) > 0 else 0 for r in train]
-    a, b = _fit_platt(xs_tr, ys_tr)
-    cal = [1 / (1 + math.exp(-(a * float(r["nexus_confidence"]) / 100.0 + b))) for r in test]
+    xs_c = [float(r["nexus_confidence"]) / 100.0 for r in calib]
+    ys_c = [1 if float(r["r"]) > 0 else 0 for r in calib]
+    a_, b_ = _fit_platt(xs_c, ys_c)
+
+    def _p(r):
+        return 1 / (1 + math.exp(-(a_ * float(r["nexus_confidence"]) / 100.0 + b_)))
+    cal = [_p(r) for r in test]
     rel_c, ece_c = _reliability(cal, ys)
-    out["calibrated"] = {"platt_a": a, "platt_b": b, "brier": _brier(cal, ys),
+    out["calibrated"] = {"platt_a": a_, "platt_b": b_, "brier": _brier(cal, ys),
                          "log_loss": _logloss(cal, ys), "ece": ece_c, "reliability": rel_c}
-    beats = out["calibrated"]["brier"] < out["base_rate_on_test"]["brier"]
-    out["status"] = "CALIBRATION_BEATS_BASE_RATE" if beats else "CALIBRATION_DOES_NOT_BEAT_BASE_RATE"
+
+    def _improvement(draw):
+        if not draw:
+            return None
+        y = [1 if float(r["r"]) > 0 else 0 for r in draw]
+        return _brier([base_rate] * len(y), y) - _brier([_p(r) for r in draw], y)
+    lo, hi = inf.block_bootstrap_ci(test, _improvement, samples=500)
+    out["brier_improvement_block24h_ci"] = [lo, hi]
+    beats_brier = out["calibrated"]["brier"] < out["base_rate_on_test"]["brier"]
+    beats_ll = out["calibrated"]["log_loss"] < out["base_rate_on_test"]["log_loss"]
+    eligible = bool(beats_brier and beats_ll and ece_c <= 0.05 and lo is not None and lo > 0)
+    out["promotion_eligible"] = eligible
+    out["status"] = ("CALIBRATION_PROMOTION_ELIGIBLE" if eligible else
+                     "CALIBRATION_NOT_PROMOTABLE_HEURISTIC_REMAINS_TELEMETRY")
     return out
 
 

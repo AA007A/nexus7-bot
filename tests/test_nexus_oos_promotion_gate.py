@@ -19,20 +19,32 @@ def _passing_artifact():
             "bootstrap_ci_low_r": 0.05,
             "nexus_expectancy_r": 0.20,
         },
-        "performance": {"approved": {"expectancy_ci_low_r": 0.04}},
         "symbols": [
             {"symbol": s, "error": None, "history_days": 90.0,
              "historical_context": {"parity_complete": True}}
             for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT")
         ],
-        "concentration": {
-            "approved_by_symbol": {"groups_positive": 5, "top_share_of_positive_r": 0.3},
-            "approved_by_month": {"groups_positive": 3, "top_share_of_positive_r": 0.4},
-        },
         "robustness": {"summary": {"temporal_folds_positive_uplift": 4}},
-        "cost_stress_approved": {
-            "fees_plus_50pct": {"net_expectancy_r": 0.1},
-            "slippage_x2": {"net_expectancy_r": 0.08},
+        "candidate_research": {
+            "inference": {
+                "approved_expectancy": {"authority_ci_low": 0.04},
+                "uplift_vs_baseline": {"authority_ci_low": 0.03},
+            },
+            "effective_sample": {"approved": {"unique_blocks": 80, "effective_n": 250.0}},
+            "concentration": {
+                "approved_by_symbol": {"groups_positive": 5, "top_share_of_positive_r": 0.3},
+                "approved_by_month": {"groups_positive": 3, "top_share_of_positive_r": 0.4},
+            },
+            "cost_stress_approved": {
+                "fees_plus_50pct": {"net_expectancy_r": 0.1},
+                "slippage_x2": {"net_expectancy_r": 0.08},
+            },
+        },
+        "portfolio_replay": {
+            "net_expectancy_r": 0.15, "starting_equity": 1000.0, "ending_equity": 1120.0,
+            "portfolio_max_drawdown": 0.08, "research_max_drawdown_limit": 0.25,
+            "robustness": {"authority_ci_low": 0.02}, "total_trades": 120,
+            "contributing_symbols": 5,
         },
         "methodology": {"closed_candles_only": True, "historical_clock_frozen": True,
                         "fees_included": True, "slippage_included": True},
@@ -100,10 +112,11 @@ class PromotionGateTests(unittest.TestCase):
         self.assertIn("APPROVED_EXPECTANCY_NOT_POSITIVE", r.blockers)
         self.assertNotEqual(self._run(a), 0)
 
-    def test_approved_expectancy_ci_must_be_positive(self):
+    def test_approved_expectancy_block_ci_must_be_positive(self):
         a = _passing_artifact()
-        a["performance"]["approved"]["expectancy_ci_low_r"] = -0.01
-        self.assertIn("APPROVED_EXPECTANCY_CI_NOT_POSITIVE", gate.evaluate(a).blockers)
+        a["candidate_research"]["inference"]["approved_expectancy"]["authority_ci_low"] = -0.01
+        self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", gate.evaluate(a).blockers)
+        self.assertNotEqual(self._run(a), 0)
 
     def test_insufficient_sample_blocks(self):
         a = _passing_artifact()
@@ -115,14 +128,23 @@ class PromotionGateTests(unittest.TestCase):
         self.assertNotEqual(self._run(a), 0)
 
     def test_concentration_breadth_horizon_and_cost_stress_block(self):
+        cr = lambda a: a["candidate_research"]  # noqa: E731
         cases = {
-            "SINGLE_SYMBOL_DOMINATES": lambda a: a["concentration"]["approved_by_symbol"].update(top_share_of_positive_r=0.8),
-            "TOO_FEW_SYMBOLS_CONTRIBUTING": lambda a: a["concentration"]["approved_by_symbol"].update(groups_positive=1),
-            "SINGLE_PERIOD_DOMINATES": lambda a: a["concentration"]["approved_by_month"].update(top_share_of_positive_r=0.9),
+            "SINGLE_SYMBOL_DOMINATES": lambda a: cr(a)["concentration"]["approved_by_symbol"].update(top_share_of_positive_r=0.8),
+            "TOO_FEW_SYMBOLS_CONTRIBUTING": lambda a: cr(a)["concentration"]["approved_by_symbol"].update(groups_positive=1),
+            "SINGLE_PERIOD_DOMINATES": lambda a: cr(a)["concentration"]["approved_by_month"].update(top_share_of_positive_r=0.9),
             "HISTORY_HORIZON_TOO_SHORT": lambda a: a["symbols"][0].update(history_days=26.0),
             "SYMBOLS_UNAVAILABLE": lambda a: a["symbols"][0].update(error="insufficient_history"),
-            "COST_STRESS_FAILS_SLIPPAGE_X2": lambda a: a["cost_stress_approved"]["slippage_x2"].update(net_expectancy_r=-0.01),
+            "COST_STRESS_FAILS_SLIPPAGE_X2": lambda a: cr(a)["cost_stress_approved"]["slippage_x2"].update(net_expectancy_r=-0.01),
             "TEMPORAL_ROBUSTNESS_INSUFFICIENT": lambda a: a["robustness"]["summary"].update(temporal_folds_positive_uplift=1),
+            "INSUFFICIENT_UNIQUE_TEMPORAL_BLOCKS": lambda a: cr(a)["effective_sample"]["approved"].update(unique_blocks=12),
+            "INSUFFICIENT_EFFECTIVE_SAMPLE": lambda a: cr(a)["effective_sample"]["approved"].update(effective_n=40.0),
+            "UPLIFT_BLOCK_CI_NOT_POSITIVE": lambda a: cr(a)["inference"]["uplift_vs_baseline"].update(authority_ci_low=-0.01),
+            "PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT": lambda a: a["portfolio_replay"].update(portfolio_max_drawdown=0.4),
+            "PORTFOLIO_ROBUSTNESS_CI_NOT_POSITIVE": lambda a: a["portfolio_replay"]["robustness"].update(authority_ci_low=-0.01),
+            "PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE": lambda a: a["portfolio_replay"].update(robustness={}),
+            "INSUFFICIENT_PORTFOLIO_TRADES": lambda a: a["portfolio_replay"].update(total_trades=10),
+            "TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING": lambda a: a["portfolio_replay"].update(contributing_symbols=1),
         }
         for blocker, mutate in cases.items():
             a = copy.deepcopy(_passing_artifact())
@@ -131,11 +153,33 @@ class PromotionGateTests(unittest.TestCase):
                 self.assertIn(blocker, gate.evaluate(a).blockers)
 
     def test_missing_evidence_sections_fail_closed(self):
-        for key in ("performance", "concentration", "robustness", "cost_stress_approved", "methodology"):
+        for key in ("candidate_research", "portfolio_replay", "robustness", "methodology"):
             a = _passing_artifact()
             del a[key]
             with self.subTest(key=key):
                 self.assertFalse(gate.evaluate(a).promote)
+
+    def test_missing_portfolio_artifact_blocks(self):
+        a = _passing_artifact()
+        del a["portfolio_replay"]
+        self.assertIn("PORTFOLIO_REPLAY_MISSING", gate.evaluate(a).blockers)
+        self.assertNotEqual(self._run(a), 0)
+
+    def test_negative_portfolio_expectancy_blocks(self):
+        a = _passing_artifact()
+        a["portfolio_replay"]["net_expectancy_r"] = -0.05
+        a["portfolio_replay"]["ending_equity"] = 950.0
+        r = gate.evaluate(a)
+        self.assertIn("PORTFOLIO_EXPECTANCY_NOT_POSITIVE", r.blockers)
+        self.assertIn("PORTFOLIO_FINAL_EQUITY_NOT_ABOVE_START", r.blockers)
+        self.assertNotEqual(self._run(a), 0)
+
+    def test_positive_candidate_edge_with_negative_portfolio_blocks(self):
+        a = _passing_artifact()  # every candidate-layer condition passes
+        a["portfolio_replay"]["ending_equity"] = 990.0
+        r = gate.evaluate(a)
+        self.assertFalse(r.promote)
+        self.assertEqual(r.blockers, ["PORTFOLIO_FINAL_EQUITY_NOT_ABOVE_START"])
 
     def test_latest_real_ci_evidence_is_blocked(self):
         r = gate.evaluate(copy.deepcopy(SEPT19))
