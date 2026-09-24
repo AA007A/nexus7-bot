@@ -22,6 +22,14 @@ try:
     from bot.sizing_semantics_log_hardening import install as _install_sizing_semantics
     _install_sizing_semantics()
 
+    # Runtime-truth only: websockets==12.0 protocols are async iterables but
+    # don't expose __anext__ directly. The truth WS proxy delegates __anext__
+    # to the wrapped protocol, so install the compatibility shim before the
+    # runtime bootstrap creates any telemetry-enabled transport wrappers.
+    # The shim is a strict no-op unless BGX_RUNTIME_TRUTH_ENABLED=true.
+    from bot.runtime_truth_ws_compat import install as _install_runtime_truth_ws_compat
+    _install_runtime_truth_ws_compat()
+
     from bot.runtime_bootstrap import install as _install_runtime_bootstrap
 
     _install_runtime_bootstrap()
