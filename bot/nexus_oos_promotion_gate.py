@@ -14,14 +14,18 @@ is met, and non-zero otherwise (including missing or corrupt artifacts):
 Uplift of NEXUS over a losing baseline is NOT sufficient. Promotion needs
 BOTH layers:
 
-* CANDIDATE_RESEARCH (signal edge): approved expectancy > 0 and its
-  block-bootstrap authority lower bound > 0 (recomputed here from the 24h /
-  48h / 72h UTC-block intervals); uplift authority lower bound > 0; adequate
-  unique temporal blocks / effective sample; temporal folds.
-* PORTFOLIO_EXECUTION_REPLAY (executable edge): net expectancy > 0, final
-  equity > starting equity, PATH-bootstrap lower bound > 0, max equity
-  drawdown within the research limit, enough trades and contributing symbols,
-  accounting invariants proven.
+* CANDIDATE_RESEARCH (signal edge, RESOLVED outcomes only): approved
+  expectancy > 0; horizon-aware block authority lower bound > 0, recomputed
+  here from block intervals whose length >= the max resolved outcome horizon
+  (re-derived by the gate) and that span >= 30 independent blocks; uplift
+  authority lower bound > 0; censoring not material; temporal folds.
+* PORTFOLIO_EXECUTION_REPLAY (executable edge): net expectancy > 0, marked
+  AND realized final equity > start, no material portfolio censoring,
+  walk-forward folds positive (the path bootstrap is non-authoritative), max
+  equity drawdown within the research limit, enough trades and contributing
+  symbols, accounting invariants proven.
+* POLICY PARITY: a sha256-verified LIVE non-secret policy attestation that
+  matches the replay manifest.
 * REPLAY PARITY: exit parity, pre-trade gate parity and portfolio parity
   complete; pinned replay policy manifest present; closed-candle sentinel
   verified.
@@ -59,6 +63,9 @@ class GatePolicy:
     max_symbol_share_of_positive_r: float = 0.50
     max_period_share_of_positive_r: float = 0.50
     min_temporal_folds_positive: int = 3
+    min_independent_blocks: int = 30
+    min_walk_forward_folds_positive: int = 3
+    require_live_policy_attestation: bool = True
     min_history_days: float = 150.0
     require_context_parity: bool = True
     cost_stress_scenarios: tuple[str, ...] = ("fees_plus_50pct", "slippage_x2")
@@ -89,37 +96,63 @@ def _num(value):
     return out if math.isfinite(out) else None
 
 
-BLOCK_CI_KEYS = ("block24h_ci", "block48h_ci", "block72h_ci")
 # Legacy IID-derived codes. If a (malformed) artifact still carries them they
 # are ignored: IID has zero promotion authority in either direction.
 LEGACY_IID_BLOCKERS = frozenset({"UPLIFT_NOT_STATISTICALLY_POSITIVE", "UPLIFT_CI_NOT_POSITIVE"})
-REQUIRED_AUTHORITY_MODEL = "BLOCK_BOOTSTRAP_ONLY_V1"
+REQUIRED_AUTHORITY_MODEL = "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2"
+DAY_MS = 86_400_000
 
 
-def block_only_authority(section: dict) -> tuple[float | None, float | None]:
+def required_block_ms(max_resolved_horizon_ms) -> int | None:
+    mx = _num(max_resolved_horizon_ms)
+    if mx is None:
+        return None
+    return max(1, math.ceil(mx / DAY_MS)) * DAY_MS
+
+
+def block_only_authority(section: dict, *, required_ms: int | None,
+                         min_blocks: int) -> tuple[float | None, float | None, str]:
     """Recompute the authority interval from BLOCK intervals only.
 
-    Never reads ``iid_ci``. Returns (None, None) when no block interval is
-    valid (fail closed).
+    An interval counts only if its block length >= ``required_ms`` (the
+    dependence horizon re-derived by the gate) AND it spans >= ``min_blocks``
+    independent blocks AND its CI is finite. Never reads ``iid_ci``.
+    Returns (low, high, status); (None, None, reason) fails closed.
     """
-    valid = []
-    for key in BLOCK_CI_KEYS:
-        ci = (section or {}).get(key)
-        if isinstance(ci, (list, tuple)) and len(ci) == 2:
-            lo, hi = _num(ci[0]), _num(ci[1])
-            if lo is not None and hi is not None:
-                valid.append((lo, hi))
-    if not valid:
-        return None, None
-    return min(lo for lo, _ in valid), max(hi for _, hi in valid)
+    if required_ms is None:
+        return None, None, "OUTCOME_HORIZON_UNKNOWN"
+    ivs = (section or {}).get("block_intervals")
+    if not isinstance(ivs, list) or not ivs:
+        return None, None, "BLOCK_INTERVALS_MISSING"
+    valid, long_enough = [], []
+    for iv in ivs:
+        if not isinstance(iv, dict):
+            continue
+        ms = _num(iv.get("block_ms"))
+        ci = iv.get("ci") or [None, None]
+        n_blk = _num(iv.get("independent_blocks"))
+        if ms is None or ms < required_ms:
+            continue
+        long_enough.append(iv)
+        lo, hi = (_num(ci[0]), _num(ci[1])) if len(ci) == 2 else (None, None)
+        if n_blk is None or n_blk < min_blocks or lo is None or hi is None:
+            continue
+        valid.append((lo, hi))
+    if valid:
+        return min(lo for lo, _ in valid), max(hi for _, hi in valid), "VALID"
+    if not long_enough:
+        return None, None, "AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON"
+    return None, None, "INSUFFICIENT_INDEPENDENT_BLOCKS"
 
 
-def _authority(section: dict, name: str, b: list) -> float | None:
-    lo, _ = block_only_authority(section)
+def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks) -> float | None:
+    lo, _, status = block_only_authority(section, required_ms=required_ms, min_blocks=min_blocks)
+    if status != "VALID":
+        b.append(status)
     reported = _num((section or {}).get("authority_ci_low"))
-    if lo is not None and reported is not None and abs(lo - reported) > 1e-9:
+    if lo is not None and (reported is None or abs(lo - reported) > 1e-9):
         b.append(f"{name}_AUTHORITY_CI_INCONSISTENT")
-    if lo is not None and reported is None:
+    if lo is None and reported is not None:
         b.append(f"{name}_AUTHORITY_CI_INCONSISTENT")
     return lo
 
@@ -179,6 +212,8 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     manifest = artifact.get("replay_policy_manifest")
     if not isinstance(manifest, dict) or not manifest.get("policy_sha256"):
         b.append("REPLAY_POLICY_MANIFEST_MISSING")
+    if policy.require_live_policy_attestation and artifact.get("policy_parity") != "ATTESTED_MATCH":
+        b.append("LIVE_POLICY_NOT_ATTESTED")
 
     symbols = artifact.get("symbols")
     if not isinstance(symbols, list) or not symbols:
@@ -186,7 +221,8 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     else:
         if any(s.get("error") for s in symbols):
             b.append("SYMBOLS_UNAVAILABLE")
-        days = [_num(s.get("history_days")) for s in symbols if not s.get("error")]
+        days = [_num(s.get("decision_window_days", s.get("history_days")))
+                for s in symbols if not s.get("error")]
         if not days or any(d is None or d < policy.min_history_days for d in days):
             b.append("HISTORY_HORIZON_TOO_SHORT")
 
@@ -195,14 +231,30 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
         b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
 
-    # ── CANDIDATE_RESEARCH (signal edge, block-bootstrap authority only) ──
+    # ── CANDIDATE_RESEARCH (signal edge, horizon-aware block authority only) ──
     infer = cand.get("inference") or {}
-    appr_lo = _authority(infer.get("approved_expectancy") or {}, "APPROVED_EXPECTANCY", b)
+    horizon = infer.get("outcome_horizon_resolved_executable") or {}
+    req = required_block_ms(horizon.get("max_ms"))
+    reported_req = _num(infer.get("required_block_ms"))
+    if req is not None and (reported_req is None or reported_req < req):
+        b.append("AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON")
+    appr_lo = _authority(infer.get("approved_expectancy") or {}, "APPROVED_EXPECTANCY", b,
+                         required_ms=req, min_blocks=policy.min_independent_blocks)
     if appr_lo is None or appr_lo <= 0:
         b.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
-    up_lo = _authority(infer.get("uplift_vs_baseline") or {}, "UPLIFT", b)
+    up_lo = _authority(infer.get("uplift_vs_baseline") or {}, "UPLIFT", b,
+                       required_ms=req, min_blocks=policy.min_independent_blocks)
     if up_lo is None or up_lo <= 0:
         b.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
+    cens = cand.get("censoring")
+    if not isinstance(cens, dict):
+        b.append("CENSORING_REPORT_MISSING")
+    elif cens.get("censoring_material") is not False:
+        b.append("CENSORING_MATERIAL")
+    adequacy = cand.get("sample_adequacy") or {}
+    n_ind = _num(adequacy.get("independent_blocks_approved"))
+    if n_ind is None or n_ind < policy.min_independent_blocks:
+        b.append("INSUFFICIENT_INDEPENDENT_BLOCKS")
     eff = ((cand.get("effective_sample") or {}).get("approved")) or {}
     blocks = _num(eff.get("unique_blocks"))
     if blocks is None or blocks < policy.min_approved_unique_blocks:
@@ -243,16 +295,23 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         start, end = _num(port.get("starting_equity")), _num(port.get("ending_equity"))
         if start is None or end is None or end <= start:
             b.append("PORTFOLIO_FINAL_EQUITY_NOT_ABOVE_START")
+        realized = _num(port.get("realized_return"))
+        if realized is None or realized <= 0:
+            b.append("PORTFOLIO_REALIZED_RETURN_NOT_POSITIVE")
+        if (port.get("end_state") or {}).get("portfolio_censoring_material") is not False:
+            b.append("PORTFOLIO_CENSORING_MATERIAL")
         mdd, limit = _num(port.get("portfolio_max_drawdown")), _num(port.get("research_max_drawdown_limit"))
         if mdd is None or limit is None or mdd > limit:
             b.append("PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT")
-        # Authority: path bootstrap (candidate timeline re-run through the
-        # state machine). The trade-level CI is approximate and never read.
-        p_lo = _num((port.get("path_bootstrap") or {}).get("authority_ci_low"))
-        if p_lo is None:
+        # Authority: walk-forward independent calendar folds on the real market
+        # timeline. The path bootstrap (spliced timelines) and the trade-level
+        # CI are approximate and never read.
+        wf = port.get("walk_forward") or {}
+        folds_pos, folds_tot = _num(wf.get("folds_positive")), _num(wf.get("folds_total"))
+        if folds_pos is None or folds_tot is None or folds_tot < 1:
             b.append("PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE")
-        elif p_lo <= 0:
-            b.append("PORTFOLIO_ROBUSTNESS_CI_NOT_POSITIVE")
+        elif folds_pos < policy.min_walk_forward_folds_positive:
+            b.append("PORTFOLIO_WALK_FORWARD_NOT_POSITIVE")
         trades = _num(port.get("total_trades"))
         if trades is None or trades < policy.min_portfolio_trades:
             b.append("INSUFFICIENT_PORTFOLIO_TRADES")

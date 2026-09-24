@@ -224,7 +224,10 @@ class PathBootstrap(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(a["replicates"], 100)
         self.assertEqual(a["method"], "UTC_BLOCK_RESAMPLED_CANDIDATE_TIMELINE_RERUN_THROUGH_STATE_MACHINE")
-        self.assertLessEqual(a["authority_ci_low"], a["authority_ci_high"])
+        lo, hi = a["net_return_ci"]
+        self.assertLessEqual(lo, hi)
+        self.assertEqual(a["status"], "APPROXIMATE_NON_AUTHORITATIVE")
+        self.assertEqual(a["authority"], "NONE")
 
     def test_trade_level_ci_is_labelled_non_authoritative(self):
         out = _run(self._rows())
@@ -302,7 +305,9 @@ class ProductionExitEmulation(unittest.TestCase):
         # rejected (stop unchanged at break-even).
         bars = _bars([(100.0, 101.1, 99.95, 101.0), (101.0, 101.4, 100.9, 101.3)])
         s = _sim(bars, signal_tp=102.0, policy=xp.ExitPolicy(trailing_trigger=0.5))
-        self.assertEqual(s["exit_reason"], "CENSORED_DATA_END")
+        self.assertEqual(s["outcome_status"], "RIGHT_CENSORED_DATA_END")
+        self.assertIsNone(s["exit_reason"])
+        self.assertEqual([l[3] for l in s["legs"]], ["PARTIAL_TP1"])   # no artificial close
         # With tp=103 the trigger is reachable: bar 1 high 102.2 gives peak
         # max(1.03 (full qty), 1.1 (half qty)) = 1.1 -> excursion 2.2 ->
         # stop 100 + 2.2 * 0.75 = 101.65 (valid below the mark); bar 2 hits it.
@@ -315,7 +320,10 @@ class ProductionExitEmulation(unittest.TestCase):
 
     def test_censoring_at_data_end_is_reported(self):
         s = _sim(_bars([(100.0, 100.3, 99.9, 100.1)] * 3), signal_tp=110.0)
-        self.assertEqual(s["censored"], "DATA_END")
+        self.assertEqual(s["censored"], "RIGHT_CENSORED_DATA_END")
+        self.assertEqual(s["legs"], [])                 # no manufactured close
+        self.assertIsNone(s["exit_ts"])
+        self.assertEqual(s["open_qty_at_censor"], 1.0)
 
     def test_short_mirror(self):
         s = _sim(_bars([(100.0, 100.1, 98.9, 99.0), (99.0, 100.05, 98.95, 100.02)]),

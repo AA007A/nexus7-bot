@@ -43,6 +43,7 @@ REQUIRED: dict[str, tuple] = {
     "MIN_STOP_LIQ_GAP_PCT": _NUM, "DEFAULT_MMR": _NUM,
     "CROSS_GEOMETRY_EXTRA_HEADROOM_PCT": _NUM, "CROSS_GEOMETRY_MIN_RETAINED_FRACTION": _NUM,
     "STARTING_EQUITY": _NUM, "RESEARCH_MAX_DRAWDOWN_LIMIT": _NUM, "RESEARCH_MAX_HOLD_BARS": (int,),
+    "OUTCOME_LOOKFORWARD_BARS": (int,),
     "CONTRACT_SPEC_SOURCE": (str,),
 }
 DAILY_PNL_MODES = ("PRODUCTION_REALIZED_TODAY_PLUS_OPEN_UNREALIZED",
@@ -77,6 +78,10 @@ def _check_types(values: dict) -> None:
             raise ManifestError(f"MANIFEST_NONFINITE {key}")
     if values["DAILY_PNL_SEMANTICS"] not in DAILY_PNL_MODES:
         raise ManifestError("MANIFEST_BAD_DAILY_PNL_SEMANTICS")
+    if values["OUTCOME_LOOKFORWARD_BARS"] < values["RESEARCH_MAX_HOLD_BARS"]:
+        # Otherwise recent decisions would be censored earlier than old ones
+        # (non-uniform censoring biased by decision date).
+        raise ManifestError("MANIFEST_LOOKFORWARD_SHORTER_THAN_RESEARCH_MAX_HOLD")
 
 
 class ReplayManifest:

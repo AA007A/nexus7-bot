@@ -333,7 +333,7 @@ def approved_at(row: dict, threshold: float) -> bool:
 
 def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
                        runtime_threshold: float, *, min_trades: int = 30,
-                       min_blocks: int = 10) -> dict:
+                       min_blocks: int = 10, required_ms: int | None = None) -> dict:
     """TRAIN discovers, VALIDATION confirms, FINAL TEST is reported exactly once.
 
     Splits are purged and embargoed (``nexus_oos_inference.purged_split``).
@@ -347,7 +347,12 @@ def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
     """
     from bot import nexus_oos_inference as inf
 
+    rows = [r for r in rows if inf._is_resolved(r) and r.get("r") is not None] + \
+        [r for r in rows if not inf._is_resolved(r)]
+    req = int(required_ms) if required_ms is not None else inf.required_block_ms(rows)
     split = inf.purged_split(rows)
+    for name in ("train", "validation", "test"):
+        split[name] = [r for r in split[name] if inf._is_resolved(r) and r.get("r") is not None]
     parts = {k: split[k] for k in ("train", "validation")}
     table = []
     for t in thresholds:
@@ -358,7 +363,7 @@ def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
             m = compact(sel)
             m["frequency"] = (len(sel) / len(part)) if part else None
             m["blocks"] = len({inf.block_id(r["ts"]) for r in sel})
-            dep = inf.dependence_aware_mean(part, sel_fn, samples=1000) if sel else {}
+            dep = inf.dependence_aware_mean(part, sel_fn, samples=1000, required_ms=req) if sel else {}
             m["authority_ci_low_r"] = dep.get("authority_ci_low")
             m["authority_ci_high_r"] = dep.get("authority_ci_high")
             m["block24h_ci"] = dep.get("block24h_ci")
@@ -393,7 +398,8 @@ def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
             test_rows = split["test"]
             sel = [r for r in test_rows if approved_at(r, t)]
             final_test = compact(sel)
-            dep = inf.dependence_aware_mean(test_rows, lambda r: approved_at(r, t), samples=1000) if sel else {}
+            dep = inf.dependence_aware_mean(test_rows, lambda r: approved_at(r, t), samples=1000,
+                                            required_ms=req) if sel else {}
             final_test["authority_ci_low_r"] = dep.get("authority_ci_low")
             final_test["authority_ci_high_r"] = dep.get("authority_ci_high")
             status = ("CONFIRMED_ON_FINAL_TEST" if (final_test.get("authority_ci_low_r") or -1) > 0
@@ -418,7 +424,8 @@ def threshold_research(rows: Sequence[dict], thresholds: Sequence[float],
 MIN_ABLATION_TRADES = 30
 
 def paired_ablation(rows: Sequence[dict], variant_key: str, *,
-                    samples: int = BOOTSTRAP_SAMPLES, seed: int = SEED) -> dict:
+                    samples: int = BOOTSTRAP_SAMPLES, seed: int = SEED,
+                    required_ms: int | None = None) -> dict:
     """FULL approved set vs variant approved set on the SAME candidate population.
 
     Δ = full − variant (positive: the removed component adds expectancy).
@@ -432,7 +439,7 @@ def paired_ablation(rows: Sequence[dict], variant_key: str, *,
     full = [r for r in rows if full_sel(r)]
     var = [r for r in rows if var_sel(r)]
     fm, vm = compact(full), compact(var)
-    dep = inf.dependence_aware_diff(rows, full_sel, var_sel, samples=samples)
+    dep = inf.dependence_aware_diff(rows, full_sel, var_sel, samples=samples, required_ms=required_ms)
     lo, hi = dep["authority_ci_low"], dep["authority_ci_high"]
     if (fm.get("trades", 0) < MIN_ABLATION_TRADES or vm.get("trades", 0) < MIN_ABLATION_TRADES
             or lo is None or hi is None):
@@ -450,6 +457,8 @@ def paired_ablation(rows: Sequence[dict], variant_key: str, *,
         "delta_block24h_ci": dep["block24h_ci"],
         "delta_block48h_ci": dep["block48h_ci"],
         "delta_block72h_ci": dep["block72h_ci"],
+        "delta_block_intervals": dep["block_intervals"],
+        "delta_authority_status": dep["authority_status"],
         "delta_iid_role": "DIAGNOSTIC_ONLY",
         "delta_ci_low_r": lo, "delta_ci_high_r": hi,
         "delta_profit_factor": (
@@ -564,7 +573,8 @@ def calibration_report(rows: Sequence[dict], heuristic: Callable[[float], float]
     """
     from bot import nexus_oos_inference as inf
 
-    usable = [r for r in rows if r.get("nexus_confidence") is not None and r.get("approved")]
+    usable = [r for r in rows if r.get("nexus_confidence") is not None and r.get("approved")
+              and r.get("r") is not None and inf._is_resolved(r)]
     split = inf.purged_split(usable, (0.4, 0.3, 0.3))
     train, calib, test = split["train"], split["validation"], split["test"]
     out: dict = {"approved_rows": len(usable), "train": len(train), "calibration": len(calib),
@@ -605,8 +615,12 @@ def calibration_report(rows: Sequence[dict], heuristic: Callable[[float], float]
             return None
         y = [1 if float(r["r"]) > 0 else 0 for r in draw]
         return _brier([base_rate] * len(y), y) - _brier([_p(r) for r in draw], y)
-    lo, hi = inf.block_bootstrap_ci(test, _improvement, samples=500)
-    out["brier_improvement_block24h_ci"] = [lo, hi]
+    blk = inf.required_block_ms(test)
+    lo, hi = inf.block_bootstrap_ci(test, _improvement, samples=500, block_ms=blk)
+    if len({inf.block_id(r["ts"], blk) for r in test}) < inf.MIN_INDEPENDENT_BLOCKS:
+        lo = hi = None     # insufficient independent blocks: no authority
+    out["brier_improvement_block_ci"] = [lo, hi]
+    out["brier_improvement_block_days"] = blk / inf.DAY_MS
     beats_brier = out["calibrated"]["brier"] < out["base_rate_on_test"]["brier"]
     beats_ll = out["calibrated"]["log_loss"] < out["base_rate_on_test"]["log_loss"]
     eligible = bool(beats_brier and beats_ll and ece_c <= 0.05 and lo is not None and lo > 0)

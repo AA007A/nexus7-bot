@@ -67,6 +67,12 @@ TELEMETRY_ONLY = "TELEMETRY_ONLY"              # no authorization/exit effect
 NOT_AUTHORITATIVE_IN_LIVE = "NOT_AUTHORITATIVE_IN_LIVE"
 UNREACHABLE = "UNREACHABLE"
 
+# Outcome status of a simulated trade. Only RESOLVED outcomes are completed
+# trades; right-censored outcomes never receive a realized R.
+RESOLVED = "RESOLVED"
+RIGHT_CENSORED_DATA_END = "RIGHT_CENSORED_DATA_END"
+RIGHT_CENSORED_RESEARCH_LIMIT = "RIGHT_CENSORED_RESEARCH_LIMIT"
+
 # A rule "blocks parity" when it can change an authorization/exit and the
 # replay cannot reproduce it exactly (and no conservative equivalent is proven).
 _PARITY_BLOCKING = {APPROXIMATED, NOT_REPLAYABLE, LIVE_ONLY}
@@ -121,7 +127,7 @@ EXIT_PARITY_MATRIX: tuple[dict, ...] = (
      "replay": "not applied (never blocks an exit)"},
     {"rule": "time_exit", "owner": "none in production", "execution_authoritative": False,
      "classification": FULLY_REPLAYED,
-     "replay": "no time exit; research censoring cap only (reported separately)"},
+     "replay": "no time exit; unresolved positions are RIGHT_CENSORED (never force-closed)"},
     {"rule": "funding_settlement", "owner": "exchange", "execution_authoritative": True,
      "classification": FULLY_REPLAYED,
      "replay": "charged at actual public funding timepoints on the quantity open at that time"},
@@ -331,7 +337,7 @@ class ExitPolicy:
     enable_trailing: bool = True
     enable_rr_double: bool = True
     shift_native_stops: bool = False          # research toggle: legacy (wrong) behaviour
-    research_max_hold_bars: int = 2880        # 30 days; censoring cap, not a production rule
+    research_max_hold_bars: int = 2880        # 30 days; right-censoring cap, NOT a production exit
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -493,44 +499,87 @@ def simulate_production_exit(*, direction: str, bars: Sequence[dict], start_idx:
 
         marks.append((close_ts, c))
 
-    censored = None
+    outcome_status = RESOLVED
+    censor_ts = None
+    last_mark = None
     if qty > 0:
+        # No production exit happened inside the available history (or the
+        # research cap). Production has no forced close: the position is
+        # RIGHT-CENSORED. No artificial exit leg, fee or realized PnL is made.
         last = bars[last_idx]
-        close_ts = ts_of(last) + FIFTEEN_MIN_MS
-        censored = "DATA_END" if last_idx == len(bars) - 1 else "RESEARCH_MAX_HOLD"
-        close_all(close_ts, float(last["c"]), "CENSORED_" + censored)
+        censor_ts = ts_of(last) + FIFTEEN_MIN_MS
+        last_mark = float(last["c"])
+        outcome_status = (RIGHT_CENSORED_DATA_END if last_idx == len(bars) - 1
+                          else RIGHT_CENSORED_RESEARCH_LIMIT)
+        exit_ts = None
+        exit_reason = None
 
     return {
         "fill": fill,
+        "outcome_status": outcome_status,
         "native_sl_initial": float(signal_sl) if not policy.shift_native_stops else float(signal_sl) + delta,
         "native_tp": native_tp,
+        "exchange_native_geometry": {
+            "sl_initial": float(signal_sl) + (delta if policy.shift_native_stops else 0.0),
+            "tp": native_tp, "sl_at_end": native_sl},
+        "local_position_geometry": {"entry": local_entry, "sl_initial": float(signal_sl) + delta,
+                                    "tp": local_tp, "sl_at_end": local_sl},
         "legs": legs,
         "marks": marks,
         "exit_ts": exit_ts,
         "exit_reason": exit_reason,
         "tp1_ts": tp1_ts,
-        "censored": censored,
+        "censored": None if outcome_status == RESOLVED else outcome_status,
+        "censor_ts": censor_ts,
+        "open_qty_at_censor": qty if outcome_status != RESOLVED else 0.0,
+        "native_sl_at_censor": native_sl if outcome_status != RESOLVED else None,
+        "last_mark": last_mark,
         "entry_ts": ts_of(first),
     }
 
 
 def legs_net_r(sim: dict, *, direction: str, fee_rate: float, funding_events: Sequence[dict],
-               price_at_ts, planned_risk_fraction: float) -> dict:
+               price_at_ts, planned_risk_fraction: float, slippage_rate: float = 0.0) -> dict:
     """Gross / fees / funding in R. R is the planned stop risk at sizing time
-    (|signal entry - signal stop| / signal entry)."""
+    (|signal entry - signal stop| / signal entry).
+
+    RESOLVED outcomes get a realized ``r``. RIGHT-CENSORED outcomes get
+    ``r = None`` (never a completed trade) plus diagnostics only:
+    ``marked_r`` (open remainder marked at the last close, no exit fee) and
+    reasonable bounds with the open remainder closed at the CURRENT native
+    stop (worst) or the native TP (best), with slippage and exit fee.
+    """
     from bot.kucoin_execution_model import fee_return_fraction, funding_return_fraction
     fill = sim["fill"]
     s = 1.0 if str(direction).upper() == "LONG" else -1.0
-    gross = sum(s * (p - fill) / fill * w for _, w, p, _ in sim["legs"])
-    fees = fee_return_fraction(fill, [(p, w) for _, w, p, _ in sim["legs"]], fee_rate)
-    funding, n = funding_return_fraction(
-        list(funding_events), direction, sim["entry_ts"], sim["exit_ts"], fill,
-        price_at_ts=price_at_ts, partial_after_ts_ms=sim.get("tp1_ts"),
-    )
     rf = float(planned_risk_fraction)
     if not rf > 0:
-        return {"r": None}
-    return {"r": (gross - fees + funding) / rf, "gross_r": gross / rf, "fees_r": -fees / rf,
+        return {"r": None, "outcome_status": sim.get("outcome_status", RESOLVED)}
+    end_ts = sim["exit_ts"] if sim.get("outcome_status", RESOLVED) == RESOLVED else sim["censor_ts"]
+    funding, n = funding_return_fraction(
+        list(funding_events), direction, sim["entry_ts"], end_ts, fill,
+        price_at_ts=price_at_ts, partial_after_ts_ms=sim.get("tp1_ts"),
+    )
+    realized_gross = sum(s * (p - fill) / fill * w for _, w, p, _ in sim["legs"])
+    realized_fees = fee_return_fraction(fill, [(p, w) for _, w, p, _ in sim["legs"]], fee_rate)
+    if sim.get("outcome_status", RESOLVED) == RESOLVED:
+        return {"r": (realized_gross - realized_fees + funding) / rf, "gross_r": realized_gross / rf,
+                "fees_r": -realized_fees / rf, "funding_r": funding / rf, "funding_events": n,
+                "outcome_status": RESOLVED}
+    q = float(sim["open_qty_at_censor"])
+    marked = realized_gross + s * (float(sim["last_mark"]) - fill) / fill * q
+
+    def _bound(level):
+        px = _slip(float(level), direction, slippage_rate, is_entry=False)
+        gross = realized_gross + s * (px - fill) / fill * q
+        fees = realized_fees + fee_rate * (px / fill) * q
+        return (gross - fees + funding) / rf
+
+    return {"r": None, "outcome_status": sim["outcome_status"],
+            "marked_r": (marked - realized_fees + funding) / rf,
+            "bound_worst_r": _bound(sim["native_sl_at_censor"]),
+            "bound_best_r": _bound(sim["native_tp"]),
+            "realized_part_r": (realized_gross - realized_fees) / rf,
             "funding_r": funding / rf, "funding_events": n}
 
 
@@ -553,10 +602,10 @@ def instrument_from_public_contract(contract: dict) -> dict:
     }
     try:
         m = float(contract.get("maintainMargin"))
-        if math.isfinite(m) and 0 < m < 1:
-            info["contractMaintainMarginReference"] = m
     except (TypeError, ValueError):
-        pass
+        m = float("nan")   # no public MMR: sizing uses risk_policy's conservative fallback
+    if math.isfinite(m) and 0 < m < 1:
+        info["contractMaintainMarginReference"] = m
     return info
 
 

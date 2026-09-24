@@ -64,6 +64,8 @@ on:
       - "bot/decision_affecting_paths.py"
       - "bot/nexus_oos_promotion_gate.py"
       - "research/replay_policy_manifest.json"
+      - "research/live_policy_attestation.txt"
+      - "bot/policy_attestation.py"
       - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
@@ -120,13 +122,21 @@ jobs:
           python -m unittest tests.test_nexus_oos_research_pipeline -v
           python -m unittest tests.test_nexus_oos_dependence_and_portfolio -v
           python -m unittest tests.test_nexus_oos_execution_parity -v
+          python -m unittest tests.test_nexus_oos_censoring_and_horizon -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
+          # A LIVE attestation line is used only if an operator committed one
+          # (copied from the LIVE startup log); nothing is read from Railway.
+          ATTEST=()
+          if [ -f research/live_policy_attestation.txt ]; then
+            ATTEST=(--live-policy-attestation research/live_policy_attestation.txt)
+          fi
           python -m bot.nexus_oos_real_replay_corrected \
             --symbols $OOS_SYMBOLS \
             --limit-15m "$OOS_LIMIT_15M" \
             --policy-manifest research/replay_policy_manifest.json \
+            "${ATTEST[@]}" \
             --output artifacts/nexus_oos_real_replay.json
 
       - name: Show evidence summary
@@ -154,15 +164,19 @@ jobs:
               'nexus_threshold_used': p.get('nexus_threshold_used'),
               'unavailable_symbols': p.get('unavailable_symbols'),
               'replay_policy_manifest': {k: (p.get('replay_policy_manifest') or {}).get(k) for k in ('policy_source', 'policy_sha256', 'differs_from_code_default')},
+              'policy_parity': p.get('policy_parity'),
+              'live_policy_attestation': {k: (p.get('live_policy_attestation') or {}).get(k) for k in ('status', 'replay_policy_sha', 'live_policy_sha', 'mismatches', 'error')},
               'replay_parity': {k: rp.get(k) for k in ('exit_parity_complete', 'exit_parity_blocking_rules', 'pretrade_parity_complete', 'pretrade_parity_blocking_gates', 'portfolio_parity_complete', 'tp1_equals_tp2_root_cause')},
               'methodology': p.get('methodology'),
               'parity_attribution': p.get('parity_attribution'),
               'legacy_diagnostic': {'authority': lg.get('authority'), 'status': lg.get('status'), 'blockers': lg.get('blockers'), 'report': lg.get('report')},
               'symbols': [{k: s.get(k) for k in ('symbol', 'error', 'candles_15m', 'history_days',
                            'history_start_utc', 'history_end_utc', 'approved', 'rejected',
-                           'candidate_count', 'parity_counts')} for s in p.get('symbols') or []],
+                           'candidate_count', 'parity_counts', 'windows')} for s in p.get('symbols') or []],
               'candidate_research': {
                   'population_counts': c.get('population_counts'),
+                  'censoring': c.get('censoring'),
+                  'sample_adequacy': c.get('sample_adequacy'),
                   'research_status': c.get('research_status'),
                   'performance': c.get('performance'),
                   'inference': c.get('inference'),

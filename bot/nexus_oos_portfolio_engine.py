@@ -82,7 +82,7 @@ class _Pos:
     __slots__ = ("row", "symbol", "direction", "s", "fill", "qty0", "qty", "margin0", "margin",
                  "entry_ts", "legs", "li", "marks", "mi", "mark", "funding", "fi", "fee_rate",
                  "realized", "fees", "funding_paid", "risk_at_stop", "exit_ts", "planned_risk_quote",
-                 "leverage", "exit_reasons")
+                 "leverage", "exit_reasons", "resolved")
 
     def __init__(self, row, qty, leverage, fee_rate):
         self.row = row
@@ -109,6 +109,7 @@ class _Pos:
         self.exit_ts = None
         self.planned_risk_quote = self.qty * abs(float(row["signal_entry"]) - float(row["sl"]))
         self.exit_reasons = []
+        self.resolved = row.get("outcome_status", "RESOLVED") == "RESOLVED"
 
     def unrealized(self) -> float:
         return self.s * (self.mark - self.fill) * self.qty
@@ -150,7 +151,10 @@ def run_portfolio(rows: Sequence[dict], manifest, *, instruments: Mapping[str, d
     # Grid anchored on the first decision (exchange bars are 15m aligned, so
     # the grid is too); every candidate, leg and mark lies on this grid.
     t0 = min(by_ts)
-    t_end = max(max(int(l[0]) for r in cands for l in r["legs"]), max(by_ts))
+    t_end = max([max(by_ts)]
+                + [int(l[0]) for r in cands for l in r["legs"]]
+                + [int(m[0]) for r in cands for m in (r.get("marks") or [])[-1:]]
+                + [int(r["censor_ts"]) for r in cands if r.get("censor_ts")])
     off_grid = [r["symbol"] for r in cands
                 if (int(r["ts"]) - t0) % BAR_MS
                 or any((int(l[0]) - t0) % BAR_MS for l in r["legs"])]
@@ -230,8 +234,8 @@ def run_portfolio(rows: Sequence[dict], manifest, *, instruments: Mapping[str, d
                 l_ts, w, px, reason = p.legs[p.li]
                 p.li += 1
                 q = min(p.qty, float(w) * p.qty0)
-                if p.li == len(p.legs):
-                    q = p.qty            # final leg closes the remainder exactly
+                if p.li == len(p.legs) and p.resolved:
+                    q = p.qty            # final leg of a RESOLVED trade closes the remainder
                 pnl = p.s * (float(px) - p.fill) * q
                 fee = p.fee_rate * float(px) * q
                 cash += pnl - fee
@@ -397,11 +401,52 @@ def run_portfolio(rows: Sequence[dict], manifest, *, instruments: Mapping[str, d
         check(T)
         T += BAR_MS
 
-    if open_pos:
-        raise AccountingInvariantError(f"positions left open after last leg: {sorted(open_pos)}")
+    # Unresolved (right-censored) positions are NOT force-closed: no exit leg,
+    # no exit fee, no realized PnL. They are reported open and marked.
+    for p in open_pos.values():
+        if p.resolved:
+            raise AccountingInvariantError(f"resolved position left open after last leg: {p.symbol}")
+    end_state = _end_state(open_pos, cash, start, [c for c in cands], trades)
     return _report(trades, skipped, curve, daily_curve, manifest, toggles, semantics, start,
                    cands, exposure_ms, margin_time, max_concurrent, stop_days, target_days,
-                   dd_gate_bars, invariant_checks)
+                   dd_gate_bars, invariant_checks, end_state)
+
+
+def _end_state(open_pos, cash, start, cands, trades) -> dict:
+    unreal = sum(p.unrealized() for p in open_pos.values())
+
+    def bound(level_of):
+        total = 0.0
+        for p in open_pos.values():
+            lvl = level_of(p)
+            if lvl is None:
+                return None
+            total += p.s * (float(lvl) - p.fill) * p.qty - p.fee_rate * float(lvl) * p.qty
+        return cash + total
+
+    worst = bound(lambda p: p.row.get("native_sl_at_censor"))
+    best = bound(lambda p: p.row.get("native_tp"))
+    last_candidate = max((int(c["ts"]) for c in cands), default=None)
+    first_censor = min((int(p.row["censor_ts"]) for p in open_pos.values()
+                        if p.row.get("censor_ts")), default=None)
+    path_unknown = bool(first_censor is not None and last_candidate is not None
+                        and first_censor < last_candidate)
+    sign_flip = (worst is not None and best is not None and ((worst - start) > 0) != ((best - start) > 0))
+    return {
+        "open_positions_at_end": len(open_pos),
+        "open_position_symbols": sorted(open_pos),
+        "unrealized_pnl_at_end": unreal,
+        "realized_equity_end": cash,
+        "realized_pnl": cash - start,
+        "marked_final_equity": cash + unreal,
+        "final_equity_worst_bound": worst,
+        "final_equity_best_bound": best,
+        "censored_before_last_candidate": path_unknown,
+        # Predeclared: material if an unresolved position was still open before
+        # the last candidate (later path unknowable) or if closing the open
+        # positions at their native stop vs native TP flips the sign of return.
+        "portfolio_censoring_material": bool(path_unknown or sign_flip or (open_pos and worst is None)),
+    }
 
 
 def _liquidation_effective(liquidation, row, leverage, mmr, *, n_open: int) -> bool:
@@ -473,16 +518,20 @@ def _parity_block() -> dict:
 
 
 def _empty_report(manifest, toggles, semantics):
-    out = _report([], {}, [], [], manifest, toggles, semantics,
-                  float(manifest.values["STARTING_EQUITY"]), [], 0, 0.0, 0, set(), set(), 0, 0)
+    start = float(manifest.values["STARTING_EQUITY"])
+    out = _report([], {}, [], [], manifest, toggles, semantics, start, [], 0, 0.0, 0, set(), set(),
+                  0, 0, _end_state({}, start, start, [], []))
     return out
 
 
 def _report(trades, skipped, curve, daily_curve, manifest, toggles, semantics, start, cands,
             exposure_ms, margin_time, max_concurrent, stop_days, target_days, dd_gate_bars,
-            invariant_checks):
+            invariant_checks, end_state):
     v = manifest.values
-    end = start + sum(t["pnl"] for t in trades)
+    realized_end = start + sum(t["pnl"] for t in trades)
+    # Marked final equity: realized + open (unresolved) positions marked, and
+    # any realized partial legs / fees / funding of open positions.
+    end = float(end_state["marked_final_equity"])
     trades_sorted = sorted(trades, key=lambda t: (t["exit_ts"], t["symbol"]))
     rs = [t["r"] for t in trades_sorted if t["r"] is not None]
     wins = [t["pnl"] for t in trades if t["pnl"] > 0]
@@ -511,7 +560,13 @@ def _report(trades, skipped, curve, daily_curve, manifest, toggles, semantics, s
         "contract_metadata": v["CONTRACT_SPEC_SOURCE"],
         "starting_equity": start,
         "ending_equity": end,
+        "ending_equity_definition": "MARKED_FINAL_EQUITY (realized + open positions marked; no forced close)",
         "net_return": (end - start) / start,
+        "realized_return": (end_state["realized_equity_end"] - start) / start,
+        "closed_trades_pnl": realized_end - start,
+        "end_state": end_state,
+        "effective_live_max_concurrent_positions": 1 if toggles.single_position_liquidation_rule else None,
+        "configured_max_positions": int(v["MAX_POSITIONS"]),
         "approved_candidates": len(cands),
         "total_trades": len(trades),
         "skipped": dict(sorted(skipped.items())),
@@ -558,30 +613,37 @@ def _report(trades, skipped, curve, daily_curve, manifest, toggles, semantics, s
     }
 
 
-# ── path bootstrap: re-run the state machine on block-resampled timelines ───
+# ── path bootstrap: DIAGNOSTIC ONLY ─────────────────────────────────────────
+PATH_BOOTSTRAP_STATUS = "APPROXIMATE_NON_AUTHORITATIVE"
+PATH_BOOTSTRAP_REASON = (
+    "Candidate blocks are resampled together with their precomputed future "
+    "(legs, marks, funding). A position from source block A can extend into a "
+    "synthetic neighbouring block whose candidates come from an unrelated source "
+    "block B, so the synthetic market timeline is not internally coherent. The "
+    "interval is reported for comparison only and never carries authority.")
+
+
 def _shift_row(row: dict, dt: int) -> dict:
     out = dict(row)
     out["ts"] = int(row["ts"]) + dt
     out["legs"] = [(int(t) + dt, w, p, why) for t, w, p, why in row["legs"]]
     out["marks"] = [(int(t) + dt, c) for t, c in (row.get("marks") or [])]
     out["funding"] = [(int(t) + dt, r, p) for t, r, p in (row.get("funding") or [])]
+    if row.get("censor_ts"):
+        out["censor_ts"] = int(row["censor_ts"]) + dt
     return out
 
 
 def path_bootstrap(rows: Sequence[dict], manifest, *, instruments, mmr_proxy=None,
                    block_ms: int = DAY_MS, replicates: int = 200, seed: int = 11,
                    toggles: Toggles = Toggles()) -> dict:
-    """Moving-calendar-block bootstrap of the CANDIDATE timeline, each replicate
-    re-run through the full portfolio state machine (path dependence kept).
-
-    Blocks are UTC-aligned; every candidate of every symbol in a block moves
-    together with its own price path, exit legs and funding, re-timed to the
-    replicate slot. Positions crossing a block boundary continue with their own
-    re-timed path.
-    """
+    """Calendar-block resampling of the CANDIDATE timeline, re-run through the
+    state machine. APPROXIMATE_NON_AUTHORITATIVE (see PATH_BOOTSTRAP_REASON)."""
     cands = [r for r in rows if r.get("approved") and r.get("executable")]
+    base = {"status": PATH_BOOTSTRAP_STATUS, "authority": "NONE", "reason": PATH_BOOTSTRAP_REASON,
+            "block_hours": block_ms // inf.HOUR_MS}
     if not cands:
-        return {"replicates": 0, "authority_ci_low": None, "authority_ci_high": None}
+        return {**base, "replicates": 0, "net_return_ci": [None, None]}
     first = (min(int(r["ts"]) for r in cands) // block_ms) * block_ms
     last = (max(int(r["ts"]) for r in cands) // block_ms) * block_ms
     n_blocks = int((last - first) // block_ms) + 1
@@ -589,11 +651,15 @@ def path_bootstrap(rows: Sequence[dict], manifest, *, instruments, mmr_proxy=Non
     for r in cands:
         blocks[int((int(r["ts"]) - first) // block_ms)].append(r)
     rng = random.Random(seed)
-    returns, expectancies = [], []
+    returns, expectancies, spliced = [], [], 0
     for _ in range(int(replicates)):
         sample = []
+        prev_src = None
         for slot in range(n_blocks):
             src = rng.randrange(n_blocks)
+            if prev_src is not None and src != prev_src + 1:
+                spliced += 1
+            prev_src = src
             dt = (slot - src) * block_ms
             sample.extend(_shift_row(r, dt) for r in blocks.get(src, ()))
         rep = run_portfolio(sample, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
@@ -603,32 +669,53 @@ def path_bootstrap(rows: Sequence[dict], manifest, *, instruments, mmr_proxy=Non
             expectancies.append(rep["net_expectancy_r"])
     lo, hi = inf._percentile_ci(list(returns))
     elo, ehi = inf._percentile_ci(list(expectancies))
-    return {
-        "method": "UTC_BLOCK_RESAMPLED_CANDIDATE_TIMELINE_RERUN_THROUGH_STATE_MACHINE",
-        "block_hours": block_ms // inf.HOUR_MS,
-        "replicates": len(returns),
-        "net_return_ci": [lo, hi],
-        "net_expectancy_r_ci": [elo, ehi],
-        "authority_ci_low": lo,
-        "authority_ci_high": hi,
-        "authority_metric": "net_return",
-    }
+    return {**base, "method": "UTC_BLOCK_RESAMPLED_CANDIDATE_TIMELINE_RERUN_THROUGH_STATE_MACHINE",
+            "replicates": len(returns), "net_return_ci": [lo, hi],
+            "net_expectancy_r_ci": [elo, ehi], "non_contiguous_block_joins": spliced}
 
 
-def path_bootstrap_authority(rows, manifest, *, instruments, mmr_proxy=None, replicates=200,
-                             block_lengths_ms=(DAY_MS, 2 * DAY_MS, 3 * DAY_MS)) -> dict:
+def path_bootstrap_diagnostic(rows, manifest, *, instruments, mmr_proxy=None, replicates=100,
+                              block_lengths_ms=(DAY_MS, 3 * DAY_MS, 7 * DAY_MS)) -> dict:
     per = {f"{b // inf.HOUR_MS}h": path_bootstrap(rows, manifest, instruments=instruments,
                                                   mmr_proxy=mmr_proxy, block_ms=b,
                                                   replicates=replicates)
            for b in block_lengths_ms}
-    lows = [p["authority_ci_low"] for p in per.values() if p.get("authority_ci_low") is not None]
-    highs = [p["authority_ci_high"] for p in per.values() if p.get("authority_ci_high") is not None]
-    return {"per_block_length": per,
-            "authority_ci_low": min(lows) if len(lows) == len(per) else None,
-            "authority_ci_high": max(highs) if len(highs) == len(per) else None,
-            "authority_rule": "min lower / max upper over all predeclared block lengths; "
-                              "missing any => not estimable",
-            "authority_metric": "net_return"}
+    return {"per_block_length": per, "status": PATH_BOOTSTRAP_STATUS, "authority": "NONE",
+            "reason": PATH_BOOTSTRAP_REASON}
+
+
+def walk_forward_folds(rows, manifest, *, instruments, mmr_proxy=None, folds: int = 4) -> dict:
+    """Conservative portfolio robustness: K contiguous, non-overlapping calendar
+    periods of DECISIONS, each replayed independently from the starting equity
+    on the REAL market timeline (a position entered in fold k keeps its real
+    path even past the fold end; nothing is spliced). Authority metric: number
+    of folds with positive marked return, with censoring reported per fold."""
+    cands = sorted((r for r in rows if r.get("approved") and r.get("executable")),
+                   key=lambda r: int(r["ts"]))
+    out = []
+    if cands:
+        t0, t1 = int(cands[0]["ts"]), int(cands[-1]["ts"]) + 1
+        span = t1 - t0
+        for k in range(folds):
+            lo = t0 + span * k // folds
+            hi = t0 + span * (k + 1) // folds
+            part = [r for r in cands if lo <= int(r["ts"]) < hi]
+            rep = run_portfolio(part, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+                                record_curve=True, check_invariants=True)
+            out.append({"fold": k + 1, "decision_start_ts": lo, "decision_end_ts": hi,
+                        "candidates": len(part), "trades": rep["total_trades"],
+                        "net_return_marked": rep["net_return"],
+                        "realized_return": rep["realized_return"],
+                        "open_positions_at_end": rep["end_state"]["open_positions_at_end"],
+                        "censoring_material": rep["end_state"]["portfolio_censoring_material"],
+                        "max_drawdown": rep["portfolio_max_drawdown"]})
+    positive = sum(1 for f in out if f["net_return_marked"] > 0 and f["realized_return"] > 0
+                   and not f["censoring_material"])
+    return {"method": "WALK_FORWARD_INDEPENDENT_CALENDAR_FOLDS", "folds": out,
+            "folds_total": len(out), "folds_positive": positive,
+            "authority": "PORTFOLIO_ROBUSTNESS",
+            "rule": "a fold counts as positive only if marked AND realized return > 0 and its "
+                    "censoring is not material"}
 
 
 def contract_spec_sensitivity(rows, manifest, *, instruments, mmr_proxy=None) -> dict:

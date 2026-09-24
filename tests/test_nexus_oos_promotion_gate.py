@@ -12,17 +12,28 @@ from pathlib import Path
 from bot import nexus_oos_promotion_gate as gate
 
 
-def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5)):
-    lo, hi = min(lo24, lo48, lo72), max(hi24, hi48, hi72)
-    return {"iid_ci": list(iid), "iid_role": "DIAGNOSTIC_ONLY",
+DAY = 86_400_000
+
+
+def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60, 45)):
+    """Block intervals for 1/2/3-day blocks; horizon in the fixture is < 1 day,
+    so all three are long enough; ``blocks`` = independent blocks per length."""
+    ivs = [{"block_ms": d * DAY, "block_days": d, "ci": [lo, hi], "independent_blocks": n,
+            "authoritative": n >= 30}
+           for d, (lo, hi), n in zip((1, 2, 3), ((lo24, hi24), (lo48, hi48), (lo72, hi72)), blocks)]
+    valid = [iv["ci"] for iv in ivs if iv["authoritative"]]
+    lo = min(c[0] for c in valid) if valid else None
+    hi = max(c[1] for c in valid) if valid else None
+    return {"iid_ci": list(iid), "iid_role": "DIAGNOSTIC_ONLY", "block_intervals": ivs,
             "block24h_ci": [lo24, hi24], "block48h_ci": [lo48, hi48], "block72h_ci": [lo72, hi72],
-            "authority_ci_low": lo, "authority_ci_high": hi}
+            "required_block_ms": DAY, "authority_ci_low": lo, "authority_ci_high": hi}
 
 
 def _passing_artifact():
     return {
-        "authority_model": "BLOCK_BOOTSTRAP_ONLY_V1",
+        "authority_model": "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2",
         "status": "AI_EDGE_PROVEN",
+        "policy_parity": "ATTESTED_MATCH",
         "blockers": [],
         "historical_context_parity_complete": True,
         "replay_parity": {"exit_parity_complete": True, "pretrade_parity_complete": True,
@@ -43,7 +54,11 @@ def _passing_artifact():
             "inference": {
                 "approved_expectancy": _dep(0.05, 0.3, 0.04, 0.32, 0.045, 0.31),
                 "uplift_vs_baseline": _dep(0.03, 0.2, 0.035, 0.21, 0.04, 0.19),
+                "outcome_horizon_resolved_executable": {"max_ms": 20 * 3_600_000},
+                "required_block_ms": DAY,
             },
+            "censoring": {"censoring_material": False, "censored_count": 3, "censored_rate": 0.01},
+            "sample_adequacy": {"independent_blocks_approved": 90, "adequate": True},
             "effective_sample": {"approved": {"unique_blocks": 80, "effective_n": 250.0}},
             "concentration": {
                 "approved_by_symbol": {"groups_positive": 5, "top_share_of_positive_r": 0.3},
@@ -58,7 +73,11 @@ def _passing_artifact():
             "accounting_invariants": "PASS",
             "net_expectancy_r": 0.15, "starting_equity": 1000.0, "ending_equity": 1120.0,
             "portfolio_max_drawdown": 0.08, "research_max_drawdown_limit": 0.25,
-            "path_bootstrap": {"authority_ci_low": 0.02, "authority_ci_high": 0.3},
+            "realized_return": 0.10,
+            "end_state": {"portfolio_censoring_material": False, "open_positions_at_end": 0},
+            "walk_forward": {"folds_positive": 4, "folds_total": 4},
+            "path_bootstrap": {"status": "APPROXIMATE_NON_AUTHORITATIVE", "authority": "NONE",
+                               "net_return_ci": [0.02, 0.3]},
             "approximate_trade_level_ci": {"authority_ci_low": -0.5, "authority": "NONE"},
             "total_trades": 120, "contributing_symbols": 5,
         },
@@ -118,7 +137,7 @@ class PromotionGateTests(unittest.TestCase):
         self.assertEqual(self._run({"status": "AI_EDGE_PROVEN"}), gate.EXIT_CORRUPT)
 
     def test_unsupported_authority_model_blocks(self):
-        for model in (None, "IID", "LEGACY"):
+        for model in (None, "IID", "LEGACY", "BLOCK_BOOTSTRAP_ONLY_V1"):
             a = _passing_artifact()
             a["authority_model"] = model
             self.assertIn("AUTHORITY_MODEL_UNSUPPORTED", gate.evaluate(a).blockers)
@@ -191,8 +210,14 @@ class PromotionGateTests(unittest.TestCase):
             "INSUFFICIENT_EFFECTIVE_SAMPLE": lambda a: cr(a)["effective_sample"]["approved"].update(effective_n=40.0),
             "UPLIFT_BLOCK_CI_NOT_POSITIVE": lambda a: cr(a)["inference"].update(uplift_vs_baseline=_dep(0.03, 0.2, -0.01, 0.2, 0.04, 0.2)),
             "PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT": lambda a: a["portfolio_replay"].update(portfolio_max_drawdown=0.4),
-            "PORTFOLIO_ROBUSTNESS_CI_NOT_POSITIVE": lambda a: a["portfolio_replay"]["path_bootstrap"].update(authority_ci_low=-0.01),
-            "PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE": lambda a: a["portfolio_replay"].update(path_bootstrap={}),
+            "PORTFOLIO_WALK_FORWARD_NOT_POSITIVE": lambda a: a["portfolio_replay"]["walk_forward"].update(folds_positive=2),
+            "PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE": lambda a: a["portfolio_replay"].update(walk_forward={}),
+            "PORTFOLIO_REALIZED_RETURN_NOT_POSITIVE": lambda a: a["portfolio_replay"].update(realized_return=-0.01),
+            "PORTFOLIO_CENSORING_MATERIAL": lambda a: a["portfolio_replay"]["end_state"].update(portfolio_censoring_material=True),
+            "CENSORING_MATERIAL": lambda a: cr(a)["censoring"].update(censoring_material=True),
+            "CENSORING_REPORT_MISSING": lambda a: cr(a).pop("censoring"),
+            "INSUFFICIENT_INDEPENDENT_BLOCKS": lambda a: cr(a)["sample_adequacy"].update(independent_blocks_approved=12),
+            "LIVE_POLICY_NOT_ATTESTED": lambda a: a.update(policy_parity="PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED"),
             "INSUFFICIENT_PORTFOLIO_TRADES": lambda a: a["portfolio_replay"].update(total_trades=10),
             "TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING": lambda a: a["portfolio_replay"].update(contributing_symbols=1),
         }
@@ -276,13 +301,14 @@ class IidHasZeroPromotionAuthority(unittest.TestCase):
         sec["authority_ci_low"] = 0.2
         r = gate.evaluate(a)
         self.assertIn("APPROVED_EXPECTANCY_AUTHORITY_CI_INCONSISTENT", r.blockers)
-        self.assertEqual(gate.block_only_authority(sec), (0.04, 0.32))
+        self.assertEqual(gate.block_only_authority(sec, required_ms=DAY, min_blocks=30),
+                         (0.04, 0.32, "VALID"))
 
     def test_no_valid_block_interval_fails_closed(self):
         a = _passing_artifact()
         sec = a["candidate_research"]["inference"]["approved_expectancy"]
-        for k in ("block24h_ci", "block48h_ci", "block72h_ci"):
-            sec[k] = [None, None]
+        for iv in sec["block_intervals"]:
+            iv["ci"] = [None, None]
         sec["iid_ci"] = [0.5, 0.9]
         r = gate.evaluate(a)
         self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", r.blockers)

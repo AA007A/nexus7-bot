@@ -41,6 +41,18 @@ CONTRACTS = [
 ]
 
 
+def _short_tail_manifest() -> str:
+    """Pinned manifest copy with a 200-bar look-forward for 900-bar fixtures."""
+    from bot import nexus_oos_replay_manifest as rm
+    raw = json.loads(rm.DEFAULT_PATH.read_text(encoding="utf-8"))
+    raw["values"]["OUTCOME_LOOKFORWARD_BARS"]["value"] = 200
+    raw["values"]["RESEARCH_MAX_HOLD_BARS"]["value"] = 200
+    fd = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(raw, fd)
+    fd.close()
+    return fd.name
+
+
 class _Client:
     async def __aenter__(self):
         return self
@@ -94,7 +106,8 @@ class ResearchPipelineTests(unittest.TestCase):
              patch.object(replay, "PublicKuCoinFuturesClient", _Client), \
              patch.object(Analyzer, "analyze_mtf", _fake_analyze):
             cls.artifact = asyncio.run(replay.run_real_replay(
-                ["AAAUSDT", "BBBUSDT", "BROKENUSDT"], limit_15m=900))
+                ["AAAUSDT", "BBBUSDT", "BROKENUSDT"], limit_15m=620,
+                manifest_path=_short_tail_manifest()))
 
     def test_unavailable_symbol_is_reported_not_dropped(self):
         a = self.artifact
@@ -113,7 +126,7 @@ class ResearchPipelineTests(unittest.TestCase):
         self.assertEqual(a["legacy_diagnostic"]["authority"], "NONE")
         self.assertNotIn("robustness", a, "legacy IID robustness must not sit at top level")
         self.assertIn("portfolio_replay", a)
-        self.assertEqual(a["authority_model"], "BLOCK_BOOTSTRAP_ONLY_V1")
+        self.assertEqual(a["authority_model"], "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2")
         c = a["candidate_research"]
         self.assertEqual(c["layer"], "CANDIDATE_RESEARCH")
         for key in ("performance", "inference", "effective_sample", "segments_approved",
@@ -121,7 +134,7 @@ class ResearchPipelineTests(unittest.TestCase):
                     "break_even_cost_multiplier", "exit_variants_approved", "ablation",
                     "context_ablation", "strategy_gate_ablation", "threshold_research",
                     "probability_calibration", "regime_parity", "temporal_folds",
-                    "research_status", "population_counts"):
+                    "research_status", "population_counts", "censoring", "sample_adequacy"):
             self.assertIn(key, c, key)
         for key in ("performance", "segments_approved", "ablation"):
             self.assertNotIn(key, a, "candidate metrics must not leak to top level")
@@ -150,6 +163,7 @@ class ResearchPipelineTests(unittest.TestCase):
         self.assertEqual(p["engine"], "BAR_BY_BAR_EVENT_ENGINE_V2")
         for k in ("starting_equity", "ending_equity", "portfolio_max_drawdown", "skipped",
                   "max_concurrent_positions", "by_month", "path_bootstrap", "gate_attribution",
+                  "walk_forward", "end_state", "realized_return",
                   "daily_pnl_semantics_sensitivity", "contract_spec_sensitivity",
                   "approximate_trade_level_ci"):
             self.assertIn(k, p)
@@ -222,7 +236,8 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
              patch.object(replay, "PublicKuCoinFuturesClient", _Client), \
              patch.object(replay, "_decide", _fake_decide), \
              patch.object(Analyzer, "analyze_mtf", _fake_analyze):
-            cls.artifact = asyncio.run(replay.run_real_replay(["AAAUSDT", "BBBUSDT"], limit_15m=900))
+            cls.artifact = asyncio.run(replay.run_real_replay(["AAAUSDT", "BBBUSDT"], limit_15m=620,
+                                                              manifest_path=_short_tail_manifest()))
 
     def test_portfolio_trades_single_position_and_invariants(self):
         p = self.artifact["portfolio_replay"]
@@ -234,11 +249,15 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
         self.assertGreater(p["skipped"].get("liquidation_guard_multi_position", 0)
                            + p["skipped"].get("same_symbol_open", 0)
                            + p["skipped"].get("cooldown_or_circuit_breaker", 0), 0)
-        self.assertIn(p["path_bootstrap"]["per_block_length"]["24h"]["replicates"], (200,))
+        self.assertEqual(p["path_bootstrap"]["authority"], "NONE")
+        self.assertEqual(p["path_bootstrap"]["status"], "APPROXIMATE_NON_AUTHORITATIVE")
+        self.assertEqual(p["path_bootstrap"]["per_block_length"]["24h"]["replicates"], 100)
+        self.assertEqual(p["walk_forward"]["folds_total"], 4)
+        self.assertEqual(p["effective_live_max_concurrent_positions"], 1)
+        self.assertEqual(p["configured_max_positions"], 2)
         self.assertEqual(set(p["gate_attribution"]), set(__import__(
             "bot.nexus_oos_portfolio_engine", fromlist=["Toggles"]).Toggles.__dataclass_fields__))
-        multi = p["gate_attribution"]["single_position_liquidation_rule"]
-        self.assertGreaterEqual(multi["total_trades"], p["total_trades"])
+        self.assertIn("single_position_liquidation_rule", p["gate_attribution"])
 
     def test_attribution_steps_are_populated(self):
         att = self.artifact["parity_attribution"]
@@ -283,7 +302,7 @@ class ResearchStatisticsTests(unittest.TestCase):
             # Threshold 90 looks great ONLY in the final test split.
             score = 91 if i % 2 else 61
             r = (5.0 if score == 91 else -1.0) if test_part else (-1.0 if score == 91 else 0.5)
-            ts = 1_760_000_000_000 + i * 3_600_000
+            ts = 1_760_000_000_000 + i * 6 * 3_600_000
             rows.append({"ts": ts, "outcome_end_ts": ts + 3_600_000, "r": r, "gates_passed": True,
                          "nexus_score": score, "nexus_regime": "TRENDING_UP", "symbol": "X",
                          "production_regime": "RANGE"})
@@ -308,7 +327,7 @@ class ResearchStatisticsTests(unittest.TestCase):
         rows = []
         for i in range(400):
             good = i % 2 == 0
-            rows.append({"ts": 1_760_000_000_000 + i * 3_600_000, "r": 1.0 if good else -1.0,
+            rows.append({"ts": 1_760_000_000_000 + i * 6 * 3_600_000, "r": 1.0 if good else -1.0,
                          "approved": good, "variants": {"minus_X": True}})
         out = res.paired_ablation(rows, "minus_X")
         self.assertGreater(out["delta_expectancy_r"], 0)

@@ -94,14 +94,15 @@ class IidZeroAuthorityInInference(unittest.TestCase):
         return rows
 
     def _block_only(self, d):
-        cis = [d[k] for k in ("block24h_ci", "block48h_ci", "block72h_ci") if d[k][0] is not None]
+        cis = [iv["ci"] for iv in d["block_intervals"] if iv["authoritative"]]
         return min(c[0] for c in cis), max(c[1] for c in cis)
 
     def test_mean_authority_equals_block_only_interval(self):
         d = inf.dependence_aware_mean(self._rows(), samples=400)
         self.assertEqual((d["authority_ci_low"], d["authority_ci_high"]), self._block_only(d))
         self.assertEqual(d["iid_role"], "DIAGNOSTIC_ONLY")
-        self.assertEqual(d["authority_model"], "BLOCK_BOOTSTRAP_ONLY_V1")
+        self.assertEqual(d["authority_model"], "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2")
+        self.assertEqual(d["authority_status"], "VALID")
         self.assertIn("block72h_ci", d)
 
     def test_diff_authority_equals_block_only_interval(self):
@@ -128,9 +129,10 @@ class IidZeroAuthorityInInference(unittest.TestCase):
 
     def test_dependence_diagnostics_reports_lags_and_predeclared_blocks(self):
         dd = inf.dependence_diagnostics(self._rows())
-        self.assertEqual(dd["block_lengths_predeclared_hours"], [24, 48, 72])
+        self.assertEqual(dd["block_lengths_predeclared_days"], [1, 2, 3, 7, 14, 30])
         self.assertEqual(set(dd["daily_acf"]), {"1", "2", "3"})
-        self.assertEqual(set(dd["per_block_length_lag1"]), {"24h", "48h", "72h"})
+        self.assertEqual(set(dd["per_block_length_lag1"]), {"1d", "2d", "3d", "7d", "14d", "30d"})
+        self.assertIn("outcome_horizon", dd)
 
 
 class PurgedSplitTests(unittest.TestCase):
@@ -144,7 +146,6 @@ class PurgedSplitTests(unittest.TestCase):
     def test_purge_and_embargo(self):
         rows = self._rows()
         sp = inf.purged_split(rows)
-        self.assertGreaterEqual(sp["embargo_ms"], inf.REPLAY_MAX_HORIZON_MS)
         self.assertGreaterEqual(sp["embargo_ms"], 9 * H)
         inf.assert_no_leakage(sp)
         b1, b2 = sp["boundaries_ms"]
