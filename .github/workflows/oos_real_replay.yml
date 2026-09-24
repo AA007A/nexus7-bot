@@ -4,15 +4,57 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "bot/nexus_oos_edge_gate.py"
-      - "bot/nexus_oos_real_replay.py"
-      - "bot/nexus_oos_real_replay_corrected.py"
-      - "bot/nexus_oos_robustness.py"
-      - "bot/nexus_oos_robustness_replay.py"
-      - "tests/test_nexus_oos_edge_gate.py"
-      - "tests/test_nexus_oos_real_replay.py"
-      - "tests/test_nexus_oos_replay_full_clock.py"
-      - "tests/test_nexus_oos_robustness.py"
+      # Decision-affecting code: keep in sync with bot/decision_affecting_paths.py
+      # (enforced by tests/test_decision_affecting_paths.py).
+      - "bot/strategy.py"
+      - "bot/indicators.py"
+      - "bot/score.py"
+      - "bot/score_weights.py"
+      - "bot/scoring_safety_hardening.py"
+      - "bot/adaptive_mtf_entry.py"
+      - "bot/adaptive_mtf_calibration.py"
+      - "bot/pullback_confirmation_hardening.py"
+      - "bot/pretrade_hardening.py"
+      - "bot/rr_precision_hardening.py"
+      - "bot/rr_gate_calibration.py"
+      - "bot/correlation.py"
+      - "bot/event_intelligence.py"
+      - "bot/market_viability_fail_closed.py"
+      - "bot/nexus_*.py"
+      - "bot/oos_*.py"
+      - "bot/market_data.py"
+      - "bot/market_data_integrity.py"
+      - "bot/market_risk_*.py"
+      - "bot/news_*.py"
+      - "bot/derivatives_news_freshness_hardening.py"
+      - "bot/config.py"
+      - "bot/risk.py"
+      - "bot/risk_manager_v3.py"
+      - "bot/risk_policy.py"
+      - "bot/professional_risk.py"
+      - "bot/professional_risk_adapter.py"
+      - "bot/final_sizing_invariants.py"
+      - "bot/final_loss_budget.py"
+      - "bot/operator_runtime_policy.py"
+      - "bot/operator_loss_policy.py"
+      - "bot/pilot_risk_cap_hardening.py"
+      - "bot/quantity.py"
+      - "bot/cross_portfolio_stress.py"
+      - "bot/cross_geometry_target_policy.py"
+      - "bot/kucoin_contract_risk_hardening.py"
+      - "bot/liquidation.py"
+      - "bot/liquidation_override_guard.py"
+      - "bot/daily_stop_*.py"
+      - "bot/daily_tracker.py"
+      - "bot/confirmed_rr_exit.py"
+      - "bot/trailing_safety_hardening.py"
+      - "bot/stagnation_time_hardening.py"
+      - "bot/partial_tp_execution_hardening.py"
+      - "bot/exit_policy_telemetry.py"
+      - "bot/kucoin_execution_model.py"
+      - "bot/backtest.py"
+      - "bot/decision_affecting_paths.py"
+      - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
 
@@ -90,6 +132,21 @@ jobs:
                       'execution_effect': p.get('execution_effect'),
                   }
               print(json.dumps(view, indent=2, sort_keys=True))
+          PY
+
+      - name: Promotion verdict (decision-affecting change)
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path('artifacts') / 'nexus_oos_real_replay.json'
+          status = 'MISSING'
+          if path.exists():
+              status = str(json.loads(path.read_text()).get('status'))
+          print(f'PROMOTION_EVIDENCE_STATUS={status}')
+          print('A green unit-test suite is not promotion evidence for a decision-affecting change.')
+          print('Promotion requires this replay evidence plus RELEASE_READINESS.md human approval.')
           PY
 
       - name: Upload replay evidence
