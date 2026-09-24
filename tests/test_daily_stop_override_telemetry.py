@@ -15,15 +15,15 @@ class DailyStopOverrideTelemetryTests(unittest.TestCase):
             "Novas entradas bloqueadas; posições abertas continuam sendo gerenciadas e protegidas."
         )
 
-    def test_matching_utc_day_rewrites_only_truthful_operator_alert(self):
+    def test_matching_utc_day_annotates_that_override_was_ignored(self):
         with patch.dict(os.environ, {"DAILY_STOP_OVERRIDE_UTC_DAY": "2026-09-14"}, clear=False):
             text, changed = telemetry.truthful_message(self.original, now=self.now)
 
         self.assertTrue(changed)
-        self.assertIn("override do operador ativo", text)
+        self.assertIn("IGNORADO", text)
         self.assertIn("$-10.45", text)
-        self.assertIn("Novas entradas permanecem liberadas", text)
-        self.assertNotIn("Novas entradas bloqueadas", text)
+        self.assertIn("Novas entradas bloqueadas", text)
+        self.assertNotIn("liberadas", text)
 
     def test_stale_override_preserves_blocked_message(self):
         with patch.dict(os.environ, {"DAILY_STOP_OVERRIDE_UTC_DAY": "2026-09-13"}, clear=False):

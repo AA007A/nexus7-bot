@@ -46,6 +46,7 @@ from bot.integrity import IntegrityGuard, Severity
 from bot.order_state import OrderRegistry, OrderState, InvalidTransition
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
+from bot.risk_policy import effective_daily_stop_limit
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
 from bot import liquidation as liq
 from bot import durable_execution as durable
@@ -454,6 +455,11 @@ class TradingEngine:
         self.daily_pnl_realized:   float = 0.0
         self.daily_pnl_unrealized: float = 0.0
         self._last_nexus: Dict[str, dict]  = {}   # última decisão da IA (observabilidade)
+        # Phase 7B AI pre-trade authority (AI_EXECUTION_MODE, default OFF =
+        # no-op). It never sends orders; PAPER/LIVE only add a mandatory "no".
+        from bot.ai.runtime import AIRuntime
+        self.ai_runtime = AIRuntime(paper_trade=self.paper_trade, log=log)
+        self._ai_hook_windows: Dict[str, tuple] = {}   # windows NEXUS used, reused by the AI hook
 
         # ── Lock de posições (race condition) ─────────────────────
         # self.positions é mutado por 7 pontos em corrotinas diferentes:
@@ -514,6 +520,7 @@ class TradingEngine:
             )
             from bot.protection_readiness import refresh_protection_readiness
             await refresh_protection_readiness(self)
+            await self._ai_startup()
 
             _ciclos = 0
             while self._running:
@@ -841,8 +848,9 @@ class TradingEngine:
             if bal > 0:
                 if cfg.DAILY_TARGET <= 0:
                     self.daily_target = round(bal * cfg.DAILY_TARGET_PCT, 2)
-                if cfg.DAILY_STOP_LOSS <= 0:
-                    self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = effective_daily_stop_limit(
+                    bal, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+                ).limit
                 self.daily_tracker.daily_target    = self.daily_target
                 self.daily_tracker.daily_stop_loss = self.daily_stop_loss
 
@@ -2627,6 +2635,10 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"nexus: news sentiment indisponível: {_e}")
 
+            # The AI hook reuses exactly these windows (no second fetch).
+            if getattr(self, "_ai_hook_windows", None) is None:
+                self._ai_hook_windows = {}
+            self._ai_hook_windows[sig.symbol] = (k15, k1h, k4h)
             return await asyncio.to_thread(
                 nexus_ai.decide, symbol=sig.symbol,
                 k15=k15, k1h=k1h, k4h=k4h,
@@ -2648,6 +2660,58 @@ class TradingEngine:
         if self.pilot.enabled:
             return float(getattr(self, "_pilot_available_balance", 0.0) or 0.0)
         return float(getattr(self.risk, "balance", 0.0) or 0.0)
+
+    async def _ai_startup(self) -> None:
+        """Validate the AI bundle and reconcile durable AI decisions BEFORE
+        any entry. Mode OFF: no-op. Failures are HALT conditions."""
+        rt = getattr(self, "ai_runtime", None)
+        if rt is None or not rt.enabled:
+            return
+        from bot.policy_attestation import runtime_identity
+        ident = runtime_identity()
+        sha = ident.get("candidate_sha")
+        # No trusted Stage-C provider exists in-candidate: AI LIVE halts here.
+        from bot.ai import hook as ai_hook
+        rt.startup(candidate_sha=None if sha == "UNAVAILABLE" else sha, stage_c_result=None,
+                   hook_profile=ai_hook.engine_profile(self))
+        log.warning(rt.observation_line(candidate_sha=sha, deployment_id=ident.get("deployment_id")))
+
+        async def _lookup(oid):
+            order = await self.client.get_order_by_client_oid(oid)
+            if order:
+                return "FOUND"
+            if not self._initial_reconciliation_complete:
+                raise RuntimeError("exchange state not reconciled")
+            return "NOT_FOUND"
+
+        if rt.halts.halted:
+            log.critical(f"[AI_HALT] {sorted(rt.halts.active)}")
+            return
+        res = await rt.recover(_lookup)
+        log.warning(f"[AI_RECOVERY] {res} halted={rt.halts.halted}")
+
+    async def _ai_gate(self, sig, nx_dec):
+        """AI_RUNTIME_HOOK_POPULATION_V1 call site: sig / nx_dec exactly as
+        held here (LIVE pilot: post CROSS geometry + NEXUS recheck)."""
+        from bot.ai import hook as ai_hook
+        from bot.ai.runtime import GateOutcome
+        rt = getattr(self, "ai_runtime", None)
+        if rt is None or not rt.enabled:
+            return GateOutcome(True, False, "AI_OFF")
+        try:
+            from bot.professional_risk_adapter import conservative_cost_fraction
+            now_ms = int(time.time() * 1000)
+            obs = ai_hook.from_engine(
+                sig, nx_dec, decision_ts=rt.event_ts(now_ms),
+                cost_fraction=conservative_cost_fraction(sig.symbol),
+                profile=ai_hook.engine_profile(self))
+            windows = (getattr(self, "_ai_hook_windows", {}) or {}).pop(sig.symbol, None) or (
+                self.client.get_cached_klines(sig.symbol, "15", 200),
+                self.client.get_cached_klines(sig.symbol, "60", 100),
+                self.client.get_cached_klines(sig.symbol, "240", 120))
+            return await rt.gate(obs, *windows, taker_fee=float(TAKER_FEE), now_ms=now_ms)
+        except Exception as exc:
+            return GateOutcome(not rt.authoritative, rt.authoritative, f"AI_GATE_ERROR:{type(exc).__name__}")
 
     async def _refresh_entry_balance(self) -> bool:
         """Zero/negative is a valid account result; query failure is separate."""
@@ -2724,6 +2788,13 @@ class TradingEngine:
             )
             if not approved:
                 return
+
+            # AI pre-trade authority: after NEXUS, before geometry/risk/sizing.
+            ai_out = await self._ai_gate(sig, nx_dec)
+            if not ai_out.allow:
+                log.info(f"[AI_GATE] {sig.symbol} blocked reason={ai_out.reason}")
+                return
+            _ai_dec = ai_out.decision if ai_out.authoritative else None
 
             self._last_nexus[sig.symbol] = nx_dec.to_dict()
             asyncio.create_task(notify_nexus(nx_dec.to_dict(), approved=True))
@@ -3009,9 +3080,18 @@ class TradingEngine:
             # sinal. Garante que retries reusem o mesmo clientOid e a
             # exchange rejeite duplicatas.
             _idem = f"{sig.symbol}_{side}_{qty}_{int(time.time()//60)}"
+            if _ai_dec is not None:
+                # client_oid derives from the AI decision_id (idempotent per event).
+                _idem = _ai_dec.decision_id
             _client_oid = self.client.build_client_oid(
                 sig.symbol, side, qty, _idem
             )
+            if _ai_dec is not None:
+                try:
+                    await self.ai_runtime.bind_intent(_ai_dec, _client_oid)
+                except Exception as exc:
+                    log.error(f"[AI_GATE] {sig.symbol} intent not durable: {type(exc).__name__}")
+                    return
 
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
@@ -3111,6 +3191,8 @@ class TradingEngine:
                         last_exc = RuntimeError(
                             f"place_order sem orderId para {sig.symbol}"
                         )
+                        if _ai_dec is not None:
+                            await self.ai_runtime.mark(_ai_dec, "PENDING_UNKNOWN")
                         if self._durable_state_enforced:
                             await durable.persist_orders(
                                 self, "ambiguous_dispatch", strict=False
@@ -3120,6 +3202,9 @@ class TradingEngine:
 
                     _oid_for_registry = _order.get("orderId", "") if _order else ""
                     if _oid_for_registry:
+                        if _ai_dec is not None:
+                            await self.ai_runtime.mark(_ai_dec, "SUBMITTED",
+                                                       order_id=_oid_for_registry)
                         self.orders.index_order_id(_oid_for_registry, _client_oid)
                         try:
                             _managed.transition(
@@ -3936,7 +4021,9 @@ class TradingEngine:
             # apenas mantemos meta/stop coerentes com o saldo atual.
             if bal > 0:
                 self.daily_target    = round(bal * cfg.DAILY_TARGET_PCT, 2)
-                self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = effective_daily_stop_limit(
+                    bal, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+                ).limit
 
             if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                 if not getattr(self, "_dd_alerted", False):

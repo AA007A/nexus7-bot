@@ -15,7 +15,8 @@ import argparse
 import asyncio
 import json
 from bisect import bisect_right
-from dataclasses import asdict
+from collections import Counter, defaultdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -99,32 +100,58 @@ def _simulate_net_r(
     funding_events: list[dict],
     fee_rate: float,
     slippage_rate: float,
+    partial: bool = True,
+    break_even: bool = True,
+    max_bars: int = 40,
+    stagnation_bars: int | None = None,
+    detail: dict | None = None,
+    shift_native: bool = True,
+    timestamps: list[int] | None = None,
 ) -> float | None:
-    """Mirror KUCOIN_MARKET_PROXY_V1 and return net R for one candidate."""
+    """Mirror KUCOIN_MARKET_PROXY_V1 and return net R for one candidate.
+
+    Defaults reproduce the historical model exactly. The optional exit-policy
+    parameters exist for one-at-a-time exit research: ``partial`` (TP1 50%),
+    ``break_even`` (SL to entry after TP1), ``max_bars`` (time exit) and
+    ``stagnation_bars`` (exit at close if TP1 not reached by then). ``detail``,
+    when given, receives gross/fees/funding components in R.
+
+    LEGACY MODEL. ``shift_native=True`` (the historical behaviour) shifts SL/TP
+    by the fill delta; production keeps the exchange-native SL/TP at the
+    unshifted signal levels (``shift_native=False`` isolates that correction).
+    The production-parity model is
+    ``nexus_oos_execution_parity.simulate_production_exit``.
+    """
     market_open = float(klines_15[decision_idx]["o"])
     entry_fill = adverse_fill(market_open, direction, is_entry=True, slippage_rate=slippage_rate)
     if entry_fill <= 0 or signal_entry <= 0:
         return None
 
-    delta = entry_fill - signal_entry
+    delta = (entry_fill - signal_entry) if shift_native else 0.0
     sl = float(signal_sl) + delta
     tp = float(signal_tp) + delta
     tp1 = float(signal_tp1) + delta
     tp2 = float(signal_tp2) + delta
-    risk_fraction = abs(entry_fill - sl) / entry_fill
+    risk_fraction = (abs(entry_fill - sl) / entry_fill if shift_native
+                     else abs(float(signal_entry) - float(signal_sl)) / float(signal_entry))
     if risk_fraction <= 0:
         return None
 
-    timestamps = _timestamp_index(klines_15)
+    timestamps = timestamps if timestamps is not None else _timestamp_index(klines_15)
     candle_ms = 15 * 60 * 1000
-    has_partial = abs(tp1 - tp2) > max(abs(entry_fill), 1.0) * 1e-12
+    has_partial = partial and abs(tp1 - tp2) > max(abs(entry_fill), 1.0) * 1e-12
+    if not partial:
+        tp = tp2
     tp1_hit = False
     tp1_ts: int | None = None
     exit_ts = decision_ts
     exit_legs: list[tuple[float, float]] = []
 
-    for j in range(decision_idx, min(decision_idx + 40, len(klines_15))):
+    for j in range(decision_idx, min(decision_idx + max_bars, len(klines_15))):
         future = klines_15[j]
+        if (stagnation_bars is not None and not tp1_hit
+                and j - decision_idx >= stagnation_bars):
+            break
         high = float(future["h"])
         low = float(future["l"])
         bar_exit_ts = _ts_ms(future) + candle_ms
@@ -138,7 +165,8 @@ def _simulate_net_r(
                 tp1_hit = True
                 tp1_ts = bar_exit_ts
                 exit_legs.append((adverse_fill(tp1, direction, is_entry=False, slippage_rate=slippage_rate), 0.5))
-                sl = entry_fill
+                if break_even:
+                    sl = entry_fill
             if tp1_hit and high >= tp2:
                 exit_legs.append((adverse_fill(tp2, direction, is_entry=False, slippage_rate=slippage_rate), 0.5))
                 exit_ts = bar_exit_ts
@@ -156,7 +184,8 @@ def _simulate_net_r(
                 tp1_hit = True
                 tp1_ts = bar_exit_ts
                 exit_legs.append((adverse_fill(tp1, direction, is_entry=False, slippage_rate=slippage_rate), 0.5))
-                sl = entry_fill
+                if break_even:
+                    sl = entry_fill
             if tp1_hit and low <= tp2:
                 exit_legs.append((adverse_fill(tp2, direction, is_entry=False, slippage_rate=slippage_rate), 0.5))
                 exit_ts = bar_exit_ts
@@ -167,7 +196,8 @@ def _simulate_net_r(
                 break
 
     if sum(weight for _, weight in exit_legs) < 0.999999:
-        last_idx = min(decision_idx + 39, len(klines_15) - 1)
+        horizon = max_bars if stagnation_bars is None else min(max_bars, stagnation_bars)
+        last_idx = min(decision_idx + horizon - 1, len(klines_15) - 1)
         last = float(klines_15[last_idx]["c"])
         exit_legs.append((adverse_fill(last, direction, is_entry=False, slippage_rate=slippage_rate), 0.5 if tp1_hit else 1.0))
         exit_ts = _ts_ms(klines_15[last_idx]) + candle_ms
@@ -184,6 +214,16 @@ def _simulate_net_r(
         price_at_ts=lambda ts: _price_at_ts(klines_15, timestamps, ts),
         partial_after_ts_ms=tp1_ts,
     )
+    if detail is not None:
+        detail.update(
+            gross_r=gross / risk_fraction,
+            fees_r=-fees / risk_fraction,
+            funding_r=funding / risk_fraction,
+            entry_fill=entry_fill,
+            stop=float(signal_sl) + delta,
+            risk_fraction=risk_fraction,
+            exit_ts=int(exit_ts),
+        )
     return (gross - fees + funding) / risk_fraction
 
 
@@ -198,30 +238,288 @@ def _freeze_nexus_clock(nexus_ai, decision_ts_ms: int):
     return _Clock()
 
 
-async def replay_symbol(client, symbol: str, *, limit_15m: int = 3000) -> dict:
-    from bot.strategy import Analyzer
-    from bot import nexus_ai
+# ── research variants ───────────────────────────────────────────────────────
+COST_SCENARIOS = {
+    "current": (1.0, 1.0),
+    "fees_plus_25pct": (1.25, 1.0),
+    "fees_plus_50pct": (1.5, 1.0),
+    "slippage_x1_5": (1.0, 1.5),
+    "slippage_x2": (1.0, 2.0),
+    "combined_adverse": (1.5, 2.0),
+}
 
-    k15 = await fetch_history(client, symbol, "15", limit_15m)
-    k1h = await fetch_history(client, symbol, "60", max(900, limit_15m // 4 + 120))
-    k4h = await fetch_history(client, symbol, "240", max(300, limit_15m // 16 + 80))
+# One exit-policy change at a time, relative to the replay's current model.
+EXIT_VARIANTS = {
+    "current": {},
+    "no_partial_tp": {"partial": False},
+    "partial_without_break_even": {"break_even": False},
+    "stagnation_16_bars_4h": {"stagnation_bars": 16},
+    "time_exit_20_bars": {"max_bars": 20},
+    "time_exit_80_bars": {"max_bars": 80},
+}
+EXITS_NOT_MODELED = (
+    "trailing_stop", "choch_exit", "regime_invalidation", "signal_invalidation",
+    "min_hold_90m",
+)
+
+NEXUS_SCORE_COMPONENTS = (
+    "TREND_ALIGNMENT", "MOMENTUM", "VOLUME", "MARKET_STRUCTURE", "VOLATILITY",
+    "DERIVATIVES", "MICROSTRUCTURE", "MULTI_TIMEFRAME", "RISK_REWARD",
+)
+
+STRATEGY_GATES_NOT_ABLATED = {
+    "gates": ["RSI", "MACD", "ADX", "volume", "EMA_alignment", "market_structure",
+              "BOS", "CHoCH", "MTF", "adaptive_MTF", "pullback_confirmation",
+              "strategy_regime", "strategy_RR_gate", "pretrade_score(score.py)",
+              "news", "market_risk_context", "microstructure"],
+    "reason": ("Inline predicates inside Analyzer.analyze_mtf / runtime wrappers "
+               "(adaptive_mtf_entry, pullback_confirmation_hardening) or require "
+               "live-only data (order book, OI, news, market-risk feeds). Ablation "
+               "needs a zero-semantic-change refactor into injectable gate "
+               "predicates first; the pre-trade score gate uses live external "
+               "data and is absent from this replay (parity gap)."),
+}
+
+
+class _NexusVariant:
+    """Temporarily alter NEXUS internals for one research decision call."""
+
+    def __init__(self, nexus_ai, name: str):
+        self.nx = nexus_ai
+        self.name = name
+        self._restore = []
+
+    def _set(self, obj, attr, value):
+        self._restore.append((obj, attr, getattr(obj, attr)))
+        setattr(obj, attr, value)
+
+    def __enter__(self):
+        import os as _os
+        nx, name = self.nx, self.name
+        if name.startswith("minus_"):
+            weights = dict(nx.WEIGHTS)
+            weights[name[len("minus_"):]] = 0.0
+            self._set(nx, "WEIGHTS", weights)
+        elif name == "no_regime_compat_gate":
+            self._set(nx, "regime_compatibility", lambda *a, **k: 100.0)
+        elif name == "no_ev_gate":
+            original = nx.expected_value
+
+            def _ev(*a, **k):
+                out = dict(original(*a, **k))
+                out["valid"] = True
+                return out
+            self._set(nx, "expected_value", _ev)
+        elif name == "no_rr_net_gate":
+            self._env = _os.environ.get("NEXUS_MIN_RR_NET")
+            _os.environ["NEXUS_MIN_RR_NET"] = "0"
+        elif name == "missing_optional_scores_zero":
+            original = nx._score_components
+
+            def _sc(models, mtf, rr_net, direction, regime):
+                out = dict(original(models, mtf, rr_net, direction, regime))
+                comps = out.get("components") or {}
+                out["total"] = round(sum(float(comps.get(k, 0.0)) * float(w)
+                                         for k, w in nx.WEIGHTS.items()), 2)
+                return out
+            self._set(nx, "_score_components", _sc)
+        return self
+
+    def __exit__(self, *exc):
+        import os as _os
+        for obj, attr, value in reversed(self._restore):
+            setattr(obj, attr, value)
+        if self.name == "no_rr_net_gate":
+            if self._env is None:
+                _os.environ.pop("NEXUS_MIN_RR_NET", None)
+            else:
+                _os.environ["NEXUS_MIN_RR_NET"] = self._env
+
+
+NEXUS_VARIANTS = (
+    tuple(f"minus_{c}" for c in NEXUS_SCORE_COMPONENTS)
+    + ("no_regime_compat_gate", "no_ev_gate", "no_rr_net_gate",
+       "missing_optional_scores_zero")
+)
+# Historical-context ablations (inputs, not internals).
+CONTEXT_VARIANTS = {
+    "ctx_A_candle_only": {"ticker": False, "funding": False},
+    "ctx_B_candle_funding": {"ticker": False, "funding": True},
+    # C (candle + available derivatives) is identical to B: funding is the
+    # only derivatives input with public history; OI history is unavailable.
+    "ctx_D_full_available": {"ticker": True, "funding": True},
+}
+NON_BINDING_THRESHOLD = -100.0
+
+
+def runtime_nexus_threshold(nexus_ai) -> float:
+    """The threshold production uses: nexus_ai.MIN_SCORE (NEXUS_MIN_SCORE or
+    MIN_ENTRY_SCORE). The replay formerly used getattr(cfg, 'NEXUS_MIN_SCORE',
+    55) which always resolved to 55 because cfg has no such attribute."""
+    return float(nexus_ai.MIN_SCORE)
+
+
+def _decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding, threshold):
+    return nexus_ai.decide(
+        symbol, w15, w1h, w4h,
+        entry=float(sig.entry), sl=float(sig.sl), tp=float(sig.tp),
+        ticker=ticker, funding=funding, oi=None, orderbook=None,
+        min_score=threshold,
+    )
+
+
+def _features(w15, w1h) -> dict:
+    from bot import nexus_oos_research as res
+    h = [float(k["h"]) for k in w15]
+    l = [float(k["l"]) for k in w15]
+    c = [float(k["c"]) for k in w15]
+    v = [float(k.get("v", 0.0) or 0.0) for k in w15]
+    atr = res.atr_pct(h, l, c)
+    ax = res.adx(h, l, c)
+    vol_mult = (v[-1] / (sum(v[-21:-1]) / 20.0)) if len(v) >= 21 and sum(v[-21:-1]) > 0 else None
+    return {
+        "atr_pct_15m": atr, "adx_15m": ax, "volume_multiple_15m": vol_mult,
+        "regime": res.classify_regime(w1h),
+    }
+
+
+async def replay_symbol(client, symbol: str, *, limit_15m: int = 3000,
+                        research: bool = True, ctx: dict | None = None) -> dict:
+    try:
+        return await _replay_symbol(client, symbol, limit_15m=limit_15m, research=research,
+                                    ctx=ctx)
+    except Exception as exc:  # reported per symbol; never silently dropped
+        return {"symbol": symbol, "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "candidates": [], "rows": []}
+
+
+WARMUP_15M = 80
+# Legacy candidate replay needed 40 forward bars (its 40-bar exit). Used only
+# when no manifest (research=False diagnostics).
+LEGACY_FORWARD_BARS = 40
+
+
+def _windows(k15, ts15, tail: int) -> dict:
+    """WARMUP / DECISION_WINDOW / OUTCOME_LOOKFORWARD windows, explicitly."""
+    from datetime import datetime, timezone
+    day = 86_400_000
+    bar = 15 * 60 * 1000
+    iso = lambda ms: datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()  # noqa: E731
+    n = len(k15)
+    d0 = ts15[min(WARMUP_15M, n - 1)]
+    last = max(WARMUP_15M, n - tail) - 1
+    d1 = ts15[min(last, n - 1)] + bar
+    end = ts15[-1] + bar
+    return {"warmup_start_utc": iso(ts15[0]), "decision_start_utc": iso(d0),
+            "decision_end_utc": iso(d1), "outcome_tail_end_utc": iso(end),
+            "warmup_days": (d0 - ts15[0]) / day, "decision_window_days": (d1 - d0) / day,
+            "outcome_lookforward_days": (end - d1) / day, "outcome_lookforward_bars": tail}
+
+
+# Fees and slippage scaled together; used for the break-even cost multiplier.
+COST_GRID = (0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0)
+
+# One exit-policy change at a time relative to the PRODUCTION-PARITY exit model.
+PARITY_EXIT_VARIANTS = {
+    "current": {},
+    "no_partial_tp": {"enable_partial": False},
+    "no_trailing": {"enable_trailing": False},
+    "no_rr_double": {"enable_rr_double": False},
+    "shifted_native_stops_legacy_bug": {"shift_native_stops": True},
+}
+
+
+def _parity_outcome(pctx: dict, *, direction, i, sig_entry, sl, tp, fee_rate, slip,
+                    policy=None) -> dict | None:
+    """Production-parity exit path + net R for one candidate geometry."""
+    from bot import nexus_oos_execution_parity as xp
+    k15, ts15 = pctx["k15"], pctx["ts15"]
+    sim = xp.simulate_production_exit(
+        direction=direction, bars=k15, start_idx=i, signal_entry=sig_entry,
+        signal_sl=sl, signal_tp=tp, slippage_rate=slip,
+        policy=policy or pctx["exit_policy"], ts_of=_ts_ms)
+    if sim is None:
+        return None
+    planned = abs(float(sig_entry) - float(sl)) / float(sig_entry)
+    end_ts = sim["exit_ts"] if sim["outcome_status"] == "RESOLVED" else sim["censor_ts"]
+    fts = pctx["funding_ts"]
+    lo = bisect_right(fts, int(sim["entry_ts"]))
+    hi = bisect_right(fts, int(end_ts))
+    net = xp.legs_net_r(sim, direction=direction, fee_rate=fee_rate,
+                        funding_events=pctx["funding_events"][lo:hi],
+                        price_at_ts=lambda ts: _price_at_ts(k15, ts15, ts),
+                        planned_risk_fraction=planned, slippage_rate=slip)
+    net["sim"] = sim
+    net["planned_risk_fraction"] = planned
+    net["end_ts"] = int(end_ts)
+    return net
+
+
+def _realized(o):
+    """Realized R of a RESOLVED outcome; None for censored/unavailable."""
+    return None if (o is None or o.get("r") is None) else float(o["r"])
+
+
+async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
+                         ctx: dict | None = None) -> dict:
+    from datetime import datetime, timezone
+    from bot.strategy import Analyzer
+    from bot.engine import TradingEngine
+    from bot import nexus_ai
+    from bot import nexus_oos_research as res
+    from bot import nexus_oos_execution_parity as xp
+    from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+
+    ctx = ctx or {}
+    manifest = ctx.get("manifest")
+    # History acquisition window = WARMUP + DECISION_WINDOW + OUTCOME_TAIL.
+    # ``limit_15m`` is the decision window. The outcome tail gives every
+    # decision the same look-forward; the latest eligible decision is moved
+    # back by the tail (no future data exists past "now").
+    tail = int(manifest["OUTCOME_LOOKFORWARD_BARS"]) if manifest is not None else LEGACY_FORWARD_BARS
+    total = WARMUP_15M + int(limit_15m) + tail
+    k15 = await fetch_history(client, symbol, "15", total)
+    k1h = await fetch_history(client, symbol, "60", max(900, total // 4 + 120))
+    k4h = await fetch_history(client, symbol, "240", max(300, total // 16 + 80))
     if len(k15) < 200 or len(k1h) < 60 or len(k4h) < 30:
-        return {"symbol": symbol, "error": "insufficient_history", "candidates": []}
+        return {"symbol": symbol, "error": "insufficient_history",
+                "candles_15m": len(k15), "candidates": [], "rows": []}
 
     start_ms = _ts_ms(k15[0])
     end_ms = _ts_ms(k15[-1]) + 15 * 60 * 1000
     funding_events = await fetch_public_funding_history(client, symbol, start_ms, end_ms)
     fee_rate = configured_taker_fee()
     slippage = slippage_rate_for_symbol(symbol)
+    threshold = runtime_nexus_threshold(nexus_ai)
 
     ts15 = _timestamp_index(k15)
     ts1h = _timestamp_index(k1h)
     ts4h = _timestamp_index(k4h)
     analyzer = Analyzer()
     rows: list[CandidateOutcome] = []
-    approved = rejected = 0
+    rich: list[dict] = []
+    approved = rejected = analyzer_errors = 0
+    counts = defaultdict(int)
 
-    for i in range(80, len(k15) - 40):
+    parity = manifest is not None
+    if parity:
+        exit_policy = manifest.exit_policy()
+        leverage = int(manifest["LEVERAGE"])
+        fee_mult = float(manifest["FEE_MULTIPLIER"])
+        drift_bps = float(manifest["NEXUS_MAX_SIGNAL_DRIFT_BPS"])
+        mmr = (ctx.get("mmr_proxy") or {}).get(symbol)
+        cost_fraction = xp.production_cost_fraction(
+            taker_fee=float(manifest["TAKER_FEE"]),
+            expected_slippage_pct=float(manifest["NEXUS_EXPECTED_SLIPPAGE_PCT"]),
+            modeled_round_trip_pct=estimated_round_trip_cost_pct(symbol, float(manifest["TAKER_FEE"])),
+        )
+        funding_sorted = sorted(funding_events, key=lambda e: int(e.get("timepoint", 0) or 0))
+        pctx = {"k15": k15, "ts15": ts15, "funding_events": funding_sorted,
+                "funding_ts": [int(e.get("timepoint", 0) or 0) for e in funding_sorted],
+                "exit_policy": exit_policy}
+
+    last_decision = len(k15) - tail
+    for i in range(WARMUP_15M, last_decision):
         decision_ts = ts15[i]
         w15 = _closed_window_by_ts(k15, ts15, decision_ts, 15, 80)
         w1h = _closed_window_by_ts(k1h, ts1h, decision_ts, 60, 50)
@@ -239,12 +537,17 @@ async def replay_symbol(client, symbol: str, *, limit_15m: int = 3000) -> dict:
                 vol_mult=getattr(cfg, "MIN_VOLUME_MULT", 1.2),
             )
         except Exception:
+            analyzer_errors += 1
             continue
-        if not sig or float(sig.rr) < float(getattr(cfg, "MIN_RR_RATIO", 2.0)):
+        if not sig:
             continue
+        # Production has no replay-side R:R filter: the analyzer (with
+        # rr_precision_hardening) already enforces MIN_RR_RATIO. Counted only.
+        if float(sig.rr) < float(getattr(cfg, "MIN_RR_RATIO", 2.0)):
+            counts["rr_below_min_after_analyzer"] += 1
 
         direction = str(sig.direction).upper()
-        r_multiple = _simulate_net_r(
+        sim_args = dict(
             direction=direction,
             signal_entry=float(sig.entry),
             signal_sl=float(sig.sl),
@@ -255,42 +558,261 @@ async def replay_symbol(client, symbol: str, *, limit_15m: int = 3000) -> dict:
             decision_ts=decision_ts,
             klines_15=k15,
             funding_events=funding_events,
-            fee_rate=fee_rate,
-            slippage_rate=slippage,
+            timestamps=ts15,
         )
-        if r_multiple is None:
+        detail = {}
+        r_legacy = _simulate_net_r(**sim_args, fee_rate=fee_rate, slippage_rate=slippage,
+                                   detail=detail)
+        legacy_ok = r_legacy is not None
+        if not parity and not legacy_ok:
             continue
-
         ticker = {"lastPrice": str(float(k15[i]["o"]))}
         funding = _funding_at(funding_events, decision_ts)
         with _freeze_nexus_clock(nexus_ai, decision_ts):
-            nx = nexus_ai.decide(
-                symbol,
-                w15,
-                w1h,
-                w4h,
-                entry=float(sig.entry),
-                sl=float(sig.sl),
-                tp=float(sig.tp),
-                ticker=ticker,
-                funding=funding,
-                oi=None,
-                orderbook=None,
-                min_score=float(getattr(cfg, "NEXUS_MIN_SCORE", 55)),
-            )
-        is_approved = getattr(nx, "execution_allowed", False) is True
-        approved += int(is_approved)
-        rejected += int(not is_approved)
-        confidence = max(0.0, min(1.0, float(getattr(nx, "confidence", 0.0) or 0.0) / 100.0))
-        rows.append(CandidateOutcome(float(decision_ts), is_approved, True, confidence, True, float(r_multiple)))
+            nx = _decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding, threshold)
+            approved_initial = getattr(nx, "execution_allowed", False) is True
+            geometry = None
+            nx2 = None
+            approved_final = approved_initial
+            if parity:
+                geometry = xp.production_geometry(sig, leverage=leverage, mmr=mmr,
+                                                  fee_multiplier=fee_mult)
+                if geometry["status"] == "ADJUSTED" and approved_initial:
+                    adj = xp._SigView(sig, sl=geometry["sl"], tp=geometry["tp"])
+                    nx2 = _decide(nexus_ai, symbol, w15, w1h, w4h, adj, ticker, funding, threshold)
+                    approved_final = getattr(nx2, "execution_allowed", False) is True
+                    counts["geometry_adjusted_reapproved" if approved_final
+                           else "geometry_adjusted_nexus_rejected"] += 1
+            if research:
+                open_nx = _decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding,
+                                  NON_BINDING_THRESHOLD)
+                variants = {}
+                for name in NEXUS_VARIANTS:
+                    with _NexusVariant(nexus_ai, name):
+                        d = _decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding, threshold)
+                    variants[name] = getattr(d, "execution_allowed", False) is True
+                for name, cctx in CONTEXT_VARIANTS.items():
+                    d = _decide(nexus_ai, symbol, w15, w1h, w4h, sig,
+                                ticker if cctx["ticker"] else None,
+                                funding if cctx["funding"] else None, threshold)
+                    variants[name] = getattr(d, "execution_allowed", False) is True
+        if legacy_ok and r_legacy is not None:
+            approved += int(approved_initial)
+            rejected += int(not approved_initial)
+            confidence = max(0.0, min(1.0, float(getattr(nx, "confidence", 0.0) or 0.0) / 100.0))
+            rows.append(CandidateOutcome(float(decision_ts), approved_initial, True, confidence,
+                                         True, float(r_legacy)))
+
+        if not research:
+            continue
+        hour = datetime.fromtimestamp(decision_ts / 1000, tz=timezone.utc)
+        row = {
+            "ts": int(decision_ts),
+            "month": hour.strftime("%Y-%m"),
+            "symbol": symbol,
+            "direction": direction,
+            "entry_type": str(getattr(sig, "entry_type", "UNKNOWN")),
+            "strategy_score": int(getattr(sig, "score", 0) or 0),
+            "rr": float(sig.rr),
+            "approved_legacy": approved_initial,
+            "r_legacy": float(r_legacy) if r_legacy is not None else None,
+            "legacy_candidate": bool(legacy_ok and r_legacy is not None),
+            "nexus_confidence": float(getattr(nx, "confidence", 0.0) or 0.0),
+        }
+        feats = _features(w15, w1h)
+        nexus_score = getattr(open_nx, "setup_quality", None)
+        gates_passed = getattr(open_nx, "execution_allowed", False) is True
+        row.update({
+            "gates_passed": gates_passed,
+            "nexus_score": float(nexus_score) if gates_passed and nexus_score is not None else None,
+            "nexus_regime": getattr(open_nx, "market_regime", None),
+            "production_regime": getattr(open_nx, "market_regime", None) or "UNKNOWN",
+            "research_regime": feats["regime"],
+            "utc_hour_bucket": res.bucket(hour.hour, (6, 12, 18), ("00-05", "06-11", "12-17", "18-23")),
+            "score_bucket": res.bucket(float(nexus_score) if gates_passed and nexus_score is not None else None,
+                                       (55, 60, 65, 70, 75, 80, 85, 90)),
+            "confidence_bucket": res.bucket(float(getattr(nx, "confidence", 0.0) or 0.0), (40, 50, 60, 70, 80)),
+            "volatility_bucket": res.bucket(feats["atr_pct_15m"], (0.002, 0.004, 0.008)),
+            "adx_bucket": res.bucket(feats["adx_15m"], (20, 25, 35, 50)),
+            "volume_bucket": res.bucket(feats["volume_multiple_15m"], (0.5, 1.0, 1.5, 2.5)),
+            "variants": variants,
+        })
+        if legacy_ok and r_legacy is not None:
+            no_slip = _simulate_net_r(**sim_args, fee_rate=fee_rate, slippage_rate=0.0)
+            row["legacy"] = {
+                "r": float(r_legacy),
+                "gross_r": detail.get("gross_r"), "fees_r": detail.get("fees_r"),
+                "funding_r": detail.get("funding_r"),
+                "slippage_r": (float(r_legacy) - float(no_slip)) if no_slip is not None else None,
+                "outcome_end_ts": int(detail["exit_ts"]),
+                "entry_fill": float(detail["entry_fill"]),
+                "stop": float(detail["stop"]),
+                "risk_fraction": float(detail["risk_fraction"]),
+                "unshifted_native_r": _simulate_net_r(**sim_args, fee_rate=fee_rate,
+                                                      slippage_rate=slippage, shift_native=False),
+            }
+            if approved_initial:
+                row["legacy"]["_path"] = [
+                    (_ts_ms(k15[j]) + 15 * 60 * 1000, float(k15[j]["c"]))
+                    for j in range(i, len(k15))
+                    if _ts_ms(k15[j]) + 15 * 60 * 1000 <= int(detail["exit_ts"])]
+
+        if not parity:
+            continue
+        funnel = xp.funnel_flags(sig, decision_ts, TradingEngine)
+        executable_px = adverse_fill(float(k15[i]["o"]), direction, is_entry=True,
+                                     slippage_rate=slippage)
+        drift = xp.drift_gate(float(sig.entry), executable_px, direction, drift_bps)
+        final_sl = geometry["sl"] if geometry["status"] == "ADJUSTED" else float(sig.sl)
+        final_tp = geometry["tp"] if geometry["status"] == "ADJUSTED" else float(sig.tp)
+        executable = (geometry["status"] in ("SAFE", "ADJUSTED")
+                      and funnel["regime_allows_direction"] and funnel["expected_pnl_positive"]
+                      and funnel["adjusted_score"] >= int(manifest["MIN_ENTRY_SCORE"])
+                      and not drift["blocked"])
+        orig = _parity_outcome(pctx, direction=direction, i=i, sig_entry=float(sig.entry),
+                               sl=float(sig.sl), tp=float(sig.tp), fee_rate=fee_rate, slip=slippage)
+        final = orig if geometry["status"] != "ADJUSTED" else _parity_outcome(
+            pctx, direction=direction, i=i, sig_entry=float(sig.entry), sl=final_sl, tp=final_tp,
+            fee_rate=fee_rate, slip=slippage)
+        if final is None:
+            counts["parity_outcome_unavailable"] += 1
+            executable = False
+        # AI_RUNTIME_HOOK_POPULATION_V1: the exact state before TradingEngine._ai_gate
+        # (LIVE pilot profile = training population; pre-geometry profile diagnostic).
+        from bot.ai import hook as ai_hook
+        hook_kw = dict(decision_ts=int(decision_ts), funnel=funnel,
+                       min_entry_score=float(manifest["MIN_ENTRY_SCORE"]), nx_initial=nx,
+                       geometry=geometry, nx_final=nx2, cost_fraction=float(cost_fraction))
+        hk = ai_hook.evaluate_candidate(sig, profile=ai_hook.PROFILE_LIVE_PILOT, **hook_kw)
+        hk_pre = ai_hook.evaluate_candidate(sig, profile=ai_hook.PROFILE_PRE_GEOMETRY, **hook_kw)
+        row["ai_hook_population"] = ai_hook.POPULATION
+        row["ai_hook_eligible"] = bool(hk["eligible"])
+        row["ai_hook_stage"] = hk["stage"]
+        row["ai_hook_eligible_pre_geometry"] = bool(hk_pre["eligible"])
+        row["ai_features"] = None
+        if hk["eligible"]:
+            obs = hk["observation"]
+            row["ai_hook_observation"] = obs.to_dict()
+            try:
+                fv, ai_regime = ai_hook.features(obs, w15, w1h, w4h)
+                row["ai_features"] = [round(float(x), 10) for x in fv.model_input()]
+                row["ai_features_missing"] = list(fv.missing)
+                row["ai_feature_hash"] = fv.feature_hash()
+                row["ai_regime"] = ai_regime
+            except Exception as exc:
+                row["ai_features_error"] = type(exc).__name__
+        row.update({
+            "session": funnel["session"], "session_penalty": funnel["session_penalty"],
+            "score_adjusted": funnel["adjusted_score"],
+            "regime_allows_direction": funnel["regime_allows_direction"],
+            "expected_pnl_positive": funnel["expected_pnl_positive"],
+            "geometry_status": geometry["status"], "geometry_reason": geometry["reason"],
+            "geometry_retained_fraction": geometry.get("retained_fraction"),
+            "drift_bps": drift["signed_drift_bps"], "drift_blocked": drift["blocked"],
+            "signal_entry": float(sig.entry), "sl": final_sl, "tp": final_tp,
+            "sl_original": float(sig.sl), "tp_original": float(sig.tp),
+            "executable": bool(executable),
+            "approved": bool(executable and approved_final),
+            "approved_final_nexus": bool(approved_final),
+            "fee_rate": fee_rate, "cost_fraction": cost_fraction,
+            "r_prod_original_geometry": _realized(orig),
+            "outcome_status_original_geometry": (orig or {}).get("outcome_status"),
+        })
+        if final is not None:
+            sim = final["sim"]
+            resolved = final["outcome_status"] == xp.RESOLVED
+            counts[f"outcome_{final['outcome_status']}"] += 1
+            row.update({
+                # Only RESOLVED outcomes are completed trades with a realized R.
+                "r": float(final["r"]) if resolved else None,
+                "outcome_status": final["outcome_status"],
+                "censored": None if resolved else final["outcome_status"],
+                "marked_r": None if resolved else final.get("marked_r"),
+                "bound_worst_r": float(final["r"]) if resolved else final.get("bound_worst_r"),
+                "bound_best_r": float(final["r"]) if resolved else final.get("bound_best_r"),
+                "gross_r": final.get("gross_r"), "fees_r": final.get("fees_r"),
+                "funding_r": final.get("funding_r"),
+                "fill": sim["fill"], "entry_fill": sim["fill"], "stop": final_sl,
+                "risk_fraction": final["planned_risk_fraction"],
+                # Resolved: actual exit. Censored: censoring time (lower bound of
+                # the unknown outcome end; purged splits treat it as open-ended).
+                "outcome_end_ts": int(final["end_ts"]),
+                "outcome_horizon_ms": (int(final["end_ts"]) - int(decision_ts)) if resolved else None,
+                "exit_reason": sim["exit_reason"],
+                "exit_legs_n": len(sim["legs"]),
+            })
+            # Costs, variants and hypothetical paths are kept for every executable
+            # row AND every AI hook-eligible row (a hook candidate may be blocked
+            # downstream, e.g. by drift; its path is still needed for the
+            # AI_HOOK_POLICY_PORTFOLIO; final-order eligibility is never implied).
+            if row["executable"] or row.get("ai_hook_eligible"):
+                variants_ok = resolved
+                cost_r, exit_r, cost_grid = {}, {}, {}
+                no_slip_o = None
+                if variants_ok:
+                    for name, (fm, sm) in COST_SCENARIOS.items():
+                        if name == "current":
+                            cost_r[name] = float(final["r"])
+                            continue
+                        cost_r[name] = _realized(_parity_outcome(
+                            pctx, direction=direction, i=i, sig_entry=float(sig.entry),
+                            sl=final_sl, tp=final_tp, fee_rate=fee_rate * fm, slip=slippage * sm))
+                    no_slip_o = _parity_outcome(pctx, direction=direction, i=i,
+                                                sig_entry=float(sig.entry), sl=final_sl, tp=final_tp,
+                                                fee_rate=fee_rate, slip=0.0)
+                    for name, kw in PARITY_EXIT_VARIANTS.items():
+                        if name == "current":
+                            exit_r[name] = float(final["r"])
+                            continue
+                        exit_r[name] = _realized(_parity_outcome(
+                            pctx, direction=direction, i=i, sig_entry=float(sig.entry), sl=final_sl,
+                            tp=final_tp, fee_rate=fee_rate, slip=slippage,
+                            policy=replace(exit_policy, **kw)))
+                    for m in COST_GRID:
+                        if m == 1.0:
+                            cost_grid[str(m)] = float(final["r"])
+                            continue
+                        cost_grid[str(m)] = _realized(_parity_outcome(
+                            pctx, direction=direction, i=i, sig_entry=float(sig.entry),
+                            sl=final_sl, tp=final_tp, fee_rate=fee_rate * m, slip=slippage * m))
+                row.update({
+                    "cost_r": cost_r, "exit_r": exit_r, "cost_grid_r": cost_grid,
+                    "slippage_r": ((float(final["r"]) - _realized(no_slip_o))
+                                   if variants_ok and _realized(no_slip_o) is not None else None),
+                })
+                if True:
+                    row["legs"] = [list(l) for l in sim["legs"]]
+                    row["_marks"] = sim["marks"]
+                    row["censor_ts"] = sim["censor_ts"]
+                    row["open_qty_at_censor"] = sim["open_qty_at_censor"]
+                    row["native_sl_at_censor"] = sim["native_sl_at_censor"]
+                    row["native_tp"] = sim["native_tp"]
+                    row["_funding"] = [
+                        (int(e.get("timepoint", 0)), float(e.get("fundingRate", 0.0) or 0.0),
+                         _price_at_ts(k15, ts15, int(e.get("timepoint", 0))))
+                        for e in funding_events
+                        if sim["entry_ts"] < int(e.get("timepoint", 0) or 0) <= int(final["end_ts"])]
+        rich.append(row)
 
     return {
         "symbol": symbol,
         "candles_15m": len(k15),
+        "requested_15m": total,
+        "requested_decision_window_15m": int(limit_15m),
+        "history_start_utc": datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat(),
+        "history_end_utc": datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat(),
+        "history_days": (end_ms - start_ms) / 86_400_000,
+        "history_shorter_than_requested": len(k15) < total,
+        "windows": _windows(k15, ts15, tail),
+        "decision_window_days": _windows(k15, ts15, tail)["decision_window_days"],
         "funding_events": len(funding_events),
+        "analyzer_errors": analyzer_errors,
         "approved": approved,
         "rejected": rejected,
+        "nexus_threshold_used": threshold,
+        "parity_counts": dict(sorted(counts.items())),
         "candidates": rows,
+        "rows": rich,
         "historical_context": {
             "candles": True,
             "ticker_proxy": True,
@@ -302,44 +824,541 @@ async def replay_symbol(client, symbol: str, *, limit_15m: int = 3000) -> dict:
     }
 
 
-async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000) -> dict:
+def _grid_break_even(rows: list[dict]) -> dict:
+    """Break-even combined cost multiplier from the per-row cost grid."""
+    pts = []
+    for m in COST_GRID:
+        vals = [r["cost_grid_r"][str(m)] for r in rows
+                if (r.get("cost_grid_r") or {}).get(str(m)) is not None]
+        if vals:
+            pts.append((m, sum(vals) / len(vals)))
+    if not pts:
+        return {"multiplier": None, "note": "NO_DATA"}
+    curve = {str(m): v for m, v in pts}
+    if pts[0][1] <= 0:
+        return {"multiplier": None, "note": "NEGATIVE_EVEN_AT_ZERO_COST",
+                "expectancy_at_zero_cost": pts[0][1], "curve": curve}
+    for (m0, f0), (m1, f1) in zip(pts, pts[1:]):
+        if f0 > 0 >= f1:
+            return {"multiplier": m0 + (m1 - m0) * f0 / (f0 - f1), "note": "CROSSING_FOUND",
+                    "curve": curve}
+    return {"multiplier": None, "note": f"POSITIVE_BEYOND_{pts[-1][0]:g}X_COST", "curve": curve}
+
+
+def temporal_folds(exe_all: list[dict], *, required_horizon_ms: int, folds: int | None = None) -> dict:
+    """Candidate robustness folds: CALENDAR-time, purged and embargoed.
+
+    Layout from ``inf.purged_calendar_folds`` over the decision span of all
+    executable rows: each fold's decision window is followed by an embargo of
+    at least the required resolved-outcome horizon. A decision whose realized
+    outcome ends at or after the fold's outcome window end is PURGED. Censored
+    rows never enter a completed-trade statistic. Point estimates only.
+    """
+    from bot import nexus_oos_inference as inf
+    k = folds or inf.FOLD_COUNT
+    rows = sorted(exe_all, key=lambda r: int(r["ts"]))
+    if not rows:
+        return {"status": inf.FOLDS_INSUFFICIENT, "folds": [], "folds_total": 0,
+                "folds_authoritative": 0, "folds_overlap_free": False,
+                "folds_positive_approved_expectancy": 0, "folds_positive_uplift": 0}
+    layout = inf.purged_calendar_folds(int(rows[0]["ts"]), int(rows[-1]["ts"]) + 1,
+                                       required_horizon_ms=required_horizon_ms, folds=k)
+    out = []
+    for w in layout["windows"]:
+        part = [r for r in rows if w["decision_start_ts"] <= int(r["ts"]) < w["decision_end_ts"]]
+        resolved = [r for r in part if r.get("outcome_status") == "RESOLVED" and r.get("r") is not None]
+        kept = [r for r in resolved if int(r["outcome_end_ts"]) < w["outcome_window_end_ts"]]
+        appr = [float(r["r"]) for r in kept if r.get("approved")]
+        base = [float(r["r"]) for r in kept]
+        am = (sum(appr) / len(appr)) if appr else None
+        bm = (sum(base) / len(base)) if base else None
+        out.append({**w, "eligible_decisions": len(part),
+                    "purged_boundary_decisions": len(resolved) - len(kept),
+                    "censored_excluded": len(part) - len(resolved),
+                    "resolved_approved_trades": len(appr), "resolved_trades": len(base),
+                    "approved_mean_r": am, "baseline_mean_r": bm,
+                    "uplift_r": (am - bm) if am is not None and bm is not None else None,
+                    "symbols_represented": len({r["symbol"] for r in kept}),
+                    "max_market_ts_used": max((int(r["outcome_end_ts"]) for r in kept),
+                                              default=w["decision_start_ts"])})
+    try:
+        overlap_free = inf.assert_folds_overlap_free(out) if out else False
+    except AssertionError:
+        overlap_free = False
+    authoritative = layout["status"] == "OK" and overlap_free
+    return {"method": "PURGED_EMBARGOED_CALENDAR_FOLDS", "status": layout["status"],
+            "layout": {k_: v for k_, v in layout.items() if k_ != "windows"},
+            "fold_embargo_ms": layout["fold_embargo_ms"],
+            "fold_required_horizon_ms": layout["fold_required_horizon_ms"],
+            "folds": out, "folds_total": len(out), "folds_overlap_free": bool(overlap_free),
+            "folds_authoritative": len(out) if authoritative else 0,
+            "folds_positive_approved_expectancy": sum(1 for f in out if (f["approved_mean_r"] or -1) > 0),
+            "folds_positive_uplift": sum(1 for f in out if (f["uplift_r"] or -1) > 0)}
+
+
+# Predeclared censoring materiality rule (fixed before seeing results):
+#   material if EITHER
+#   (a) the right-censored share of executable outcomes exceeds 5% (the
+#       worst/best bounds assume exits at the native SL/TP; gaps and trailing
+#       make them approximate, so a small share is required), OR
+#   (b) replacing every censored outcome by its WORST reasonable bound
+#       (open remainder at the current native stop) vs its BEST reasonable
+#       bound (at the native TP) changes the sign of the approved expectancy
+#       or of the NEXUS uplift.
+CENSORING_MAX_RATE = 0.05
+
+
+def censoring_report(exe_all: list[dict]) -> dict:
+    cens = [r for r in exe_all if r.get("outcome_status") != "RESOLVED"]
+    appr_all = [r for r in exe_all if r.get("approved")]
+    appr_cens = [r for r in appr_all if r.get("outcome_status") != "RESOLVED"]
+
+    def by(key, rows):
+        out = defaultdict(int)
+        for r in rows:
+            out[str(r.get(key))] += 1
+        return dict(sorted(out.items()))
+
+    def mean_with(rows, pick):
+        vals = [pick(r) for r in rows]
+        vals = [float(v) for v in vals if v is not None]
+        return (sum(vals) / len(vals)) if vals else None
+
+    worst = lambda r: r.get("bound_worst_r")  # noqa: E731
+    best = lambda r: r.get("bound_best_r")  # noqa: E731
+    a_w, a_b = mean_with(appr_all, worst), mean_with(appr_all, best)
+    b_w, b_b = mean_with(exe_all, worst), mean_with(exe_all, best)
+    up_low = (a_w - b_b) if a_w is not None and b_b is not None else None
+    up_high = (a_b - b_w) if a_b is not None and b_w is not None else None
+    rate = (len(cens) / len(exe_all)) if exe_all else 0.0
+    sign_flip_appr = (a_w is not None and a_b is not None and (a_w > 0) != (a_b > 0))
+    sign_flip_up = (up_low is not None and up_high is not None and (up_low > 0) != (up_high > 0))
+    marked = [float(r["marked_r"]) for r in cens if r.get("marked_r") is not None]
+    return {
+        "censored_count": len(cens),
+        "censored_rate": rate,
+        "approved_censored_count": len(appr_cens),
+        "approved_censored_rate": (len(appr_cens) / len(appr_all)) if appr_all else 0.0,
+        "by_status": by("outcome_status", cens),
+        "by_symbol": by("symbol", cens),
+        "by_direction": by("direction", cens),
+        "by_production_regime": by("production_regime", cens),
+        "avg_marked_r_at_censoring": (sum(marked) / len(marked)) if marked else None,
+        "marked_r_role": "DIAGNOSTIC_ONLY",
+        "approved_expectancy_worst_bound_r": a_w,
+        "approved_expectancy_best_bound_r": a_b,
+        "uplift_worst_bound_r": up_low,
+        "uplift_best_bound_r": up_high,
+        "bounds_definition": "censored open remainder closed at the current native stop (worst) "
+                             "or native TP (best), with slippage and exit fee",
+        "materiality_rule": f"rate > {CENSORING_MAX_RATE:.0%} OR sign change of approved "
+                            "expectancy or uplift between worst and best bounds",
+        "censoring_material": bool(rate > CENSORING_MAX_RATE or sign_flip_appr or sign_flip_up),
+    }
+
+
+def research_status(infer: dict, approved_mean, *, censoring_material: bool = False,
+                    sample_adequate: bool = True) -> str:
+    appr = infer.get("approved_expectancy") or {}
+    up = infer.get("uplift_vs_baseline") or {}
+    lo, hi = appr.get("authority_ci_low"), appr.get("authority_ci_high")
+    if approved_mean is None or censoring_material or not sample_adequate:
+        return "INSUFFICIENT_EVIDENCE"
+    if appr.get("authority_status") not in (None, "VALID"):
+        return ("NEGATIVE_POINT_ESTIMATE_NO_VALID_AUTHORITY" if approved_mean <= 0
+                else "INSUFFICIENT_EVIDENCE")
+    if hi is not None and hi < 0:
+        return "NEGATIVE_EXPECTANCY_ESTABLISHED"
+    if approved_mean <= 0:
+        return "NEGATIVE_POINT_ESTIMATE"
+    if lo is not None and lo > 0 and (up.get("authority_ci_low") or -1) > 0:
+        return "EDGE_SUPPORTED_BY_BLOCK_CI"
+    return "EDGE_NOT_ESTABLISHED"
+
+
+def _research_sections(all_rich: list[dict], threshold: float) -> dict:
+    """CANDIDATE_RESEARCH on production-EXECUTABLE candidates with
+    production-parity outcomes. Baseline = every executable strategy candidate
+    (counterfactual execution); approved = final production approval."""
+    from bot import nexus_oos_research as res
+    from bot import nexus_oos_inference as inf
+    from bot.nexus_probability import heuristic_win_probability
+
+    exe_all = [r for r in all_rich if r.get("executable") and r.get("outcome_status")]
+    # Completed trades only: RIGHT-CENSORED outcomes are never realized trades.
+    exe = [r for r in exe_all if r.get("outcome_status") == "RESOLVED" and r.get("r") is not None]
+    approved = [r for r in exe if r["approved"]]
+    is_approved = lambda r: bool(r.get("approved"))  # noqa: E731
+    req_ms = inf.required_block_ms(exe)
+    out: dict = {"layer": "CANDIDATE_RESEARCH", "outcome_model": "PRODUCTION_PARITY_V1",
+                 "population": "EXECUTABLE_CANDIDATES_RESOLVED_OUTCOMES"}
+    out["censoring"] = censoring_report(exe_all)
+    geometry = defaultdict(int)
+    funnel_fail = defaultdict(int)
+    for r in all_rich:
+        geometry[str(r.get("geometry_status"))] += 1
+        if not r.get("regime_allows_direction", True):
+            funnel_fail["regime_disallows_direction"] += 1
+        if not r.get("expected_pnl_positive", True):
+            funnel_fail["expected_pnl_not_positive"] += 1
+        if r.get("drift_blocked"):
+            funnel_fail["pre_dispatch_drift"] += 1
+        if (r.get("score_adjusted") is not None
+                and r.get("score_adjusted") < (r.get("strategy_score") or 0)
+                and not r.get("executable")):
+            funnel_fail["session_penalty_involved"] += 1
+    out["population_counts"] = {
+        "strategy_candidates": len(all_rich),
+        "executable_candidates": len(exe),
+        "approved_production": len(approved),
+        "approved_legacy_definition": sum(1 for r in all_rich if r.get("approved_legacy")),
+        "geometry_status": dict(sorted(geometry.items())),
+        "funnel_failures": dict(sorted(funnel_fail.items())),
+        "resolved_executable_outcomes": len(exe),
+        "censored_executable_outcomes": sum(1 for r in exe_all if r.get("outcome_status") != "RESOLVED"),
+        "approved_production_including_censored": sum(1 for r in exe_all if r.get("approved")),
+        # AI_RUNTIME_HOOK_POPULATION_V1 funnel (LIVE pilot profile; stateless).
+        "ai_hook_population": {
+            "definition": "AI_RUNTIME_HOOK_POPULATION_V1",
+            "profile": "LIVE_PILOT_POST_CROSS_GEOMETRY",
+            "strategy_candidates": len(all_rich),
+            "executable_candidates": sum(1 for r in all_rich if r.get("executable")),
+            "initial_nexus_approved": sum(1 for r in all_rich if r.get("approved_legacy")),
+            "ai_hook_eligible": sum(1 for r in all_rich if r.get("ai_hook_eligible")),
+            "ai_hook_eligible_resolved": sum(1 for r in all_rich if r.get("ai_hook_eligible")
+                                             and r.get("outcome_status") == "RESOLVED"),
+            "ai_hook_eligible_pre_geometry_profile": sum(
+                1 for r in all_rich if r.get("ai_hook_eligible_pre_geometry")),
+            "post_ai_downstream_eligible": sum(1 for r in all_rich if r.get("ai_hook_eligible")
+                                               and r.get("executable")),
+            "production_approved": sum(1 for r in all_rich if r.get("approved")),
+            "hook_stage_counts": dict(sorted(
+                Counter(str(r.get("ai_hook_stage")) for r in all_rich).items())),
+            "semantics": {
+                "executable": "geometry SAFE/ADJUSTED and scan funnel and not pre-dispatch drift "
+                              "(does NOT require NEXUS)",
+                "approved": "executable and final NEXUS approval (production approval, no AI)",
+                "approved_legacy": "initial NEXUS approval on the original signal geometry",
+                "ai_hook_eligible": "reaches TradingEngine._ai_gate: scan funnel, initial NEXUS, "
+                                    "CROSS geometry not BLOCK, NEXUS recheck when ADJUSTED",
+            },
+        },
+    }
+    out["performance"] = {
+        "baseline": res.performance(exe),
+        "approved": res.performance(approved),
+        "rejected": res.performance([r for r in exe if not r["approved"]]),
+        "approval_rate": (len(approved) / len(exe)) if exe else None,
+        "rejection_rate": (1 - len(approved) / len(exe)) if exe else None,
+    }
+    out["inference"] = {
+        "approved_expectancy": inf.dependence_aware_mean(exe, is_approved, required_ms=req_ms),
+        "baseline_expectancy": inf.dependence_aware_mean(exe, required_ms=req_ms),
+        "uplift_vs_baseline": inf.dependence_aware_diff(exe, is_approved, lambda r: True,
+                                                        required_ms=req_ms),
+        "block_autocorrelation_24h": inf.lag1_block_autocorrelation(approved, inf.DEFAULT_BLOCK_MS),
+        "dependence_diagnostics": inf.dependence_diagnostics(approved),
+        "outcome_horizon_resolved_executable": inf.outcome_horizon_stats(exe),
+        "outcome_horizon_resolved_approved": inf.outcome_horizon_stats(approved),
+        "required_block_ms": req_ms,
+        "required_block_days": req_ms / inf.DAY_MS,
+        "predeclared_block_days": list(inf.PREDECLARED_BLOCK_DAYS),
+        "min_resampling_blocks": inf.MIN_RESAMPLING_BLOCKS,
+        "authority_model": inf.AUTHORITY_MODEL,
+        "iid_role": inf.IID_ROLE,
+    }
+    out["effective_sample"] = {
+        "raw_candidates": len(exe),
+        "raw_approved": len(approved),
+        "block_ms": req_ms,
+        "baseline": inf.effective_sample(exe, block_ms=req_ms),
+        "approved": inf.effective_sample(exe, is_approved, block_ms=req_ms),
+    }
+    days = sorted({r["ts"] // inf.DAY_MS for r in exe_all})
+    history_days = ((days[-1] - days[0] + 1) if days else 0)
+    n_blk = out["effective_sample"]["approved"].get("unique_blocks") or 0
+    out["sample_adequacy"] = {
+        "decision_history_days": history_days,
+        "authority_block_days": req_ms / inf.DAY_MS,
+        "resampling_blocks_approved": n_blk,
+        "resampling_blocks_possible": (history_days * inf.DAY_MS) // req_ms if req_ms else 0,
+        "effective_sample_approved": out["effective_sample"]["approved"].get("effective_n"),
+        "min_resampling_blocks": inf.MIN_RESAMPLING_BLOCKS,
+        "adequate": n_blk >= inf.MIN_RESAMPLING_BLOCKS,
+        "result_if_inadequate": "INSUFFICIENT_EVIDENCE",
+    }
+    out["segments_approved"] = res.segments(approved)
+    out["segments_baseline"] = res.segments(exe)
+    out["concentration"] = {
+        "approved_by_symbol": res.concentration(approved, "symbol"),
+        "approved_by_month": res.concentration(approved, "month"),
+        "approved_by_production_regime": res.concentration(approved, "production_regime"),
+    }
+    out["cost_stress_approved"] = res.cost_stress(approved)
+    out["cost_stress_baseline"] = res.cost_stress(exe)
+    out["break_even_cost_multiplier"] = {
+        "approved": _grid_break_even(approved) if approved else None,
+        "baseline": _grid_break_even(exe) if exe else None,
+        "definition": "fees and slippage scaled together; 1.0 = current model; grid "
+                      + ",".join(f"{m:g}" for m in COST_GRID),
+    }
+    out["exit_variants_approved"] = {
+        name: res.compact([{"ts": r["ts"], "r": r["exit_r"][name]} for r in approved
+                           if (r.get("exit_r") or {}).get(name) is not None])
+        for name in PARITY_EXIT_VARIANTS
+    }
+    out["exit_reason_mix_approved"] = dict(sorted(
+        __import__("collections").Counter(str(r.get("exit_reason")) for r in approved).items()))
+    out["ablation"] = {name: res.paired_ablation(exe, name, required_ms=req_ms) for name in NEXUS_VARIANTS}
+    out["context_ablation"] = {name: res.paired_ablation(exe, name, required_ms=req_ms)
+                               for name in CONTEXT_VARIANTS}
+    out["ablation_notes"] = (
+        "NEXUS variants are evaluated on the ORIGINAL signal geometry; the post-compression "
+        "NEXUS re-run applies only to the production approval (approximation for ablations).")
+    out["context_ablation_notes"] = {
+        "C_candle_plus_available_derivatives": "identical to B: funding is the only derivatives input with public history",
+        "OI": "no public historical OI in replay; never fabricated",
+        "orderbook": "no historical order book; microstructure component always excluded",
+        "news_and_market_risk": "live-only feeds; absent from replay",
+    }
+    out["strategy_gate_ablation"] = {"status": "NOT_ABLATED", **STRATEGY_GATES_NOT_ABLATED}
+    # Censored rows are passed so the purged split treats them as open-ended
+    # (purged from TRAIN/VALIDATION); statistics use resolved rows only.
+    out["threshold_research"] = res.threshold_research(
+        exe_all, (55, 60, 65, 70, 75, 80, 85, 90), threshold, required_ms=req_ms)
+    out["probability_calibration"] = res.calibration_report(exe, heuristic_win_probability)
+    out["regime_parity"] = {
+        "production_regime": "nexus_ai decision market_regime at each decision (primary)",
+        "research_regime": "nexus_oos_research.classify_regime on closed 1h candles (diagnostic only)",
+    }
+    out["temporal_folds"] = temporal_folds(exe_all, required_horizon_ms=req_ms)
+    # Phase 7 research sections (no gate authority): loss root-cause and the
+    # purged walk-forward AI meta-model on previously inspected history.
+    from bot.ai import diagnostics as ai_diag
+    from bot.ai import training as ai_train
+    out["loss_decomposition"] = ai_diag.decomposition(exe_all)
+    try:
+        out["ai_meta_model"] = ai_train.walk_forward(all_rich, required_ms=req_ms)
+        from bot.ai import hook as ai_hook
+        out["ai_effective_execution_parity"] = {
+            "status": ai_hook.EFFECTIVE_EXECUTION_PARITY,
+            "missing": list(ai_hook.EFFECTIVE_EXECUTION_PARITY_MISSING),
+            "meaning": "AI results are AI_HOOK_EDGE (selection among candidates reaching the runtime "
+                       "hook); they are not proof of AI_EFFECTIVE_EXECUTION_EDGE on final real orders"}
+        # dataset_manifest is computed inside walk_forward from EXACTLY the rows
+        # passed to training.dataset() (the hook population), never exe_all.
+        out["ai_meta_model"].setdefault("dataset_manifest", ai_train.dataset_manifest(all_rich))
+    except Exception as exc:          # reported, never silently dropped
+        out["ai_meta_model"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:300]}
+    out["research_status"] = research_status(
+        out["inference"], out["performance"]["approved"].get("net_expectancy_r"),
+        censoring_material=out["censoring"]["censoring_material"],
+        sample_adequate=out["sample_adequacy"]["adequate"])
+    return out
+
+
+def _mean_n(vals) -> dict:
+    vals = [float(v) for v in vals if v is not None]
+    return {"n": len(vals), "mean_r": (sum(vals) / len(vals)) if vals else None}
+
+
+def _parity_attribution(all_rich: list[dict]) -> dict:
+    """Step-wise attribution of candidate-level expectancy on identical data.
+
+    Each step adds exactly one parity correction to the previous one.
+    """
+    legacy_appr = [r for r in all_rich if r.get("legacy_candidate") and r.get("approved_legacy")]
+    steps = [
+        ("A0_legacy_model", "old exit model (shifted native stops, TP1==TP2 partial never, 40-bar exit)",
+         _mean_n(r["r_legacy"] for r in legacy_appr)),
+        ("A1_unshifted_native_stops", "A0 + exchange SL/TP at the unshifted signal levels",
+         _mean_n((r.get("legacy") or {}).get("unshifted_native_r") for r in legacy_appr)),
+        ("A2_production_exit_engine", "production exits (1R partial + break-even, trailing, 2R, "
+         "native TP/SL, no time exit) on the original geometry",
+         _mean_n(r.get("r_prod_original_geometry") for r in legacy_appr)),
+        ("A3_cross_geometry", "A2 + post-NEXUS liquidation-safe geometry (BLOCK removed, "
+         "ADJUSTED compressed and re-approved by NEXUS)",
+         _mean_n(r.get("r") for r in legacy_appr
+                 if r.get("geometry_status") in ("SAFE", "ADJUSTED") and r.get("approved_final_nexus"))),
+        ("A4_production_funnel", "A3 + session score adjustment, regime direction, expected PnL "
+         "and pre-dispatch drift gates (= production approval)",
+         _mean_n(r.get("r") for r in all_rich if r.get("approved"))),
+    ]
+    out, prev = {}, None
+    for key, what, m in steps:
+        m = dict(m)
+        m["change"] = what
+        m["delta_vs_previous"] = (m["mean_r"] - prev) if (m["mean_r"] is not None and prev is not None) else None
+        prev = m["mean_r"] if m["mean_r"] is not None else prev
+        out[key] = m
+    out["baseline_legacy"] = _mean_n(r["r_legacy"] for r in all_rich if r.get("legacy_candidate"))
+    out["baseline_parity"] = _mean_n(r.get("r") for r in all_rich
+                                     if r.get("executable") and r.get("r") is not None)
+    return out
+
+
+def _legacy_portfolio_rows(all_rich: list[dict]) -> list[dict]:
+    rows = []
+    for r in all_rich:
+        lg = r.get("legacy") or {}
+        if not (r.get("legacy_candidate") and r.get("approved_legacy") and lg.get("_path") is not None):
+            continue
+        rows.append({
+            "ts": r["ts"], "symbol": r["symbol"], "direction": r["direction"], "approved": True,
+            "r": lg["r"], "fees_r": lg.get("fees_r"), "slippage_r": lg.get("slippage_r"),
+            "funding_r": lg.get("funding_r"), "entry_fill": lg["entry_fill"], "stop": lg["stop"],
+            "risk_fraction": lg["risk_fraction"], "outcome_end_ts": lg["outcome_end_ts"],
+            "_path": lg["_path"], "month": r.get("month"),
+            "production_regime": r.get("production_regime"),
+            "research_regime": r.get("research_regime"),
+        })
+    return rows
+
+
+def _engine_rows(all_rich: list[dict]) -> list[dict]:
+    out = []
+    for r in all_rich:
+        # Censored approved rows are included: they occupy capital and stay open.
+        if not (r.get("approved") and r.get("executable") and r.get("outcome_status")):
+            continue
+        row = dict(r)
+        row["marks"] = r.get("_marks") or []
+        row["funding"] = r.get("_funding") or []
+        out.append(row)
+    return out
+
+
+def portfolio_policy():
+    """LEGACY portfolio policy (pre-manifest), used only to re-run the legacy
+    engine for old-vs-new attribution. The authoritative replay uses the
+    pinned manifest (bot.nexus_oos_replay_manifest)."""
+    import os as _os
+    from bot import risk_policy as rp
+    base = rp.load_policy(cfg)
+    lev = float(_os.environ.get("OOS_PORTFOLIO_LEVERAGE", "50"))
+    mdd = float(_os.environ.get("OOS_PORTFOLIO_MAX_DRAWDOWN", "0.50"))
+    return rp.RiskPolicy(**{**base.__dict__, "leverage": lev, "max_drawdown": mdd,
+                            "ignored_overrides": ()})
+
+
+def _summ(rep: dict) -> dict:
+    keys = ("ending_equity", "net_return", "realized_return", "total_trades", "portfolio_max_drawdown",
+            "net_expectancy_r", "profit_factor", "win_rate", "blocked_daily_stop",
+            "blocked_drawdown", "daily_stop_days")
+    return {k: rep.get(k) for k in keys}
+
+
+def closed_candle_sentinel_installed() -> bool:
+    from bot.strategy import Analyzer
+    return bool(getattr(Analyzer, "_timestamp_closed_candle_integrity_installed", False))
+
+
+CANONICAL_BLOCKER_KEYS = (
+    "HISTORICAL_CONTEXT_PARITY_INCOMPLETE", "APPROVED_EXPECTANCY_NOT_POSITIVE",
+    "APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", "UPLIFT_BLOCK_CI_NOT_POSITIVE",
+    "SYMBOLS_UNAVAILABLE", "PORTFOLIO_PARITY_INCOMPLETE", "PRETRADE_CONTEXT_PARITY_INCOMPLETE",
+    "NO_CANDIDATES", "CONTRACT_METADATA_UNAVAILABLE",
+)
+
+
+async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
+                          research: bool = True, manifest_path: str | None = None,
+                          policy_observation_fixture: str | None = None,
+                          candidate_sha: str | None = None) -> dict:
     # Install the production wrapper stack in a PAPER-safe process. No exchange
     # mutation methods are called by this replay.
     from bot.runtime_bootstrap import install as install_runtime
+    from bot import nexus_ai
+    from bot import nexus_oos_inference as inf
+    from bot import nexus_oos_execution_parity as xp
+    from bot import nexus_oos_replay_manifest as rm
+    from bot.nexus_oos_robustness import analyze_robustness
+
+    symbols = list(symbols)
+    manifest = None
+    if research:
+        # Fail closed BEFORE touching the runtime or the network.
+        manifest = rm.load(manifest_path)
     install_runtime()
+    if manifest is not None:
+        manifest.verify_runtime()   # values production reads in THIS process
 
     symbol_reports = []
     all_rows: list[CandidateOutcome] = []
+    all_rich: list[dict] = []
+    contracts = None
+    instruments: dict = {}
+    mmr_proxy: dict = {}
     async with PublicKuCoinFuturesClient() as client:
+        if research:
+            try:
+                contracts = await client._get("/api/v1/contracts/active")
+            except Exception:  # reported via CONTRACT_METADATA_UNAVAILABLE
+                contracts = None
+            alias = {"XBT": "BTC"}
+            for c in contracts or []:
+                if not isinstance(c, dict) or not str(c.get("symbol", "")).endswith("USDTM"):
+                    continue
+                base = alias.get(str(c.get("baseCurrency", "")), str(c.get("baseCurrency", "")))
+                std = f"{base}USDT"
+                if std in symbols and std not in instruments:
+                    info = xp.instrument_from_public_contract(c)
+                    instruments[std] = info
+                    if "contractMaintainMarginReference" in info:
+                        mmr_proxy[std] = info["contractMaintainMarginReference"]
+        ctx = {"manifest": manifest, "mmr_proxy": mmr_proxy}
         for symbol in symbols:
-            rep = await replay_symbol(client, symbol, limit_15m=limit_15m)
+            rep = await replay_symbol(client, symbol, limit_15m=limit_15m, research=research,
+                                      ctx=ctx)
             symbol_reports.append(rep)
             all_rows.extend(rep.get("candidates", []))
+            all_rich.extend(rep.get("rows", []))
 
+    # ── LEGACY_DIAGNOSTIC: the pre-parity IID edge report. No authority. ──
     edge = build_edge_report(all_rows)
-    statistically_ok, blockers = edge_promotion_decision(edge)
+    legacy_ok, legacy_blockers = edge_promotion_decision(edge)
     context_parity_complete = all(
         bool(rep.get("historical_context", {}).get("parity_complete"))
         for rep in symbol_reports if "error" not in rep
     ) and bool(symbol_reports)
-    final_blockers = list(blockers)
-    if not context_parity_complete:
-        final_blockers.append("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
-    status = "AI_EDGE_PROVEN" if statistically_ok and context_parity_complete else "AI_EDGE_NOT_PROVEN"
 
     compact_symbols = []
     for rep in symbol_reports:
-        compact = {k: v for k, v in rep.items() if k != "candidates"}
+        compact = {k: v for k, v in rep.items() if k not in ("candidates", "rows")}
         compact["candidate_count"] = len(rep.get("candidates", []))
         compact_symbols.append(compact)
 
-    return {
-        "status": status,
-        "blockers": sorted(set(final_blockers)),
-        "report": asdict(edge),
+    blockers: list[str] = []
+    if not context_parity_complete:
+        blockers.append("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
+    if any(rep.get("error") for rep in symbol_reports):
+        blockers.append("SYMBOLS_UNAVAILABLE")
+
+    report = asdict(edge)
+    report["authority"] = "LEGACY_DIAGNOSTIC_ONLY"
+    artifact = {
+        "result_kind": "RESEARCH_RESULT",
+        "authority_model": inf.AUTHORITY_MODEL,
+        "promotion_gate": "python -m bot.nexus_oos_promotion_gate <artifact>",
+        "report": report,
+        "legacy_diagnostic": {
+            "authority": "NONE",
+            "note": ("Pre-parity IID edge report on the legacy exit model and legacy approval "
+                     "definition. Kept for comparison; never read by the promotion gate."),
+            "status": "AI_EDGE_PROVEN" if legacy_ok else "AI_EDGE_NOT_PROVEN",
+            "blockers": list(legacy_blockers),
+            "report": asdict(edge),
+            "robustness": analyze_robustness(
+                [rep for rep in symbol_reports if not rep.get("error")], temporal_folds=4),
+        },
         "symbols": compact_symbols,
+        "requested_symbols": symbols,
+        "unavailable_symbols": {rep["symbol"]: rep["error"] for rep in symbol_reports if rep.get("error")},
+        "nexus_threshold_used": runtime_nexus_threshold(nexus_ai),
+        "historical_context_parity_complete": context_parity_complete,
         "methodology": {
             "closed_candles_only": True,
+            "closed_candle_sentinel_verified": closed_candle_sentinel_installed(),
             "historical_clock_frozen": True,
             "same_bar_ambiguity": "STOP_FIRST",
             "fees_included": True,
@@ -347,33 +1366,282 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000) -> d
             "funding_included_when_public_history_available": True,
             "exchange_mutations": False,
             "runtime_policy_mutations": False,
+            "exit_model": "PRODUCTION_PARITY_V1 (see replay_parity.exit_parity_matrix)",
+            "legacy_exit_model": "SL, TP1 50% + break-even, TP2, 40-bar time exit (legacy_diagnostic only)",
         },
     }
+    artifact["candidate_sha"] = candidate_sha
+    if research and manifest is not None:
+        ex, pre = xp.exit_parity_status(), xp.pretrade_parity_status()
+        from bot import policy_attestation as pa
+        artifact["replay_policy_manifest"] = manifest.report()
+        # A supplied observation is a RESEARCH FIXTURE: content comparison only,
+        # provenance UNAUTHENTICATED. Stage C re-reads it from the deployment.
+        att = pa.compare(manifest, policy_observation_fixture)
+        artifact["live_policy_observation"] = att
+        artifact["policy_parity"] = att["status"]
+        artifact["policy_provenance"] = att["provenance"]
+        # A pending observation is not a research blocker (stage A); only the
+        # LIVE_RELEASE_GATE requires ATTESTED_MATCH. Mismatch/invalid block always.
+        if att["status"] not in (pa.STATUS_MATCH, pa.STATUS_PENDING):
+            blockers.append(att["status"])
+        artifact["replay_parity"] = {
+            "exit_parity_matrix": list(xp.EXIT_PARITY_MATRIX),
+            "pretrade_gate_matrix": list(xp.PRETRADE_GATE_MATRIX),
+            "exit_parity_complete": ex["complete"],
+            "exit_parity_blocking_rules": ex["blocking_rules"],
+            "pretrade_parity_complete": pre["complete"],
+            "pretrade_parity_blocking_gates": pre["blocking_rules"],
+            "portfolio_parity_complete": bool(ex["complete"] and pre["complete"]),
+            "tp1_equals_tp2_root_cause": (
+                "strategy.calc_sl_tp (distinct TP1/TP2) has no caller; analyze_mtf and the "
+                "adaptive-MTF wrapper build Signal without tp1/tp2 and Signal.__post_init__ sets "
+                "tp1 = tp2 = tp. Production reality, not a replay artefact. Production partial TP "
+                "uses 1R (+0.03% funding buffer), not sig.tp1."),
+        }
+        if not ex["complete"] or not pre["complete"]:
+            blockers.append("PORTFOLIO_PARITY_INCOMPLETE")
+        if not pre["complete"]:
+            blockers.append("PRETRADE_CONTEXT_PARITY_INCOMPLETE")
+    if research and all_rich and manifest is not None:
+        from bot import nexus_oos_portfolio_engine as pe
+        from bot import nexus_oos_portfolio_replay as legacy_pr
+        cand = _research_sections(all_rich, runtime_nexus_threshold(nexus_ai))
+        artifact["candidate_research"] = cand
+        artifact["research_status"] = cand["research_status"]
+        artifact["parity_attribution"] = _parity_attribution(all_rich)
+        if not instruments:
+            blockers.append("CONTRACT_METADATA_UNAVAILABLE")
+        rows = _engine_rows(all_rich)
+        port = pe.run_portfolio(rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy)
+        # Path bootstrap: APPROXIMATE_NON_AUTHORITATIVE (incoherent spliced
+        # market timeline). Portfolio robustness authority: walk-forward folds.
+        port["path_bootstrap"] = pe.path_bootstrap_diagnostic(
+            rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy, replicates=100)
+        port["walk_forward"] = pe.walk_forward_folds(
+            rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+            required_horizon_ms=cand["inference"]["required_block_ms"])
+        port["robustness"] = {
+            "method": "PURGED_EMBARGOED_CALENDAR_FOLDS",
+            "status": port["walk_forward"]["status"],
+            "folds_overlap_free": port["walk_forward"]["folds_overlap_free"],
+            "folds_positive": port["walk_forward"]["folds_positive"],
+            "folds_total": port["walk_forward"]["folds_total"],
+            "path_bootstrap_authority": "NONE",
+        }
+        port["daily_pnl_semantics_sensitivity"] = {
+            sem: _summ(pe.run_portfolio(rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+                                        daily_pnl_semantics=sem))
+            for sem in ("PRODUCTION_REALIZED_TODAY_PLUS_OPEN_UNREALIZED",
+                        "EQUITY_ANCHORED_AT_UTC_MIDNIGHT")}
+        port["gate_attribution"] = {
+            name: _summ(pe.run_portfolio(rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+                                         toggles=replace(pe.Toggles(), **{name: False})))
+            for name in pe.Toggles.__dataclass_fields__}
+        port["contract_spec_sensitivity"] = pe.contract_spec_sensitivity(
+            rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy)
+        artifact["portfolio_replay"] = port
+        _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy)
+        lrules, lmmr = legacy_pr.contract_rules_from_public(contracts or [], symbols)
+        legacy_port = legacy_pr.run_portfolio_legacy(
+            _legacy_portfolio_rows(all_rich), portfolio_policy(), contract_rules=lrules or None,
+            mmr=lmmr or None)
+        artifact["portfolio_replay_legacy"] = {
+            **_summ(legacy_port), "authority": "NONE",
+            "note": "legacy engine + legacy rows on the same data; for attribution only"}
+        infer = cand["inference"]
+        appr_mean = cand["performance"]["approved"].get("net_expectancy_r")
+        if appr_mean is None or appr_mean <= 0:
+            blockers.append("APPROVED_EXPECTANCY_NOT_POSITIVE")
+        lo = infer["approved_expectancy"].get("authority_ci_low")
+        if lo is None or lo <= 0:
+            blockers.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
+        ulo = infer["uplift_vs_baseline"].get("authority_ci_low")
+        if ulo is None or ulo <= 0:
+            blockers.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
+        for key in ("approved_expectancy", "uplift_vs_baseline"):
+            st = infer[key].get("authority_status")
+            if st and st != "VALID":
+                blockers.append(st)
+        if cand["censoring"]["censoring_material"]:
+            blockers.append("CENSORING_MATERIAL")
+        if not cand["sample_adequacy"]["adequate"]:
+            blockers.append("INSUFFICIENT_RESAMPLING_BLOCKS")
+        if port["end_state"]["portfolio_censoring_material"]:
+            blockers.append("PORTFOLIO_CENSORING_MATERIAL")
+        tf = cand["temporal_folds"]
+        if tf["status"] != "OK":
+            blockers.append("INSUFFICIENT_INDEPENDENT_TEMPORAL_FOLDS")
+        elif not tf["folds_overlap_free"]:
+            blockers.append("TEMPORAL_FOLDS_NOT_INDEPENDENT")
+        wf = port["walk_forward"]
+        if wf["status"] != "OK":
+            blockers.append("INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS")
+        elif not wf["folds_overlap_free"]:
+            blockers.append("PORTFOLIO_FOLDS_NOT_INDEPENDENT")
+    elif research:
+        blockers.append("NO_CANDIDATES")
+    artifact["blockers"] = sorted(set(blockers))
+    artifact["status"] = "AI_EDGE_PROVEN" if not artifact["blockers"] else "AI_EDGE_NOT_PROVEN"
+    return artifact
 
 
-def main() -> int:
+def _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy):
+    """AI walk-forward TEST folds -> production-parity portfolio (each fold from
+    the same starting equity; never TRAIN/VALIDATION), then the independent
+    AI_RESEARCH_PROMOTION_GATE, then a SHADOW_CHALLENGER only on PASS + stable."""
+    from bot import nexus_oos_portfolio_engine as pe
+    from bot.ai import ai_gate
+    from bot.ai import training as ai_train
+    import os as _os
+    from datetime import datetime, timezone
+    ai = (artifact.get("candidate_research") or {}).get("ai_meta_model") or {}
+    if ai.get("status") != "OK":
+        return
+    by_key = {(int(r["ts"]), str(r.get("symbol")), str(r.get("direction"))): r for r in all_rich
+              if r.get("outcome_status") and r.get("legs") is not None}
+
+    def rows_for(keys, kind):
+        """AI_HOOK_POLICY_PORTFOLIO: every AI-approved hook candidate whose
+        hypothetical production-parity path exists (downstream gates NOT applied;
+        final-order eligibility is not implied). KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO:
+        additionally the historically reproducible downstream gates (executable)."""
+        out, missing = [], 0
+        for k in keys:
+            r = by_key.get((int(k[0]), k[1], k[2]))
+            if r is None or (kind == "KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO" and not r.get("executable")):
+                missing += r is None
+                continue
+            row = dict(r, approved=True, executable=True,
+                       downstream_executable=bool(r.get("executable")))
+            row["marks"] = r.get("_marks") or []
+            row["funding"] = r.get("_funding") or []
+            out.append(row)
+        return out, missing
+    for kind, prefix in (("AI_HOOK_POLICY_PORTFOLIO", ""), ("KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO",
+                                                             "downstream_filtered_")):
+        folds, pooled_keys, missing = [], [], 0
+        for s_ in ai.get("steps") or []:
+            keys = s_.get("_approved_keys") or []
+            pooled_keys += keys
+            rows, miss = rows_for(keys, kind)
+            missing += miss
+            rep = pe.run_portfolio(rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy)
+            folds.append({"test_fold": s_["test_fold"], "approved_keys": len(keys), "rows_in_portfolio": len(rows),
+                          **_ai_port_summary(rep)})
+        ai[prefix + "portfolio_by_test_fold"] = folds
+        ai[prefix + "portfolio_pooled_test"] = {
+            "portfolio_kind": kind, "approved_hook_rows_without_path": missing,
+            **_ai_port_summary(pe.run_portfolio(rows_for(pooled_keys, kind)[0], manifest,
+                                                instruments=instruments, mmr_proxy=mmr_proxy))}
+    ai["portfolio_kind"] = "AI_HOOK_POLICY_PORTFOLIO"
+    ai["downstream_filtered_portfolio_kind"] = "KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO"
+    code_sha = artifact.get("candidate_sha") or _os.environ.get("GITHUB_SHA")
+    gate = ai_gate.evaluate(artifact)
+    ai["research_promotion_gate"] = gate
+    stable = (ai.get("selection_stability") or {}).get("status") == "MODEL_SELECTION_STABLE"
+    if gate["verdict"] == "PASS" and stable:
+        ai["shadow_challenger"] = ai_train.build_shadow_challenger(
+            all_rich, ai, training_code_sha=code_sha,
+            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    else:
+        ai["shadow_challenger"] = {"created": False,
+                                   "reason": ("AI_RESEARCH_GATE_BLOCK" if gate["verdict"] != "PASS"
+                                              else "MODEL_SELECTION_UNSTABLE")}
+        # Zero-order observation bundle: NO EDGE CLAIM, NO ORDER AUTHORITY,
+        # NO LIVE AUTHORITY. Only for collecting fresh forward SHADOW data.
+        from bot.ai import lifecycle as ai_lc
+        try:
+            obs_b = ai_train.build_shadow_challenger(
+                all_rich, ai, training_code_sha=code_sha,
+                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                lifecycle_state="SHADOW_OBSERVER")
+            ai["shadow_observer"] = {**obs_b, "claims": dict(ai_lc.OBSERVER_CLAIMS)}
+        except Exception as exc:
+            ai["shadow_observer"] = {"created": False, "reason": type(exc).__name__}
+
+
+def _ai_port_summary(rep: dict) -> dict:
+    keys = ("starting_equity", "ending_equity", "realized_return", "net_return", "portfolio_max_drawdown",
+            "research_max_drawdown_limit", "total_trades", "net_expectancy_r", "profit_factor",
+            "win_rate", "contributing_symbols", "skipped", "end_state")
+    return {k: rep.get(k) for k in keys}
+
+
+def _strip_private(obj):
+    if isinstance(obj, dict):
+        return {k: _strip_private(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [_strip_private(v) for v in obj]
+    return obj
+
+
+def main(argv=None) -> int:
+    """RESEARCH command: exits 0 whenever the replay ran, even on negative
+    evidence. Promotion is decided separately by bot.nexus_oos_promotion_gate.
+    A missing / malformed / mismatched replay policy manifest exits 2 (fail
+    closed) before any market data is read."""
+    from bot.nexus_oos_replay_manifest import ManifestError
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"])
     parser.add_argument("--limit-15m", type=int, default=3000)
     parser.add_argument("--output", default="artifacts/nexus_oos_real_replay.json")
-    args = parser.parse_args()
-    report = asyncio.run(run_real_replay(args.symbols, limit_15m=args.limit_15m))
+    parser.add_argument("--policy-manifest", default=None,
+                        help="Pinned replay policy (default research/replay_policy_manifest.json).")
+    parser.add_argument("--policy-observation-fixture", default=None,
+                        help="RESEARCH/TEST FIXTURE only: a [LIVE_POLICY_OBSERVATION_V2] line. "
+                             "Content comparison only; never LIVE provenance.")
+    parser.add_argument("--candidate-sha", default=None,
+                        help="Exact commit SHA the replay ran on (recorded for the live gate).")
+    parser.add_argument("--no-research", action="store_true",
+                        help="Skip research sections (faster; no promotion evidence).")
+    args = parser.parse_args(argv)
+    fixture = None
+    if args.policy_observation_fixture:
+        try:
+            fixture = Path(args.policy_observation_fixture).read_text(encoding="utf-8")
+        except OSError:
+            fixture = "UNREADABLE"
+    try:
+        report = asyncio.run(run_real_replay(args.symbols, limit_15m=args.limit_15m,
+                                             research=not args.no_research,
+                                             manifest_path=args.policy_manifest,
+                                             policy_observation_fixture=fixture,
+                                             candidate_sha=args.candidate_sha))
+    except ManifestError as exc:
+        print(json.dumps({"status": "REPLAY_POLICY_MANIFEST_INVALID", "error": str(exc)}))
+        return 2
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    out.write_text(json.dumps(_strip_private(report), indent=2, sort_keys=True, default=str),
+                   encoding="utf-8")
+    cand = report.get("candidate_research") or {}
+    perf = cand.get("performance") or {}
+    infer = cand.get("inference") or {}
+    port = report.get("portfolio_replay") or {}
     print(json.dumps({
         "status": report["status"],
+        "research_status": report.get("research_status"),
+        "authority_model": report.get("authority_model"),
         "blockers": report["blockers"],
-        "baseline_candidates": report["report"]["baseline_candidates"],
-        "approved_candidates": report["report"]["approved_candidates"],
-        "rejected_candidates": report["report"]["rejected_candidates"],
-        "baseline_expectancy_r": report["report"]["baseline_expectancy_r"],
-        "nexus_expectancy_r": report["report"]["nexus_expectancy_r"],
-        "expectancy_uplift_r": report["report"]["expectancy_uplift_r"],
-        "bootstrap_ci_low_r": report["report"]["bootstrap_ci_low_r"],
-        "bootstrap_ci_high_r": report["report"]["bootstrap_ci_high_r"],
+        "unavailable_symbols": report["unavailable_symbols"],
+        "nexus_threshold_used": report["nexus_threshold_used"],
+        "policy_sha256": (report.get("replay_policy_manifest") or {}).get("policy_sha256"),
+        "executable_candidates": (perf.get("baseline") or {}).get("trades"),
+        "approved_candidates": (perf.get("approved") or {}).get("trades"),
+        "approved_expectancy_r": (perf.get("approved") or {}).get("net_expectancy_r"),
+        "approved_block_authority_ci": [
+            (infer.get("approved_expectancy") or {}).get("authority_ci_low"),
+            (infer.get("approved_expectancy") or {}).get("authority_ci_high")],
+        "uplift_block_authority_ci": [
+            (infer.get("uplift_vs_baseline") or {}).get("authority_ci_low"),
+            (infer.get("uplift_vs_baseline") or {}).get("authority_ci_high")],
+        "portfolio_ending_equity": port.get("ending_equity"),
+        "portfolio_realized_return": port.get("realized_return"),
+        "censoring": {k: (cand.get("censoring") or {}).get(k) for k in ("censored_count", "censored_rate", "censoring_material")},
+        "policy_parity": report.get("policy_parity"),
         "output": str(out),
-    }, sort_keys=True))
+    }, sort_keys=True, default=str))
     return 0
 
 

@@ -32,7 +32,7 @@ class DailyStopOperatorOverrideTests(unittest.IsolatedAsyncioTestCase):
             positions={},
         )
 
-    async def test_valid_stored_stop_is_bypassed_only_on_exact_utc_day(self):
+    async def test_valid_stored_stop_is_not_bypassed_by_exact_utc_day_override(self):
         day = '2026-09-14'
         state = json.dumps({
             'version': 3,
@@ -51,9 +51,9 @@ class DailyStopOperatorOverrideTests(unittest.IsolatedAsyncioTestCase):
             blocked = await gate.entries_blocked(
                 engine, datetime(2026, 9, 14, 14, 30, tzinfo=timezone.utc)
             )
-            self.assertFalse(blocked)
-            self.assertFalse(engine.daily_stopped)
-            self.assertFalse(engine.daily_tracker.daily_stopped)
+            self.assertTrue(blocked)
+            self.assertTrue(engine.daily_stopped)
+            self.assertTrue(engine.daily_tracker.daily_stopped)
             write.assert_not_awaited()
 
     async def test_override_auto_expires_on_next_utc_day(self):
@@ -77,7 +77,7 @@ class DailyStopOperatorOverrideTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(engine.daily_stopped)
             self.assertTrue(engine.daily_tracker.daily_stopped)
 
-    async def test_fresh_breach_is_persisted_before_override_releases_entries(self):
+    async def test_fresh_breach_is_persisted_and_override_does_not_release_entries(self):
         day = '2026-09-14'
         engine = self.engine(day=day, realized=-3.05, limit=0.86, stopped=True)
         env = {'RAILWAY_SERVICE_ID': '', 'DAILY_STOP_OVERRIDE_UTC_DAY': day}
@@ -88,12 +88,12 @@ class DailyStopOperatorOverrideTests(unittest.IsolatedAsyncioTestCase):
             blocked = await gate.entries_blocked(
                 engine, datetime(2026, 9, 14, 14, 30, tzinfo=timezone.utc)
             )
-            self.assertFalse(blocked)
+            self.assertTrue(blocked)
             write.assert_awaited_once()
             persisted = json.loads(write.await_args.args[1])
             self.assertLessEqual(persisted['trigger_pnl'], -persisted['stop_limit'])
-            self.assertFalse(engine.daily_stopped)
-            self.assertFalse(engine.daily_tracker.daily_stopped)
+            self.assertTrue(engine.daily_stopped)
+            self.assertTrue(engine.daily_tracker.daily_stopped)
 
     async def test_storage_failure_remains_fail_closed_even_with_override(self):
         day = '2026-09-14'
@@ -104,6 +104,48 @@ class DailyStopOperatorOverrideTests(unittest.IsolatedAsyncioTestCase):
                 engine, datetime(2026, 9, 14, 14, 30, tzinfo=timezone.utc)
             )
             self.assertTrue(blocked)
+
+
+    async def test_breach_with_every_override_combination_stays_blocked(self):
+        """daily stop breached + persistent override + UTC-day override = BLOCK."""
+        day = '2026-09-14'
+        state = json.dumps({
+            'version': 3, 'day': day, 'trigger_pnl': -3.05, 'stop_limit': 0.86,
+            'triggered_at': f'{day}T09:00:00+00:00', 'source': 'RUNTIME_DAILY_STOP',
+        })
+        for env in (
+            {'DAILY_STOP_OVERRIDE_UTC_DAY': day},
+            {'DAILY_STOP_OPERATOR_OVERRIDE': 'true'},
+            {'DAILY_STOP_OVERRIDE_UTC_DAY': day, 'DAILY_STOP_OPERATOR_OVERRIDE': 'true',
+             'LIVE_RISK_OVERRIDE_APPROVED': 'true'},
+        ):
+            for stored in (state, None):
+                engine = self.engine(day=day, realized=-3.05, limit=0.86, stopped=True)
+                engine.active = True
+                with self.subTest(env=env, stored=stored is not None), \
+                     patch.dict('os.environ', {'RAILWAY_SERVICE_ID': '', **env}, clear=False), \
+                     patch.object(gate.db, 'configured_postgres_unavailable', return_value=False), \
+                     patch.object(gate.db, 'load_key_value', new_callable=AsyncMock, return_value=stored), \
+                     patch.object(gate.db, 'save_key_value', new_callable=AsyncMock, return_value=True):
+                    blocked = await gate.entries_blocked(
+                        engine, datetime(2026, 9, 14, 14, 30, tzinfo=timezone.utc)
+                    )
+                    self.assertTrue(blocked)
+                    self.assertTrue(engine.daily_stopped)
+                    self.assertTrue(engine.daily_tracker.daily_stopped)
+                    # Position management is not paused by the entry gate.
+                    self.assertTrue(engine.active)
+
+    def test_override_function_never_authorizes(self):
+        engine = self.engine()
+        with patch.dict('os.environ', {'DAILY_STOP_OVERRIDE_UTC_DAY': '2026-09-14'}, clear=False):
+            self.assertFalse(gate._operator_override_active(engine, '2026-09-14'))
+        self.assertTrue(engine.daily_stopped)
+
+    def test_override_is_not_a_risk_reducing_action(self):
+        from bot.risk_policy import RiskAction, override_may_authorize
+        self.assertFalse(override_may_authorize(RiskAction.OPEN_POSITION))
+        self.assertFalse(override_may_authorize(RiskAction.INCREASE_POSITION))
 
 
 if __name__ == '__main__':

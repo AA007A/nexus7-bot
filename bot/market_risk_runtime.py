@@ -174,6 +174,49 @@ def _coinglass_provider_status(
     return f"no_valid_signals:http={http_statuses}:api={api_codes}:fail_neutral"
 
 
+def classify_provider_health(
+    *,
+    configured: bool,
+    http_statuses: list[int],
+    api_codes: list[str],
+    signal_names: list[str],
+    fallback_active: bool,
+) -> dict[str, Any]:
+    """Explicit provider health; a present API key alone is never "healthy".
+
+    Flags: CONFIGURED (key present), AUTHORIZED (no 401/403 and at least one
+    authenticated 200), FRESH (valid parsed signals this poll), FAILED (no
+    valid signals), FALLBACK_ACTIVE (another provider is supplying data).
+    STALE is decided by signal age in ``_merge_signals``/expiry, not here.
+    A failed provider contributes no signal: it can never fabricate
+    directional conviction.
+    """
+    unauthorized = any(s in (401, 403) for s in http_statuses) or any(
+        c in ("401", "403") for c in api_codes
+    )
+    authorized = bool(configured and not unauthorized and 200 in http_statuses)
+    fresh = bool(authorized and signal_names)
+    if not configured:
+        state = "UNCONFIGURED"
+    elif fresh:
+        state = "FRESH"
+    else:
+        state = "FAILED"
+    flags = [f for f, on in (
+        ("CONFIGURED", configured), ("AUTHORIZED", authorized), ("FRESH", fresh),
+        ("FAILED", state == "FAILED"), ("FALLBACK_ACTIVE", fallback_active),
+    ) if on]
+    return {
+        "state": state,
+        "configured": bool(configured),
+        "authorized": authorized,
+        "fresh": fresh,
+        "fallback_active": bool(fallback_active),
+        "flags": flags,
+        "signals": len(set(signal_names)) if fresh else 0,
+    }
+
+
 def parse_coinglass_liquidation(payload: dict[str, Any]) -> dict[str, float]:
     if _coinglass_api_code(payload) != "0":
         return {}
@@ -374,6 +417,23 @@ async def _coinglass_loop(log) -> None:
                 statuses, api_codes, merged_names
             )
             _mark_provider("coinglass_v4", status)
+            health = classify_provider_health(
+                configured=True,
+                http_statuses=statuses,
+                api_codes=api_codes,
+                signal_names=merged_names,
+                fallback_active=any(
+                    str(name).startswith("binance")
+                    and str(value).startswith(("ok", "partial"))
+                    for name, value in (_state.get("providers") or {}).items()
+                ),
+            )
+            log.info(
+                "[MARKET_RISK_PROVIDER_HEALTH] provider=coinglass_v4 state=%s flags=%s "
+                "http=%s signals=%d",
+                health["state"], "+".join(health["flags"]) or "NONE",
+                statuses, health["signals"],
+            )
             if "401" in api_codes or 401 in statuses:
                 log.warning("[COINGLASS_AUTH] authorized=false action=verify_key_and_endpoint_entitlement binance_fallback_retained=true")
             if not status.startswith("ok:"):

@@ -189,5 +189,11 @@ def install() -> None:
         TradingEngine, _kucoin.KuCoinClient, _score, _nexus_ai
     )
 
+    # Read-only: one sanitized LIVE_POLICY_OBSERVATION_V2 line (whitelisted
+    # non-secret policy values, their sha256 and the platform code/deployment
+    # identity). Content evidence only; provenance is verified at Stage C.
+    from bot import policy_attestation as _policy_attestation
+    _policy_attestation.install(_log)
+
     builtins._nexus_runtime_bootstrap_installed = True
     _log.info("[RUNTIME_BOOTSTRAP] installed centralized hardening bootstrap")

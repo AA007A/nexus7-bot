@@ -1,52 +1,108 @@
-"""Final LIVE pilot sizing authority.
+"""Final LIVE pilot sizing authority: risk-authoritative, minimum of all caps.
 
-Operator policy owns quantity: 50% of freshly authenticated available
-collateral is used as initial margin at configured leverage. RiskManagerV3 is
-mandatory as a fail-closed validation gate, but its numeric recommendation
-cannot silently shrink an otherwise valid operator target.
+History: this wrapper used to make "50% of available collateral as initial
+margin at configured leverage" the quantity authority (``OPERATOR_50PCT_EQUITY``)
+and downgraded RiskManagerV3 to a non-authoritative validation gate. At 50x
+that sized positions whose stop-out cost ~25% of equity.
+
+Now the final LIVE quantity is::
+
+    final_qty = floor_lot(min(risk_manager_qty, canonical_qty))
+
+where ``risk_manager_qty`` is the executable-core RiskManagerV3 adapter result
+and ``canonical_qty`` is an independent recomputation by
+``risk_policy.size_new_entry`` from the confirmed capital snapshot and the
+fresh pilot available balance. Both are equity stop-risk authoritative; the
+operator 50% margin figure is only one of several CAPS. The result is then
+proven against the equity-based ``final_loss_budget`` before it can reach the
+dispatch path. Any missing, unconfirmed, non-finite or inconsistent input
+fails closed (quantity 0, entry blocked). The quantity is never escalated to
+an exchange minimum, and the technical stop is never moved.
 """
 from __future__ import annotations
 
 import math
-from decimal import Decimal, ROUND_FLOOR
 
 from bot.config import cfg
-from bot.quantity import quantity_rules
+from bot import risk_policy
 
-MARGIN_FRACTION = 0.50
+# Kept for backwards-compatible imports; it is a CAP, not a target.
+MARGIN_FRACTION = risk_policy.DEFAULT_OPERATOR_MARGIN_CAP_PCT
 
 
 def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
-    """Return operator target when both target and risk validation are valid."""
+    """Return the smaller of two positive finite quantities, otherwise 0."""
     values = (float(target_qty), float(risk_qty))
     if any(not math.isfinite(v) or v <= 0 for v in values):
         return 0.0
-    return float(target_qty)
+    return min(values)
 
 
-def _operator_target_quantity(info: dict, price: float, available: float, leverage: float) -> float:
-    """Derive the 50%-margin target directly from fresh collateral.
+def _effective_risk_pct(engine) -> float:
+    getter = getattr(engine, "_effective_risk_pct", None)
+    value = float(getter()) if callable(getter) else float(cfg.MAX_RISK_PCT)
+    return min(value, float(cfg.MAX_RISK_PCT))
 
-    This deliberately does not depend on any earlier legacy sizing wrapper.
-    Native KuCoin contract lots are floored so rounding can never consume more
-    than the operator's 50% initial-margin allocation.
-    """
-    price_d = Decimal(str(price))
-    available_d = Decimal(str(available))
-    leverage_d = Decimal(str(leverage))
-    if any(not v.is_finite() or v <= 0 for v in (price_d, available_d, leverage_d)):
-        return 0.0
 
-    multiplier, lot, minimum, min_notional = quantity_rules(info)
-    target_margin = available_d * Decimal(str(MARGIN_FRACTION))
-    target_notional = target_margin * leverage_d
-    contracts = target_notional / (price_d * multiplier)
-    contracts = (contracts / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
-    if contracts < minimum:
-        return 0.0
-    if contracts * multiplier * price_d < min_notional:
-        return 0.0
-    return float(contracts * multiplier)
+def size_pilot_entry(engine, symbol: str, info: dict, price: float, signal, log):
+    """Return ``(final_qty, detail)``; ``final_qty == 0`` means BLOCK."""
+    price_f = float(price)
+    direction = str(getattr(signal, "direction", "")).upper()
+    stop = float(getattr(signal, "sl", float("nan")))
+
+    snapshot = getattr(getattr(engine, "risk", None), "professional_snapshot", None)
+    capital = getattr(snapshot, "capital", None)
+    if snapshot is None or capital is None or getattr(snapshot, "confirmed", False) is not True:
+        return 0.0, "capital_snapshot_unconfirmed"
+
+    pilot_available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
+    available = min(float(capital.available_collateral), pilot_available)
+    equity = float(capital.equity)
+
+    policy = risk_policy.load_policy(cfg)
+    from bot.professional_risk_adapter import (
+        conservative_cost_fraction, max_adverse_entry_drift, _maintenance_margin_rate,
+    )
+    cost = conservative_cost_fraction(symbol, policy)
+    instruments = getattr(engine, "instruments", {}) or {}
+    open_risks = [
+        risk_policy.projected_open_risk(p, instruments.get(sym), cost)
+        for sym, p in (getattr(engine, "positions", {}) or {}).items()
+    ]
+    risk_pct = _effective_risk_pct(engine)
+    rules = risk_policy.QuantityRules.from_instrument(info)
+    canonical = risk_policy.size_new_entry(
+        policy=policy, equity=equity, available=available, entry=price_f, stop=stop,
+        direction=direction, rules=rules, cost_fraction=cost, risk_pct=risk_pct,
+        maintenance_margin_rate=_maintenance_margin_rate(info), open_risks=open_risks,
+        max_adverse_entry_drift=max_adverse_entry_drift(),
+    )
+    if not canonical.allowed:
+        log.warning("[FINAL_SIZING_INVARIANT] symbol=%s canonical %s", symbol, canonical.log_fields())
+        return 0.0, f"canonical_{canonical.reason}"
+
+    risk_qty = float(engine.risk.size(
+        symbol, price_f, engine.instruments, open_positions=engine.positions,
+    ))
+    combined = _select_final_quantity(target_qty=canonical.qty, risk_qty=risk_qty)
+    if combined <= 0:
+        return 0.0, "risk_manager_quantity_invalid_or_zero"
+    final_d = rules.floor_base(combined)
+    if final_d <= 0 or final_d < rules.minimum_base(price_f):
+        return 0.0, "exchange_minimum_exceeds_safe_quantity"
+    final_qty = float(final_d)
+
+    from bot.final_loss_budget import validate
+    validate(final_qty, price_f, stop, direction, float(cfg.LEVERAGE), cost,
+             equity=equity, risk_pct=risk_pct)
+    margin = final_qty * price_f / float(cfg.LEVERAGE)
+    cap = available * min(policy.max_margin_pct, policy.operator_margin_cap_pct)
+    if not math.isfinite(margin) or margin > cap * (1 + 1e-9):
+        return 0.0, "margin_cap_exceeded"
+    return final_qty, {
+        "risk_qty": risk_qty, "canonical": canonical, "cost": cost,
+        "equity": equity, "risk_pct": risk_pct, "margin": margin,
+    }
 
 
 def install(engine_module, pilot_cap, log) -> None:
@@ -55,7 +111,7 @@ def install(engine_module, pilot_cap, log) -> None:
 
     previous_minimum = engine_module.minimum_base_quantity
 
-    def _final_operator_authoritative_quantity(info, price):
+    def _final_risk_authoritative_quantity(info, price):
         engine = pilot_cap._PILOT_ENGINE.get()
         symbol = pilot_cap._PILOT_SYMBOL.get()
         if engine is None or not symbol:
@@ -65,100 +121,50 @@ def install(engine_module, pilot_cap, log) -> None:
         ):
             return previous_minimum(info, price)
 
+        signal = pilot_cap._PILOT_SIGNAL.get()
+        setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
         try:
-            price_f = float(price)
-            available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
-            leverage = float(cfg.LEVERAGE)
-            target_qty = _operator_target_quantity(info, price_f, available, leverage)
-        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=context_%s",
-                symbol, type(exc).__name__,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        if any(not math.isfinite(v) or v <= 0 for v in (target_qty, price_f, available, leverage)):
-            log.critical("[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_context", symbol)
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        try:
-            risk_qty = float(engine.risk.size(
-                symbol, price_f, engine.instruments, open_positions=engine.positions,
-            ))
+            final_qty, detail = size_pilot_entry(engine, symbol, info, price, signal, log)
         except Exception as exc:
+            # Risk/sizing ambiguity is fail-closed. The failure type is logged;
+            # nothing is swallowed silently.
+            from bot.final_loss_budget import reason_from_exception
             log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=risk_validation_%s",
-                symbol, type(exc).__name__,
+                "[FINAL_SIZING_INVARIANT] symbol=%s setup_id=%s result=BLOCK reason=%s error=%s",
+                symbol, setup_id, reason_from_exception(exc), type(exc).__name__,
             )
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        final_qty = _select_final_quantity(target_qty=target_qty, risk_qty=risk_qty)
         if final_qty <= 0:
             log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_quantity target_qty=%.12g risk_validation_qty=%.12g",
-                symbol, target_qty, risk_qty,
+                "[FINAL_SIZING_INVARIANT] symbol=%s setup_id=%s result=BLOCK reason=%s",
+                symbol, setup_id, detail,
             )
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
 
-        target_margin = available * MARGIN_FRACTION
-        target_notional = target_margin * leverage
-        final_margin = (final_qty * price_f) / leverage
-        tolerance = max(1e-9, target_margin * 1e-6)
-        if not math.isfinite(final_margin) or final_margin > target_margin + tolerance:
-            log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=margin_cap_exceeded final_margin=%.12g target_margin=%.12g",
-                symbol, final_margin, target_margin,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        signal = None
-        cost_fraction = float("nan")
-        setup_id = "UNKNOWN"
-        try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            signal = pilot_cap._PILOT_SIGNAL.get()
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
-            setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
-            validate(
-                final_qty, price_f, signal.sl, signal.direction, leverage,
-                cost_fraction,
-            )
-        except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
-            emit_telemetry(
-                log, symbol=symbol, setup_id=setup_id,
-                stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
-                stop=getattr(signal, "sl", float("nan")),
-                direction=getattr(signal, "direction", "UNKNOWN"),
-                leverage=leverage, cost_fraction=cost_fraction, result="BLOCK",
-                specific_reason=reason_from_exception(exc),
-                risk_v3_advisory_qty=risk_qty,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
+        from bot.final_loss_budget import emit_telemetry
         emit_telemetry(
-            log, symbol=symbol, setup_id=setup_id,
-            stage="FINAL_SIZING_INVARIANT", qty=final_qty, entry=price_f,
-            stop=signal.sl, direction=signal.direction, leverage=leverage,
-            cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
-            risk_v3_advisory_qty=risk_qty,
+            log, symbol=symbol, setup_id=setup_id, stage="FINAL_SIZING_INVARIANT",
+            qty=final_qty, entry=float(price), stop=signal.sl, direction=signal.direction,
+            leverage=float(cfg.LEVERAGE), cost_fraction=detail["cost"], result="PASS",
+            specific_reason="within_equity_risk_budget", equity=detail["equity"],
+            risk_pct=detail["risk_pct"], risk_v3_qty=detail["risk_qty"],
         )
-
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(
-            "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS target_qty=%.12g risk_validation_qty=%.12g final_qty=%.12g target_margin=%.6f target_notional=%.6f final_margin=%.6f margin_pct=50.00%% leverage=%.0fx authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
-            symbol, target_qty, risk_qty, final_qty, target_margin, target_notional, final_margin, leverage,
+            "[FINAL_SIZING_INVARIANT] symbol=%s setup_id=%s result=PASS final_qty=%.12g "
+            "risk_manager_qty=%.12g margin=%.6f authority=RISK_POLICY_MIN_OF_CAPS %s",
+            symbol, setup_id, final_qty, detail["risk_qty"], detail["margin"],
+            detail["canonical"].log_fields(),
         )
         return final_qty
 
-    engine_module.minimum_base_quantity = _final_operator_authoritative_quantity
+    engine_module.minimum_base_quantity = _final_risk_authoritative_quantity
     engine_module._final_sizing_invariants_installed = True
     log.critical(
-        "[FINAL_SIZING_INVARIANT] installed=true operator_margin_target=50pct_available sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE configured_leverage_unchanged=true fail_closed=true"
+        "[FINAL_SIZING_INVARIANT] installed=true sizing_authority=RISK_POLICY_MIN_OF_CAPS "
+        "caps=risk,margin,operator_margin_cap,liquidation,portfolio,exchange_lot "
+        "operator_margin=CAP_ONLY loss_budget=EQUITY_RISK_PCT fail_closed=true"
     )

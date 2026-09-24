@@ -212,3 +212,47 @@ def test_combined_fresh_risk_can_block_pilot_gate():
     reasons = guard.evaluate(None, None, "BTCUSDT")
     assert "BASE_GATE" in reasons
     assert any(reason.startswith("15_MARKET_RISK: EXTREME") for reason in reasons)
+
+
+def test_coinglass_401_is_unauthorized_failed_and_contributes_no_signal():
+    from bot.market_risk_runtime import classify_provider_health, parse_coinglass_markets
+
+    health = classify_provider_health(
+        configured=True, http_statuses=[401, 401], api_codes=["http_non_200", "http_non_200"],
+        signal_names=[], fallback_active=True,
+    )
+    assert health["state"] == "FAILED"
+    assert health["configured"] is True
+    assert health["authorized"] is False
+    assert health["fresh"] is False
+    assert "FALLBACK_ACTIVE" in health["flags"]
+    assert "AUTHORIZED" not in health["flags"]
+    assert health["signals"] == 0
+    # An error payload never parses into signals (no fabricated conviction).
+    assert parse_coinglass_markets({"code": "401", "msg": "unauthorized"}) == {}
+
+
+def test_key_present_alone_is_not_healthy():
+    from bot.market_risk_runtime import classify_provider_health
+
+    health = classify_provider_health(
+        configured=True, http_statuses=[200], api_codes=["0"], signal_names=[],
+        fallback_active=False,
+    )
+    assert health["state"] == "FAILED"
+    assert health["authorized"] is True
+    assert health["fresh"] is False
+
+
+def test_unconfigured_and_fresh_states():
+    from bot.market_risk_runtime import classify_provider_health
+
+    assert classify_provider_health(
+        configured=False, http_statuses=[], api_codes=[], signal_names=[], fallback_active=False,
+    )["state"] == "UNCONFIGURED"
+    fresh = classify_provider_health(
+        configured=True, http_statuses=[200, 200], api_codes=["0", "0"],
+        signal_names=["liquidation_usd_1h"], fallback_active=False,
+    )
+    assert fresh["state"] == "FRESH"
+    assert fresh["flags"] == ["CONFIGURED", "AUTHORIZED", "FRESH"]

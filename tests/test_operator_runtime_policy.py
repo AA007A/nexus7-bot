@@ -14,7 +14,7 @@ class _Log:
 
 
 class OperatorRuntimePolicyTests(unittest.TestCase):
-    def test_drawdown_blocks_by_default_override_allows_but_capacity_still_blocks(self):
+    def test_drawdown_blocks_with_and_without_override_and_capacity_still_blocks(self):
         from bot.risk import RiskManager
         from bot.risk_manager_v3 import RiskManagerV3
         from bot import operator_runtime_policy as policy
@@ -36,6 +36,9 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
 
             self.assertFalse(legacy.can_open(0))
             os.environ[policy.RISK_OVERRIDE_ENV] = "true"
+            self.assertFalse(legacy.can_open(0))
+
+            legacy.drawdown = 0.05
             self.assertTrue(legacy.can_open(0))
             self.assertFalse(legacy.can_open(2))
 
@@ -47,6 +50,9 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             os.environ.pop(policy.RISK_OVERRIDE_ENV, None)
             self.assertFalse(v3.can_open(0))
             os.environ[policy.RISK_OVERRIDE_ENV] = "true"
+            self.assertFalse(v3.can_open(0))
+
+            v3.update_capital(CapitalState(equity=99.0, available_collateral=40.0))
             self.assertTrue(v3.can_open(0))
             self.assertFalse(v3.can_open(2))
         finally:
@@ -56,53 +62,24 @@ class OperatorRuntimePolicyTests(unittest.TestCase):
             if previous_override is not None:
                 os.environ[policy.RISK_OVERRIDE_ENV] = previous_override
 
-    def test_live_pilot_target_is_fifty_percent_available_margin(self):
-        from bot import engine as engine_module
+    def test_invalid_risk_policy_blocks_new_entries(self):
+        from bot.risk import RiskManager
         from bot import operator_runtime_policy as policy
-        from bot import pilot_risk_cap_hardening as pilot_cap
 
-        old_leverage = cfg.LEVERAGE
-        original_minimum = engine_module.minimum_base_quantity
-        original_marker = getattr(engine_module, "_operator_margin_sizing_installed", False)
-
-        risk = SimpleNamespace(size=lambda *args, **kwargs: 0.01)
-        fake_engine = SimpleNamespace(
-            paper_trade=False,
-            pilot=SimpleNamespace(enabled=True),
-            _pilot_available_balance=20.0,
-            risk=risk,
-            instruments={},
-            positions={},
-        )
-        info = {
-            "multiplier": "0.01",
-            "lotSize": "1",
-            "minQty": "1",
-            "minNotional": "0",
-        }
-
+        old = cfg.MAX_RISK_PCT
         try:
-            cfg.LEVERAGE = 50
-            engine_module._operator_margin_sizing_installed = False
-            policy._install_margin_sizing(_Log())
-            token_engine = pilot_cap._PILOT_ENGINE.set(fake_engine)
-            token_symbol = pilot_cap._PILOT_SYMBOL.set("TESTUSDT")
-            token_qty = pilot_cap._PILOT_FINAL_QTY.set(None)
-            try:
-                qty = engine_module.minimum_base_quantity(info, 100.0)
-                # available=20; 50% margin=10; 50x => target notional=500;
-                # qty=5 @ $100 => $500 notional => $10 initial margin.
-                self.assertAlmostEqual(qty, 5.0)
-                self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
-                self.assertAlmostEqual(pilot_cap._PILOT_FINAL_QTY.get(), 5.0)
-            finally:
-                pilot_cap._PILOT_FINAL_QTY.reset(token_qty)
-                pilot_cap._PILOT_SYMBOL.reset(token_symbol)
-                pilot_cap._PILOT_ENGINE.reset(token_engine)
+            policy._install_drawdown_advisory(_Log())
+            legacy = RiskManager()
+            legacy._ready = True
+            legacy.balance_confirmed = True
+            legacy.balance = 100.0
+            legacy.peak_balance = 100.0
+            legacy.drawdown = 0.0
+            self.assertTrue(legacy.can_open(0))
+            cfg.MAX_RISK_PCT = 0.30
+            self.assertFalse(legacy.can_open(0))
         finally:
-            cfg.LEVERAGE = old_leverage
-            engine_module.minimum_base_quantity = original_minimum
-            engine_module._operator_margin_sizing_installed = original_marker
+            cfg.MAX_RISK_PCT = old
 
     def test_exit_min_hold_defaults_to_ninety_minutes(self):
         from bot.exit_policy_telemetry import _min_hold_remaining

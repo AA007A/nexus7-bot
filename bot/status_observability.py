@@ -7,23 +7,27 @@ permission.
 """
 from __future__ import annotations
 
-import os
 
 from bot.logger import log
 
 
 def _drawdown_blocked(engine) -> tuple[bool, float, float]:
-    """Return observational drawdown-block state without mutating risk policy."""
+    """Return observational drawdown-block state without mutating risk policy.
+
+    Mirrors ``risk_policy.drawdown_entry_decision``: an operator override has
+    no effect on new-entry authority, and an unreadable state is reported as
+    blocked (the runtime gate also fails closed on it).
+    """
     try:
         from bot.config import cfg
+        from bot.risk_policy import drawdown_entry_decision
 
         drawdown = float(getattr(getattr(engine, "risk", None), "drawdown", 0.0) or 0.0)
         limit = float(getattr(cfg, "MAX_DRAWDOWN", 0.0) or 0.0)
-        override = str(os.environ.get("LIVE_RISK_OVERRIDE_APPROVED", "")).strip().lower() == "true"
-        blocked = bool(limit > 0.0 and drawdown >= limit and not override)
+        blocked = not drawdown_entry_decision(drawdown, limit).can_open
         return blocked, drawdown, limit
-    except Exception:
-        return False, 0.0, 0.0
+    except (AttributeError, TypeError, ValueError, ImportError):
+        return True, float("nan"), float("nan")
 
 
 def execution_observability(engine) -> dict:

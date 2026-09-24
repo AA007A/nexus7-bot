@@ -1,96 +1,104 @@
-"""Operator LIVE sizing and explicit risk-override policy.
+"""Operator LIVE runtime policy: drawdown hard gate for new exposure.
 
-The controlled LIVE pilot keeps the operator-requested execution geometry:
+History: this module previously (a) made "50% of available collateral as
+initial margin" the LIVE quantity authority and (b) let
+``LIVE_RISK_OVERRIDE_APPROVED=true`` neutralize the drawdown hard gate
+(runtime evidence: drawdown=59.40% vs limit=50%, ``ALLOW_NEW_ENTRIES``).
 
-* target initial margin = 50% of freshly authenticated available collateral;
-* leverage is read from the existing configuration (production currently uses 50x);
-* stop-risk sizing remains telemetry under this operator margin policy.
+Both capabilities are removed:
 
-A drawdown breach is fail-closed by default. It may be bypassed only when the
-operator explicitly enables LIVE_RISK_OVERRIDE_APPROVED=true. The override
-never bypasses balance, position-count, protection, duplicate-order,
-reconciliation, instrument or other execution-safety gates.
+* ``drawdown >= MAX_DRAWDOWN`` blocks every NEW position. The decision comes
+  from ``bot.risk_policy.drawdown_entry_decision`` and cannot be changed by any
+  environment variable, ``DRAWDOWN_MODE`` or override.
+* ``LIVE_RISK_OVERRIDE_APPROVED`` is still read, but only so telemetry is
+  truthful (``override_effect=NONE``). Per ``risk_policy.override_may_authorize``
+  an override may only ever authorize risk-reducing actions (close, reduce,
+  cancel exposure-increasing orders, protection repair, reconciliation), and
+  none of those paths pass through this gate.
+* The 50% margin figure survives only as a CAP inside the canonical sizer
+  (``risk_policy.size_new_entry``). It is never a utilization target.
+
+Existing positions keep being managed, protected and reconciled while new
+entries are blocked; this gate only governs NEW exposure.
+
+The class-method ownership recorded by ``runtime_contract_guard`` is unchanged:
+this module still owns ``RiskManager.can_open``, ``RiskManagerV3.can_open``,
+``TradingEngine._update_balance`` and ``TradingEngine.run``.
 """
 from __future__ import annotations
 
-import math
 import os
 
 from bot.config import cfg
+from bot import risk_policy
 from bot import startup_ready_notification
 
 
-MARGIN_FRACTION = 0.50
+# Retained as the name of the operator margin CAP (not a target).
+MARGIN_FRACTION = risk_policy.DEFAULT_OPERATOR_MARGIN_CAP_PCT
 RISK_OVERRIDE_ENV = "LIVE_RISK_OVERRIDE_APPROVED"
 
 
 def _risk_override_enabled() -> bool:
-    """Return True only for an explicit boolean operator acknowledgement."""
+    """Return whether the operator REQUESTED an override (telemetry only).
+
+    The value has no authority over new exposure; see module docstring.
+    """
     return os.environ.get(RISK_OVERRIDE_ENV, "").strip().lower() == "true"
 
 
+def _decision(drawdown):
+    return risk_policy.drawdown_entry_decision(
+        drawdown, cfg.MAX_DRAWDOWN, override_requested=_risk_override_enabled(),
+    )
+
+
+def _policy_violations() -> tuple[str, ...]:
+    return risk_policy.load_policy(cfg).violations()
+
+
 def _protect_drawdown_update(self, bound_update, log, *, source: str):
-    """Wrap one balance update without silently neutralizing drawdown safety."""
+    """Wrap one balance update; a legacy drawdown pause is never neutralized."""
     async def _guarded_update(*args, **kwargs):
         was_active = bool(getattr(self, "active", False))
         risk_before = getattr(self, "risk", None)
-        drawdown_before = float(getattr(risk_before, "drawdown", 0.0) or 0.0)
-        override = _risk_override_enabled()
+        before = _decision(float(getattr(risk_before, "drawdown", 0.0) or 0.0))
 
-        if was_active and drawdown_before >= float(cfg.MAX_DRAWDOWN):
+        if was_active and not before.can_open:
             self._dd_alerted = True
-            if override:
-                log.critical(
-                    "[DRAWDOWN_OVERRIDE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=true entries_blocked=false execution_effect=ALLOW_NEW_ENTRIES",
-                    source,
-                    drawdown_before * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
-            else:
-                log.error(
-                    "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=false entries_blocked=true execution_effect=BLOCK_NEW_ENTRIES",
-                    source,
-                    drawdown_before * 100.0,
-                    float(cfg.MAX_DRAWDOWN) * 100.0,
-                )
+            log.error(
+                "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                "override_requested=%s override_effect=NONE entries_blocked=true "
+                "execution_effect=BLOCK_NEW_ENTRIES risk_reducing_actions=ALLOWED",
+                source, before.drawdown * 100.0, before.limit * 100.0,
+                str(before.override_requested).lower(),
+            )
 
         try:
             return await bound_update(*args, **kwargs)
         finally:
             risk = getattr(self, "risk", None)
-            drawdown = float(getattr(risk, "drawdown", 0.0) or 0.0)
+            after = _decision(float(getattr(risk, "drawdown", 0.0) or 0.0))
             became_inactive = was_active and not bool(getattr(self, "active", False))
-            if became_inactive and drawdown >= float(cfg.MAX_DRAWDOWN):
-                if _risk_override_enabled():
-                    self.active = True
-                    self._dd_alerted = True
-                    log.critical(
-                        "[DRAWDOWN_OVERRIDE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "legacy_pause_neutralized=true active_restored=true override=true",
-                        source,
-                        drawdown * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
-                    )
-                else:
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "legacy_pause_preserved=true active_restored=false override=false",
-                        source,
-                        drawdown * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
-                    )
+            if became_inactive and not after.can_open:
+                log.error(
+                    "[DRAWDOWN_HARD_GATE_%s] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "legacy_pause_preserved=true active_restored=false "
+                    "override_requested=%s override_effect=NONE",
+                    source, after.drawdown * 100.0, after.limit * 100.0,
+                    str(after.override_requested).lower(),
+                )
 
     return _guarded_update
 
 
 def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
-    """Install drawdown hard-gate with an explicit, auditable operator override.
+    """Install the non-overridable drawdown hard gate.
 
     Backward compatible with the previous private helper signature
     ``_install_drawdown_advisory(log)`` used by regression tests. The engine
     wrappers are installed only when a TradingEngine class is explicitly passed.
+    (The historical name is kept for the runtime contract; it is a hard gate.)
     """
     if log is None:
         TradingEngine = None
@@ -112,28 +120,32 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
             if not self.balance_confirmed or self.balance <= 0:
                 log.warning("[BALANCE] new entries blocked: zero or unconfirmed balance")
                 return False
+            violations = _policy_violations()
+            if violations:
+                log.critical(
+                    "[RISK_POLICY_INVALID] entries_blocked=true violations=%s",
+                    " | ".join(violations),
+                )
+                return False
+            decision = _decision(self.drawdown)
             log.info(
-                "[ENTRY_RISK_STATE] drawdown=%.2f%% configured_limit=%.2f%% entry_authorization=%s override=%s",
+                "[ENTRY_RISK_STATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                "entry_authorization=%s override_requested=%s override_effect=NONE",
                 float(self.drawdown) * 100.0,
                 float(cfg.MAX_DRAWDOWN) * 100.0,
-                "BLOCK_DRAWDOWN" if (self.drawdown >= cfg.MAX_DRAWDOWN and not _risk_override_enabled()) else "ALLOW",
-                _risk_override_enabled(),
+                "ALLOW" if decision.can_open else "BLOCK_DRAWDOWN",
+                str(decision.override_requested).lower(),
             )
-            if self.drawdown >= cfg.MAX_DRAWDOWN:
-                if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
-                        float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
-                    )
-                    return False
-                log.critical(
-                    "[DRAWDOWN_OVERRIDE] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=true entries_blocked=false",
+            if not decision.can_open:
+                log.error(
+                    "[DRAWDOWN_HARD_GATE] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "reason=%s override_requested=%s override_effect=NONE entries_blocked=true",
                     float(self.drawdown) * 100.0,
                     float(cfg.MAX_DRAWDOWN) * 100.0,
+                    decision.reason,
+                    str(decision.override_requested).lower(),
                 )
+                return False
             if n >= cfg.MAX_POSITIONS:
                 log.info("⛔ %s/%s posições → aguardando", n, cfg.MAX_POSITIONS)
                 return False
@@ -148,21 +160,19 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 return False
             if self.equity <= 0 or self.available_collateral <= 0:
                 return False
-            if self.drawdown >= cfg.MAX_DRAWDOWN:
-                if not _risk_override_enabled():
-                    log.error(
-                        "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                        "override=false entries_blocked=true",
-                        float(self.drawdown) * 100.0,
-                        float(cfg.MAX_DRAWDOWN) * 100.0,
-                    )
-                    return False
-                log.critical(
-                    "[DRAWDOWN_OVERRIDE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
-                    "override=true entries_blocked=false",
+            if _policy_violations():
+                return False
+            decision = _decision(self.drawdown)
+            if not decision.can_open:
+                log.error(
+                    "[DRAWDOWN_HARD_GATE_V3] drawdown=%.2f%% configured_limit=%.2f%% "
+                    "reason=%s override_requested=%s override_effect=NONE entries_blocked=true",
                     float(self.drawdown) * 100.0,
                     float(cfg.MAX_DRAWDOWN) * 100.0,
+                    decision.reason,
+                    str(decision.override_requested).lower(),
                 )
+                return False
             if open_positions >= cfg.MAX_POSITIONS:
                 return False
             return True
@@ -205,7 +215,7 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
                 log.critical(
                     "[DRAWDOWN_POLICY_INSTANCE] installed=true class=%s "
                     "bound_update_module=%s bound_update_name=%s "
-                    "default=hard_gate explicit_override_supported=true",
+                    "default=hard_gate override_supported_for_new_entries=false",
                     type(self).__name__,
                     getattr(current_bound_update, "__module__", "unknown"),
                     getattr(current_bound_update, "__name__", type(current_bound_update).__name__),
@@ -220,111 +230,24 @@ def _install_drawdown_advisory(TradingEngine_or_log, log=None) -> None:
         TradingEngine._operator_drawdown_run_binding = True
 
 
-def _install_margin_sizing(log) -> None:
-    """Keep 50% of fresh available collateral as the LIVE pilot margin target."""
-    from bot import engine as engine_module
-    from bot import pilot_live_runtime
-    from bot import pilot_risk_cap_hardening as pilot_cap
-
-    if getattr(engine_module, "_operator_margin_sizing_installed", False):
-        return
-
-    previous_minimum = engine_module.minimum_base_quantity
-
-    def _margin_target_quantity(info, price):
-        engine = pilot_cap._PILOT_ENGINE.get()
-        symbol = pilot_cap._PILOT_SYMBOL.get()
-        if engine is None or not symbol:
-            return previous_minimum(info, price)
-        if getattr(engine, "paper_trade", False) or not bool(
-            getattr(getattr(engine, "pilot", None), "enabled", False)
-        ):
-            return previous_minimum(info, price)
-
-        available = float(getattr(engine, "_pilot_available_balance", 0.0) or 0.0)
-        leverage = float(cfg.LEVERAGE)
-        price_f = float(price)
-        if (
-            not math.isfinite(available) or available <= 0
-            or not math.isfinite(leverage) or leverage <= 0
-            or not math.isfinite(price_f) or price_f <= 0
-        ):
-            log.critical(
-                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=invalid_context "
-                "available=%s leverage=%s price=%s",
-                symbol, available, leverage, price_f,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        target_margin = available * MARGIN_FRACTION
-        target_notional = target_margin * leverage
-        try:
-            target_qty = float(
-                pilot_live_runtime._pilot_quantity_for_notional(
-                    info, price_f, target_notional
-                )
-            )
-        except Exception as exc:
-            log.critical(
-                "[PILOT_MARGIN_SIZING] symbol=%s result=BLOCK reason=quantity_%s",
-                symbol, type(exc).__name__,
-            )
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        risk_qty = 0.0
-        try:
-            risk_qty = float(
-                engine.risk.size(
-                    symbol,
-                    price_f,
-                    engine.instruments,
-                    open_positions=engine.positions,
-                )
-            )
-        except Exception as exc:
-            log.warning(
-                "[PILOT_MARGIN_SIZING] symbol=%s stop_risk_telemetry=%s",
-                symbol, type(exc).__name__,
-            )
-
-        if not math.isfinite(target_qty) or target_qty <= 0:
-            pilot_cap._PILOT_FINAL_QTY.set(0.0)
-            return 0.0
-
-        actual_notional = target_qty * price_f
-        actual_margin = actual_notional / leverage
-        pilot_cap._PILOT_FINAL_QTY.set(target_qty)
-        log.warning(
-            "[PILOT_MARGIN_SIZING] symbol=%s result=PASS available=%.6f "
-            "margin_pct=%.2f%% target_margin=%.6f leverage=%.0fx "
-            "target_notional=%.6f qty=%.12g actual_margin=%.6f "
-            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy",
-            symbol,
-            available,
-            MARGIN_FRACTION * 100.0,
-            target_margin,
-            leverage,
-            target_notional,
-            target_qty,
-            actual_margin,
-            risk_qty,
-        )
-        return target_qty
-
-    engine_module.minimum_base_quantity = _margin_target_quantity
-    engine_module._operator_margin_sizing_installed = True
-
-
 def install(TradingEngine, log) -> None:
-    """Install after all controlled-pilot sizing/risk wrappers."""
+    """Install the drawdown hard gate and report the canonical risk policy."""
     _install_drawdown_advisory(TradingEngine, log)
-    _install_margin_sizing(log)
+    policy = risk_policy.load_policy(cfg)
+    violations = policy.violations()
     log.critical(
-        "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
-        "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
-        "override_enabled=%s railway_variables_unchanged=true",
-        cfg.LEVERAGE,
+        "[OPERATOR_RUNTIME_POLICY] installed drawdown=hard_gate "
+        "override_supported_for_new_entries=false override_requested=%s "
+        "sizing_authority=risk_policy.size_new_entry operator_margin=CAP_ONLY "
+        "policy_valid=%s %s ignored_overrides=%s railway_variables_unchanged=true",
         _risk_override_enabled(),
+        str(not violations).lower(),
+        policy.summary(),
+        ",".join(policy.ignored_overrides) or "none",
     )
+    for violation in violations:
+        log.critical(
+            "[RISK_POLICY_INVALID] violation=%s execution_effect=BLOCK_NEW_ENTRIES "
+            "existing_positions=MANAGED",
+            violation,
+        )

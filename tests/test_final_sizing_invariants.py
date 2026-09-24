@@ -1,9 +1,16 @@
+"""Final LIVE sizing is risk-authoritative (minimum of all caps).
+
+Formerly these tests asserted that the operator 50%-margin target was the
+quantity authority and that RiskManagerV3 "does not shrink" it. That is the
+P0 defect fixed here; the tests now assert the opposite invariant.
+"""
 import unittest
 from types import SimpleNamespace
 
 from bot.config import cfg
 from bot import final_sizing_invariants as final_sizing
 from bot import pilot_risk_cap_hardening as pilot_cap
+from bot.professional_risk import CapitalState
 
 
 class _Log:
@@ -25,34 +32,44 @@ INFO = {
 
 class FinalSizingInvariantTests(unittest.TestCase):
     def setUp(self):
-        self.old_leverage = cfg.LEVERAGE
+        self.old = {k: getattr(cfg, k) for k in ("LEVERAGE", "MAX_RISK_PCT", "MAX_MARGIN_PCT")}
         cfg.LEVERAGE = 50
+        cfg.MAX_RISK_PCT = 0.01
+        cfg.MAX_MARGIN_PCT = 0.50
 
     def tearDown(self):
-        cfg.LEVERAGE = self.old_leverage
+        for k, v in self.old.items():
+            setattr(cfg, k, v)
 
-    def _install(self, *, risk_size, legacy_qty=0.001, available=20.0):
+    def _install(self, *, risk_size, legacy_qty=0.001, available=20.0, equity=None, confirmed=True):
         module = _EngineModule()
-        # Deliberately tiny legacy result: final authority must not inherit it.
         module.minimum_base_quantity = lambda info, price: legacy_qty
         module._final_sizing_invariants_installed = False
-        risk = SimpleNamespace(size=risk_size)
+        snapshot = SimpleNamespace(
+            capital=CapitalState(
+                equity=available if equity is None else equity,
+                available_collateral=available,
+            ),
+            confirmed=confirmed,
+        )
+        risk = SimpleNamespace(size=risk_size, professional_snapshot=snapshot)
         engine = SimpleNamespace(
             paper_trade=False,
             pilot=SimpleNamespace(enabled=True),
             _pilot_available_balance=available,
             risk=risk,
-            instruments={},
+            instruments={"TESTUSDT": INFO},
             positions={},
         )
         final_sizing.install(module, pilot_cap, _Log())
         return module, engine
 
-    def _call(self, module, engine, price=100.0, info=INFO):
+    def _call(self, module, engine, price=100.0, info=INFO, stop_pct=0.004):
         token_engine = pilot_cap._PILOT_ENGINE.set(engine)
         token_symbol = pilot_cap._PILOT_SYMBOL.set("TESTUSDT")
         token_qty = pilot_cap._PILOT_FINAL_QTY.set(None)
-        token_signal = pilot_cap._PILOT_SIGNAL.set(SimpleNamespace(sl=price * .996, direction='LONG'))
+        token_signal = pilot_cap._PILOT_SIGNAL.set(
+            SimpleNamespace(sl=price * (1 - stop_pct), direction='LONG'))
         try:
             qty = module.minimum_base_quantity(info, price)
             stored = pilot_cap._PILOT_FINAL_QTY.get()
@@ -63,32 +80,32 @@ class FinalSizingInvariantTests(unittest.TestCase):
             pilot_cap._PILOT_SYMBOL.reset(token_symbol)
             pilot_cap._PILOT_ENGINE.reset(token_engine)
 
-    def test_operator_target_is_derived_from_50pct_margin_not_legacy_quantity(self):
-        module, engine = self._install(risk_size=lambda *a, **k: 0.25, legacy_qty=0.001)
-        qty, stored = self._call(module, engine)
-        # available=20, margin=10, leverage=50 => notional=500; price=100 => qty=5.
-        self.assertAlmostEqual(qty, 5.0)
-        self.assertAlmostEqual(stored, 5.0)
-        self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
-
-    def test_risk_numeric_recommendation_does_not_shrink_valid_operator_target(self):
+    def test_risk_quantity_shrinks_operator_target(self):
         module, engine = self._install(risk_size=lambda *a, **k: 0.25)
         qty, stored = self._call(module, engine)
-        self.assertAlmostEqual(qty, 5.0)
-        self.assertAlmostEqual(stored, 5.0)
+        self.assertGreater(qty, 0.0)
+        self.assertLessEqual(qty, 0.25)
+        self.assertEqual(qty, stored)
 
-    def test_operator_target_remains_authoritative_when_risk_allows_more(self):
+    def test_operator_margin_is_not_a_utilization_target(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0)
-        qty, stored = self._call(module, engine)
-        self.assertAlmostEqual(qty, 5.0)
-        self.assertAlmostEqual(stored, 5.0)
+        qty, _ = self._call(module, engine)
+        # Old behavior: exactly 5.0 (50% of 20 at 50x). Now the equity stop
+        # budget (1% of 20 = 0.2 USDT) binds far below that.
+        self.assertLess(qty, 5.0)
+        stop_distance = 100.0 * 0.004
+        self.assertLessEqual(qty * stop_distance, 20.0 * 0.01 + 1e-12)
 
-    def test_contract_floor_never_exceeds_50pct_margin(self):
+    def test_legacy_minimum_quantity_is_not_inherited(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, legacy_qty=123.0)
+        qty, _ = self._call(module, engine)
+        self.assertLess(qty, 123.0)
+
+    def test_contract_floor_never_exceeds_margin_cap(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=19.37)
-        qty, _ = self._call(module, engine, price=2.0)
+        qty, _ = self._call(module, engine, price=2.0, info={**INFO, "multiplier": "1"}, stop_pct=0.05)
         margin = qty * 2.0 / cfg.LEVERAGE
         self.assertLessEqual(margin, 19.37 * 0.50 + 1e-9)
-        self.assertGreater(qty, 0.0)
 
     def test_risk_sizing_exception_fails_closed(self):
         def _raise(*args, **kwargs):
@@ -109,6 +126,28 @@ class FinalSizingInvariantTests(unittest.TestCase):
         qty, stored = self._call(module, engine, info={})
         self.assertEqual(qty, 0.0)
         self.assertEqual(stored, 0.0)
+
+    def test_unconfirmed_capital_fails_closed(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 0.25, confirmed=False)
+        qty, stored = self._call(module, engine)
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
+
+    def test_minimum_lot_above_budget_is_no_trade(self):
+        # 1 contract of 1 unit @100 with a 5% stop loses 5 USDT >> 0.2 budget.
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0)
+        qty, stored = self._call(module, engine, info={**INFO, "multiplier": "1"}, stop_pct=0.05)
+        self.assertEqual(qty, 0.0)
+        self.assertEqual(stored, 0.0)
+
+    def test_leverage_does_not_change_final_quantity_when_risk_binds(self):
+        results = []
+        for leverage in (10, 50):
+            cfg.LEVERAGE = leverage
+            module, engine = self._install(risk_size=lambda *a, **k: 10.0, available=1000.0)
+            results.append(self._call(module, engine, stop_pct=0.02)[0])
+        self.assertGreater(results[0], 0.0)
+        self.assertAlmostEqual(results[0], results[1])
 
 
 if __name__ == "__main__":

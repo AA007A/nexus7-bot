@@ -44,11 +44,11 @@ class DailyTracker:
                 if cfg.DAILY_TARGET > 0
                 else round(balance * cfg.DAILY_TARGET_PCT, 2)
             )
-            self.daily_stop_loss = (
-                cfg.DAILY_STOP_LOSS
-                if cfg.DAILY_STOP_LOSS > 0
-                else round(balance * cfg.DAILY_STOP_LOSS_PCT, 2)
-            )
+            from bot.risk_policy import effective_daily_stop_limit
+            # Stricter of percentage and absolute limit; never looser.
+            self.daily_stop_loss = effective_daily_stop_limit(
+                balance, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+            ).limit
             self.weekly_stop_loss  = max(round(balance * getattr(cfg, "WEEKLY_STOP_PCT", 0.03), 2), 3.00)
             self.monthly_stop_loss = max(round(balance * getattr(cfg, "MONTHLY_STOP_PCT", 0.08), 2), 8.00)
 

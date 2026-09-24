@@ -69,7 +69,7 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
 
     def test_later_available_balance_is_conservative_margin_cap(self):
         adapter = self._adapter(balance=1000.0)
-        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=0.50)
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=float(cfg.MAX_RISK_PCT))
         adapter.balance = 10.0
         adapter.balance_confirmed = True
         qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
@@ -78,11 +78,23 @@ class ProfessionalRiskAdapterTests(unittest.TestCase):
         self.assertGreater(qty, 0.0)
         self.assertEqual(snapshot.capital.equity, 1000.0)
         self.assertEqual(snapshot.capital.available_collateral, 10.0)
-        max_margin = 10.0 * 0.80
+        max_margin = 10.0 * min(float(cfg.MAX_MARGIN_PCT), 0.50)
         self.assertLessEqual(
             (qty * 100.0) / float(cfg.LEVERAGE),
             max_margin + 1e-9,
         )
+
+    def test_plan_risk_above_policy_blocks_instead_of_clamping(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=0.50)
+        self.assertEqual(adapter.size("TESTUSDT", 100.0, INSTRUMENTS), 0.0)
+
+    def test_projected_stop_loss_within_equity_budget(self):
+        adapter = self._adapter()
+        adapter.set_plan(symbol="TESTUSDT", entry=100.0, stop=99.0, risk_pct=float(cfg.MAX_RISK_PCT))
+        qty = adapter.size("TESTUSDT", 100.0, INSTRUMENTS)
+        self.assertGreater(qty, 0.0)
+        self.assertLessEqual(qty * 1.0, 1000.0 * float(cfg.MAX_RISK_PCT))
 
     def test_entry_mismatch_fails_closed(self):
         adapter = self._adapter()
@@ -96,7 +108,7 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
         fake_engine = SimpleNamespace(
             risk=risk,
             paper_trade=True,
-            _effective_risk_pct=lambda: 0.02,
+            _effective_risk_pct=lambda: float(cfg.MAX_RISK_PCT),
         )
         signal = SimpleNamespace(symbol="TESTUSDT", entry=100.0, sl=95.0)
         decision = SimpleNamespace(execution_allowed=True)
@@ -117,7 +129,7 @@ class RuntimeProfessionalRiskPreparationTests(unittest.IsolatedAsyncioTestCase):
             risk=risk,
             paper_trade=False,
             _validation_safety_lock_active=True,
-            _effective_risk_pct=lambda: 0.02,
+            _effective_risk_pct=lambda: float(cfg.MAX_RISK_PCT),
         )
         signal = SimpleNamespace(symbol="TESTUSDT", entry=100.0, sl=95.0)
         decision = SimpleNamespace(execution_allowed=True)

@@ -238,15 +238,23 @@ def install(TradingEngine, log) -> None:
 
         executable_price = metrics.get("executable_price")
         cost_fraction = float("nan")
+        equity = float("nan")
+        risk_pct = float("nan")
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
+        from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
+        from bot.config import cfg
         try:
-            from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
-            from bot.config import cfg
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            from bot.professional_risk_adapter import conservative_cost_fraction
+            from bot.final_sizing_invariants import _effective_risk_pct
+            snapshot = getattr(getattr(self, "risk", None), "professional_snapshot", None)
+            if snapshot is None or getattr(snapshot, "confirmed", False) is not True:
+                raise ValueError("invalid loss budget")
+            equity = float(snapshot.capital.equity)
+            risk_pct = _effective_risk_pct(self)
+            cost_fraction = conservative_cost_fraction(symbol)
             validate(
                 qty_f, executable_price, sig.sl, direction,
-                cfg.LEVERAGE, cost_fraction,
+                cfg.LEVERAGE, cost_fraction, equity=equity, risk_pct=risk_pct,
             )
         except (AttributeError, TypeError, ValueError, ArithmeticError) as exc:
             emit_telemetry(
@@ -256,6 +264,7 @@ def install(TradingEngine, log) -> None:
                 direction=direction, leverage=cfg.LEVERAGE,
                 cost_fraction=cost_fraction, result="BLOCK",
                 specific_reason=reason_from_exception(exc),
+                equity=equity, risk_pct=risk_pct,
             )
             return False
         emit_telemetry(
@@ -263,7 +272,8 @@ def install(TradingEngine, log) -> None:
             stage="FRESH_PREDISPATCH_RECHECK", qty=qty_f,
             entry=executable_price, stop=sig.sl, direction=direction,
             leverage=cfg.LEVERAGE, cost_fraction=cost_fraction, result="PASS",
-            specific_reason="within_50pct_entry_margin",
+            specific_reason="within_equity_risk_budget",
+            equity=equity, risk_pct=risk_pct,
         )
 
         log.info(

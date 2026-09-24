@@ -4,29 +4,108 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "bot/nexus_oos_edge_gate.py"
-      - "bot/nexus_oos_real_replay.py"
-      - "bot/nexus_oos_real_replay_corrected.py"
-      - "bot/nexus_oos_robustness.py"
-      - "bot/nexus_oos_robustness_replay.py"
-      - "tests/test_nexus_oos_edge_gate.py"
-      - "tests/test_nexus_oos_real_replay.py"
-      - "tests/test_nexus_oos_replay_full_clock.py"
-      - "tests/test_nexus_oos_robustness.py"
+      # Decision-affecting code: keep in sync with bot/decision_affecting_paths.py
+      # (enforced by tests/test_decision_affecting_paths.py).
+      - "bot/strategy.py"
+      - "bot/indicators.py"
+      - "bot/score.py"
+      - "bot/score_weights.py"
+      - "bot/scoring_safety_hardening.py"
+      - "bot/adaptive_mtf_entry.py"
+      - "bot/adaptive_mtf_calibration.py"
+      - "bot/pullback_confirmation_hardening.py"
+      - "bot/pretrade_hardening.py"
+      - "bot/rr_precision_hardening.py"
+      - "bot/rr_gate_calibration.py"
+      - "bot/correlation.py"
+      - "bot/event_intelligence.py"
+      - "bot/market_viability_fail_closed.py"
+      - "bot/nexus_*.py"
+      - "bot/oos_*.py"
+      - "bot/market_data.py"
+      - "bot/market_data_integrity.py"
+      - "bot/market_risk_*.py"
+      - "bot/news_*.py"
+      - "bot/derivatives_news_freshness_hardening.py"
+      - "bot/config.py"
+      - "bot/risk.py"
+      - "bot/risk_manager_v3.py"
+      - "bot/risk_policy.py"
+      - "bot/professional_risk.py"
+      - "bot/professional_risk_adapter.py"
+      - "bot/final_sizing_invariants.py"
+      - "bot/final_loss_budget.py"
+      - "bot/operator_runtime_policy.py"
+      - "bot/operator_loss_policy.py"
+      - "bot/pilot_risk_cap_hardening.py"
+      - "bot/quantity.py"
+      - "bot/cross_portfolio_stress.py"
+      - "bot/cross_geometry_target_policy.py"
+      - "bot/kucoin_contract_risk_hardening.py"
+      - "bot/liquidation.py"
+      - "bot/liquidation_override_guard.py"
+      - "bot/daily_stop_*.py"
+      - "bot/daily_tracker.py"
+      - "bot/engine.py"
+      - "bot/pilot.py"
+      - "bot/pilot_exposure_capacity.py"
+      - "bot/pre_dispatch_guard.py"
+      - "bot/kucoin_native_tpsl.py"
+      - "bot/native_stop_repair.py"
+      - "bot/runtime_overlays.py"
+      - "bot/runtime_bootstrap.py"
+      - "bot/confirmed_rr_exit.py"
+      - "bot/trailing_safety_hardening.py"
+      - "bot/stagnation_time_hardening.py"
+      - "bot/partial_tp_execution_hardening.py"
+      - "bot/exit_policy_telemetry.py"
+      - "bot/kucoin_execution_model.py"
+      - "bot/backtest.py"
+      - "bot/decision_affecting_paths.py"
+      - "bot/nexus_oos_promotion_gate.py"
+      - "research/replay_policy_manifest.json"
+      - "bot/live_release_evidence.py"
+      - "bot/ai/**"
+      - "bot/policy_attestation.py"
+      - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
+    inputs:
+      limit_15m:
+        description: "15m candles per symbol (17280 = 180 days; 8640 = 90 days)"
+        default: "17280"
+      research_only:
+        description: "true = report evidence without failing (never used for PRs)"
+        default: "false"
+
+# Staged gates (see RELEASE_READINESS.md):
+#   RESEARCH_PROMOTION_GATE (stage A, code merge): strict; FAILS this job unless
+#     every research condition in bot/nexus_oos_promotion_gate.py is met. It may
+#     pass with LIVE_POLICY_OBSERVATION_PENDING and never means PRODUCTION_READY=YES.
+#   LIVE_RELEASE_GATE (stage C): requires a BGX_LIVE_RELEASE_EVIDENCE_V1 envelope
+#     verified against trusted read-only sources (RELEASE_EVIDENCE.md). No such
+#     source exists in CI, so it is reported for information only and BLOCKS.
+# No LIVE policy evidence is read from the repository.
 
 jobs:
   replay:
     name: Real historical replay evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 350
     env:
       PAPER_TRADE: "true"
       LIVE_TRADING_CONFIRMED: ""
       NEXUS_PILOT_ENABLED: "false"
+      OOS_SYMBOLS: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT ADAUSDT DOGEUSDT LINKUSDT AVAXUSDT DOTUSDT LTCUSDT NEARUSDT ATOMUSDT"
+      OOS_LIMIT_15M: ${{ github.event.inputs.limit_15m || '17280' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Exact candidate SHA
+        run: |
+          echo "candidate_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-python@v5
         with:
@@ -37,67 +116,205 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Replay accounting, clock-parity and robustness unit tests
+      - name: Replay accounting, clock-parity, research and gate unit tests
         run: |
           python -m unittest tests.test_nexus_oos_edge_gate -v
           python -m unittest tests.test_nexus_oos_real_replay -v
           python -m unittest tests.test_nexus_oos_replay_full_clock -v
           python -m unittest tests.test_nexus_oos_robustness -v
+          python -m unittest tests.test_nexus_oos_promotion_gate -v
+          python -m unittest tests.test_nexus_oos_research_pipeline -v
+          python -m unittest tests.test_nexus_oos_dependence_and_portfolio -v
+          python -m unittest tests.test_nexus_oos_execution_parity -v
+          python -m unittest tests.test_nexus_oos_censoring_and_horizon -v
+          python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v
+          python -m unittest tests.test_live_release_evidence -v
+          python -m unittest tests.test_nexus_oos_influence_residual -v
+          python -m unittest tests.test_ai_decision_authority -v
+          python -m unittest tests.test_ai_phase7b -v
+          python -m unittest tests.test_ai_phase7c -v
+          python -m unittest tests.test_ai_phase7d -v
+          python -m unittest tests.test_ai_phase7e -v
 
-      - name: Run real public-market OOS replay
+      - name: Run real public-market OOS replay (research result)
         run: |
           python -m bot.nexus_oos_real_replay_corrected \
-            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
-            --limit-15m 2500 \
+            --symbols $OOS_SYMBOLS \
+            --limit-15m "$OOS_LIMIT_15M" \
+            --policy-manifest research/replay_policy_manifest.json \
+            --candidate-sha "$(git rev-parse HEAD)" \
             --output artifacts/nexus_oos_real_replay.json
 
-      - name: Run paired-bootstrap robustness replay
-        run: |
-          python -m bot.nexus_oos_robustness_replay \
-            --symbols BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT \
-            --limit-15m 2500 \
-            --output artifacts/nexus_oos_robustness.json
-
-      - name: Show evidence reports
+      - name: Show evidence summary
         if: always()
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           from pathlib import Path
-          for name in ('nexus_oos_real_replay.json', 'nexus_oos_robustness.json'):
-              path = Path('artifacts') / name
-              if not path.exists():
-                  print(f'{name}: MISSING')
-                  continue
-              p = json.loads(path.read_text())
-              print(f'===== {name} =====')
-              if name == 'nexus_oos_real_replay.json':
-                  view = {
-                      'status': p.get('status'),
-                      'blockers': p.get('blockers'),
-                      'report': p.get('report'),
-                      'symbols': p.get('symbols'),
-                      'methodology': p.get('methodology'),
-                  }
-              else:
-                  view = {
-                      'status': p.get('status'),
-                      'historical_context_parity_complete': p.get('historical_context_parity_complete'),
-                      'symbols': p.get('symbols'),
-                      'summary': (p.get('robustness') or {}).get('summary'),
-                      'pooled': (p.get('robustness') or {}).get('pooled'),
-                      'promotion_authority': p.get('promotion_authority'),
-                      'execution_effect': p.get('execution_effect'),
-                  }
-              print(json.dumps(view, indent=2, sort_keys=True))
+          path = Path('artifacts') / 'nexus_oos_real_replay.json'
+          if not path.exists():
+              print('nexus_oos_real_replay.json: MISSING')
+              raise SystemExit(0)
+          p = json.loads(path.read_text())
+          c = p.get('candidate_research') or {}
+          pf = dict(p.get('portfolio_replay') or {})
+          pf.pop('equity_curve_daily', None)
+          dep = lambda d: {k: (d or {}).get(k) for k in ('delta_expectancy_r', 'delta_iid_ci', 'delta_block24h_ci', 'delta_block48h_ci', 'delta_block72h_ci', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
+          rp = p.get('replay_parity') or {}
+          lg = p.get('legacy_diagnostic') or {}
+          view = {
+              'candidate_sha': p.get('candidate_sha'),
+              'status': p.get('status'),
+              'research_status': p.get('research_status'),
+              'authority_model': p.get('authority_model'),
+              'blockers': p.get('blockers'),
+              'nexus_threshold_used': p.get('nexus_threshold_used'),
+              'unavailable_symbols': p.get('unavailable_symbols'),
+              'replay_policy_manifest': {k: (p.get('replay_policy_manifest') or {}).get(k) for k in ('policy_source', 'policy_sha256', 'differs_from_code_default')},
+              'policy_parity': p.get('policy_parity'),
+              'policy_provenance': p.get('policy_provenance'),
+              'live_policy_observation': {k: (p.get('live_policy_observation') or {}).get(k) for k in ('status', 'provenance', 'replay_policy_sha', 'live_policy_sha', 'mismatches', 'error')},
+              'replay_parity': {k: rp.get(k) for k in ('exit_parity_complete', 'exit_parity_blocking_rules', 'pretrade_parity_complete', 'pretrade_parity_blocking_gates', 'portfolio_parity_complete', 'tp1_equals_tp2_root_cause')},
+              'methodology': p.get('methodology'),
+              'parity_attribution': p.get('parity_attribution'),
+              'legacy_diagnostic': {'authority': lg.get('authority'), 'status': lg.get('status'), 'blockers': lg.get('blockers'), 'report': lg.get('report')},
+              'symbols': [{k: s.get(k) for k in ('symbol', 'error', 'candles_15m', 'history_days',
+                           'history_start_utc', 'history_end_utc', 'approved', 'rejected',
+                           'candidate_count', 'parity_counts', 'windows')} for s in p.get('symbols') or []],
+              'candidate_research': {
+                  'population_counts': c.get('population_counts'),
+                  'censoring': c.get('censoring'),
+                  'sample_adequacy': c.get('sample_adequacy'),
+                  'research_status': c.get('research_status'),
+                  'performance': c.get('performance'),
+                  'inference': c.get('inference'),
+                  'effective_sample': c.get('effective_sample'),
+                  'temporal_folds': c.get('temporal_folds'),
+                  'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
+                                    for k, v in (c.get('concentration') or {}).items()},
+                  'cost_stress_approved': c.get('cost_stress_approved'),
+                  'ai_meta_model': {k: (c.get('ai_meta_model') or {}).get(k) for k in ('status', 'population', 'hook_profile', 'data_label', 'pooled_test', 'authority_summary', 'dataset_manifest', 'error', 'selection_stability', 'research_promotion_gate', 'portfolio_by_test_fold', 'portfolio_pooled_test')},
+                  'ai_shadow_challenger': {k: ((c.get('ai_meta_model') or {}).get('shadow_challenger') or {}).get(k) for k in ('created', 'reason', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256')},
+                  'ai_shadow_observer': {k: ((c.get('ai_meta_model') or {}).get('shadow_observer') or {}).get(k) for k in ('created', 'reason', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256', 'claims')},
+                  'ai_effective_execution_parity': c.get('ai_effective_execution_parity'),
+                  'ai_meta_model_steps': [{k: s.get(k) for k in ('step', 'train_folds', 'validation_fold', 'test_fold', 'n_train', 'n_validation', 'n_test', 'selected_classifier', 'selected_regressor', 'policy', 'policy_sha256', 'windows', 'test_calibration', 'test_ai_cost_stress', 'test_ai_by_regime', 'test_ai_by_symbol', 'test_ai_approved', 'test_baseline', 'test_nexus_production', 'test_ai_by_direction')} for s in ((c.get('ai_meta_model') or {}).get('steps') or [])],
+                  'ai_authority': {k: {kk: (v or {}).get(kk) for kk in ('mean_r', 'delta', 'authority_status', 'authority_ci_low', 'authority_ci_high', 'residual_dependence_at_longest_usable')} for k, v in (((c.get('ai_meta_model') or {}).get('authority')) or {}).items()},
+                  'loss_decomposition': {'answers': (c.get('loss_decomposition') or {}).get('answers'), 'approved': {k: v for k, v in ((c.get('loss_decomposition') or {}).get('approved') or {}).items() if k in ('by_direction', 'by_regime', 'by_exit_reason', 'by_symbol', 'costs_r', 'by_utc_hour', 'by_holding_hours')}},
+                  'cost_stress_baseline': c.get('cost_stress_baseline'),
+                  'break_even_cost_multiplier': c.get('break_even_cost_multiplier'),
+                  'exit_variants_approved': c.get('exit_variants_approved'),
+                  'exit_reason_mix_approved': c.get('exit_reason_mix_approved'),
+                  'ablation': {k: dep(v) for k, v in (c.get('ablation') or {}).items()},
+                  'context_ablation': {k: dep(v) for k, v in (c.get('context_ablation') or {}).items()},
+                  'threshold_research': c.get('threshold_research'),
+                  'probability_calibration': {k: v for k, v in (c.get('probability_calibration') or {}).items() if k not in ('split',)},
+                  'segments_approved': {k: {b: {m: s.get(m) for m in ('trades', 'net_expectancy_r', 'expectancy_ci_low_r')} for b, s in v.items()}
+                                        for k, v in (c.get('segments_approved') or {}).items()},
+              },
+              'portfolio_replay': pf,
+              'portfolio_replay_legacy': p.get('portfolio_replay_legacy'),
+          }
+          print('```json')
+          print(json.dumps(view, indent=2, sort_keys=True, default=str))
+          print('```')
           PY
+
+      - name: AI operation readiness (sanitized)
+        if: always()
+        run: |
+          python -m bot.ai.readiness --artifact artifacts/nexus_oos_real_replay.json \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --output artifacts/AI_OPERATION_READINESS.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: AI hook evidence (compact)
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path('artifacts') / 'nexus_oos_real_replay.json'
+          if not p.exists():
+              print('replay artifact MISSING'); raise SystemExit(0)
+          a = json.loads(p.read_text()); c = a.get('candidate_research') or {}; ai = c.get('ai_meta_model') or {}
+          g = ai.get('research_promotion_gate') or {}
+          rec = g.get('recomputed') or {}
+          def auth(x):
+              x = x or {}
+              return {k: x.get(k) for k in ('status', 'ci', 'point_estimate', 'n_resampling_units', 'n_a_active_blocks', 'n_b_active_blocks', 'a_active_adequate')}
+          view = {
+              'candidate_sha': a.get('candidate_sha'),
+              'hook_population_counts': (c.get('population_counts') or {}).get('ai_hook_population'),
+              'ai_status': ai.get('status'), 'population': ai.get('population'), 'hook_profile': ai.get('hook_profile'),
+              'dataset_manifest': ai.get('dataset_manifest'),
+              'folds': ai.get('folds'),
+              'steps': [{k: s.get(k) for k in ('step', 'n_train', 'n_validation', 'n_test', 'selected_classifier', 'selected_regressor', 'policy', 'policy_sha256', 'test_ai_approved', 'test_baseline', 'test_nexus_production')} | {'test_calibration': {k: (s.get('test_calibration') or {}).get(k) for k in ('brier', 'brier_base_rate', 'log_loss', 'ece', 'beats_base_rate')}} for s in ai.get('steps') or []],
+              'selection_stability': ai.get('selection_stability'),
+              'pooled_test': {k: (ai.get('pooled_test') or {}).get(k) for k in ('ai_approved', 'baseline', 'nexus_production')},
+              'authority_recomputed': {'model': rec.get('model'), 'ai_expectancy': auth(rec.get('ai_expectancy')), 'ai_uplift': auth(rec.get('ai_uplift'))},
+              'ai_gate': {k: g.get(k) for k in ('verdict', 'blockers', 'components', 'required_portfolio', 'ai_hook_edge', 'ai_effective_execution_parity', 'ai_effective_execution_edge', 'live_historical_promotion')},
+              'hook_policy_portfolio_pooled': ai.get('portfolio_pooled_test'),
+              'downstream_filtered_portfolio_pooled': ai.get('downstream_filtered_portfolio_pooled_test'),
+              'shadow_challenger': {k: (ai.get('shadow_challenger') or {}).get(k) for k in ('created', 'reason', 'bundle_sha256')},
+              'shadow_observer': {k: (ai.get('shadow_observer') or {}).get(k) for k in ('created', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256', 'claims', 'reason')},
+          }
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Export and verify AI shadow observer bundle
+        if: always()
+        run: |
+          python -m bot.ai.bundle_export --artifact artifacts/nexus_oos_real_replay.json \
+            --out artifacts/ai_shadow_observer_bundle --candidate-sha "$(git rev-parse HEAD)" \
+            --deploy-manifest artifacts/shadow_observer_deploy_manifest/shadow_observer_deploy_manifest.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          python -m bot.ai.bundle_export --verify artifacts/ai_shadow_observer_bundle | tee -a "$GITHUB_STEP_SUMMARY"
+          python -c "import json; d=json.load(open('artifacts/shadow_observer_deploy_manifest/shadow_observer_deploy_manifest.json')); print(json.dumps({'provenance': d['provenance'], 'pinned_env': d['pinned_env'], 'lifecycle_state': d['lifecycle_state']}, indent=1, sort_keys=True))" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload replay evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nexus-oos-real-replay
-          path: |
-            artifacts/nexus_oos_real_replay.json
-            artifacts/nexus_oos_robustness.json
+          path: artifacts/nexus_oos_real_replay.json
           if-no-files-found: error
+
+      - name: Upload AI readiness
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-operation-readiness
+          path: artifacts/AI_OPERATION_READINESS.json
+          if-no-files-found: warn
+
+      - name: Upload AI shadow observer bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-shadow-observer-bundle
+          path: artifacts/ai_shadow_observer_bundle/
+          if-no-files-found: error
+
+      - name: Upload shadow observer deploy manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-observer-deploy-manifest
+          path: artifacts/shadow_observer_deploy_manifest/
+          if-no-files-found: error
+
+      - name: Live release gate (informational, stage C)
+        if: always()
+        continue-on-error: true
+        run: |
+          # Never passes from CI: no trusted control-plane source and no Stage-C
+          # evidence envelope exist here. Reported so the live blockers are visible.
+          python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json \
+            --gate live | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Research promotion gate (strict)
+        if: always()
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.research_only == 'true' }}
+        run: |
+          python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json --gate research | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

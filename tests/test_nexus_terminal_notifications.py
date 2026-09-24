@@ -66,7 +66,7 @@ class NexusTerminalNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Score candidato: `72.0/100`", text)
         self.assertIn("Score NEXUS: `72.0`", text)
         self.assertIn("R:R líquido: `1.47`", text)
-        self.assertIn("EV: `+0.120%`", text)
+        self.assertIn("EV heur.: `+0.120%`", text)
         self.assertIn("Nenhuma ordem foi enviada", text)
 
     async def test_early_rr_veto_never_reports_fake_zero_metrics(self):
@@ -98,10 +98,10 @@ class NexusTerminalNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Score NEXUS: `não calculado (veto anterior ao score final)`", text)
         self.assertIn("Confiança: `81.0%`", text)
         self.assertIn("R:R líquido: `1.33`", text)
-        self.assertIn("EV: `—`", text)
+        self.assertIn("EV heur.: `—`", text)
         self.assertNotIn("Score final: `0.0/100`", text)
         self.assertNotIn("R:R líquido: `0.00`", text)
-        self.assertNotIn("EV: `+0.000%`", text)
+        self.assertNotIn("EV heur.: `+0.000%`", text)
 
     async def test_early_rr_veto_rewrites_ai_decision_log_truthfully(self):
         decision = SimpleNamespace(

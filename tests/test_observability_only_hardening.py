@@ -1,4 +1,3 @@
-import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -153,57 +152,17 @@ class StrategyStopGeometryObservabilityTests(unittest.TestCase):
 
 
 class FinalLossObservabilityTests(unittest.TestCase):
-    @staticmethod
-    def _legacy_validate(qty, entry, stop, direction, leverage, cost_fraction):
-        values = (qty, entry, stop, leverage, cost_fraction)
-        if any(isinstance(v, bool) or not math.isfinite(float(v)) for v in values):
-            raise ValueError("nonfinite loss budget")
-        qty, entry, stop, leverage, cost_fraction = map(float, values)
-        if min(qty, entry, stop, leverage) <= 0 or cost_fraction < 0:
-            raise ValueError("invalid loss budget")
-        if not ((direction == "LONG" and stop < entry) or (direction == "SHORT" and stop > entry)):
-            raise ValueError("invalid stop direction")
-        margin = qty * entry / leverage
-        projected = qty * (abs(entry - stop) + entry * cost_fraction)
-        limit = margin * 0.50
-        if projected > limit + max(1e-12, limit * 1e-12):
-            raise ValueError("projected loss exceeds 50pct entry margin")
-        return projected, limit
+    """Telemetry for the equity-based loss budget (budget = equity * risk_pct)."""
 
-    def test_validate_is_behaviorally_equivalent_to_pre_patch_formula(self):
-        cases = [
-            (5, 100, 99.5027, "LONG", 50, .0022),
-            (5, 100, 99.12, "LONG", 50, .0032),
-            (.001, 100, 98, "LONG", 50, .0022),
-            (7, 100, 100.78, "SHORT", 50, .0022),
-            (5, 100, 101, "LONG", 50, .0022),
-        ]
-        for args in cases:
-            try:
-                expected = self._legacy_validate(*args)
-                expected_error = None
-            except ValueError as exc:
-                expected = None
-                expected_error = str(exc)
-            try:
-                actual = loss_budget.validate(*args)
-                actual_error = None
-            except ValueError as exc:
-                actual = None
-                actual_error = str(exc)
-            self.assertEqual(actual_error, expected_error)
-            if expected is not None:
-                self.assertAlmostEqual(actual[0], expected[0])
-                self.assertAlmostEqual(actual[1], expected[1])
-
-    def test_ada_like_block_exposes_normalized_arithmetic(self):
-        metrics = loss_budget.measure(5, 100, 99.12, "LONG", 50, .0032)
+    def test_block_exposes_equity_normalized_arithmetic(self):
+        metrics = loss_budget.measure(5, 100, 99.12, "LONG", 50, .0032, equity=100, risk_pct=.01)
         self.assertAlmostEqual(metrics["stop_fraction"] * 100, .88, places=8)
-        self.assertAlmostEqual(metrics["projected_loss_pct_notional"], 1.20, places=8)
-        self.assertAlmostEqual(metrics["allowed_loss_pct_notional"], 1.00, places=8)
-        self.assertAlmostEqual(metrics["headroom_pct"], -.20, places=8)
-        with self.assertRaisesRegex(ValueError, "projected loss exceeds 50pct entry margin"):
-            loss_budget.validate(5, 100, 99.12, "LONG", 50, .0032)
+        self.assertAlmostEqual(metrics["projected_loss"], 6.0, places=8)
+        self.assertAlmostEqual(metrics["loss_limit"], 1.0, places=8)
+        self.assertAlmostEqual(metrics["projected_loss_pct_equity"], 6.0, places=8)
+        self.assertAlmostEqual(metrics["headroom_usdt"], -5.0, places=8)
+        with self.assertRaisesRegex(ValueError, "projected loss exceeds equity risk budget"):
+            loss_budget.validate(5, 100, 99.12, "LONG", 50, .0032, equity=100, risk_pct=.01)
 
         log = _Log()
         loss_budget.emit_telemetry(
@@ -211,81 +170,99 @@ class FinalLossObservabilityTests(unittest.TestCase):
             stage="FINAL_SIZING_INVARIANT", qty=5, entry=100, stop=99.12,
             direction="LONG", leverage=50, cost_fraction=.0032,
             result="BLOCK",
-            specific_reason="projected_loss_exceeds_50pct_entry_margin",
-            risk_v3_advisory_qty=.25,
+            specific_reason="projected_loss_exceeds_equity_risk_budget",
+            equity=100, risk_pct=.01, risk_v3_qty=.25,
         )
         msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("result=BLOCK", msg)
-        self.assertIn("specific_reason=projected_loss_exceeds_50pct_entry_margin", msg)
-        self.assertIn("qty=5", msg)
-        self.assertIn("risk_v3_advisory_qty=0.25", msg)
-        self.assertIn("allowed_loss_pct_notional=1.00000000", msg)
-        self.assertIn("projected_loss_pct_notional=1.20000000", msg)
-        self.assertIn("headroom_pct=-0.20000000", msg)
+        self.assertIn("specific_reason=projected_loss_exceeds_equity_risk_budget", msg)
+        self.assertIn("qty_authority=RISK_POLICY_MIN_OF_CAPS", msg)
+        self.assertIn("risk_v3_qty=0.25", msg)
+        self.assertIn("budget_basis=EQUITY_RISK_PCT", msg)
+        self.assertIn("allowed_loss_pct_equity=1.00000000", msg)
 
-    def test_major_like_pass_exposes_positive_headroom(self):
-        metrics = loss_budget.measure(5, 100, 99.5027, "LONG", 50, .0022)
-        self.assertAlmostEqual(metrics["projected_loss_pct_notional"], .7173, places=8)
-        self.assertAlmostEqual(metrics["allowed_loss_pct_notional"], 1.0, places=8)
-        self.assertGreater(metrics["headroom_pct"], 0)
-        before = loss_budget.validate(5, 100, 99.5027, "LONG", 50, .0022)
-
+    def test_pass_exposes_positive_headroom(self):
+        metrics = loss_budget.measure(0.1, 100, 99.5027, "LONG", 50, .0022, equity=100, risk_pct=.01)
+        self.assertGreater(metrics["headroom_usdt"], 0)
+        before = loss_budget.validate(0.1, 100, 99.5027, "LONG", 50, .0022, equity=100, risk_pct=.01)
         log = _Log()
         loss_budget.emit_telemetry(
             log, symbol="BTCUSDT", setup_id="BTCUSDT:LONG:MOMENTUM:1",
-            stage="FRESH_PREDISPATCH_RECHECK", qty=5, entry=100, stop=99.5027,
+            stage="FRESH_PREDISPATCH_RECHECK", qty=0.1, entry=100, stop=99.5027,
             direction="LONG", leverage=50, cost_fraction=.0022,
-            result="PASS", specific_reason="within_50pct_entry_margin",
+            result="PASS", specific_reason="within_equity_risk_budget",
+            equity=100, risk_pct=.01,
         )
-        after = loss_budget.validate(5, 100, 99.5027, "LONG", 50, .0022)
+        after = loss_budget.validate(0.1, 100, 99.5027, "LONG", 50, .0022, equity=100, risk_pct=.01)
         self.assertEqual(before, after)
         msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FRESH_PREDISPATCH_RECHECK", msg)
         self.assertIn("result=PASS", msg)
-        self.assertIn("headroom_pct=0.28270000", msg)
 
-    def test_telemetry_failure_does_not_change_validation(self):
+    def test_invalid_telemetry_input_is_reported_not_swallowed(self):
+        log = _Log()
+        loss_budget.emit_telemetry(
+            log, symbol="BTCUSDT", setup_id="x", stage="FINAL_SIZING_INVARIANT",
+            qty=float("nan"), entry=100, stop=99, direction="LONG", leverage=50,
+            cost_fraction=.0022, result="BLOCK", specific_reason="nonfinite_loss_budget",
+            equity=100, risk_pct=.01,
+        )
+        msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
+        self.assertIn("telemetry_error=ValueError", msg)
+        self.assertIn("specific_reason=nonfinite_loss_budget", msg)
+
+    def test_logging_failure_propagates_instead_of_being_silently_dropped(self):
         class BrokenLog:
             def info(self, *args, **kwargs):
                 raise RuntimeError("logging down")
             def warning(self, *args, **kwargs):
                 raise RuntimeError("logging down")
 
-        expected = loss_budget.validate(5, 100, 99.5027, "LONG", 50, .0022)
-        loss_budget.emit_telemetry(
-            BrokenLog(), symbol="BTCUSDT", setup_id="x",
-            stage="FINAL_SIZING_INVARIANT", qty=5, entry=100, stop=99.5027,
-            direction="LONG", leverage=50, cost_fraction=.0022,
-            result="PASS", specific_reason="within_50pct_entry_margin",
-        )
+        expected = loss_budget.validate(0.1, 100, 99.5027, "LONG", 50, .0022, equity=100, risk_pct=.01)
+        with self.assertRaises(RuntimeError):
+            loss_budget.emit_telemetry(
+                BrokenLog(), symbol="BTCUSDT", setup_id="x",
+                stage="FINAL_SIZING_INVARIANT", qty=0.1, entry=100, stop=99.5027,
+                direction="LONG", leverage=50, cost_fraction=.0022,
+                result="PASS", specific_reason="within_equity_risk_budget",
+                equity=100, risk_pct=.01,
+            )
         self.assertEqual(
-            loss_budget.validate(5, 100, 99.5027, "LONG", 50, .0022),
+            loss_budget.validate(0.1, 100, 99.5027, "LONG", 50, .0022, equity=100, risk_pct=.01),
             expected,
         )
 
 
 class FinalSizingTelemetryTests(unittest.TestCase):
     def setUp(self):
-        self.old_leverage = cfg.LEVERAGE
+        self.old = {k: getattr(cfg, k) for k in ("LEVERAGE", "MAX_RISK_PCT", "MAX_MARGIN_PCT")}
         cfg.LEVERAGE = 50
+        cfg.MAX_RISK_PCT = 0.01
+        cfg.MAX_MARGIN_PCT = 0.50
 
     def tearDown(self):
-        cfg.LEVERAGE = self.old_leverage
+        for k, v in self.old.items():
+            setattr(cfg, k, v)
 
-    def _exercise(self, stop):
+    def _exercise(self, stop, *, risk_qty=.25, confirmed=True):
+        from bot.professional_risk import CapitalState
+
         class EngineModule:
             pass
 
         info = {"multiplier": "0.001", "lotSize": "1", "minQty": "1", "minNotional": "0"}
         EngineModule.minimum_base_quantity = lambda info, price: .001
         EngineModule._final_sizing_invariants_installed = False
-        risk = SimpleNamespace(size=lambda *args, **kwargs: .25)
+        snapshot = SimpleNamespace(
+            capital=CapitalState(equity=20.0, available_collateral=20.0), confirmed=confirmed,
+        )
+        risk = SimpleNamespace(size=lambda *args, **kwargs: risk_qty, professional_snapshot=snapshot)
         engine = SimpleNamespace(
             paper_trade=False,
             pilot=SimpleNamespace(enabled=True),
             _pilot_available_balance=20.0,
             risk=risk,
-            instruments={},
+            instruments={"TESTUSDT": info},
             positions={},
         )
         signal = SimpleNamespace(
@@ -308,26 +285,24 @@ class FinalSizingTelemetryTests(unittest.TestCase):
             pilot_cap._PILOT_ENGINE.reset(token_engine)
         return qty, stored, log
 
-    def test_final_sizing_block_logs_operator_qty_not_risk_advisory_qty(self):
-        qty, stored, log = self._exercise(99.12)
+    def test_final_sizing_block_logs_reason_and_setup(self):
+        qty, stored, log = self._exercise(99.6, confirmed=False)
         self.assertEqual(qty, 0.0)
         self.assertEqual(stored, 0.0)
-        msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
-        self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
+        msg = [m for _, m in log.rendered() if "[FINAL_SIZING_INVARIANT]" in m][-1]
         self.assertIn("result=BLOCK", msg)
-        self.assertIn("qty=5", msg)
-        self.assertIn("qty_authority=FINAL_OPERATOR_QTY", msg)
-        self.assertIn("risk_v3_advisory_qty=0.25", msg)
-        self.assertIn("risk_v3_qty_authority=NON_AUTHORITATIVE", msg)
+        self.assertIn("setup_id=TESTUSDT:LONG:MOMENTUM:1", msg)
+        self.assertIn("reason=capital_snapshot_unconfirmed", msg)
 
-    def test_final_sizing_pass_preserves_operator_quantity(self):
+    def test_final_sizing_pass_is_risk_authoritative(self):
         qty, stored, log = self._exercise(99.6)
-        self.assertEqual(qty, 5.0)
-        self.assertEqual(stored, 5.0)
+        self.assertGreater(qty, 0.0)
+        self.assertLessEqual(qty, .25)
+        self.assertEqual(qty, stored)
         msg = [m for _, m in log.rendered() if "[FINAL_LOSS_BUDGET]" in m][0]
         self.assertIn("stage=FINAL_SIZING_INVARIANT", msg)
         self.assertIn("result=PASS", msg)
-        self.assertIn("qty=5", msg)
+        self.assertIn("budget_basis=EQUITY_RISK_PCT", msg)
 
 
 if __name__ == "__main__":

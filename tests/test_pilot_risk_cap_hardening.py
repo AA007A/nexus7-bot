@@ -35,9 +35,22 @@ class _Pilot:
 
 
 class _Risk:
-    def __init__(self, qty):
+    """Risk double with a confirmed capital snapshot.
+
+    Equity is large enough that the fixed test quantity sits inside the 1%
+    equity stop-risk budget, so these tests exercise market-quality gating.
+    ``RiskBudgetRecheckTests`` covers the budget itself.
+    """
+
+    def __init__(self, qty, equity=100_000.0):
+        from types import SimpleNamespace
+        from bot.professional_risk import CapitalState
         self.qty = qty
         self.calls = []
+        self.professional_snapshot = SimpleNamespace(
+            capital=CapitalState(equity=equity, available_collateral=equity),
+            confirmed=True,
+        )
 
     def size(self, symbol, entry, instruments, size_mult=1.0, open_positions=None):
         self.calls.append((symbol, entry, instruments, open_positions))
@@ -287,6 +300,44 @@ class PilotRiskCapEngineOrderRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance.refresh_calls, 2)
         self.assertEqual(instance.client.ticker_calls, 1)
         self.assertEqual(instance.client.book_calls, 1)
+        self.assertEqual(instance.client.place_calls, 0)
+
+
+class RiskBudgetRecheckTests(PilotRiskCapLiveParityTests):
+    """The fresh-price recheck enforces the equity budget, not 50% of margin."""
+
+    async def test_good_market_blocks_when_quantity_exceeds_equity_budget(self):
+        original = _Risk.__init__
+
+        def small_equity(self, qty, equity=100_000.0):
+            # qty=10 @100 with a 0.4% stop loses >= 4 USDT; 1% of 100 = 1 USDT.
+            original(self, qty, equity=100.0)
+        _Risk.__init__ = small_equity
+        try:
+            instance, result = await self._exercise(
+                ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+                book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+            )
+        finally:
+            _Risk.__init__ = original
+        self.assertIsNone(result)
+        self.assertEqual(instance.client.place_calls, 0)
+
+    async def test_unconfirmed_capital_blocks_recheck(self):
+        original = _Risk.__init__
+
+        def unconfirmed(self, qty, equity=100_000.0):
+            original(self, qty, equity=equity)
+            self.professional_snapshot.confirmed = False
+        _Risk.__init__ = unconfirmed
+        try:
+            instance, result = await self._exercise(
+                ticker={"bid": 99.98, "ask": 100.02, "lastPrice": 100.0},
+                book={"b": [[99.98, 100]], "a": [[100.02, 100]]},
+            )
+        finally:
+            _Risk.__init__ = original
+        self.assertIsNone(result)
         self.assertEqual(instance.client.place_calls, 0)
 
 

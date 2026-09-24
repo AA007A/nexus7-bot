@@ -12,6 +12,20 @@ PILOT_ENABLED = os.environ.get("REAL_TRADING_PILOT", "").strip().lower() == "tru
 PILOT_RELEASE_TOKEN = "I_APPROVE_TWO_LIVE_PILOT_ORDERS"
 
 
+def drawdown_blocks_new_entries(engine) -> bool:
+    """Canonical drawdown gate for new entries, independent of DRAWDOWN_MODE.
+
+    ``DRAWDOWN_MODE=ADVISORY`` and operator overrides only affect telemetry;
+    they can never turn a drawdown breach into new-entry authority.
+    """
+    from bot.config import cfg
+    from bot.risk_policy import drawdown_entry_decision
+    if getattr(engine, "_drawdown_hard_gate_active", False):
+        return True
+    drawdown = getattr(getattr(engine, "risk", None), "drawdown", None)
+    return not drawdown_entry_decision(drawdown, cfg.MAX_DRAWDOWN).can_open
+
+
 def _paper_trade_enabled() -> bool:
     return os.environ.get("PAPER_TRADE", "true").strip().lower() == "true"
 
@@ -136,7 +150,7 @@ class PilotGuard:
             risk = getattr(engine, "risk", None)
             if risk is None or not getattr(risk, "_ready", False):
                 r.append("9_RISK: RiskManager não inicializado")
-            if getattr(engine, "_drawdown_hard_gate_active", False):
+            if drawdown_blocks_new_entries(engine):
                 r.append("9B_DRAWDOWN: HARD_GATE ativo; novas entradas bloqueadas")
 
             if ai_decision is None:

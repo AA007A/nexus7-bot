@@ -1,0 +1,157 @@
+{
+  "aggregate_bootstrap_verifier": null,
+  "ai_effective_execution_edge": "BLOCK",
+  "ai_effective_execution_parity": "INCOMPLETE",
+  "ai_hook_edge": "BLOCK",
+  "ai_live_historical_promotion": {
+    "blockers": [
+      "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE",
+      "AI_META_MODEL_STATUS_MISSING"
+    ],
+    "verdict": "BLOCK"
+  },
+  "ai_research_promotion_gate": {
+    "blockers": [
+      "AI_META_MODEL_STATUS_MISSING"
+    ],
+    "components": {
+      "AI_CALIBRATION": "BLOCK",
+      "AI_CONCENTRATION": "BLOCK",
+      "AI_COST_STRESS": "BLOCK",
+      "AI_EXPECTANCY_AUTHORITY": "BLOCK",
+      "AI_PORTFOLIO_ROBUSTNESS": "BLOCK",
+      "AI_UPLIFT_AUTHORITY": "BLOCK",
+      "AI_WINDOWS": "BLOCK"
+    },
+    "recomputed": {},
+    "verdict": "BLOCK"
+  },
+  "ai_runtime_hook_population": {
+    "counts": null,
+    "definition": null,
+    "profile": null
+  },
+  "ai_version": "NEXUS7_AI_DECISION_AUTHORITY_V2",
+  "candidate_sha": null,
+  "components": {
+    "AI_CALIBRATION": "BLOCK",
+    "AI_COST_STRESS": "BLOCK",
+    "AI_EXPECTANCY_AUTHORITY": "BLOCK",
+    "AI_PORTFOLIO_ROBUSTNESS": "BLOCK",
+    "AI_RESEARCH_ARTIFACT_AUTHENTICATED": "BLOCK",
+    "AI_RESEARCH_PROMOTION": "BLOCK",
+    "AI_UPLIFT_AUTHORITY": "BLOCK"
+  },
+  "decision_policy_version": "NEXUS7_AI_DECISION_POLICY_V2",
+  "durable_ai_journal": "DATABASE_AI_DECISIONS_TABLE",
+  "engine_integration": "WIRED_PRE_TRADE_AFTER_NEXUS_DEFAULT_OFF",
+  "execution_mode_support": {
+    "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C_AND_AI_IDENTITY",
+    "OFF": "DEFAULT_NO_OP",
+    "PAPER": "CODE_READY_REQUIRES_PAPER_TRADE_ENGINE",
+    "SHADOW": "AI_HAS_NO_ORDER_AUTHORITY_IN_ENGINE; forward evidence only from the isolated observer (bot.ai.shadow_observer)"
+  },
+  "feature_schema": {
+    "live_only_excluded": [
+      "funding_rate",
+      "open_interest_delta",
+      "orderbook_imbalance"
+    ],
+    "model_features": [
+      "ret_1",
+      "ret_4",
+      "ret_16",
+      "atr_pct_14",
+      "realized_vol_32",
+      "ema20_ema50_gap",
+      "ema20_slope_8",
+      "rsi_14",
+      "adx_14",
+      "volume_multiple_20",
+      "body_ratio",
+      "range_position_32",
+      "h1_trend_slope_12",
+      "h4_trend_slope_6",
+      "h1_realized_vol_24",
+      "direction_long",
+      "strategy_score",
+      "planned_rr",
+      "stop_distance_pct",
+      "cost_fraction",
+      "nexus_confidence",
+      "hour_sin",
+      "hour_cos",
+      "adx_14__missing",
+      "volume_multiple_20__missing",
+      "body_ratio__missing",
+      "range_position_32__missing",
+      "h1_trend_slope_12__missing",
+      "h4_trend_slope_6__missing",
+      "h1_realized_vol_24__missing",
+      "direction_long__missing",
+      "strategy_score__missing",
+      "planned_rr__missing",
+      "stop_distance_pct__missing",
+      "cost_fraction__missing",
+      "nexus_confidence__missing",
+      "hour_sin__missing",
+      "hour_cos__missing"
+    ],
+    "sha256": "ae0f97b06f39028ab5858dbfde3127d567f1b6b7f666fa8109083b5277e739f3",
+    "version": "NEXUS7_AI_FEATURES_V3"
+  },
+  "forward_paper_evidence": {
+    "contract": "FORWARD_PAPER_EVIDENCE_V1",
+    "contract_sha256": "f7eca124520a7c9c34b09e38d5392618efeb694f6ccc0641106854464f194308",
+    "reason": "no forward window observed yet",
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "forward_shadow_evidence": {
+    "contract": "FORWARD_SHADOW_EVIDENCE_V3",
+    "contract_sha256": "8d90f1d8cad8329ac42827cd87897e095d555275c1e63b74951bf4cbb050a522",
+    "reason": "no forward window observed yet",
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "halt_authority": "UNIFIED_HALT_CONTROLLER_OPERATOR_RECOVER_ONLY",
+  "known_blockers": [
+    "AI_CALIBRATION_BLOCK",
+    "AI_COST_STRESS_BLOCK",
+    "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE",
+    "AI_EXPECTANCY_AUTHORITY_BLOCK",
+    "AI_PORTFOLIO_ROBUSTNESS_BLOCK",
+    "AI_RESEARCH_ARTIFACT_AUTHENTICATED_BLOCK",
+    "AI_RESEARCH_PROMOTION_BLOCK",
+    "AI_UPLIFT_AUTHORITY_BLOCK",
+    "NO_FORWARD_PAPER_EVIDENCE",
+    "NO_FORWARD_SHADOW_EVIDENCE",
+    "NO_LIVE_CHAMPION",
+    "STAGE_C_EVIDENCE_NOT_AVAILABLE"
+  ],
+  "live_status": "BLOCK",
+  "model_selection_stability": null,
+  "oos_status": {
+    "ai_meta_model_status": "NOT_RUN",
+    "data_label": null,
+    "pooled_test_ai_approved": null,
+    "pooled_test_baseline": null
+  },
+  "restart_ai_reconciliation": "CLIENT_OID_RECONCILE_BEFORE_NEW_ENTRY",
+  "risk_invariant_status": "ENFORCED_BY_AUTHORITY_CHAIN_TESTED",
+  "schema": "NEXUS7_AI_OPERATION_READINESS_V3",
+  "secrets_included": false,
+  "shadow_challenger": {
+    "bundle_sha256": null,
+    "created": false,
+    "decision_policy_sha256": null,
+    "lifecycle_state": null,
+    "reason": null
+  },
+  "shadow_observer": {
+    "bundle_sha256": null,
+    "claims": null,
+    "created": null,
+    "decision_policy_sha256": null,
+    "lifecycle_state": null,
+    "reason": null
+  }
+}

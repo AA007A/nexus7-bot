@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import os
 from typing import Any
 
 from bot.config import cfg
@@ -19,6 +18,7 @@ from bot.kucoin import TAKER_FEE
 from bot.logger import log
 from bot.professional_risk import CapitalState
 from bot.risk_manager_v3 import RiskManagerV3
+from bot import risk_policy
 
 
 @dataclass(frozen=True)
@@ -137,66 +137,114 @@ class ProfessionalRiskAdapter:
 
     def size(self, symbol: str, entry: float, instruments: dict,
              size_mult: float = 1.0, open_positions: dict | None = None) -> float:
-        """Return stop-risk-sized base quantity or fail closed with zero.
+        """Return the canonical risk-authoritative base quantity, or 0 (BLOCK).
 
-        ``open_positions`` is intentionally not used for margin arithmetic here:
-        the authenticated ``CapitalState`` already separates available
-        collateral, position margin, and order margin. The argument remains in
-        the signature solely for compatibility with the canonical engine.
+        Delegates to ``risk_policy.size_new_entry`` which takes the minimum of
+        the equity stop-risk, MAX_MARGIN_PCT collateral, operator margin CAP,
+        liquidation-buffer and portfolio stop-risk caps, floored to the
+        exchange lot. ``open_positions`` feeds the portfolio cap: every open
+        position's projected loss at its current protective stop consumes the
+        aggregate budget (unknown geometry consumes a full per-trade budget).
         """
-        del open_positions
+        decision = self.size_decision(
+            symbol, entry, instruments, size_mult=size_mult, open_positions=open_positions,
+        )
+        return float(decision.qty) if decision is not None and decision.allowed else 0.0
+
+    def size_decision(self, symbol: str, entry: float, instruments: dict,
+                      size_mult: float = 1.0, open_positions: dict | None = None):
         key = str(symbol)
         plan = self._plans.get(key)
         if plan is None:
             log.critical("[RISK_V3_CORE] %s blocked: planned geometry unavailable", key)
-            return 0.0
+            return None
         if not math.isclose(float(entry), plan.entry, rel_tol=1e-9, abs_tol=1e-12):
             log.critical(
                 "[RISK_V3_CORE] %s blocked: entry mismatch planned=%.12g current=%.12g",
                 key, plan.entry, float(entry),
             )
-            return 0.0
+            return None
         if not self._v3.confirmed:
             log.critical("[RISK_V3_CORE] %s blocked: capital state unconfirmed", key)
-            return 0.0
+            return None
 
         try:
             multiplier = float(size_mult)
             if not math.isfinite(multiplier) or multiplier <= 0:
                 raise ValueError("size_mult must be positive and finite")
-            effective_risk_pct = plan.risk_pct * multiplier
-            if not 0 < effective_risk_pct <= 1:
-                raise ValueError("effective risk_pct outside (0,1]")
+            # A multiplier may shrink risk but never grow it past the plan.
+            effective_risk_pct = plan.risk_pct * min(multiplier, 1.0)
 
             self._reconcile_latest_available()
             if not self._v3.confirmed:
                 raise RuntimeError("capital state invalidated during reconciliation")
 
-            expected_slippage = float(
-                os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")
-            )
-            sizing = self._v3.size_for_stop(
-                symbol=key,
+            info = (instruments or {}).get(key)
+            if not isinstance(info, dict) or not info:
+                raise ValueError("instrument metadata unavailable")
+            policy = risk_policy.load_policy(cfg)
+            cost = conservative_cost_fraction(key, policy)
+            open_risks = [
+                risk_policy.projected_open_risk(p, (instruments or {}).get(sym), cost)
+                for sym, p in (open_positions or {}).items()
+            ]
+            capital = self._v3.capital
+            direction = "LONG" if plan.stop < plan.entry else "SHORT"
+            decision = risk_policy.size_new_entry(
+                policy=policy,
+                equity=capital.equity,
+                available=capital.available_collateral,
                 entry=float(entry),
                 stop=plan.stop,
-                instruments=instruments,
+                direction=direction,
+                rules=risk_policy.QuantityRules.from_instrument(info),
+                cost_fraction=cost,
                 risk_pct=effective_risk_pct,
-                leverage=float(cfg.LEVERAGE),
-                fee_rate_per_side=float(TAKER_FEE),
-                expected_slippage_pct=expected_slippage,
+                maintenance_margin_rate=_maintenance_margin_rate(info),
+                open_risks=open_risks,
+                max_adverse_entry_drift=max_adverse_entry_drift(),
             )
-            log.info(
-                "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
-                "projected_stop_loss=%.6f stop_distance_pct=%.6f "
-                "required_margin=%.6f binding=%s decision_effect=NONE",
-                key, sizing.qty, sizing.risk_budget,
-                sizing.projected_stop_loss, sizing.stop_distance_pct,
-                sizing.required_margin, sizing.binding_constraint,
-            )
-            return float(sizing.qty)
+            logger = log.info if decision.allowed else log.warning
+            logger("[RISK_V3_CORE] symbol=%s %s", key, decision.log_fields())
+            return decision
         except Exception as exc:
+            # Fail closed: any sizing failure is a BLOCK for this candidate.
             log.critical(
                 "[RISK_V3_CORE] %s blocked: %s",
                 key, type(exc).__name__,
             )
-            return 0.0
+            return None
+
+
+def conservative_cost_fraction(symbol: str, policy=None) -> float:
+    """Round-trip execution cost per unit of entry notional (the larger model)."""
+    from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+
+    policy = policy or risk_policy.load_policy(cfg)
+    return risk_policy.round_trip_cost_fraction(
+        taker_fee_per_side=float(TAKER_FEE),
+        expected_slippage_pct=float(policy.expected_slippage_pct),
+        modeled_round_trip_fraction=estimated_round_trip_cost_pct(symbol) / 100.0,
+    )
+
+
+def max_adverse_entry_drift() -> float:
+    """Largest adverse signal drift the LIVE pre-dispatch guard accepts."""
+    from bot.pre_dispatch_guard import limits_from_env
+
+    bps = float(limits_from_env().max_signal_drift_bps)
+    if not math.isfinite(bps) or bps < 0:
+        raise ValueError("invalid NEXUS_MAX_SIGNAL_DRIFT_BPS")
+    return bps / 10_000.0
+
+
+def _maintenance_margin_rate(info: dict):
+    for key in ("crossMaintainMarginRate", "contractMaintainMarginReference", "maintainMargin"):
+        value = info.get(key)
+        try:
+            mmr = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(mmr) and 0 < mmr < 1:
+            return mmr
+    return None

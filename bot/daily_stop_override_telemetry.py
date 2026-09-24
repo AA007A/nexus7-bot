@@ -4,9 +4,10 @@ This module changes notification wording only. It does not clear stop state,
 authorize entries, alter PnL, change risk limits, or mutate exchange state.
 Actual entry authorization remains owned by ``bot.durable_daily_stop``.
 
-The historical persistent override is intentionally not considered active here;
-only an exact UTC-day break-glass override may change the operator-facing daily
-stop notification.
+A daily-stop override no longer authorizes entries (override_effect=NONE).
+When ``DAILY_STOP_OVERRIDE_UTC_DAY`` names today, the daily-stop notification
+keeps its "entries blocked" text and adds an explicit note that the requested
+override was ignored, so the operator is never told entries are allowed.
 """
 from __future__ import annotations
 
@@ -19,9 +20,9 @@ _DAILY_STOP_PREFIX = "🛑 *Stop-Loss DIÁRIO*"
 _BLOCKED_TEXT = (
     "Novas entradas bloqueadas; posições abertas continuam sendo gerenciadas e protegidas."
 )
-_ALLOWED_TEXT = (
-    "Novas entradas permanecem liberadas pelo override do operador; "
-    "posições abertas continuam sendo gerenciadas e protegidas."
+_IGNORED_NOTE = (
+    "\nOverride do operador solicitado para hoje foi IGNORADO: overrides não "
+    "autorizam nova exposição; novas entradas continuam bloqueadas."
 )
 
 
@@ -49,7 +50,7 @@ def override_active_now(*, now: datetime | None = None) -> bool:
 
 
 def truthful_message(text: str, *, now: datetime | None = None) -> tuple[str, bool]:
-    """Rewrite only the misleading LIVE daily-stop notification when override is active."""
+    """Annotate the LIVE daily-stop notification when an override was requested."""
     original = str(text)
     if not override_active_now(now=now):
         return original, False
@@ -57,13 +58,7 @@ def truthful_message(text: str, *, now: datetime | None = None) -> tuple[str, bo
         return original, False
     if _BLOCKED_TEXT not in original:
         return original, False
-
-    rewritten = original.replace(
-        _DAILY_STOP_PREFIX,
-        "⚠️ *Limite diário excedido — override do operador ativo*",
-        1,
-    ).replace(_BLOCKED_TEXT, _ALLOWED_TEXT, 1)
-    return rewritten, True
+    return original + _IGNORED_NOTE, True
 
 
 def install(core_engine, log) -> None:
@@ -77,8 +72,8 @@ def install(core_engine, log) -> None:
         rewritten, changed = truthful_message(text)
         if changed:
             log.warning(
-                "[DAILY_STOP_OVERRIDE_ALERT] mode=%s override_active=true entries_blocked=false "
-                "pnl_preserved=true evidence_preserved=true execution_effect=NONE",
+                "[DAILY_STOP_OVERRIDE_ALERT] mode=%s override_requested=true override_effect=NONE "
+                "entries_blocked=true pnl_preserved=true evidence_preserved=true",
                 override_mode_now(),
             )
         return await previous_notify(rewritten)

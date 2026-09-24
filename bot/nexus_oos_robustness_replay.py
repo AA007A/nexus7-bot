@@ -32,7 +32,7 @@ async def run(symbols: list[str], *, limit_15m: int) -> dict:
     reports = []
     async with PublicKuCoinFuturesClient() as client:
         for symbol in symbols:
-            reports.append(await replay_symbol(client, symbol, limit_15m=limit_15m))
+            reports.append(await replay_symbol(client, symbol, limit_15m=limit_15m, research=False))
 
     robustness = analyze_robustness(reports, temporal_folds=4)
     compact_symbols = []
