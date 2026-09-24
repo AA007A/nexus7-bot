@@ -134,13 +134,18 @@ def resolve_one(rec: dict, bars: list, funding_events: list, *, now_ms: int, exi
         "resolved_with_bars_closed_by_ms": int(now_ms)}
 
 
-async def resolve_pending(store, fetch_bars, fetch_funding, *, now_ms: int, exit_policy) -> dict:
-    """One resolver pass over every PENDING candidate (idempotent)."""
-    counts = {"pending": 0, "resolved": 0, "censored_gap": 0, "invalid": 0}
-    for rec in await store.by_status(es.PENDING):
-        bars = await fetch_bars(rec["symbol"], int(rec["event_ts"]), int(now_ms))
-        funding = await fetch_funding(rec["symbol"], int(rec["event_ts"]), int(now_ms))
-        status, outcome = resolve_one(rec, bars, funding, now_ms=now_ms, exit_policy=exit_policy)
+async def resolve_pending(store, window_id: str, fetch_bars, fetch_funding, *, now_ms: int, exit_policy) -> dict:
+    """One resolver pass over the window's PENDING candidates (idempotent).
+    Information is capped at the window's fixed end: bars/funding after
+    window_end_ms are never used."""
+    w = await store.window(window_id)
+    horizon = min(int(now_ms), int(w["window_end_ms"]))
+    counts = {"pending": 0, "resolved": 0, "censored_gap": 0, "invalid": 0, "information_horizon_ms": horizon}
+    for rec in await store.candidates(window_id, es.PENDING):
+        bars = [b for b in await fetch_bars(rec["symbol"], int(rec["event_ts"]), horizon) if _ts(b) + M15 <= horizon]
+        funding = [e for e in (await fetch_funding(rec["symbol"], int(rec["event_ts"]), horizon) or [])
+                   if int(e.get("timepoint", 0) or 0) <= horizon]
+        status, outcome = resolve_one(rec, bars, funding, now_ms=horizon, exit_policy=exit_policy)
         if status == es.PENDING:
             counts["pending"] += 1
             continue
@@ -149,11 +154,25 @@ async def resolve_pending(store, fetch_bars, fetch_funding, *, now_ms: int, exit
     return counts
 
 
-async def close_window(store, *, window_end_ms: int) -> int:
-    """Evidence window end: open candidates are RIGHT_CENSORED_DATA_END (never force-closed)."""
+async def close_window(store, window_id: str, fetch_bars, fetch_funding, *, exit_policy, now_ms: int) -> dict:
+    """At the FIXED end boundary: stop accepting candidates, resolve with
+    information up to window_end_ms only, censor what is still open
+    (RIGHT_CENSORED_DATA_END; never force-closed), mark the window CLOSED.
+    Never starts another window."""
+    w = await store.window(window_id)
+    if w["status"] == es.W_CLOSED:
+        return {"closed": True, "already_closed": True, "window_id": window_id}
+    if w["status"] != es.W_ACTIVE:
+        raise es.WindowRefused(f"window is {w['status']}")
+    end = int(w["window_end_ms"])
+    if int(now_ms) < end:
+        raise es.WindowRefused("window end not reached; no early stopping")
+    res = await resolve_pending(store, window_id, fetch_bars, fetch_funding, now_ms=end, exit_policy=exit_policy)
     n = 0
-    for rec in await store.by_status(es.PENDING):
+    for rec in await store.candidates(window_id, es.PENDING):
         if await store.finalize(rec["candidate_id"], es.CENSORED_END,
-                                {"reason": "WINDOW_END_OPEN_POSITION", "window_end_ms": int(window_end_ms)}):
+                                {"reason": "WINDOW_END_OPEN_POSITION", "window_end_ms": end}):
             n += 1
-    return n
+    await store.update_window(window_id, status=es.W_CLOSED, closed_at_ms=end)
+    return {"closed": True, "already_closed": False, "window_id": window_id, "window_end_ms": end,
+            "resolver": res, "right_censored_data_end": n, "event": "FORWARD_WINDOW_CLOSED"}

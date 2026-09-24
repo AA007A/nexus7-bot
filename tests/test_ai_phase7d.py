@@ -66,12 +66,29 @@ def record(**over):
     return rec
 
 
+def fixture_identity(**over):
+    ident = {"contract_name": fe.SHADOW_CONTRACT["name"], "contract_sha256": fe.CONTRACT_SHA256["SHADOW"],
+             "code_sha": "c" * 40, "bundle_sha256": "b" * 64, "policy_sha256": "p" * 64,
+             "symbol_universe": list(fe.SHADOW_UNIVERSE),
+             "cost_identity": {"taker_fee": 0.0006, "slippage_rates": {s: 0.0005 for s in fe.SHADOW_UNIVERSE}}}
+    ident.update(over)
+    return ident
+
+
+def mk_window(st, start=DECISION_TS, **over):
+    """A committed window whose identity matches record()."""
+    return run(st.create_window(fixture_identity(**over), created_at_ms=start - 1, first_boundary_ms=start,
+                                window_end_ms=start + fe.WINDOW_DURATION_MS,
+                                expected_boundaries=fe.EXPECTED_BOUNDARIES))["window_id"]
+
+
 def observer(store=None, *, p=0.62, gross_r=0.5):
     r, _ = runtime_with_bundle("SHADOW", p=p, gross_r=gross_r)
     st = store or es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
     o = so.ShadowObserver(ENV, client=object(), runtime=r, manifest=rm.load(), store=st)
     o.mmr_proxy[SYM] = 0.004
     o.start()
+    run(o.open_window(DECISION_TS - 1))
     return o, st
 
 
@@ -87,9 +104,9 @@ class ForwardCollection(unittest.TestCase):
         o, st = observer()
         a, b = observe(o), observe(o)
         self.assertEqual(a["stage"], "AI_HOOK", a)
-        self.assertTrue(a["persisted"])
-        self.assertFalse(b["persisted"])                               # same candidate, no duplicate
-        rows = run(st.all_candidates())
+        self.assertEqual(a["persisted"], "INSERTED")
+        self.assertEqual(b["persisted"], "IDEMPOTENT_DUPLICATE")       # same candidate, no duplicate
+        rows = run(st.candidates(o.window["window_id"]))
         self.assertEqual(len(rows), 1)
         rec = rows[0]
         for k in ("candidate_id", "decision_id", "event_ts", "symbol", "direction", "code_sha", "bundle_sha256",
@@ -105,7 +122,8 @@ class ForwardCollection(unittest.TestCase):
         for p, gross, expected in ((0.3, 0.5, "ABSTAIN"), (0.62, 2.0, "TRADE")):
             o, st = observer(p=p, gross_r=gross)
             observe(o)
-            rec = run(st.all_candidates())[0]
+            wid = o.window["window_id"]
+            rec = run(st.candidates(wid))[0]
             self.assertEqual(rec["ai_decision"], expected)
             bars = bars_from(DECISION_TS, [100.0, 100.2, 100.6, 101.0, 101.6, 102.0])
 
@@ -114,9 +132,9 @@ class ForwardCollection(unittest.TestCase):
 
             async def ff(*a):
                 return []
-            res = run(fc.resolve_pending(st, fb, ff, now_ms=DECISION_TS + 7 * M15, exit_policy=EXIT))
+            res = run(fc.resolve_pending(st, wid, fb, ff, now_ms=DECISION_TS + 7 * M15, exit_policy=EXIT))
             self.assertEqual(res["resolved"], 1, (expected, res))
-            done = run(st.all_candidates())[0]
+            done = run(st.candidates(wid))[0]
             self.assertEqual(done["status"], "RESOLVED")
             self.assertIsNotNone(done["outcome"]["modeled_net_r"])
             self.assertEqual(done["ai_decision"], expected)               # never relabelled
@@ -168,7 +186,8 @@ class Resolver(unittest.TestCase):
 
     def test_unresolved_stays_pending_and_window_end_censors(self):
         st = es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
-        run(st.put_candidate(record()))
+        wid = mk_window(st)
+        run(st.put_candidate(wid, record()))
         bars = bars_from(DECISION_TS, [100.0, 100.1, 100.05, 100.1])
 
         async def fb(*a):
@@ -176,10 +195,12 @@ class Resolver(unittest.TestCase):
 
         async def ff(*a):
             return []
-        res = run(fc.resolve_pending(st, fb, ff, now_ms=DECISION_TS + 10 * M15, exit_policy=EXIT))
+        res = run(fc.resolve_pending(st, wid, fb, ff, now_ms=DECISION_TS + 10 * M15, exit_policy=EXIT))
         self.assertEqual(res["pending"], 1)
         self.assertEqual(run(st.get("cand-1"))["status"], "PENDING")
-        self.assertEqual(run(fc.close_window(st, window_end_ms=DECISION_TS + 10 * M15)), 1)
+        closed = run(fc.close_window(st, wid, fb, ff, exit_policy=EXIT,
+                                     now_ms=DECISION_TS + fe.WINDOW_DURATION_MS))
+        self.assertEqual(closed["right_censored_data_end"], 1)
         rec = run(st.get("cand-1"))
         self.assertEqual(rec["status"], "RIGHT_CENSORED_DATA_END")
         self.assertNotIn("modeled_net_r", rec["outcome"])                  # no forced close / no R
@@ -198,7 +219,9 @@ class Resolver(unittest.TestCase):
         o, _ = observer(st)
         observe(o)
         o2, _ = observer(st)                                                # "restart" on the same store
-        self.assertEqual(run(o2.recover()), 1)
+        wid = o2.window["window_id"]
+        self.assertEqual(wid, o.window["window_id"])                        # same durable window
+        self.assertEqual(len(run(st.candidates(wid, "PENDING"))), 1)
         bars = bars_from(DECISION_TS, [100.0, 100.2, 100.6, 101.0, 101.6, 102.0])
 
         async def fb(*a):
@@ -206,31 +229,33 @@ class Resolver(unittest.TestCase):
 
         async def ff(*a):
             return []
-        first = run(fc.resolve_pending(st, fb, ff, now_ms=DECISION_TS + 7 * M15, exit_policy=EXIT))
-        rec = run(st.all_candidates())[0]
-        second = run(fc.resolve_pending(st, fb, ff, now_ms=DECISION_TS + 9 * M15, exit_policy=EXIT))
+        first = run(fc.resolve_pending(st, wid, fb, ff, now_ms=DECISION_TS + 7 * M15, exit_policy=EXIT))
+        rec = run(st.candidates(wid))[0]
+        second = run(fc.resolve_pending(st, wid, fb, ff, now_ms=DECISION_TS + 9 * M15, exit_policy=EXIT))
         self.assertEqual((first["resolved"], second["resolved"], second["pending"]), (1, 0, 0))
-        self.assertEqual(run(st.all_candidates())[0]["record_sha256"], rec["record_sha256"])
+        self.assertEqual(run(st.candidates(wid))[0]["record_sha256"], rec["record_sha256"])
         self.assertFalse(run(st.finalize(rec["candidate_id"], "RESOLVED", {"x": 1})))
 
     def test_tampered_pending_row_fails_verification(self):
         st = es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
-        run(st.put_candidate(record()))
-        status, raw = st.rows["cand-1"]
+        wid = mk_window(st)
+        run(st.put_candidate(wid, record()))
+        w, status, k, raw = st.t["ai_shadow_candidates"]["cand-1"]
         d = json.loads(raw)
         d["entry"] = 90.0
-        st.rows["cand-1"] = (status, json.dumps(d))
+        st.t["ai_shadow_candidates"]["cand-1"] = (w, status, k, json.dumps(d))
         with self.assertRaises(Exception):
-            run(st.by_status("PENDING"))
+            run(st.candidates(wid, "PENDING"))
 
     def test_db_outage_breaks_continuity(self):
         st = es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
+        wid = mk_window(st)
         st.fail = True
         with self.assertRaises(es.EvidenceContinuityBroken):
-            run(st.put_candidate(record()))
+            run(st.put_candidate(wid, record()))
         st.fail = False
         with self.assertRaises(es.EvidenceContinuityBroken):              # halted, not silently resumed
-            run(st.put_candidate(record()))
+            run(st.put_candidate(wid, record()))
 
 
 # ── evidence DB authority ────────────────────────────────────────────────────
@@ -322,14 +347,18 @@ class RealPostgresEvidenceStore(unittest.TestCase):
         async def go():
             st = await es.EvidenceStore.connect(self.env())
             self.assertEqual(st.backend, "postgresql")
-            self.assertTrue(await st.put_candidate(record(candidate_id="pg-1")))
-            self.assertFalse(await st.put_candidate(record(candidate_id="pg-1")))
-            self.assertEqual([r["candidate_id"] for r in await st.by_status("PENDING")], ["pg-1"])
+            wid = (await st.create_window(fixture_identity(), created_at_ms=DECISION_TS - 1,
+                                          first_boundary_ms=DECISION_TS,
+                                          window_end_ms=DECISION_TS + fe.WINDOW_DURATION_MS,
+                                          expected_boundaries=fe.EXPECTED_BOUNDARIES))["window_id"]
+            self.assertEqual(await st.put_candidate(wid, record(candidate_id="pg-1")), "INSERTED")
+            self.assertEqual(await st.put_candidate(wid, record(candidate_id="pg-1")), "IDEMPOTENT_DUPLICATE")
+            self.assertEqual([r["candidate_id"] for r in await st.candidates(wid, "PENDING")], ["pg-1"])
             self.assertTrue(await st.finalize("pg-1", "RESOLVED", {"modeled_net_r": 0.5}))
             self.assertFalse(await st.finalize("pg-1", "RESOLVED", {"modeled_net_r": 9}))
             self.assertEqual((await st.get("pg-1"))["outcome"], {"modeled_net_r": 0.5})
-            await st.heartbeat({"ts": 1, "kind": "SCAN"})
-            self.assertEqual(len(await st.heartbeats()), 1)
+            await st.heartbeat(wid, {"ts": DECISION_TS, "kind": "SCAN"})
+            self.assertEqual(len(await st.heartbeats(wid)), 1)
             # restart: a second connection sees the same durable state
             st2 = await es.EvidenceStore.connect(self.env())
             self.assertEqual((await st2.get("pg-1"))["status"], "RESOLVED")
@@ -444,21 +473,24 @@ class ForwardContractAndArtifact(unittest.TestCase):
                 "hook_profile": hk.PROFILE_LIVE_PILOT, "symbols": list(fe.SHADOW_UNIVERSE)}
 
     def test_v2_contract_uses_the_hook_baseline(self):
-        c = fe.SHADOW_CONTRACT
+        c = fe.SHADOW_CONTRACT_V2                                       # superseded by V3 (Phase 7E)
         self.assertEqual(c["name"], "FORWARD_SHADOW_EVIDENCE_V2")
+        self.assertEqual(fe.SUPERSEDED[c["name"]]["status"], "SUPERSEDED_BEFORE_FIRST_FORWARD_WINDOW")
+        self.assertEqual(fe.SHADOW_CONTRACT["baselines"], c["baselines"])
         self.assertIn("ALL AI_RUNTIME_HOOK_POPULATION_V1", c["baselines"]["HOOK_BASELINE"])
         self.assertIn("NOT MEASURED", c["baselines"]["EFFECTIVE_EXECUTION_BASELINE"])
         self.assertEqual(set(c["products"]), {"FORWARD_OBSERVATION_DATASET", "FROZEN_POLICY_FORWARD_EVIDENCE"})
+        self.assertLessEqual(set(c["products"]), set(fe.SHADOW_CONTRACT["products"]))
         self.assertEqual(len(fe.CONTRACT_SHA256["SHADOW"]), 64)
         cands = self._cands(trades=10)
-        art = fa.build_forward_shadow_artifact(cands, [], identity=self._identity(), window_start_ms=DECISION_TS,
+        art = fa._build_forward_shadow_artifact(cands, [], identity=self._identity(), window_start_ms=DECISION_TS,
                                                window_end_ms=None, safety=self.SAFE, journal_verified=True)
         rs = [x["outcome"]["modeled_net_r"] for x in cands]
         self.assertAlmostEqual(art["FROZEN_POLICY_FORWARD_EVIDENCE"]["hook_baseline_mean_r"], sum(rs) / len(rs))
         self.assertEqual(art["FROZEN_POLICY_FORWARD_EVIDENCE"]["baseline"], "HOOK_BASELINE")
 
     def test_zero_trade_policy_still_builds_the_observation_dataset(self):
-        art = fa.build_forward_shadow_artifact(self._cands(trades=0), [], identity=self._identity(),
+        art = fa._build_forward_shadow_artifact(self._cands(trades=0), [], identity=self._identity(),
                                                window_start_ms=DECISION_TS, window_end_ms=None, safety=self.SAFE,
                                                journal_verified=True)
         self.assertEqual(art["FORWARD_OBSERVATION_DATASET"]["resolved_hook_candidates"], 40)
@@ -466,7 +498,7 @@ class ForwardContractAndArtifact(unittest.TestCase):
         self.assertEqual(art["FROZEN_POLICY_FORWARD_EVIDENCE"]["status"], "INSUFFICIENT_EVIDENCE")
         self.assertIn(art["verdict"], fa.IN_CANDIDATE_VERDICTS)
         self.assertNotEqual(art["verdict"], "PASS")
-        closed = fa.build_forward_shadow_artifact(self._cands(trades=0), [], identity=self._identity(),
+        closed = fa._build_forward_shadow_artifact(self._cands(trades=0), [], identity=self._identity(),
                                                   window_start_ms=DECISION_TS, window_end_ms=DECISION_TS + 40 * 86_400_000,
                                                   safety=self.SAFE, journal_verified=True)
         self.assertEqual(closed["verdict"], "INSUFFICIENT_EVIDENCE")
@@ -474,14 +506,14 @@ class ForwardContractAndArtifact(unittest.TestCase):
     def test_zero_order_violation_or_identity_change_invalidates(self):
         for bad in ({"orders_sent": 1}, {"exchange_credentials_present": True}, {"execution_lease_acquired": True},
                     {"mutating_client_methods": True}):
-            art = fa.build_forward_shadow_artifact(self._cands(), [], identity=self._identity(),
+            art = fa._build_forward_shadow_artifact(self._cands(), [], identity=self._identity(),
                                                    window_start_ms=DECISION_TS, window_end_ms=None,
                                                    safety={**self.SAFE, **bad}, journal_verified=True)
             self.assertEqual(art["verdict"], "BLOCK")
             self.assertIn("ZERO_ORDER_ASSERTION_FAILED", art["blockers"])
         mixed = self._cands()
         mixed[3]["bundle_sha256"] = "x" * 64
-        art = fa.build_forward_shadow_artifact(mixed, [], identity=self._identity(), window_start_ms=DECISION_TS,
+        art = fa._build_forward_shadow_artifact(mixed, [], identity=self._identity(), window_start_ms=DECISION_TS,
                                                window_end_ms=None, safety=self.SAFE, journal_verified=True)
         self.assertIn("IDENTITY_CHANGED_MID_WINDOW", art["blockers"])
 
@@ -514,7 +546,7 @@ class ShadowBundleArtifact(unittest.TestCase):
         self.assertEqual(b.manifest["hook_profile"], hk.TRAINING_PROFILE)
         dm = bx.deploy_manifest(res)
         self.assertFalse(dm["secrets_included"])
-        self.assertEqual(dm["forward_contract"], "FORWARD_SHADOW_EVIDENCE_V2")
+        self.assertEqual(dm["forward_contract"], "FORWARD_SHADOW_EVIDENCE_V3")
         self.assertEqual(dm["symbol_universe"], list(fe.SHADOW_UNIVERSE))
         text = json.dumps(dm)
         for secret in ("postgresql://", "API_SECRET=", "PASSPHRASE="):

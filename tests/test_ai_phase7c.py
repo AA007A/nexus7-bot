@@ -35,7 +35,7 @@ MMR = 0.02
 def market():
     k15 = candles(220, M15, DECISION_TS)
     k1h = candles(120, H1, DECISION_TS, seed=2)
-    k4h = candles(130, H4, DECISION_TS, seed=3)
+    k4h = candles(130, H4, DECISION_TS - DECISION_TS % H4, seed=3)     # 4h bars aligned to UTC 4h
     forming = {"ts": DECISION_TS, "o": k15[-1]["c"], "h": k15[-1]["c"] * 1.01, "l": k15[-1]["c"] * 0.99,
                "c": k15[-1]["c"] * 1.005, "v": 1.0}
     return k15 + [forming], k1h, k4h
@@ -518,6 +518,7 @@ class ShadowObserverIsolation(unittest.TestCase):
         obs = so.ShadowObserver(self.ENV, client=SimpleNamespace(), runtime=r, manifest=rm.load(),
                                 symbols=list(fe.SHADOW_UNIVERSE), store=store)
         obs.start()
+        run(obs.open_window(DECISION_TS - 1))                  # window committed before any candidate
         obs.mmr_proxy[SYM] = 0.004
         m = market()
         with patch("bot.strategy.Analyzer.analyze_mtf", lambda self, *a, **k: signal(sl=99.5, tp=101.5)), \
@@ -526,7 +527,7 @@ class ShadowObserverIsolation(unittest.TestCase):
         self.assertEqual(out["stage"], "AI_HOOK", out)
         self.assertTrue(out["allow"])
         self.assertEqual(obs.orders_sent, 0)
-        rec = run(store.all_candidates())[0]
+        rec = run(store.candidates(obs.window["window_id"]))[0]
         self.assertIn(rec["ai_decision"], ("TRADE", "ABSTAIN"))
         self.assertEqual(rec["hook_profile"], hk.PROFILE_LIVE_PILOT)
         self.assertEqual(rec["status"], "PENDING")

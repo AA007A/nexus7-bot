@@ -134,6 +134,7 @@ jobs:
           python -m unittest tests.test_ai_phase7b -v
           python -m unittest tests.test_ai_phase7c -v
           python -m unittest tests.test_ai_phase7d -v
+          python -m unittest tests.test_ai_phase7e -v
 
       - name: Run real public-market OOS replay (research result)
         run: |

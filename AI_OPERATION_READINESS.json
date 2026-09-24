@@ -107,8 +107,8 @@
     "verdict": "INSUFFICIENT_EVIDENCE"
   },
   "forward_shadow_evidence": {
-    "contract": "FORWARD_SHADOW_EVIDENCE_V2",
-    "contract_sha256": "57a74ba500a6d6f38f3bf4fd0bee6a1a67e5d6b59222ebdf3411b866737eb3b4",
+    "contract": "FORWARD_SHADOW_EVIDENCE_V3",
+    "contract_sha256": "8d90f1d8cad8329ac42827cd87897e095d555275c1e63b74951bf4cbb050a522",
     "reason": "no forward window observed yet",
     "verdict": "INSUFFICIENT_EVIDENCE"
   },

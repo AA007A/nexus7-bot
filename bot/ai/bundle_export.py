@@ -120,6 +120,13 @@ def deploy_manifest(export_result: dict, *, repo_root=".") -> dict:
             "bundle_digest": export_result["bundle_digest"],
             "forward_contract": fe.SHADOW_CONTRACT["name"], "forward_contract_sha256": fe.CONTRACT_SHA256["SHADOW"],
             "symbol_universe": list(fe.SHADOW_UNIVERSE),
+            "symbol_universe_sha256": fe.universe_sha256(fe.SHADOW_UNIVERSE),
+            "forward_window": {"duration_days": fe.WINDOW_DAYS, "expected_boundaries": fe.EXPECTED_BOUNDARIES,
+                               "start": "first 15m boundary after successful startup (derived, not configured)",
+                               "optional_env": "AI_EVIDENCE_NEW_WINDOW_AFTER=<latest window_id> (single-use; "
+                                               "only for a new window after the previous one ended)"},
+            "superseded_contracts": fe.SUPERSEDED,
+            "forward_artifact_export": "python -m bot.ai.forward_artifact --from-evidence-db --output PATH",
             "required_env_names": ["AI_EXECUTION_MODE=SHADOW", "AI_BUNDLE_DIR", "AI_BUNDLE_SHA256", "SHADOW_SYMBOLS",
                                    "EVIDENCE_DATABASE_URL (secret, dedicated PostgreSQL)", "EVIDENCE_DB_AUTHORITY_ID",
                                    "PRODUCTION_DB_AUTHORITY_ID", "PRODUCTION_DB_FINGERPRINT"],

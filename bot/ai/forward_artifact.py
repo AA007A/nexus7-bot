@@ -1,5 +1,13 @@
-"""build_forward_shadow_artifact: FORWARD_SHADOW_EVIDENCE_V2 artifact from the
-durable candidate/outcome rows and observer heartbeats.
+"""FORWARD_SHADOW_EVIDENCE_V3 artifact, derived ONLY from the durable evidence DB.
+
+    build_forward_shadow_artifact_from_store(store)          (library)
+    python -m bot.ai.forward_artifact --from-evidence-db --output PATH   (read-only export)
+
+Window bounds, identity, contract, symbol universe, continuity, candidates,
+boundary journal, heartbeats and coverage all come from the store; nothing
+(bounds, journal_verified, safety) can be supplied by the caller. Every row
+digest, the window identity, boundary uniqueness and heartbeat/window
+binding are re-verified here.
 
 Two separate products, never mixed:
   FORWARD_OBSERVATION_DATASET     all hook candidates (TRADE and ABSTAIN) +
@@ -19,7 +27,7 @@ import math
 from bot.ai import evidence_store as es
 from bot.ai import forward_evidence as fe
 
-SCHEMA = "FORWARD_SHADOW_ARTIFACT_V2"
+SCHEMA = "FORWARD_SHADOW_ARTIFACT_V3"
 IN_CANDIDATE_VERDICTS = ("COLLECTING", "INSUFFICIENT_EVIDENCE", "BLOCK")
 DAY_MS = 86_400_000
 
@@ -77,7 +85,7 @@ def _share(seg):
     return (max(pos) / sum(pos)) if pos else None
 
 
-def build_forward_shadow_artifact(candidates: list, heartbeats: list, *, identity: dict, window_start_ms: int,
+def _build_forward_shadow_artifact(candidates: list, heartbeats: list, *, identity: dict, window_start_ms: int,
                                   window_end_ms: int | None, safety: dict, journal_verified: bool,
                                   continuity_broken: bool = False) -> dict:
     from bot import nexus_oos_inference as inf
@@ -179,3 +187,200 @@ def build_forward_shadow_artifact(candidates: list, heartbeats: list, *, identit
         "blockers": sorted(set(blockers)), "insufficient": sorted(set(insufficient)),
         "verdict": verdict, "final_authority": "PROTECTED_EVALUATOR_ONLY",
     }
+
+
+# ── V3: everything derived from the durable store ───────────────────────────
+def _coverage(window: dict, boundaries: list) -> dict:
+    universe = list(window["identity"]["symbol_universe"])
+    start, end = int(window["window_start_ms"]), int(window["window_end_ms"])
+    expected_b = (end - start) // fe.M15_MS
+    expected_sb = expected_b * len(universe)
+    by = {}
+    for r in boundaries:
+        by[r["status"]] = by.get(r["status"], 0) + 1
+    last = window.get("last_completed_boundary_ms")
+    elapsed_b = 0 if last is None else (int(last) - start) // fe.M15_MS + 1
+    seen = {(int(r["boundary_ms"]), r["symbol"]) for r in boundaries}
+    unaccounted_elapsed = sum(1 for k in range(elapsed_b) for sym in universe
+                              if (start + k * fe.M15_MS, sym) not in seen)
+    processed = sum(by.get(x, 0) for x in fe.PROCESSED_STATUSES)
+    errors = by.get("ERROR", 0)
+    complete_boundaries = sum(1 for k in range(elapsed_b)
+                              if all((start + k * fe.M15_MS, sym) in seen for sym in universe))
+    return {"expected_boundaries": expected_b, "expected_symbol_boundaries": expected_sb,
+            "elapsed_boundaries": elapsed_b, "completed_boundaries": int(window.get("completed_boundaries") or 0),
+            "fully_journaled_boundaries": complete_boundaries,
+            "journaled_symbol_boundaries": len(boundaries), "by_status": dict(sorted(by.items())),
+            "complete_symbol_boundaries": processed, "missing_symbol_boundaries":
+                by.get("DATA_MISSING", 0) + by.get("MISSED", 0), "error_symbol_boundaries": errors,
+            "unaccounted_elapsed_symbol_boundaries": unaccounted_elapsed,
+            "unaccounted_symbol_boundaries": expected_sb - len(boundaries),
+            "coverage_fraction": processed / expected_sb if expected_sb else None,
+            "coverage_fraction_elapsed": processed / (elapsed_b * len(universe)) if elapsed_b else None,
+            "error_fraction": errors / expected_sb if expected_sb else None}
+
+
+def _completeness(cov: dict, *, closed: bool, broken: bool) -> dict:
+    rule = fe.COMPLETENESS_RULE
+    fails = []
+    if broken:
+        fails.append("CONTINUITY_BROKEN")
+    if cov["unaccounted_elapsed_symbol_boundaries"] > 0:
+        fails.append("UNACCOUNTED_SYMBOL_BOUNDARIES")
+    if closed:
+        if cov["unaccounted_symbol_boundaries"] > rule["max_unaccounted_symbol_boundaries"]:
+            fails.append("UNACCOUNTED_SYMBOL_BOUNDARIES_AT_END")
+        if (cov["coverage_fraction"] or 0.0) < rule["min_processed_symbol_boundary_fraction"]:
+            fails.append("PROCESSED_COVERAGE_BELOW_RULE")
+        if (cov["error_fraction"] or 0.0) > rule["max_error_symbol_boundary_fraction"]:
+            fails.append("ERROR_FRACTION_ABOVE_RULE")
+    return {"rule": rule, "evaluated_at_window_end": closed, "failures": sorted(set(fails)),
+            "satisfied": (not fails) if closed else (None if not fails else False)}
+
+
+async def build_forward_shadow_artifact_from_store(store, *, window_id: str | None = None) -> dict:
+    """The only public builder. Bounds/identity/journal status are DERIVED."""
+    from bot.ai.runtime import JournalIntegrityError
+    integrity = []
+    try:
+        windows = await store.windows()                       # every window digest + identity verified
+    except JournalIntegrityError as exc:
+        return {"schema": SCHEMA, "verdict": "BLOCK", "blockers": ["JOURNAL_NOT_VERIFIED"],
+                "integrity_errors": [str(exc)], "final_authority": "PROTECTED_EVALUATOR_ONLY"}
+    if window_id is None:
+        act = [w for w in windows if w["status"] == es.W_ACTIVE]
+        pick = act or sorted(windows, key=lambda w: w["window_start_ms"])[-1:]
+    else:
+        pick = [w for w in windows if w["window_id"] == window_id]
+    if not pick:
+        return {"schema": SCHEMA, "verdict": "INSUFFICIENT_EVIDENCE", "reason": "NO_EVIDENCE_WINDOW",
+                "blockers": [], "final_authority": "PROTECTED_EVALUATOR_ONLY"}
+    w = pick[0]
+    wid = w["window_id"]
+    ident = w["identity"]
+    cands, bnds, hbs = [], [], []
+    try:
+        cands = await store.candidates(wid)
+        bnds = await store.boundaries(wid)
+        hbs = await store.heartbeats(wid)
+    except JournalIntegrityError as exc:
+        integrity.append(str(exc))
+    # identity / binding / uniqueness re-verification (computed, never supplied)
+    for c in cands:
+        if any(c.get(k) != ident.get(v) for k, v in es.CANDIDATE_IDENTITY_FIELDS.items()):
+            integrity.append(f"candidate {c['candidate_id']} identity differs from window")
+        if not (w["window_start_ms"] <= int(c["event_ts"]) < w["window_end_ms"]):
+            integrity.append(f"candidate {c['candidate_id']} outside window bounds")
+    keys = [(int(b["boundary_ms"]), b["symbol"]) for b in bnds]
+    if len(keys) != len(set(keys)):
+        integrity.append("duplicate (boundary, symbol) rows")
+    for b in bnds:
+        if b["symbol"] not in ident["symbol_universe"] or \
+                (int(b["boundary_ms"]) - w["window_start_ms"]) % fe.M15_MS or \
+                not (w["window_start_ms"] <= int(b["boundary_ms"]) < w["window_end_ms"]):
+            integrity.append(f"boundary row {b['boundary_id']} not canonical for the window")
+    for h in hbs:
+        if h.get("window_id") != wid:
+            integrity.append("heartbeat not bound to window")
+    journal_verified = not integrity
+    safeties = [h.get("safety") for h in hbs if h.get("kind") == "SCAN" and h.get("safety")]
+    zero_violation = any(not (s.get("exchange_credentials_present") is False and
+                              s.get("mutating_client_methods") is False and
+                              s.get("execution_lease_acquired") is False and s.get("orders_sent") == 0)
+                         for s in safeties)
+    safety = {"exchange_credentials_present": False, "mutating_client_methods": False,
+              "execution_lease_acquired": False, "orders_sent": 0} if not zero_violation else \
+        {"orders_sent": None, "violation": True}
+    closed = w["status"] == es.W_CLOSED
+    broken = bool(w.get("continuity_broken"))
+    body = _build_forward_shadow_artifact(
+        cands, hbs, identity={**ident, "symbols": ident["symbol_universe"]},
+        window_start_ms=w["window_start_ms"], window_end_ms=w["window_end_ms"] if closed else None,
+        safety=safety, journal_verified=journal_verified, continuity_broken=broken)
+    cov = _coverage(w, bnds)
+    comp = _completeness(cov, closed=closed, broken=broken)
+    blockers = set(body["blockers"])
+    if w["status"] == es.W_INVALID:
+        blockers.add("WINDOW_INVALID_IDENTITY_CHANGE")
+    if ident.get("symbol_universe") != list(fe.SHADOW_UNIVERSE):
+        blockers.add("SYMBOL_UNIVERSE_NOT_PINNED_IN_ORDER")
+    if ident.get("contract_name") != fe.SHADOW_CONTRACT["name"] or \
+            ident.get("contract_sha256") != fe.CONTRACT_SHA256["SHADOW"]:
+        blockers.add("CONTRACT_MISMATCH")
+    obs_valid = journal_verified and not ({"IDENTITY_CHANGED_MID_WINDOW", "WINDOW_INVALID_IDENTITY_CHANGE",
+                                           "CONTRACT_MISMATCH"} & blockers)
+    policy_status = ("INVALID_CONTINUITY" if broken else "INVALID_COVERAGE" if comp["satisfied"] is False
+                     else "PENDING_WINDOW_OPEN" if not closed else "VALID" if obs_valid else "INVALID_JOURNAL")
+    if closed and comp["satisfied"] is False:
+        blockers.add("COMPLETENESS_RULE_FAILED")
+    fpe = dict(body["FROZEN_POLICY_FORWARD_EVIDENCE"])
+    if policy_status not in ("VALID", "PENDING_WINDOW_OPEN"):
+        fpe["status"] = "DISQUALIFIED_" + policy_status
+        fpe["authority"] = {}
+    verdict = "BLOCK" if blockers else "INSUFFICIENT_EVIDENCE" if closed else "COLLECTING"
+    assert verdict in IN_CANDIDATE_VERDICTS
+    return {**body, "FROZEN_POLICY_FORWARD_EVIDENCE": fpe,
+            "window_id": wid, "window_identity": ident, "window_identity_sha256": w["identity_sha256"],
+            "window": {"start_ms": w["window_start_ms"], "end_ms": w["window_end_ms"], "status": w["status"],
+                       "closed": closed, "closed_at_ms": w.get("closed_at_ms"),
+                       "fixed_duration_ms": w["window_end_ms"] - w["window_start_ms"],
+                       "start_source": "DURABLE_WINDOW_ROW", "end_source": "DURABLE_WINDOW_ROW",
+                       "calendar_days": body["window"]["calendar_days"]},
+            "symbols": list(ident["symbol_universe"]),
+            "continuity": {"continuity_broken": broken, "continuity_reason": w.get("continuity_reason"),
+                           "source": "DURABLE_WINDOW_ROW"},
+            "coverage": cov, "completeness": comp,
+            "OBSERVATION_DATASET_VALIDITY": {"journal_verified": journal_verified, "integrity_errors": integrity,
+                                             "valid": obs_valid},
+            "FROZEN_POLICY_EVIDENCE_VALIDITY": {"status": policy_status, "completeness_satisfied": comp["satisfied"],
+                                                "continuity_broken": broken,
+                                                "valid": policy_status == "VALID"},
+            "journal_verified": journal_verified, "journal_verified_source": "COMPUTED_FROM_STORE",
+            "evidence_db": {"authority_id": (store.identity or {}).get("authority_id"),
+                            "fingerprint": (store.identity or {}).get("fingerprint")},
+            "superseded_contracts": fe.SUPERSEDED,
+            "blockers": sorted(blockers), "verdict": verdict}
+
+
+_FORBIDDEN_OUTPUT = ("://", "password", "EVIDENCE_DATABASE_URL", "KUCOIN_API")
+
+
+def sanitized_json(art: dict) -> str:
+    import json
+    text = json.dumps(art, sort_keys=True, indent=2, default=str) + "\n"
+    low = text.lower()
+    bad = [t for t in _FORBIDDEN_OUTPUT if t.lower() in low]
+    if bad:
+        raise ValueError(f"artifact not sanitized: {bad}")
+    return text
+
+
+async def _export(env, output, window_id=None) -> dict:
+    from pathlib import Path
+    store = await es.EvidenceStore.connect(env, read_only=True)
+    try:
+        art = await build_forward_shadow_artifact_from_store(store, window_id=window_id)
+    finally:
+        await store.conn.close()
+    p = Path(output)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(sanitized_json(art), encoding="utf-8")
+    return art
+
+
+def main(argv=None) -> int:
+    import argparse
+    import asyncio
+    import os
+    ap = argparse.ArgumentParser(description="Read-only FORWARD_SHADOW_EVIDENCE_V3 export")
+    ap.add_argument("--from-evidence-db", action="store_true", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--window-id")
+    a = ap.parse_args(argv)
+    art = asyncio.run(_export(dict(os.environ), a.output, a.window_id))
+    print(f"verdict={art['verdict']} window_id={art.get('window_id')} output={a.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

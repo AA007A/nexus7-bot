@@ -327,7 +327,8 @@ Evidence goes only to a dedicated PostgreSQL database, never SQLite and never th
   - `FORWARD_OBSERVATION_DATASET` grows even when the policy abstains.
   - `FROZEN_POLICY_FORWARD_EVIDENCE` covers TRADE candidates only; with zero trades it is INSUFFICIENT_EVIDENCE.
 - **Diagnostic buckets** are predeclared: probability deciles, predicted-net-R buckets, direction, regime and symbol. They are diagnostics only; a challenger designed from this window needs a new untouched window.
-- **Builder:** `build_forward_shadow_artifact` never self-attests PASS; it returns COLLECTING, INSUFFICIENT_EVIDENCE or BLOCK.
+- **Builder:** the (now private) stats builder never self-attests PASS; it returns COLLECTING, INSUFFICIENT_EVIDENCE or BLOCK.
+- **Status:** superseded by V3 before any forward window ran (`SUPERSEDED_BEFORE_FIRST_FORWARD_WINDOW`).
 - **BLOCK conditions:** any zero-order assertion failing, an unverified journal, a continuity break, an identity change or a symbol-universe mismatch.
 - **Symbol universe:** the pinned 12-symbol universe is required.
 
@@ -348,7 +349,44 @@ Evidence goes only to a dedicated PostgreSQL database, never SQLite and never th
 
 `--verify` reloads the bundle through the real `bot.ai.runtime.load_bundle` path, checks the hook profile and runs a deterministic inference. Both artifacts are uploaded by the exact-SHA replay workflow.
 
-## 13. What is not done
+## 13. Phase 7E: prospective window lock, completeness and continuity
+
+### 13.1 `FORWARD_SHADOW_EVIDENCE_V3` (`bot/ai/forward_evidence.py`)
+- **Fixed window:** `window_start` is the first canonical 15m boundary after a successful startup; `window_end = window_start + 30 days` exactly (2,880 boundaries, 34,560 symbol-boundaries).
+- **No flexibility:** no extension, no optional stopping, no caller-supplied bounds. An inadequate sample at the end is INSUFFICIENT_EVIDENCE.
+- **Superseded:** V1 and V2 are marked `SUPERSEDED_BEFORE_FIRST_FORWARD_WINDOW`; zero forward windows ran under them.
+- **Completeness rule** (frozen before deployment):
+  - processed symbol-boundaries ≥ 0.99 of expected;
+  - ERROR ≤ 0.005;
+  - zero unaccounted symbol-boundaries;
+  - no continuity break.
+- **Validity products:** `OBSERVATION_DATASET_VALIDITY` and `FROZEN_POLICY_EVIDENCE_VALIDITY` are separate. Policy evidence is disqualified (its authority CIs removed) when the completeness rule fails.
+
+### 13.2 Durable window (`ai_evidence_windows`, `bot/ai/evidence_store.py`)
+- **Identity:** contract name and sha; code, bundle, policy and feature-schema SHAs; hook population and profile; the ordered universe and its sha; evidence DB id and fingerprint; and the cost identity (taker fee, slippage model version and rates, exit-policy sha, replay-manifest sha).
+- **Window id:** `window_id = sha256(identity_sha256, start, end)`. The record is sealed, and every load verifies both digests.
+- **One ACTIVE window per DB:** enforced by a PostgreSQL partial unique index.
+- **Durable state:** status, `continuity_broken` / `continuity_reason` (never cleared), `last_completed_boundary_ms`, `boundary_in_progress_ms`, completed and missed boundaries, `closed_at_ms`. Immutable fields cannot be updated.
+- **Row binding:** candidates, boundaries and heartbeats reference the window (foreign key) and are refused unless the window is ACTIVE, unbroken, and the timestamp lies within its bounds.
+- **Candidate identity and costs:** candidates must carry the window's code, bundle, policy, schema and hook identity. A cost mismatch breaks continuity (`COST_IDENTITY_MISMATCH`).
+- **Duplicates:** `candidate_payload_sha256` covers every decision-affecting field (it excludes `observed_at_ms`, `decision_latency_ms`, status, outcome and seal).
+  - Same payload → `IDEMPOTENT_DUPLICATE`.
+  - Different payload → `CANDIDATE_RECONSTRUCTION_MISMATCH` (continuity broken).
+- **Isolation:** the store refuses any database with a `trades` table, even an empty one.
+
+### 13.3 Observer (`bot/ai/shadow_observer.py`)
+- **Startup order:** credentials → read-only client → ordered universe → PostgreSQL → isolation → bundle → policy/schema → contract V3 → window committed → market.
+- **Restart:** loads the ACTIVE window and requires an exact identity match. Otherwise the window becomes `INVALID_IDENTITY_CHANGE` and nothing is appended. A new window needs `AI_EVIDENCE_NEW_WINDOW_AFTER=<latest window_id>`.
+- **Boundary journal:** one `ai_shadow_boundaries` row for each of the 12 symbols per boundary. A boundary not evaluated within 5 min is recorded `MISSED` at restart. A crash or outage inside a boundary breaks continuity (`INTERRUPTED_BOUNDARY`), and an in-process DB failure is persisted once the DB answers (`DB_FAILURE`).
+- **Decision candle:** the decision candle (`open_ts == decision_ts`) must exist and gives the ticker open. The previous-close fallback is removed. Stale 15m/1h/4h inputs → `DATA_MISSING` with no evaluation.
+- **Window end:** resolve with information up to `window_end`, censor open candidates (`RIGHT_CENSORED_DATA_END`), set the window `CLOSED`, log `[FORWARD_WINDOW_CLOSED]`, stop. No new window is started.
+
+### 13.4 Artifact (`bot/ai/forward_artifact.py`)
+- **Builder:** `build_forward_shadow_artifact_from_store(store, window_id=None)` is the only public builder. Bounds, identity, contract, universe, continuity, candidates, boundaries, heartbeats and coverage all come from the DB.
+- **Verification:** it re-verifies every digest, the window identity, boundary uniqueness and canonicality, and heartbeat/candidate binding. `journal_verified` is computed.
+- **Export:** `python -m bot.ai.forward_artifact --from-evidence-db --output PATH` connects read-only. The output is sanitized (no URL or credential) and byte-reproducible.
+
+## 14. What is not done
 - **Deployment:** nothing is deployed, and no Railway variable has changed. `AI_EXECUTION_MODE` stays unset (OFF) in production.
 - **LIVE:** no LIVE_CHAMPION exists, and no trusted Stage-C or AI-identity provider is implemented in-candidate.
 - **Forward evidence:** no forward SHADOW or PAPER evidence exists yet.
