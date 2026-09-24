@@ -17,31 +17,44 @@ DAY = 86_400_000
 D0 = 1_735_689_600_000   # 2025-01-01T00:00Z
 
 
-def residual(means, block_ids=None, counts=None):
-    """Residual-dependence report exactly as inference emits it (from a series)."""
-    ids = list(range(100, 100 + len(means))) if block_ids is None else list(block_ids)
-    series = {"block_ids": ids, "means": list(means),
-              "counts": [3] * len(means) if counts is None else list(counts)}
-    return {"residual_series_kind": inf.SERIES_KIND_MEAN, "n_blocks": len(means), "series": series,
-            **inf.acf_from_block_series(ids, list(means))}
+MEAN_TARGET = 0.20   # approved expectancy reported by the fixture
+DIFF_TARGET = 0.10   # uplift reported by the fixture
 
 
-def paired_residual(a_means, b_means=None, block_ids=None, a_counts=None, b_counts=None):
-    """PAIRED_BLOCK_DELTA report exactly as inference emits it for mean(A) - mean(B)."""
+def _influence_report(series, *, diff):
+    ids, psi, point = inf.influence_scores(series, diff=diff)
+    return {"residual_series_kind": inf.SERIES_KIND_DIFF if diff else inf.SERIES_KIND_MEAN,
+            "n_blocks": len(series["block_ids"]), "aggregate_point_estimate": point,
+            "series": series, **inf.acf_from_block_series(ids, psi)}
+
+
+def residual(values, block_ids=None, counts=None, target=MEAN_TARGET):
+    """MEAN_INFLUENCE_SCORE_V1 report exactly as inference emits it. Block ``i`` has
+    per-row mean ``values[i] + shift`` so that sum(S)/sum(N) == ``target``."""
+    n = len(values)
+    ids = list(range(100, 100 + n)) if block_ids is None else list(block_ids)
+    counts = [3] * n if counts is None else list(counts)
+    tot = sum(counts)
+    shift = target - sum(v * c for v, c in zip(values, counts)) / tot
+    series = {"block_ids": ids, "sum_r": [round((v + shift) * c, 12) for v, c in zip(values, counts)],
+              "count": counts}
+    return _influence_report(series, diff=False)
+
+
+def paired_residual(a_means, b_means=None, block_ids=None, a_counts=None, b_counts=None,
+                    target=DIFF_TARGET):
+    """DIFF_MEAN_INFLUENCE_SCORE_V1 report for mean(A) - mean(B) == ``target``."""
     n = len(a_means)
     ids = list(range(100, 100 + n)) if block_ids is None else list(block_ids)
     b_means = [0.0] * n if b_means is None else list(b_means)
     a_counts = [3] * n if a_counts is None else list(a_counts)
     b_counts = [5] * n if b_counts is None else list(b_counts)
+    mu_b = sum(m * c for m, c in zip(b_means, b_counts)) / sum(b_counts)
+    shift = target + mu_b - sum(m * c for m, c in zip(a_means, a_counts)) / sum(a_counts)
     series = {"block_ids": ids,
-              "a_sum": [round(m * c, 12) for m, c in zip(a_means, a_counts)], "a_count": a_counts,
+              "a_sum": [round((m + shift) * c, 12) for m, c in zip(a_means, a_counts)], "a_count": a_counts,
               "b_sum": [round(m * c, 12) for m, c in zip(b_means, b_counts)], "b_count": b_counts}
-    d_ids, deltas = inf.paired_delta_from_aggregates(series)
-    res = inf.acf_from_block_series(d_ids, deltas)
-    if len(deltas) < 30:
-        res = {**res, "estimable": False, "significant": None}
-    return {"residual_series_kind": inf.SERIES_KIND_PAIRED, "n_blocks": n,
-            "n_delta_blocks": len(deltas), "series": series, **res}
+    return _influence_report(series, diff=True)
 
 
 def clean_series(n):
@@ -77,7 +90,8 @@ def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60,
     hi = max(c[1] for c in valid) if valid else None
     return {"iid_ci": list(iid), "iid_role": "DIAGNOSTIC_ONLY", "block_intervals": ivs,
             "block24h_ci": [lo24, hi24], "block48h_ci": [lo48, hi48], "block72h_ci": [lo72, hi72],
-            "required_block_ms": DAY, "authority_ci_low": lo, "authority_ci_high": hi}
+            "required_block_ms": DAY, "authority_ci_low": lo, "authority_ci_high": hi,
+            **({"delta": DIFF_TARGET} if paired else {"mean_r": MEAN_TARGET})}
 
 
 def _passing_artifact():

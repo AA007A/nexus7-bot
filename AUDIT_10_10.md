@@ -147,6 +147,7 @@ Wrappers that still decide a risk concept after this pass:
 | P0-46 | P0 | `dependence_aware_diff` residual | Uplift residual ACF came from the A-only block means | An approved-only ACF could authorize uplift | Statistic-specific series | `PAIRED_BLOCK_DELTA` aggregates (a/b sums and counts); the gate rebuilds the delta; wrong/missing kind rejected; `UPLIFT_RESIDUAL_DEPENDENCE[_NOT_ESTIMABLE]` | `tests/test_nexus_oos_paired_residual.py` (8) | none |
 | P1-26 | P1 | zero-variance ACF | Treated as non-significant | A constant series looked "independent" | Undefined ⇒ fail closed | `ZERO_VARIANCE` ⇒ NOT_ESTIMABLE (tolerant of floating-point residue) | tests 6, 7 | none |
 | P1-27 | P1 | Stage-C approval timing | Approval could predate the protection evidence | A reviewer could approve before checks finished | After all automated evidence | Protection run completion and `generated_at` included in the approval lower bound | `ApprovalBindsReleaseInstance` | none |
+| P0-47 | P0 | residual series vs estimator | Equal-weight block means / paired block deltas | Did not describe the count-weighted bootstrap statistic; varying selection intensity could evade the check | Estimator-aligned influence scores | `MEAN_INFLUENCE_SCORE_V1` / `DIFF_MEAN_INFLUENCE_SCORE_V1` over the bootstrap's block universe (zero-A blocks kept); the gate recomputes ψ and the ACF from aggregates and checks the point estimate (`RESIDUAL_AGGREGATES_POINT_ESTIMATE_MISMATCH`); legacy kinds are diagnostic only | `tests/test_nexus_oos_influence_residual.py` (9) | Methodology frozen after this |
 | P2-01 | P2 | `pilot_live_runtime`, `pilot_risk_cap_hardening` sizing hooks | Superseded inner sizing wrappers | Dead in the LIVE path; still installed | One authority | Kept (contract/tests depend on them). Scheduled for removal | — | Maintenance only |
 | P2-02 | P2 | Remaining 9 silent handlers | 5 justified best-effort, 4 REVIEW_MEDIUM (runtime_truth ×3, pullback telemetry) | — | classify all | 2 REVIEW_HIGH fixed | selfcheck | REVIEW_MEDIUM remain |
 | P2-03 | P2 | `engine.py` (3992 lines) | Monolith | — | Extract stateful authorities with parity tests | Not attempted in this pass (zero-semantic-change refactor requires its own PR) | — | — |
@@ -172,7 +173,7 @@ Wrappers that still decide a risk concept after this pass:
 |---|---|
 | Baseline offline suite at 77ae453 | 1607/1607 pass |
 | New P0 tests against baseline code | 14 fail (reproduced), 29 pass |
-| Full offline suite (`python -m tests.run_offline`), final code | 1872/1872 pass (1726 before the parity phase) |
+| Full offline suite (`python -m tests.run_offline`), final code | 1873/1873 pass (1726 before the parity phase) |
 | `compileall`, `ruff --select E9,F63,F7,F82`, pyflakes undefined names | pass / pass / 0 |
 | `python -m bot.selfcheck` | 0 critical; silent handlers 12 → 9 |
 | `python -m bot.release_proof` | `RELEASE_PROOF=PASS` (161/161) |

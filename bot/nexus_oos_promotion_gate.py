@@ -174,7 +174,9 @@ def block_only_authority(section: dict, *, required_ms: int | None, min_blocks: 
         # per-block aggregate series (block means); stored ACF values are only
         # cross-checked, never trusted.
         _, longest = max(usable_ivs, key=lambda x: x[0])
-        status = residual_dependence_recompute(longest, paired=paired, min_blocks=min_blocks)
+        status = residual_dependence_recompute(
+            longest, paired=paired, min_blocks=min_blocks,
+            reported_estimate=(section or {}).get("delta" if paired else "mean_r"))
         if status is not None:
             return None, None, status
     if valid:
@@ -184,87 +186,88 @@ def block_only_authority(section: dict, *, required_ms: int | None, min_blocks: 
     return None, None, "INSUFFICIENT_RESAMPLING_BLOCKS"
 
 
-def _paired_series_error(series, expected_a_blocks) -> str | None:
-    """Structural checks on a PAIRED_BLOCK_DELTA aggregate series."""
+AGGREGATE_POINT_TOLERANCE = 1e-8     # numerical only (aggregates are rounded to 1e-12)
+
+
+def _influence_series_error(series, *, diff: bool, expected_a_blocks) -> str | None:
+    """Structural checks on influence-score aggregates. None when valid."""
+    pre = "UPLIFT_RESIDUAL_SERIES" if diff else "RESIDUAL_DEPENDENCE_SERIES"
     if not isinstance(series, dict):
-        return "UPLIFT_RESIDUAL_SERIES_MISSING"
-    keys = ("block_ids", "a_sum", "a_count", "b_sum", "b_count")
+        return pre + "_MISSING"
+    keys = (("block_ids", "a_sum", "a_count", "b_sum", "b_count") if diff
+            else ("block_ids", "sum_r", "count"))
     cols = [series.get(k) for k in keys]
     if not all(isinstance(c, list) for c in cols):
-        return "UPLIFT_RESIDUAL_SERIES_MISSING"
-    ids, a_sum, a_cnt, b_sum, b_cnt = cols
-    if len({len(c) for c in cols}) != 1:
-        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+        return pre + "_MISSING"
+    if len({len(c) for c in cols}) != 1 or not cols[0]:
+        return pre + "_INCONSISTENT"
+    ids = cols[0]
     if any(isinstance(b, bool) or not isinstance(b, int) for b in ids):
-        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    if any(b2 <= b1 for b1, b2 in zip(ids, ids[1:])):
-        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    for c in a_cnt + b_cnt:
-        if isinstance(c, bool) or not isinstance(c, int) or c < 0:
-            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    if any(na + nb < 1 for na, nb in zip(a_cnt, b_cnt)):
-        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    for v in a_sum + b_sum:
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    for sm, n in list(zip(a_sum, a_cnt)) + list(zip(b_sum, b_cnt)):
-        if n == 0 and sm != 0:
-            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
-    # The resampling blocks of a difference statistic are the A-population blocks.
-    if expected_a_blocks is None or sum(1 for n in a_cnt if n >= 1) != expected_a_blocks:
-        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+        return pre + "_INCONSISTENT"
+    if any(b2 <= b1 for b1, b2 in zip(ids, ids[1:])):          # strictly increasing => unique
+        return pre + "_INCONSISTENT"
+    pairs = list(zip(cols[1::2], cols[2::2]))                   # (sums, counts) per population
+    for sums, cnts in pairs:
+        for c in cnts:
+            if isinstance(c, bool) or not isinstance(c, int) or c < 0:
+                return pre + "_INCONSISTENT"
+        for v in sums:
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                return pre + "_INCONSISTENT"
+        if any(c == 0 and v != 0 for v, c in zip(sums, cnts)) or sum(cnts) <= 0:
+            return pre + "_INCONSISTENT"
+    # Resampling blocks = blocks with >= 1 row of the (first) selected population.
+    a_cnt = pairs[0][1]
+    if expected_a_blocks is None or sum(1 for c in a_cnt if c >= 1) != expected_a_blocks:
+        return pre + "_INCONSISTENT"
     return None
 
 
-def residual_dependence_recompute(iv: dict, *, paired: bool = False,
-                                  min_blocks: int = 30) -> str | None:
-    """Independently recompute the CALENDAR residual ACF of the statistic.
+def residual_dependence_recompute(iv: dict, *, paired: bool = False, min_blocks: int = 30,
+                                  reported_estimate=None) -> str | None:
+    """Independently recompute the estimator-aligned residual dependence.
 
-    Single-mean statistic: series block_ids / means / counts (validated).
-    Difference statistic (``paired``): residual_series_kind must be
-    PAIRED_BLOCK_DELTA; the gate rebuilds the per-block delta
-    a_sum/a_count - b_sum/b_count from the joint aggregates (blocks lacking A
-    or B dropped, so they break adjacency). An approved-only block-mean series
-    can never authorize a difference statistic. Lag-1..3 pairs only when block
-    ids differ by exactly k. Stored ACF values are cross-checked, never
-    trusted. Returns None when there is no significant residual dependence.
+    The series kind must be MEAN_INFLUENCE_SCORE_V1 (single mean) or
+    DIFF_MEAN_INFLUENCE_SCORE_V1 (difference, e.g. uplift); equal-weight
+    BLOCK_MEAN / PAIRED_BLOCK_DELTA series are diagnostic only and rejected.
+    From the compact aggregates the gate recomputes mu, mean counts, every
+    block influence score psi(t) and the CALENDAR lag-1..3 ACF (pairs only when
+    block ids differ by exactly k). It also checks that the aggregates reproduce
+    the reported point estimate. Stored scores/ACF are never trusted.
+    Returns None when there is no significant residual dependence.
     """
     from bot import nexus_oos_inference as inf
     rd = iv.get("residual_dependence")
+    kind = inf.SERIES_KIND_DIFF if paired else inf.SERIES_KIND_MEAN
+    pre = "UPLIFT_RESIDUAL_SERIES" if paired else "RESIDUAL_DEPENDENCE_SERIES"
     if not isinstance(rd, dict):
-        return "UPLIFT_RESIDUAL_SERIES_MISSING" if paired else "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+        return pre + "_MISSING"
+    if rd.get("residual_series_kind") != kind:
+        return pre + "_KIND_INVALID"
     series = rd.get("series")
     n_blk = _num(iv.get("resampling_blocks"))
-    if paired:
-        if rd.get("residual_series_kind") != inf.SERIES_KIND_PAIRED:
-            return "UPLIFT_RESIDUAL_SERIES_KIND_INVALID"
-        err = _paired_series_error(series, int(n_blk) if n_blk is not None else None)
-        if err is not None:
-            return err
-        ids, vals = inf.paired_delta_from_aggregates(series)
-        dep, nest, bad = (inf.PAIRED_RESIDUAL_DEPENDENCE, inf.PAIRED_RESIDUAL_NOT_ESTIMABLE,
-                          "UPLIFT_RESIDUAL_SERIES_INCONSISTENT")
-    else:
-        if rd.get("residual_series_kind") not in (None, inf.SERIES_KIND_MEAN):
-            return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
-        err = inf.validate_block_series(series, int(n_blk) if n_blk is not None else -1)
-        if err is not None:
-            return err
-        ids, vals = series["block_ids"], [float(m) for m in series["means"]]
-        dep, nest, bad = ("RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK", inf.RESIDUAL_NOT_ESTIMABLE,
-                          "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT")
-    res = inf.acf_from_block_series(ids, vals)
+    err = _influence_series_error(series, diff=paired,
+                                  expected_a_blocks=int(n_blk) if n_blk is not None else None)
+    if err is not None:
+        return err
+    sc = inf.influence_scores(series, diff=paired)
+    if sc is None:
+        return pre + "_INCONSISTENT"
+    ids, psi, point = sc
+    rep = _num(reported_estimate)
+    if rep is None or abs(point - rep) > AGGREGATE_POINT_TOLERANCE:
+        return "RESIDUAL_AGGREGATES_POINT_ESTIMATE_MISMATCH"
+    res = inf.acf_from_block_series(ids, psi)
     reported = rd.get("acf") or {}
     for k, v in res["acf"].items():
         r = reported.get(k)
         if (v is None) != (r is None) or (v is not None and (_num(r) is None or abs(_num(r) - v) > 1e-9)):
-            return bad
-    if paired and len(vals) < min_blocks:
-        return nest
+            return pre + "_INCONSISTENT"
     if not res["estimable"]:
-        return nest
+        return inf.DIFF_RESIDUAL_NOT_ESTIMABLE if paired else inf.RESIDUAL_NOT_ESTIMABLE
     if res["significant"]:
-        return dep
+        return (inf.DIFF_RESIDUAL_DEPENDENCE if paired
+                else "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK")
     return None
 
 

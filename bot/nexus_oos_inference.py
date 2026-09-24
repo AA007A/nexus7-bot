@@ -78,10 +78,14 @@ RESIDUAL_NOT_ESTIMABLE = "RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
 # Difference statistics (mean(A) - mean(B), e.g. uplift) use their OWN residual
 # series: the per-block paired delta mean_A(block) - mean_B(block), defined only
 # for blocks containing both populations. Never the A-only block means.
-SERIES_KIND_MEAN = "BLOCK_MEAN"
+# Authority series (estimator-aligned block influence scores; predeclared):
+SERIES_KIND_MEAN = "MEAN_INFLUENCE_SCORE_V1"
+SERIES_KIND_DIFF = "DIFF_MEAN_INFLUENCE_SCORE_V1"
+# Diagnostic-only legacy series (never promotion authority):
+SERIES_KIND_BLOCK_MEAN = "BLOCK_MEAN"
 SERIES_KIND_PAIRED = "PAIRED_BLOCK_DELTA"
-PAIRED_RESIDUAL_DEPENDENCE = "UPLIFT_RESIDUAL_DEPENDENCE"
-PAIRED_RESIDUAL_NOT_ESTIMABLE = "UPLIFT_RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
+DIFF_RESIDUAL_DEPENDENCE = PAIRED_RESIDUAL_DEPENDENCE = "UPLIFT_RESIDUAL_DEPENDENCE"
+DIFF_RESIDUAL_NOT_ESTIMABLE = PAIRED_RESIDUAL_NOT_ESTIMABLE = "UPLIFT_RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
 BOOTSTRAP_SAMPLES = 2000
 SEED = 11
 
@@ -299,7 +303,9 @@ def block_acf(rows, selector, block_ms: int, lags=RESIDUAL_ACF_LAGS) -> dict:
               "means": [round(sum(v) / len(v), 12) for _, v in ordered],
               "counts": [len(v) for _, v in ordered]}
     res = acf_from_block_series(series["block_ids"], series["means"], lags)
-    return {"residual_series_kind": SERIES_KIND_MEAN, "n_blocks": len(ordered), "series": series, **res}
+    # DIAGNOSTIC ONLY (equal-weight block means; not the bootstrap estimator).
+    return {"residual_series_kind": SERIES_KIND_BLOCK_MEAN, "authority": "NONE",
+            "n_blocks": len(ordered), "series": series, **res}
 
 
 def paired_delta_from_aggregates(series) -> tuple[list[int], list[float]]:
@@ -345,10 +351,78 @@ def paired_block_acf(rows, sel_a, sel_b, block_ms: int, *, min_blocks: int = MIN
     if len(deltas) < min_blocks:
         res = {**res, "estimable": False, "significant": None,
                "not_estimable_reason": "TOO_FEW_BLOCKS_WITH_BOTH_POPULATIONS"}
-    return {"residual_series_kind": SERIES_KIND_PAIRED, "delta_definition":
+    # DIAGNOSTIC ONLY (equal-weight paired block deltas; not the bootstrap estimator).
+    return {"residual_series_kind": SERIES_KIND_PAIRED, "authority": "NONE", "delta_definition":
             "a_sum/a_count - b_sum/b_count per block; blocks lacking A or B are dropped",
             "n_blocks": len(ordered), "n_delta_blocks": len(deltas),
             "min_delta_blocks": int(min_blocks), "series": series, **res}
+
+
+def influence_aggregates(rows, sel_a, sel_b, block_ms: int) -> dict:
+    """Compact per-block aggregates over the SAME block universe the clustered
+    bootstrap resamples: every calendar block containing any row passed in
+    (blocks with zero selected rows are kept; zero-A blocks are information)."""
+    agg: dict = defaultdict(lambda: [0.0, 0, 0.0, 0])
+    for r in rows:
+        g = agg[block_id(r["ts"], block_ms)]
+        if sel_a(r):
+            g[0] += float(r["r"])
+            g[1] += 1
+        if sel_b is not None and sel_b(r):
+            g[2] += float(r["r"])
+            g[3] += 1
+    ordered = sorted(agg.items())
+    ids = [int(b) for b, _ in ordered]
+    if sel_b is None:
+        return {"block_ids": ids, "sum_r": [round(v[0], 12) for _, v in ordered],
+                "count": [v[1] for _, v in ordered]}
+    return {"block_ids": ids,
+            "a_sum": [round(v[0], 12) for _, v in ordered], "a_count": [v[1] for _, v in ordered],
+            "b_sum": [round(v[2], 12) for _, v in ordered], "b_count": [v[3] for _, v in ordered]}
+
+
+def influence_scores(series: dict, *, diff: bool):
+    """Estimator-aligned block influence scores (shared with the promotion gate).
+
+    mean:  psi_A(t) = (S_A,t - mu_A * N_A,t) / mean_count_A
+    diff:  psi(t)   = psi_A(t) - psi_B(t)
+    with mu = sum(S)/sum(N) and mean_count = sum(N) / number_of_blocks. Returns
+    (block_ids, psi, point_estimate) or None when a population is empty.
+    """
+    ids = list(series["block_ids"])
+    n = len(ids)
+    pops = ([("a_sum", "a_count"), ("b_sum", "b_count")] if diff else [("sum_r", "count")])
+    parts, mus = [], []
+    for ks, kn in pops:
+        sums, cnts = [float(x) for x in series[ks]], [int(c) for c in series[kn]]
+        tot_n = sum(cnts)
+        if n == 0 or tot_n <= 0:
+            return None
+        mu = sum(sums) / tot_n
+        mean_count = tot_n / n
+        parts.append([(s_ - mu * c) / mean_count for s_, c in zip(sums, cnts)])
+        mus.append(mu)
+    if diff:
+        return ids, [a - b for a, b in zip(parts[0], parts[1])], mus[0] - mus[1]
+    return ids, parts[0], mus[0]
+
+
+def influence_residual(rows, sel_a, sel_b, block_ms: int, lags=RESIDUAL_ACF_LAGS) -> dict:
+    """Residual-dependence report aligned with the bootstrap estimator."""
+    diff = sel_b is not None
+    series = influence_aggregates(rows, sel_a, sel_b, block_ms)
+    sc = influence_scores(series, diff=diff)
+    if sc is None:
+        res = acf_from_block_series([], [], lags)
+        point = None
+    else:
+        ids, psi, point = sc
+        res = acf_from_block_series(ids, psi, lags)
+    return {"residual_series_kind": SERIES_KIND_DIFF if diff else SERIES_KIND_MEAN,
+            "definition": ("psi(t) = (S_A,t - mu_A N_A,t)/mean_count_A - (S_B,t - mu_B N_B,t)/mean_count_B"
+                           if diff else "psi(t) = (S_t - mu N_t)/mean_count"),
+            "n_blocks": len(series["block_ids"]), "aggregate_point_estimate": point,
+            "series": series, **res}
 
 
 def validate_block_series(series, expected_blocks=None) -> str | None:
@@ -417,7 +491,7 @@ def acf_from_block_series(block_ids, means, lags=RESIDUAL_ACF_LAGS,
 
 def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: int,
           residual_fn=None, kind: str = SERIES_KIND_MEAN) -> dict:
-    paired = kind == SERIES_KIND_PAIRED
+    paired = kind == SERIES_KIND_DIFF
     dep_code = PAIRED_RESIDUAL_DEPENDENCE if paired else RESIDUAL_DEPENDENCE
     nest_code = PAIRED_RESIDUAL_NOT_ESTIMABLE if paired else RESIDUAL_NOT_ESTIMABLE
     intervals = []
@@ -435,7 +509,7 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
                           "resampling_blocks": n_blk, "authoritative": reason is None,
                           "invalid_reason": reason,
                           "residual_dependence": ((residual_fn(ms) if residual_fn is not None
-                                                   else block_acf(rows, selector_for_blocks, ms))
+                                                   else influence_residual(rows, selector_for_blocks, None, ms))
                                                   if ms >= req_ms else None)})
     usable = [iv for iv in intervals if iv["authoritative"]]
     residual = None
@@ -505,7 +579,9 @@ def dependence_aware_mean(rows: Sequence[dict], selector: Callable[[dict], bool]
     cis = {ms: fast_ci(rows, selector, block_ms=ms, samples=samples) for ms in _lengths(req)}
     sel = [r for r in rows if selector(r)]
     out = {"mean_r": (sum(float(r["r"]) for r in sel) / len(sel)) if sel else None, "n": len(sel)}
-    out.update(_pack(rows, selector, iid, cis, req, min_blocks))
+    out.update(_pack(rows, selector, iid, cis, req, min_blocks,
+                     residual_fn=lambda ms: influence_residual(rows, selector, None, ms),
+                     kind=SERIES_KIND_MEAN))
     return out
 
 
@@ -519,8 +595,8 @@ def dependence_aware_diff(rows: Sequence[dict], sel_a, sel_b, *,
     cis = {ms: fast_ci(rows, sel_a, sel_b, block_ms=ms, samples=samples) for ms in _lengths(req)}
     out = {"delta": stat(rows)}
     out.update(_pack(rows, sel_a, iid, cis, req, min_blocks,
-                     residual_fn=lambda ms: paired_block_acf(rows, sel_a, sel_b, ms, min_blocks=min_blocks),
-                     kind=SERIES_KIND_PAIRED))
+                     residual_fn=lambda ms: influence_residual(rows, sel_a, sel_b, ms),
+                     kind=SERIES_KIND_DIFF))
     return out
 
 

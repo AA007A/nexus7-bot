@@ -324,10 +324,11 @@ class ResidualDependenceFailsClosed(unittest.TestCase):
             rd = iv["residual_dependence"]
             if rd is None:
                 continue
-            self.assertEqual(rd["n_blocks"], iv["resampling_blocks"])
-            again = inf.acf_from_block_series(rd["series"]["block_ids"], rd["series"]["means"])
-            self.assertEqual(again["acf"], rd["acf"])
-            self.assertEqual(len(rd["series"]["counts"]), rd["n_blocks"])
+            self.assertEqual(rd["residual_series_kind"], "MEAN_INFLUENCE_SCORE_V1")
+            self.assertEqual(sum(1 for c in rd["series"]["count"] if c >= 1), iv["resampling_blocks"])
+            ids, psi, _ = inf.influence_scores(rd["series"], diff=False)
+            self.assertEqual(inf.acf_from_block_series(ids, psi)["acf"], rd["acf"])
+            self.assertEqual(len(rd["series"]["count"]), rd["n_blocks"])
 
 
 class CalendarResidualACF(unittest.TestCase):

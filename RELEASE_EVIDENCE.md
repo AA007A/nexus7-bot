@@ -88,7 +88,7 @@ The artifact carries compact per-block series (`block_ids`, `means`, `counts`). 
 - counts are positive integers;
 - the series length equals `resampling_blocks`.
 
-Blocks are paired only when their IDs differ by exactly k. For uplift, the series is `PAIRED_BLOCK_DELTA` (`a_sum`, `a_count`, `b_sum`, `b_count` per block); the gate rebuilds the delta from these aggregates and rejects any approved-only series. A zero-variance series is NOT_ESTIMABLE. Fewer than 20 calendar-valid pairs at any lag gives INSUFFICIENT_EVIDENCE. Nested fields are not authenticated separately: the artifact digest covers them.
+Blocks are paired only when their IDs differ by exactly k. The authority series are estimator-aligned block influence scores: `MEAN_INFLUENCE_SCORE_V1` (`block_ids`, `sum_r`, `count`) and `DIFF_MEAN_INFLUENCE_SCORE_V1` for uplift (`block_ids`, `a_sum`, `a_count`, `b_sum`, `b_count`; zero-A blocks kept). The gate recomputes every score and the ACF from these aggregates, checks that they reproduce the reported point estimate, and rejects `BLOCK_MEAN` or `PAIRED_BLOCK_DELTA` as authority. A zero-variance series is NOT_ESTIMABLE. Fewer than 20 calendar-valid pairs at any lag gives INSUFFICIENT_EVIDENCE. Nested fields are not authenticated separately: the artifact digest covers them.
 
 ## 7. Trust boundary: the candidate is not the root of trust
 The software being released must not decide whether it may be released. `bot/live_release_evidence.py` in this repository is a **reference implementation**. The authoritative Stage-C verifier comes from a protected location, **never from the candidate branch or SHA**:

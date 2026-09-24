@@ -497,6 +497,21 @@ In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward
    - The economic conclusion is still **NEGATIVE**: approved expectancy −0.403 R with a wholly negative authority interval, and 0 of 4 candidate folds positive. Positive uplift over a more negative baseline is not a profitable edge.
 6. **Stage-C approval** is the final release authorization. It must not predate any automated Stage-C evidence it authorizes, including protection evidence (the run completion times and the protection `generated_at`).
 
+### C.13 Estimator-aligned residual authority (after `c20c328`) — methodology frozen
+1. **Why.** The clustered bootstrap estimates the **count-weighted** statistic: μ_A = ΣS_A,t / ΣN_A,t, and for uplift μ_A − μ_B. It resamples every calendar block of the research timeline and keeps each block's row count. The equal-weight block-mean series (`BLOCK_MEAN`) and paired block deltas (`PAIRED_BLOCK_DELTA`) describe a different statistic whenever block counts vary. They are now **diagnostic only**.
+2. **The authority series is the block influence score** over the same block universe the bootstrap resamples (every calendar block with any resolved row):
+   - `MEAN_INFLUENCE_SCORE_V1`: ψ(t) = (S_t − μ N_t) / mean_count, where mean_count = ΣN / blocks.
+   - `DIFF_MEAN_INFLUENCE_SCORE_V1`: ψ(t) = ψ_A(t) − ψ_B(t).
+   - Blocks with zero A rows are kept: ψ_A = 0, and ψ_B stays in.
+   - The artifact stores only aggregates: `block_ids`, `sum_r`, `count` for a mean; `block_ids`, `a_sum`, `a_count`, `b_sum`, `b_count` for a difference.
+3. **The gate recomputes everything** from those aggregates: μ_A, μ_B, the mean counts, every ψ(t), and the calendar lag-1/2/3 ACF (pairs only at an ID distance of exactly k; at least 20 pairs per lag; zero variance ⇒ NOT_ESTIMABLE).
+   - It checks the aggregates reproduce the reported point estimate (`mean_r` or `delta`) to within a numerical tolerance of 1e-8. Otherwise `RESIDUAL_AGGREGATES_POINT_ESTIMATE_MISMATCH`.
+   - It never trusts a stored score or ACF.
+   - It rejects any other series kind for authority.
+4. **Regression fixture (A ⊂ B).** A's block contribution follows a slow regime while A counts are either 1 or 100 per block. The equal-weight paired delta is clean, because the 1/N dilution hides the regime. The influence score has lag-1 ACF ≈ 0.93. Uplift authority therefore fails.
+5. **Unchanged:** the bootstrap, point estimates, block CIs, required horizon, folds, embargo, censoring and portfolio replay.
+6. **Historical runs** (all SHAs up to and including `c20c328`) did not use estimator-aligned residual authority. Their economic numbers stand, but they cannot establish STATISTICAL_AUTHORITY = VALID under the completed methodology. The first replay on the successor SHA is the authority candidate. The inference/release methodology is frozen from here unless that replay exposes a defect.
+
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.
 
