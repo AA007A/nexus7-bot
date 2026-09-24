@@ -20,7 +20,7 @@ def _passing_artifact():
             "nexus_expectancy_r": 0.20,
         },
         "symbols": [
-            {"symbol": s, "error": None, "history_days": 90.0,
+            {"symbol": s, "error": None, "history_days": 180.0,
              "historical_context": {"parity_complete": True}}
             for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT")
         ],

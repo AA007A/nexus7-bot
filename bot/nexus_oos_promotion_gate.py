@@ -52,7 +52,7 @@ class GatePolicy:
     max_symbol_share_of_positive_r: float = 0.50
     max_period_share_of_positive_r: float = 0.50
     min_temporal_folds_positive: int = 3
-    min_history_days: float = 60.0
+    min_history_days: float = 150.0
     require_context_parity: bool = True
     cost_stress_scenarios: tuple[str, ...] = ("fees_plus_50pct", "slippage_x2")
 

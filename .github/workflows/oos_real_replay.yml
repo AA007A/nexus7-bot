@@ -60,8 +60,8 @@ on:
   workflow_dispatch:
     inputs:
       limit_15m:
-        description: "15m candles per symbol (8640 = 90 days)"
-        default: "8640"
+        description: "15m candles per symbol (17280 = 180 days; 8640 = 90 days)"
+        default: "17280"
       research_only:
         description: "true = report evidence without failing (never used for PRs)"
         default: "false"
@@ -76,13 +76,13 @@ jobs:
   replay:
     name: Real historical replay evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 350
     env:
       PAPER_TRADE: "true"
       LIVE_TRADING_CONFIRMED: ""
       NEXUS_PILOT_ENABLED: "false"
       OOS_SYMBOLS: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT ADAUSDT DOGEUSDT LINKUSDT AVAXUSDT DOTUSDT LTCUSDT NEARUSDT ATOMUSDT"
-      OOS_LIMIT_15M: ${{ github.event.inputs.limit_15m || '8640' }}
+      OOS_LIMIT_15M: ${{ github.event.inputs.limit_15m || '17280' }}
     steps:
       - uses: actions/checkout@v4
         with:
