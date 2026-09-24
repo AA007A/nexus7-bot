@@ -1,0 +1,76 @@
+{
+  "ai_version": "NEXUS7_AI_DECISION_AUTHORITY_V1",
+  "candidate_sha": null,
+  "decision_policy_version": "NEXUS7_AI_DECISION_POLICY_V1",
+  "execution_invariant_status": "IDEMPOTENT_RECONCILE_BEFORE_RETRY_TESTED",
+  "execution_mode_support": {
+    "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C",
+    "PAPER": "SUPPORTED",
+    "RESEARCH": "SUPPORTED",
+    "SHADOW": "SUPPORTED"
+  },
+  "feature_schema": {
+    "live_only_excluded": [
+      "funding_rate",
+      "open_interest_delta",
+      "orderbook_imbalance"
+    ],
+    "model_features": [
+      "ret_1",
+      "ret_4",
+      "ret_16",
+      "atr_pct_14",
+      "realized_vol_32",
+      "ema20_ema50_gap",
+      "ema20_slope_8",
+      "rsi_14",
+      "adx_14",
+      "volume_multiple_20",
+      "body_ratio",
+      "range_position_32",
+      "h1_trend_slope_12",
+      "h4_trend_slope_6",
+      "h1_realized_vol_24",
+      "direction_long",
+      "strategy_score",
+      "planned_rr",
+      "stop_distance_pct",
+      "cost_fraction",
+      "nexus_confidence",
+      "hour_sin",
+      "hour_cos"
+    ],
+    "sha256": "928fe825236d69e7892816360d2efe7c2339ccd2b6ab383f457a45b4100415e9",
+    "version": "NEXUS7_AI_FEATURES_V1"
+  },
+  "known_blockers": [
+    "AI_EDGE_NOT_PROVEN_OOS",
+    "NO_FORWARD_SHADOW_EVIDENCE",
+    "NO_FORWARD_PAPER_EVIDENCE",
+    "NO_PROMOTED_MODEL_ARTIFACT",
+    "AI_NOT_WIRED_INTO_PRODUCTION_ENGINE",
+    "STAGE_C_EVIDENCE_NOT_AVAILABLE",
+    "REPLAY_PARITY_INCOMPLETE"
+  ],
+  "live_status": "BLOCK",
+  "model": {
+    "model_sha256": null,
+    "note": "research models are retrained per replay; none is pinned for LIVE",
+    "status": "NO_PROMOTED_MODEL"
+  },
+  "oos_status": {
+    "ai_authority_ci_low": null,
+    "ai_authority_status": null,
+    "ai_meta_model_status": "NOT_RUN",
+    "ai_uplift_authority_ci_low": null,
+    "data_label": null,
+    "pooled_test_ai_approved": null,
+    "pooled_test_baseline": null,
+    "positive_edge_proven": false
+  },
+  "paper_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS",
+  "risk_invariant_status": "ENFORCED_BY_AUTHORITY_CHAIN_TESTED",
+  "schema": "NEXUS7_AI_OPERATION_READINESS_V1",
+  "secrets_included": false,
+  "shadow_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS"
+}

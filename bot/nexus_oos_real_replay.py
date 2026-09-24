@@ -676,6 +676,22 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
         if final is None:
             counts["parity_outcome_unavailable"] += 1
             executable = False
+        # Canonical AI features: the SAME call used by SHADOW / PAPER / LIVE.
+        try:
+            from bot.ai import features as ai_fx
+            from bot.ai import regime as ai_rg
+            fv = ai_fx.compute_features(
+                w15, w1h, w4h, decision_ts=int(decision_ts), direction=direction,
+                strategy_score=float(getattr(sig, "score", 0) or 0), entry=float(sig.entry),
+                stop=float(final_sl), rr=float(sig.rr), cost_fraction=float(cost_fraction),
+                nexus_confidence=float(getattr(nx, "confidence", 0.0) or 0.0))
+            row["ai_features"] = [None if fv.values.get(n) is None else round(float(fv.values[n]), 10)
+                                  for n in ai_fx.MODEL_FEATURES]
+            row["ai_features_missing"] = list(fv.missing)
+            row["ai_regime"] = ai_rg.classify(w1h)
+        except Exception as exc:
+            row["ai_features"] = None
+            row["ai_features_error"] = type(exc).__name__
         row.update({
             "session": funnel["session"], "session_penalty": funnel["session_penalty"],
             "score_adjusted": funnel["adjusted_score"],
@@ -1077,6 +1093,16 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         "research_regime": "nexus_oos_research.classify_regime on closed 1h candles (diagnostic only)",
     }
     out["temporal_folds"] = temporal_folds(exe_all, required_horizon_ms=req_ms)
+    # Phase 7 research sections (no gate authority): loss root-cause and the
+    # purged walk-forward AI meta-model on previously inspected history.
+    from bot.ai import diagnostics as ai_diag
+    from bot.ai import training as ai_train
+    out["loss_decomposition"] = ai_diag.decomposition(exe_all)
+    try:
+        out["ai_meta_model"] = ai_train.walk_forward(exe_all, required_ms=req_ms)
+        out["ai_meta_model"]["dataset_manifest"] = ai_train.dataset_manifest(exe_all)
+    except Exception as exc:          # reported, never silently dropped
+        out["ai_meta_model"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:300]}
     out["research_status"] = research_status(
         out["inference"], out["performance"]["approved"].get("net_expectancy_r"),
         censoring_material=out["censoring"]["censoring_material"],

@@ -65,6 +65,7 @@ on:
       - "bot/nexus_oos_promotion_gate.py"
       - "research/replay_policy_manifest.json"
       - "bot/live_release_evidence.py"
+      - "bot/ai/**"
       - "bot/policy_attestation.py"
       - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
@@ -129,6 +130,7 @@ jobs:
           python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v
           python -m unittest tests.test_live_release_evidence -v
           python -m unittest tests.test_nexus_oos_influence_residual -v
+          python -m unittest tests.test_ai_decision_authority -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
@@ -187,6 +189,10 @@ jobs:
                   'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
                                     for k, v in (c.get('concentration') or {}).items()},
                   'cost_stress_approved': c.get('cost_stress_approved'),
+                  'ai_meta_model': {k: (c.get('ai_meta_model') or {}).get(k) for k in ('status', 'data_label', 'pooled_test', 'authority_summary', 'dataset_manifest', 'error')},
+                  'ai_meta_model_steps': [{k: s.get(k) for k in ('step', 'train_folds', 'validation_fold', 'test_fold', 'n_train', 'n_validation', 'n_test', 'selected_classifier', 'selected_regressor', 'policy', 'test_calibration', 'test_ai_approved', 'test_baseline', 'test_nexus_production', 'test_ai_by_direction')} for s in ((c.get('ai_meta_model') or {}).get('steps') or [])],
+                  'ai_authority': {k: {kk: (v or {}).get(kk) for kk in ('mean_r', 'delta', 'authority_status', 'authority_ci_low', 'authority_ci_high', 'residual_dependence_at_longest_usable')} for k, v in (((c.get('ai_meta_model') or {}).get('authority')) or {}).items()},
+                  'loss_decomposition': {'answers': (c.get('loss_decomposition') or {}).get('answers'), 'approved': {k: v for k, v in ((c.get('loss_decomposition') or {}).get('approved') or {}).items() if k in ('by_direction', 'by_regime', 'by_exit_reason', 'by_symbol', 'costs_r', 'by_utc_hour', 'by_holding_hours')}},
                   'cost_stress_baseline': c.get('cost_stress_baseline'),
                   'break_even_cost_multiplier': c.get('break_even_cost_multiplier'),
                   'exit_variants_approved': c.get('exit_variants_approved'),
@@ -206,6 +212,13 @@ jobs:
           print('```')
           PY
 
+      - name: AI operation readiness (sanitized)
+        if: always()
+        run: |
+          python -m bot.ai.readiness --artifact artifacts/nexus_oos_real_replay.json \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --output artifacts/AI_OPERATION_READINESS.json | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload replay evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -213,6 +226,14 @@ jobs:
           name: nexus-oos-real-replay
           path: artifacts/nexus_oos_real_replay.json
           if-no-files-found: error
+
+      - name: Upload AI readiness
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-operation-readiness
+          path: artifacts/AI_OPERATION_READINESS.json
+          if-no-files-found: warn
 
       - name: Live release gate (informational, stage C)
         if: always()

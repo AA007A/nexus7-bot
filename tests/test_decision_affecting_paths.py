@@ -67,6 +67,7 @@ class PromotionGateWorkflowContract(unittest.TestCase):
         self.assertIn("python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v", text)
         self.assertIn("python -m unittest tests.test_live_release_evidence -v", text)
         self.assertIn("python -m unittest tests.test_nexus_oos_influence_residual -v", text)
+        self.assertIn("python -m unittest tests.test_ai_decision_authority -v", text)
         # LIVE evidence is never read from a committed file.
         self.assertNotIn("live_policy_attestation.txt", text)
         self.assertNotIn("--policy-observation-fixture", text)

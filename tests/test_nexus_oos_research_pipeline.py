@@ -265,6 +265,17 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
             "bot.nexus_oos_portfolio_engine", fromlist=["Toggles"]).Toggles.__dataclass_fields__))
         self.assertIn("single_position_liquidation_rule", p["gate_attribution"])
 
+    def test_phase7_ai_sections_present(self):
+        c = self.artifact["candidate_research"]
+        ai = c["ai_meta_model"]
+        self.assertIn(ai.get("status"), ("OK", "INSUFFICIENT_DATA", "INSUFFICIENT_INDEPENDENT_FOLDS"))
+        self.assertEqual(ai["data_label"], "HISTORICAL_OOS_PREVIOUSLY_INSPECTED")
+        self.assertGreater(ai["dataset_manifest"]["rows"], 0)          # canonical features populated
+        answers = c["loss_decomposition"]["answers"]
+        for k in ("entries_wrong_gross_negative", "costs_consume_edge", "short_structurally_worse",
+                  "nexus_score_rank_correlation_with_r"):
+            self.assertIn(k, answers)
+
     def test_attribution_steps_are_populated(self):
         att = self.artifact["parity_attribution"]
         self.assertGreater(att["A0_legacy_model"]["n"], 10)
