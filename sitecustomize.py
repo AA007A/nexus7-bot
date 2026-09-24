@@ -30,6 +30,14 @@ try:
     from bot.runtime_truth_ws_compat import install as _install_runtime_truth_ws_compat
     _install_runtime_truth_ws_compat()
 
+    # Preserve every replay-relevant kline/control frame while excluding the
+    # high-frequency ticker stream from durable truth telemetry. This wraps
+    # only the telemetry capture function; the KuCoin WS frame delivered to
+    # production parsing/cache code is unchanged. It is also a no-op while
+    # BGX_RUNTIME_TRUTH_ENABLED=false.
+    from bot.runtime_truth_ws_filter import install as _install_runtime_truth_ws_filter
+    _install_runtime_truth_ws_filter()
+
     from bot.runtime_bootstrap import install as _install_runtime_bootstrap
 
     _install_runtime_bootstrap()
