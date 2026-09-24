@@ -311,6 +311,7 @@ def walk_forward(rows, *, required_ms: int, samples: int = AUTHORITY_BOOTSTRAP_S
                                 "seed": inf.SEED, "unit_order": "BLOCK_ID_ASCENDING",
                                 "percentiles": [0.025, 0.975]}
     return {**base, "status": "OK", "layout": {k: v for k, v in lay.items() if k != "windows"},
+            "dataset_manifest": dataset_manifest(rows),
             "folds": [{"fold": w["fold"], "decision_start_ts": w["decision_start_ts"],
                        "decision_end_ts": w["decision_end_ts"],
                        "outcome_window_end_ts": w["outcome_window_end_ts"], "n": len(f)}
@@ -331,9 +332,17 @@ def walk_forward(rows, *, required_ms: int, samples: int = AUTHORITY_BOOTSTRAP_S
 
 
 def dataset_manifest(rows) -> dict:
+    """Identity of EXACTLY the rows training.dataset() passes to training
+    (AI_RUNTIME_HOOK_POPULATION_V1, resolved, current schema). One row more or
+    less, or any changed feature hash / outcome, changes the sha256."""
+    from bot.ai import hook as ai_hook
     data = dataset(rows)
-    body = [[int(r["ts"]), r.get("symbol"), r.get("direction"), round(float(r["r"]), 12)] for r in data]
-    return {"rows": len(data), "sha256": hashlib.sha256(json.dumps(body).encode()).hexdigest(),
+    body = [[int(r["ts"]), r.get("symbol"), r.get("direction"), r.get("ai_feature_hash"),
+             round(float(r["r"]), 12)] for r in data]
+    sha = hashlib.sha256(json.dumps(body).encode()).hexdigest()
+    return {"rows": len(data), "sha256": sha,
+            "training_dataset_rows": len(data), "training_dataset_sha256": sha,
+            "training_population": ai_hook.POPULATION, "training_hook_profile": ai_hook.TRAINING_PROFILE,
             "first_ts": data[0]["ts"] if data else None, "last_ts": data[-1]["ts"] if data else None,
             "data_label": DATA_LABEL, "feature_schema_sha256": fx.schema_hash()}
 

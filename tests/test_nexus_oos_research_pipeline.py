@@ -269,6 +269,31 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
         self.assertEqual(ai["research_promotion_gate"]["verdict"], "BLOCK")
         self.assertEqual(ai["shadow_challenger"], {"created": False, "reason": "AI_RESEARCH_GATE_BLOCK"})
 
+    def test_phase7d_hook_policy_portfolio_keeps_downstream_blocked_hook_rows(self):
+        """A hook-approved candidate blocked downstream (e.g. drift) stays in the
+        AI_HOOK_POLICY_PORTFOLIO and is excluded only from the
+        KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO; nothing is silently dropped."""
+        import copy as _copy
+        _, all_rich, manifest, instruments, mmr = self.ai_inputs[0]
+        rich = _copy.deepcopy(all_rich)
+        execs = [r for r in rich if r.get("executable") and r.get("outcome_status") and r.get("legs")]
+        blocked = execs[0]
+        blocked.update(executable=False, drift_blocked=True, ai_hook_eligible=True)
+        keys = [[int(r["ts"]), r["symbol"], r["direction"]] for r in execs[:6]]
+        art = {"candidate_sha": "c" * 40, "candidate_research": {"ai_meta_model": {
+            "status": "OK", "data_label": "HISTORICAL_OOS_PREVIOUSLY_INSPECTED",
+            "selection_stability": {"status": "MODEL_SELECTION_UNSTABLE"},
+            "steps": [{"test_fold": 3, "_approved_keys": keys}]}}}
+        replay.__dict__["_ai_portfolio_and_gate"](art, rich, manifest, instruments, mmr)
+        ai = art["candidate_research"]["ai_meta_model"]
+        self.assertEqual(ai["portfolio_kind"], "AI_HOOK_POLICY_PORTFOLIO")
+        self.assertEqual(ai["portfolio_by_test_fold"][0]["rows_in_portfolio"], 6)
+        self.assertEqual(ai["downstream_filtered_portfolio_by_test_fold"][0]["rows_in_portfolio"], 5)
+        self.assertEqual(ai["portfolio_pooled_test"]["approved_hook_rows_without_path"], 0)
+        self.assertEqual(ai["research_promotion_gate"]["required_portfolio"], "AI_HOOK_POLICY_PORTFOLIO")
+        self.assertEqual(ai["shadow_observer"]["lifecycle_state"], "SHADOW_OBSERVER") if ai.get(
+            "shadow_observer", {}).get("created") else None
+
     def test_portfolio_trades_single_position_and_invariants(self):
         p = self.artifact["portfolio_replay"]
         self.assertGreater(p["approved_candidates"], 10)

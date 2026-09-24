@@ -16,7 +16,9 @@ Each bootstrap draw is rebuilt from those aggregates:
 using the SAME predeclared seed (nexus_oos_inference.SEED), sample count,
 block universe (ascending block id = the time order in which the replay
 passed its rows), draw code (nexus_oos_inference._fast_ci) and 2.5/97.5
-percentile definition. The point estimate, the influence-score residual ACF
+percentile definition. Resampling units = len(block_ids) (the full universe,
+zero-A blocks included); A-/B-active block counts are reported separately and
+sample adequacy requires enough A-active blocks. The point estimate, the influence-score residual ACF
 and the authority interval (min low / max high over valid lengths) are all
 recomputed. Stored ``block_intervals[].ci``, ``authority_ci_low/high``,
 ``authority_status``, stored ACF and stored point estimates are COMPARISON
@@ -77,9 +79,15 @@ def recompute(section: dict, *, required_ms: int | None, min_blocks: int, paired
         if not isinstance(series, dict) or not isinstance(series.get("a_count" if paired else "count"), list):
             out["status"] = "AGGREGATE_INTERVAL_MISSING"
             return out
-        n_blk = sum(1 for c in series["a_count" if paired else "count"]
-                    if isinstance(c, int) and not isinstance(c, bool) and c >= 1)
-        err = g._influence_series_error(series, diff=paired, expected_a_blocks=n_blk)
+        def active(key):
+            return sum(1 for c in series.get(key) or []
+                       if isinstance(c, int) and not isinstance(c, bool) and c >= 1)
+        # The bootstrap resamples the FULL calendar block universe (every block
+        # of the pooled population, including zero-A blocks: they are data).
+        n_units = len(series.get("block_ids") or [])
+        n_a = active("a_count" if paired else "count")
+        n_b = active("b_count") if paired else None
+        err = g._influence_series_error(series, diff=paired, expected_a_blocks=n_a)
         if err is not None:
             out["status"] = err
             return out
@@ -89,20 +97,33 @@ def recompute(section: dict, *, required_ms: int | None, min_blocks: int, paired
             return out
         ids, psi, point = sc
         points.append(point)
-        lo, hi = ci_from_series(series, diff=paired, samples=samples) if n_blk >= min_blocks else (None, None)
+        lo, hi = ci_from_series(series, diff=paired, samples=samples) if n_units >= min_blocks else (None, None)
         stored = (iv or {}).get("ci") or [None, None]
-        rec = {"block_ms": ms, "resampling_blocks": n_blk, "ci": [lo, hi], "stored_ci": list(stored),
+        rec = {"block_ms": ms, "n_resampling_units": n_units, "n_a_active_blocks": n_a,
+               "n_b_active_blocks": n_b, "a_active_adequate": n_a >= min_blocks,
+               "ci": [lo, hi], "stored_ci": list(stored),
                "stored_matches": (lo is not None and len(stored) == 2 and stored[0] is not None
                                   and stored[1] is not None
                                   and abs(float(stored[0]) - lo) <= CI_COMPARISON_TOLERANCE
                                   and abs(float(stored[1]) - hi) <= CI_COMPARISON_TOLERANCE)}
         out["intervals"].append(rec)
-        if n_blk >= min_blocks and lo is not None and hi is not None:
+        rec["excluded_reason"] = (None if (n_units >= min_blocks and n_a >= min_blocks and lo is not None)
+                                  else "INSUFFICIENT_RESAMPLING_UNITS" if n_units < min_blocks
+                                  else "INSUFFICIENT_A_ACTIVE_BLOCKS" if n_a < min_blocks
+                                  else "CI_NOT_ESTIMABLE")
+        if rec["excluded_reason"] is None:
             usable.append((ms, lo, hi, ids, psi))
     if max(points) - min(points) > g.AGGREGATE_POINT_TOLERANCE:
         out["status"] = "AGGREGATE_UNIVERSES_INCONSISTENT"
         return out
     out["point_estimate"] = points[0]
+    longest = max(out["intervals"], key=lambda r: r["block_ms"])
+    out["n_resampling_units"] = longest["n_resampling_units"]
+    out["n_a_active_blocks"] = longest["n_a_active_blocks"]
+    out["n_b_active_blocks"] = longest["n_b_active_blocks"]
+    # Sample adequacy (separate from bootstrap validity): at least one
+    # authoritative length with enough A-active blocks.
+    out["a_active_adequate"] = any(r["a_active_adequate"] for r in out["intervals"])
     if not usable:
         out["status"] = "INSUFFICIENT_RESAMPLING_BLOCKS"
     else:

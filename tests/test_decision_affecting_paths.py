@@ -70,6 +70,9 @@ class PromotionGateWorkflowContract(unittest.TestCase):
         self.assertIn("python -m unittest tests.test_ai_decision_authority -v", text)
         self.assertIn("python -m unittest tests.test_ai_phase7b -v", text)
         self.assertIn("python -m unittest tests.test_ai_phase7c -v", text)
+        self.assertIn("python -m unittest tests.test_ai_phase7d -v", text)
+        for name in ("ai-shadow-observer-bundle", "shadow-observer-deploy-manifest"):
+            self.assertIn(f"name: {name}", text)
         # LIVE evidence is never read from a committed file.
         self.assertNotIn("live_policy_attestation.txt", text)
         self.assertNotIn("--policy-observation-fixture", text)

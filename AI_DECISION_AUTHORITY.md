@@ -294,7 +294,61 @@ In the production engine, `AI_EXECUTION_MODE=SHADOW` only means the AI has no or
 
 When the gate blocks, the replay builds a zero-order `SHADOW_OBSERVER` bundle: no edge claim, no order authority, no LIVE authority, never promotable.
 
-## 12. What is not done
+## 12. Phase 7D: forward evidence collector and deployable SHADOW bundle
+
+### 12.1 Collector and resolver
+`bot/ai/forward_collector.py` and `bot/ai/shadow_observer.py` persist every hook candidate once, TRADE and ABSTAIN alike. The deterministic `candidate_id` is built from population, profile, symbol, event, direction, bundle, policy and code. Each record carries:
+- identities: code, bundle, policy, feature schema, hook population and profile;
+- geometry: entry, stop, TP, RR, score and NEXUS confidence;
+- the regime and feature hash;
+- model outputs and the decision, with vetoes and reason codes;
+- decision-time fee, slippage and funding assumptions.
+
+The resolver calls the replay's own `_parity_outcome`: native SL/TP, 1R partial, break-even, trailing, 2R, fees, slippage and funding. It uses candles closed by evaluation time only, and records gross, fees, slippage, funding and net R, MFE/MAE, holding time, legs and cost-stress R.
+
+Predeclared rules:
+- a missing decision bar makes the candidate INVALID;
+- a missing 15m candle before the exit gives `RIGHT_CENSORED_DATA_GAP`;
+- nothing is ever force-closed; open candidates at window end become `RIGHT_CENSORED_DATA_END`;
+- final rows are never rewritten.
+
+### 12.2 Evidence database (`bot/ai/evidence_store.py`)
+Evidence goes only to a dedicated PostgreSQL database, never SQLite and never the `bot.database` `/tmp` fallback.
+- **Identity pins:** the evidence DB authority id and endpoint fingerprint must differ from the pinned production DB id and fingerprint, and from `DATABASE_URL`.
+- **Role marker:** the database must carry role `AI_SHADOW_EVIDENCE`. A database holding production trades or a different role is refused.
+- **Sealing:** rows are sealed with `record_sha256`, and every load verifies the seal.
+- **Outage:** a DB failure marks evidence continuity broken and halts collection.
+- **Tests:** the store is tested against a real throw-away PostgreSQL cluster.
+
+### 12.3 `FORWARD_SHADOW_EVIDENCE_V2`
+- **HOOK_BASELINE** is all hook candidates and is the uplift baseline.
+- **EFFECTIVE_EXECUTION_BASELINE** is not measured.
+- **Two products:**
+  - `FORWARD_OBSERVATION_DATASET` grows even when the policy abstains.
+  - `FROZEN_POLICY_FORWARD_EVIDENCE` covers TRADE candidates only; with zero trades it is INSUFFICIENT_EVIDENCE.
+- **Diagnostic buckets** are predeclared: probability deciles, predicted-net-R buckets, direction, regime and symbol. They are diagnostics only; a challenger designed from this window needs a new untouched window.
+- **Builder:** `build_forward_shadow_artifact` never self-attests PASS; it returns COLLECTING, INSUFFICIENT_EVIDENCE or BLOCK.
+- **BLOCK conditions:** any zero-order assertion failing, an unverified journal, a continuity break, an identity change or a symbol-universe mismatch.
+- **Symbol universe:** the pinned 12-symbol universe is required.
+
+### 12.4 Replay semantics fixed
+- **Dataset manifest:** `dataset_manifest` is computed inside `walk_forward` from exactly the rows `training.dataset()` uses: `training_dataset_rows`, `training_dataset_sha256`, `training_population` and `training_hook_profile`. It includes feature hashes.
+- **Hook-row data:** paths and cost scenarios are kept for every hook-eligible row.
+- **Two AI portfolios:**
+  - `AI_HOOK_POLICY_PORTFOLIO`: every AI-approved hook candidate with a path, downstream gates not applied. The AI gate requires this one.
+  - `KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO`: a diagnostic after the replayable downstream gates.
+- **Bootstrap units:**
+  - `n_resampling_units` is `len(block_ids)`, the full universe including zero-A blocks.
+  - A-active and B-active block counts are reported separately.
+  - Adequacy additionally requires enough A-active blocks per authoritative length.
+- **Training code identity** is the candidate SHA, not the PR merge SHA.
+
+### 12.5 Deployable bundle
+`python -m bot.ai.bundle_export` writes the `ai-shadow-observer-bundle` artifact with exactly four files: `manifest.json`, `classifier.json`, `regressor.json` and `bundle_metadata.json`. It also writes the non-secret `shadow-observer-deploy-manifest`.
+
+`--verify` reloads the bundle through the real `bot.ai.runtime.load_bundle` path, checks the hook profile and runs a deterministic inference. Both artifacts are uploaded by the exact-SHA replay workflow.
+
+## 13. What is not done
 - **Deployment:** nothing is deployed, and no Railway variable has changed. `AI_EXECUTION_MODE` stays unset (OFF) in production.
 - **LIVE:** no LIVE_CHAMPION exists, and no trusted Stage-C or AI-identity provider is implemented in-candidate.
 - **Forward evidence:** no forward SHADOW or PAPER evidence exists yet.

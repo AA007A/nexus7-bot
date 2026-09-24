@@ -741,7 +741,11 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
                 "exit_reason": sim["exit_reason"],
                 "exit_legs_n": len(sim["legs"]),
             })
-            if row["executable"]:
+            # Costs, variants and hypothetical paths are kept for every executable
+            # row AND every AI hook-eligible row (a hook candidate may be blocked
+            # downstream, e.g. by drift; its path is still needed for the
+            # AI_HOOK_POLICY_PORTFOLIO; final-order eligibility is never implied).
+            if row["executable"] or row.get("ai_hook_eligible"):
                 variants_ok = resolved
                 cost_r, exit_r, cost_grid = {}, {}, {}
                 no_slip_o = None
@@ -776,8 +780,6 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
                     "slippage_r": ((float(final["r"]) - _realized(no_slip_o))
                                    if variants_ok and _realized(no_slip_o) is not None else None),
                 })
-                # Kept for EVERY executable row (not only NEXUS-approved): the AI
-                # test-fold portfolio replay needs the same production paths.
                 if True:
                     row["legs"] = [list(l) for l in sim["legs"]]
                     row["_marks"] = sim["marks"]
@@ -1143,7 +1145,9 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
             "missing": list(ai_hook.EFFECTIVE_EXECUTION_PARITY_MISSING),
             "meaning": "AI results are AI_HOOK_EDGE (selection among candidates reaching the runtime "
                        "hook); they are not proof of AI_EFFECTIVE_EXECUTION_EDGE on final real orders"}
-        out["ai_meta_model"]["dataset_manifest"] = ai_train.dataset_manifest(exe_all)
+        # dataset_manifest is computed inside walk_forward from EXACTLY the rows
+        # passed to training.dataset() (the hook population), never exe_all.
+        out["ai_meta_model"].setdefault("dataset_manifest", ai_train.dataset_manifest(all_rich))
     except Exception as exc:          # reported, never silently dropped
         out["ai_meta_model"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:300]}
     out["research_status"] = research_status(
@@ -1495,34 +1499,50 @@ def _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy)
     if ai.get("status") != "OK":
         return
     by_key = {(int(r["ts"]), str(r.get("symbol")), str(r.get("direction"))): r for r in all_rich
-              if r.get("executable") and r.get("outcome_status")}
+              if r.get("outcome_status") and r.get("legs") is not None}
 
-    def rows_for(keys):
-        out = []
+    def rows_for(keys, kind):
+        """AI_HOOK_POLICY_PORTFOLIO: every AI-approved hook candidate whose
+        hypothetical production-parity path exists (downstream gates NOT applied;
+        final-order eligibility is not implied). KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO:
+        additionally the historically reproducible downstream gates (executable)."""
+        out, missing = [], 0
         for k in keys:
             r = by_key.get((int(k[0]), k[1], k[2]))
-            if r is None:
+            if r is None or (kind == "KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO" and not r.get("executable")):
+                missing += r is None
                 continue
-            row = dict(r, approved=True)
+            row = dict(r, approved=True, executable=True,
+                       downstream_executable=bool(r.get("executable")))
             row["marks"] = r.get("_marks") or []
             row["funding"] = r.get("_funding") or []
             out.append(row)
-        return out
-    folds, pooled_keys = [], []
-    for s in ai.get("steps") or []:
-        keys = s.get("_approved_keys") or []
-        pooled_keys += keys
-        rep = pe.run_portfolio(rows_for(keys), manifest, instruments=instruments, mmr_proxy=mmr_proxy)
-        folds.append({"test_fold": s["test_fold"], **_ai_port_summary(rep)})
-    ai["portfolio_by_test_fold"] = folds
-    ai["portfolio_pooled_test"] = _ai_port_summary(pe.run_portfolio(
-        rows_for(pooled_keys), manifest, instruments=instruments, mmr_proxy=mmr_proxy))
+        return out, missing
+    for kind, prefix in (("AI_HOOK_POLICY_PORTFOLIO", ""), ("KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO",
+                                                             "downstream_filtered_")):
+        folds, pooled_keys, missing = [], [], 0
+        for s_ in ai.get("steps") or []:
+            keys = s_.get("_approved_keys") or []
+            pooled_keys += keys
+            rows, miss = rows_for(keys, kind)
+            missing += miss
+            rep = pe.run_portfolio(rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy)
+            folds.append({"test_fold": s_["test_fold"], "approved_keys": len(keys), "rows_in_portfolio": len(rows),
+                          **_ai_port_summary(rep)})
+        ai[prefix + "portfolio_by_test_fold"] = folds
+        ai[prefix + "portfolio_pooled_test"] = {
+            "portfolio_kind": kind, "approved_hook_rows_without_path": missing,
+            **_ai_port_summary(pe.run_portfolio(rows_for(pooled_keys, kind)[0], manifest,
+                                                instruments=instruments, mmr_proxy=mmr_proxy))}
+    ai["portfolio_kind"] = "AI_HOOK_POLICY_PORTFOLIO"
+    ai["downstream_filtered_portfolio_kind"] = "KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO"
+    code_sha = artifact.get("candidate_sha") or _os.environ.get("GITHUB_SHA")
     gate = ai_gate.evaluate(artifact)
     ai["research_promotion_gate"] = gate
     stable = (ai.get("selection_stability") or {}).get("status") == "MODEL_SELECTION_STABLE"
     if gate["verdict"] == "PASS" and stable:
         ai["shadow_challenger"] = ai_train.build_shadow_challenger(
-            all_rich, ai, training_code_sha=_os.environ.get("GITHUB_SHA"),
+            all_rich, ai, training_code_sha=code_sha,
             created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     else:
         ai["shadow_challenger"] = {"created": False,
@@ -1533,7 +1553,7 @@ def _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy)
         from bot.ai import lifecycle as ai_lc
         try:
             obs_b = ai_train.build_shadow_challenger(
-                all_rich, ai, training_code_sha=_os.environ.get("GITHUB_SHA"),
+                all_rich, ai, training_code_sha=code_sha,
                 created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 lifecycle_state="SHADOW_OBSERVER")
             ai["shadow_observer"] = {**obs_b, "claims": dict(ai_lc.OBSERVER_CLAIMS)}

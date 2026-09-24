@@ -70,6 +70,7 @@ def passing_artifact():
             "portfolio_max_drawdown": 0.05, "research_max_drawdown_limit": 0.10,
             "end_state": {"portfolio_censoring_material": False}}
     ai["portfolio_by_test_fold"] = [dict(fold, test_fold=3), dict(fold, test_fold=4)]
+    ai["portfolio_kind"] = "AI_HOOK_POLICY_PORTFOLIO"
     return {"candidate_sha": "c" * 40,
             "candidate_research": {"ai_meta_model": ai,
                                    "inference": {"outcome_horizon_resolved_executable": {"max_ms": H1}}}}
@@ -385,8 +386,8 @@ class FakeDB:
                 for k, v in self.rows.items() if v["status"] in ("INTENT_CREATED", "SUBMITTED", "PENDING_UNKNOWN")]
 
 
-def write_bundle(tmp, lifecycle="SHADOW_CHALLENGER", p=0.62, hook_profile=None):
-    b, ca, ra, man = constant_bundle(p=p, lifecycle=lifecycle, hook_profile=hook_profile)
+def write_bundle(tmp, lifecycle="SHADOW_CHALLENGER", p=0.62, hook_profile=None, gross_r=0.5):
+    b, ca, ra, man = constant_bundle(p=p, gross_r=gross_r, lifecycle=lifecycle, hook_profile=hook_profile)
     for name, obj in (("manifest.json", man), ("classifier.json", ca), ("regressor.json", ra)):
         with open(os.path.join(tmp, name), "w") as fh:
             json.dump(obj, fh)
@@ -394,7 +395,7 @@ def write_bundle(tmp, lifecycle="SHADOW_CHALLENGER", p=0.62, hook_profile=None):
 
 
 def runtime_with_bundle(mode, *, lifecycle=None, paper_trade=None, pin=None, db=None, stage_c=None, p=0.62,
-                        bundle_profile=None, engine_profile=None):
+                        bundle_profile=None, engine_profile=None, gross_r=0.5):
     """PAPER engines run the pre-geometry hook profile; LIVE pilot the post-geometry one."""
     tmp = tempfile.mkdtemp()
     lifecycle = lifecycle or {"SHADOW": "SHADOW_CHALLENGER", "PAPER": "PAPER_CHALLENGER",
@@ -402,7 +403,7 @@ def runtime_with_bundle(mode, *, lifecycle=None, paper_trade=None, pin=None, db=
     default_profile = hk.PROFILE_PRE_GEOMETRY if mode == "PAPER" else hk.PROFILE_LIVE_PILOT
     bundle_profile = bundle_profile or default_profile
     engine_profile = engine_profile or default_profile
-    sha = write_bundle(tmp, lifecycle, p=p, hook_profile=bundle_profile)
+    sha = write_bundle(tmp, lifecycle, p=p, hook_profile=bundle_profile, gross_r=gross_r)
     env = {"AI_EXECUTION_MODE": mode, "AI_BUNDLE_DIR": tmp, "AI_BUNDLE_SHA256": pin or sha}
     journal = rt.DurableAIJournal(db or FakeDB())
     r = rt.AIRuntime(env, journal=journal, paper_trade=(mode == "PAPER") if paper_trade is None else paper_trade,

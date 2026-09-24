@@ -133,6 +133,7 @@ jobs:
           python -m unittest tests.test_ai_decision_authority -v
           python -m unittest tests.test_ai_phase7b -v
           python -m unittest tests.test_ai_phase7c -v
+          python -m unittest tests.test_ai_phase7d -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
@@ -224,6 +225,49 @@ jobs:
             --candidate-sha "$(git rev-parse HEAD)" \
             --output artifacts/AI_OPERATION_READINESS.json | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: AI hook evidence (compact)
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path('artifacts') / 'nexus_oos_real_replay.json'
+          if not p.exists():
+              print('replay artifact MISSING'); raise SystemExit(0)
+          a = json.loads(p.read_text()); c = a.get('candidate_research') or {}; ai = c.get('ai_meta_model') or {}
+          g = ai.get('research_promotion_gate') or {}
+          rec = g.get('recomputed') or {}
+          def auth(x):
+              x = x or {}
+              return {k: x.get(k) for k in ('status', 'ci', 'point_estimate', 'n_resampling_units', 'n_a_active_blocks', 'n_b_active_blocks', 'a_active_adequate')}
+          view = {
+              'candidate_sha': a.get('candidate_sha'),
+              'hook_population_counts': (c.get('population_counts') or {}).get('ai_hook_population'),
+              'ai_status': ai.get('status'), 'population': ai.get('population'), 'hook_profile': ai.get('hook_profile'),
+              'dataset_manifest': ai.get('dataset_manifest'),
+              'folds': ai.get('folds'),
+              'steps': [{k: s.get(k) for k in ('step', 'n_train', 'n_validation', 'n_test', 'selected_classifier', 'selected_regressor', 'policy', 'policy_sha256', 'test_ai_approved', 'test_baseline', 'test_nexus_production')} | {'test_calibration': {k: (s.get('test_calibration') or {}).get(k) for k in ('brier', 'brier_base_rate', 'log_loss', 'ece', 'beats_base_rate')}} for s in ai.get('steps') or []],
+              'selection_stability': ai.get('selection_stability'),
+              'pooled_test': {k: (ai.get('pooled_test') or {}).get(k) for k in ('ai_approved', 'baseline', 'nexus_production')},
+              'authority_recomputed': {'model': rec.get('model'), 'ai_expectancy': auth(rec.get('ai_expectancy')), 'ai_uplift': auth(rec.get('ai_uplift'))},
+              'ai_gate': {k: g.get(k) for k in ('verdict', 'blockers', 'components', 'required_portfolio', 'ai_hook_edge', 'ai_effective_execution_parity', 'ai_effective_execution_edge', 'live_historical_promotion')},
+              'hook_policy_portfolio_pooled': ai.get('portfolio_pooled_test'),
+              'downstream_filtered_portfolio_pooled': ai.get('downstream_filtered_portfolio_pooled_test'),
+              'shadow_challenger': {k: (ai.get('shadow_challenger') or {}).get(k) for k in ('created', 'reason', 'bundle_sha256')},
+              'shadow_observer': {k: (ai.get('shadow_observer') or {}).get(k) for k in ('created', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256', 'claims', 'reason')},
+          }
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Export and verify AI shadow observer bundle
+        if: always()
+        run: |
+          python -m bot.ai.bundle_export --artifact artifacts/nexus_oos_real_replay.json \
+            --out artifacts/ai_shadow_observer_bundle --candidate-sha "$(git rev-parse HEAD)" \
+            --deploy-manifest artifacts/shadow_observer_deploy_manifest/shadow_observer_deploy_manifest.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          python -m bot.ai.bundle_export --verify artifacts/ai_shadow_observer_bundle | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload replay evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -239,6 +283,22 @@ jobs:
           name: ai-operation-readiness
           path: artifacts/AI_OPERATION_READINESS.json
           if-no-files-found: warn
+
+      - name: Upload AI shadow observer bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-shadow-observer-bundle
+          path: artifacts/ai_shadow_observer_bundle/
+          if-no-files-found: error
+
+      - name: Upload shadow observer deploy manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-observer-deploy-manifest
+          path: artifacts/shadow_observer_deploy_manifest/
+          if-no-files-found: error
 
       - name: Live release gate (informational, stage C)
         if: always()

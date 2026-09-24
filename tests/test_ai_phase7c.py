@@ -511,8 +511,13 @@ class ShadowObserverIsolation(unittest.TestCase):
 
     def test_observer_hook_path_journals_shadow_decisions_with_zero_orders(self):
         from bot import nexus_oos_replay_manifest as rm
+        from bot.ai import evidence_store as es
+        from bot.ai import forward_evidence as fe
         r, j = runtime_with_bundle("SHADOW")
-        obs = so.ShadowObserver(self.ENV, client=SimpleNamespace(), runtime=r, manifest=rm.load(), symbols=[SYM])
+        store = es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
+        obs = so.ShadowObserver(self.ENV, client=SimpleNamespace(), runtime=r, manifest=rm.load(),
+                                symbols=list(fe.SHADOW_UNIVERSE), store=store)
+        obs.start()
         obs.mmr_proxy[SYM] = 0.004
         m = market()
         with patch("bot.strategy.Analyzer.analyze_mtf", lambda self, *a, **k: signal(sl=99.5, tp=101.5)), \
@@ -521,9 +526,10 @@ class ShadowObserverIsolation(unittest.TestCase):
         self.assertEqual(out["stage"], "AI_HOOK", out)
         self.assertTrue(out["allow"])
         self.assertEqual(obs.orders_sent, 0)
-        rec = next(iter(j.db.rows.values()))
-        self.assertIn(rec["status"], ("SHADOW_TRADE", "SHADOW_ABSTAIN"))
-        self.assertEqual(rec["record"]["hook_observation"]["profile"], hk.PROFILE_LIVE_PILOT)
+        rec = run(store.all_candidates())[0]
+        self.assertIn(rec["ai_decision"], ("TRADE", "ABSTAIN"))
+        self.assertEqual(rec["hook_profile"], hk.PROFILE_LIVE_PILOT)
+        self.assertEqual(rec["status"], "PENDING")
 
     def test_observer_lifecycle_makes_no_claims(self):
         self.assertEqual(lc.OBSERVER_CLAIMS, {"edge_claim": False, "order_authority": False,

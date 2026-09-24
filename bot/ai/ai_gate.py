@@ -91,6 +91,9 @@ def evaluate(artifact: dict, policy: g.GatePolicy = g.GatePolicy()) -> dict:
     lo_u, st_u, delta = re_u["ci"][0], re_u["status"], re_u["point_estimate"]
     out["recomputed"] = {"model": agg.VERSION, "ai_expectancy": re_e, "ai_uplift": re_u,
                          "required_block_ms": req}
+    for name, rec in (("EXPECTANCY", re_e), ("UPLIFT", re_u)):
+        if rec.get("a_active_adequate") is False:
+            b.append(f"AI_{name}_INSUFFICIENT_A_ACTIVE_BLOCKS")
     n_appr = (ai.get("pooled_test") or {}).get("ai_approved", {}).get("n") or 0
     if n_appr < policy.min_approved_samples:
         b.append("AI_INSUFFICIENT_APPROVED_SAMPLE")
@@ -136,6 +139,12 @@ def evaluate(artifact: dict, policy: g.GatePolicy = g.GatePolicy()) -> dict:
     if stress_ok:
         comp["AI_COST_STRESS"] = "PASS"
 
+    # AI_RESEARCH_PROMOTION requires the AI_HOOK_POLICY_PORTFOLIO (every
+    # AI-approved hook candidate, downstream gates not applied). The
+    # KNOWN_DOWNSTREAM_FILTERED_PORTFOLIO is a diagnostic; effective-execution
+    # edge stays BLOCK while downstream parity is incomplete.
+    if ai.get("portfolio_kind") != "AI_HOOK_POLICY_PORTFOLIO":
+        b.append("AI_PORTFOLIO_KIND_NOT_HOOK_POLICY")
     folds = ai.get("portfolio_by_test_fold") or []
     port_ok = bool(folds)
     for f in folds:
@@ -163,6 +172,7 @@ def _live_view(out: dict, cand: dict) -> dict:
     represented, or fresh forward evidence. LIVE fails closed without it."""
     parity = (cand.get("ai_effective_execution_parity") or {}).get("status", "INCOMPLETE")
     out["ai_hook_edge"] = out["verdict"]
+    out["required_portfolio"] = "AI_HOOK_POLICY_PORTFOLIO"
     out["ai_effective_execution_parity"] = parity
     live_b = list(out["blockers"])
     if parity != "COMPLETE":
