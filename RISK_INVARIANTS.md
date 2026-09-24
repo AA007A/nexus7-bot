@@ -16,7 +16,8 @@ Every risk concept has one owner. Any other module that reads the concept must c
 | **Liquidation cap** | `equity − qty·loss_per_unit ≥ 2 × mmr × qty × entry` | `risk_policy.size_new_entry` cap `liquidation` | `mmr` comes from instrument metadata; if unknown, a conservative 5% is used (this can only shrink quantity). |
 | **Portfolio cap** | `Σ open projected stop losses + candidate ≤ MAX_POSITIONS × equity × MAX_RISK_PCT` | `risk_policy.size_new_entry` cap `portfolio`; `risk_policy.projected_open_risk` | Open positions whose geometry is unknown consume a full per-trade budget. `n_open ≥ MAX_POSITIONS` ⇒ BLOCK. |
 | **CROSS stress** | All bot positions plus the candidate at their stops at the same time: `(maintenance + closing fees) / (stressed margin − opening fee − slippage) < MAX_STOP_STRESS_RISK_RATE` | `cross_portfolio_stress.evaluate` with threshold from `risk_policy` (default 0.50, ceiling 0.90) | Unknown MMR, stale requirement, missing protection, local/exchange mismatch, or extra non-reduce orders ⇒ BLOCK. |
-| **Daily stop** | `min(balance × DAILY_STOP_LOSS_PCT, DAILY_STOP_LOSS if > 0)` | `risk_policy.effective_daily_stop_limit` | An absolute value can only tighten the limit. Invalid absolute ⇒ ignored (the percentage governs). Balance ≤ 0 ⇒ error (fail closed). |
+| **Daily stop** | `min(balance × DAILY_STOP_LOSS_PCT, DAILY_STOP_LOSS if > 0)`, computed exactly | `risk_policy.effective_daily_stop_limit` | Exact Decimal product, quantized DOWN to 1e-8 and converted to the largest float not above it, so the internal limit is never looser than the configured limit. `display_limit` (floored to cents) is for text only and never used by a gate. An absolute value can only tighten. Invalid absolute ⇒ ignored. Balance ≤ 0 ⇒ error (fail closed). |
+| **Daily-stop breach** | Proven breach for the UTC day ⇒ NEW and INCREASING exposure BLOCK | `durable_daily_stop.entries_blocked` | `DAILY_STOP_OVERRIDE_UTC_DAY` and `DAILY_STOP_OPERATOR_OVERRIDE` are telemetry only (`override_effect=NONE`). Close, reduce, cancel, protection repair and reconcile are not gated. Durable evidence is never deleted. |
 | **Leverage** | `cfg.LEVERAGE`, never mutated at runtime | `RiskPolicy.leverage` | Enters collateral (margin) and liquidation only. It never enters the loss budget. |
 | **Quantity** | `floor_lot(min(RiskManagerV3 adapter qty, size_new_entry qty))` | LIVE: `final_sizing_invariants.size_pilot_entry`. PAPER/core: `ProfessionalRiskAdapter.size` → `size_new_entry` | If below the exchange minimum ⇒ 0 (NO TRADE). Never escalated. |
 | **Configuration validity** | Bounds + contradictions | `RiskPolicy.violations()` | Any violation ⇒ new entries BLOCK (`[RISK_POLICY_INVALID]`); existing positions stay managed. |
@@ -38,7 +39,7 @@ Every risk concept has one owner. Any other module that reads the concept must c
 | `NEXUS_EXPECTED_SLIPPAGE_PCT` | [0, 0.05) |
 | Contradiction | `MAX_RISK_PCT < DAILY_STOP_LOSS_PCT` and `MAX_RISK_PCT < MAX_DRAWDOWN` |
 
-Non-authoritative variables. Their presence is reported in `ignored_overrides` and never honored: `LIVE_RISK_OVERRIDE_APPROVED`, `DAILY_STOP_OPERATOR_OVERRIDE`. `DRAWDOWN_MODE` is telemetry-only.
+Non-authoritative variables. Their presence is reported and never honored for new exposure: `LIVE_RISK_OVERRIDE_APPROVED`, `DAILY_STOP_OPERATOR_OVERRIDE`, `DAILY_STOP_OVERRIDE_UTC_DAY`. `DRAWDOWN_MODE` is telemetry-only.
 
 ## Worked example: production state (equity = available = 25.9007 USDT, 50x, MAX_RISK_PCT = 1%)
 
@@ -52,6 +53,14 @@ SOL-like contract (multiplier 0.01), entry 150, cost 0.22%, drift allowance 0.20
 
 The old final loss budget allowed up to `margin × 0.5 = 6.48 USDT = 25%` of equity per trade. The new budget is 0.259 USDT.
 
-Daily stop: `min(25.9007 × 3% = 0.78, 100) = 0.78 USDT`. The baseline produced 100 USDT.
+Daily stop: `min(25.9007 × 3% = 0.777021, 100) = 0.777021 USDT` (displayed `0.77`). The baseline produced 100 USDT; the first fix rounded to 0.78.
 
 Drawdown: `(63.7943 − 25.9007) / 63.7943 = 59.40% ≥ 50%` ⇒ **new entries BLOCKED**. This holds whatever `LIVE_RISK_OVERRIDE_APPROVED` is set to.
+
+## Research-only metrics (never risk authority)
+
+| Metric | Layer | Meaning |
+|---|---|---|
+| `candidate_sequence_drawdown_r` | candidate research | Drawdown of cumulative R of *overlapping* candidates in decision order. **Not** an account drawdown. |
+| `portfolio_max_drawdown` | portfolio execution replay | Marked-equity drawdown of the event-driven replay under production position/risk constraints. The only account-drawdown estimate. |
+| `heuristic_win_probability` | NEXUS | Uncalibrated score transform; EV derived from it may only veto (`nexus_probability_semantics`). |
