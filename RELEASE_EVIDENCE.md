@@ -60,7 +60,7 @@ The envelope is a **claim**. No field is trusted because it appears in a JSON fi
 | `EXACT_DEPLOYMENT_SHA_MATCH` | Railway and the runtime line | trusted artifact SHA = envelope SHA = deployment `commitHash` = runtime `candidate_sha` |
 | `CI_EVIDENCE` | Each workflow run | Exact `head_sha`, expected name, `conclusion = success`, ≤ 7 days. `NEXUS Real OOS Replay` must be the same run as the research artifact |
 | `PROTECTION_EVIDENCE` | PER_JOB: each **job** (id, name, run, head SHA, conclusion) and its run. CERTIFICATE: the named workflow's run and its certificate artifact | PER_JOB: job name = check name; job belongs to the stated run; one job per check (one generic run can never satisfy several checks). CERTIFICATE: digest matches, candidate SHA matches, and every required check is present and `PASS` |
-| `HUMAN_APPROVAL_EVIDENCE` | The provider-native approval record | `state = APPROVED`; same candidate SHA, deployment ID (or a record that explicitly lists this deployment in `covered_deployment_ids`), research-artifact digest and release-evidence digest; approved **after** the pre-live evidence completed; ≤ 24 h old |
+| `HUMAN_APPROVAL_EVIDENCE` | The provider-native approval record | `state = APPROVED`; same candidate SHA, deployment ID (or a record that explicitly lists this deployment in `covered_deployment_ids`), research-artifact digest and release-evidence digest; approved **after all automated Stage-C evidence completed, including protection evidence** (approval is the final release authorization, not a pre-review); ≤ 24 h old |
 | `RELEASE_VERIFIER_TRUSTED` | The protected environment's verifier identity | The verifier SHA equals the SHA pinned by the protected environment and differs from the candidate SHA. The result reports `release_verifier_version` and `release_verifier_sha` |
 
 ## 4. Stale-evidence limits (predeclared, fixed before any Stage-C evidence exists)
@@ -88,7 +88,7 @@ The artifact carries compact per-block series (`block_ids`, `means`, `counts`). 
 - counts are positive integers;
 - the series length equals `resampling_blocks`.
 
-Blocks are paired only when their IDs differ by exactly k. Fewer than 20 calendar-valid pairs at any lag gives INSUFFICIENT_EVIDENCE. Nested fields are not authenticated separately: the artifact digest covers them.
+Blocks are paired only when their IDs differ by exactly k. For uplift, the series is `PAIRED_BLOCK_DELTA` (`a_sum`, `a_count`, `b_sum`, `b_count` per block); the gate rebuilds the delta from these aggregates and rejects any approved-only series. A zero-variance series is NOT_ESTIMABLE. Fewer than 20 calendar-valid pairs at any lag gives INSUFFICIENT_EVIDENCE. Nested fields are not authenticated separately: the artifact digest covers them.
 
 ## 7. Trust boundary: the candidate is not the root of trust
 The software being released must not decide whether it may be released. `bot/live_release_evidence.py` in this repository is a **reference implementation**. The authoritative Stage-C verifier comes from a protected location, **never from the candidate branch or SHA**:

@@ -361,6 +361,13 @@ class ApprovalBindsReleaseInstance(unittest.TestCase):
         src.approvals[ref]["deployment_id"] = "dep-A"
         self.assertTrue(live(ev_b, src).promote, live(ev_b, src).blockers)
 
+    def test_approval_cannot_predate_the_protection_evidence_it_authorizes(self):
+        for mode, run in (("PER_JOB", PROT_RUN), ("CERTIFICATE", CERT_RUN)):
+            src = FakeSources()
+            ev = envelope(src, protection=mode)              # approved 30 min ago
+            src.runs[run]["completed_at"] = ago(minutes=10)   # protection finished afterwards
+            self.assertIn("HUMAN_APPROVAL_NOT_PROVEN", live(ev, src).blockers)
+
     def test_approval_before_prelive_evidence_or_bound_to_other_evidence(self):
         src = FakeSources()
         ev = seal(envelope(src), src, approved_at=ago(hours=1, minutes=30))  # before runtime line

@@ -74,7 +74,14 @@ RESIDUAL_ACF_LAGS = (1, 2, 3)
 # Each lag needs >= this many calendar-valid pairs, otherwise the rule cannot
 # be evaluated and authority is withheld (INSUFFICIENT_EVIDENCE). Predeclared.
 MIN_RESIDUAL_ACF_PAIRS = 20
-RESIDUAL_NOT_ESTIMABLE = "RESIDUAL_DEPENDENCE_INSUFFICIENT_CALENDAR_PAIRS"
+RESIDUAL_NOT_ESTIMABLE = "RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
+# Difference statistics (mean(A) - mean(B), e.g. uplift) use their OWN residual
+# series: the per-block paired delta mean_A(block) - mean_B(block), defined only
+# for blocks containing both populations. Never the A-only block means.
+SERIES_KIND_MEAN = "BLOCK_MEAN"
+SERIES_KIND_PAIRED = "PAIRED_BLOCK_DELTA"
+PAIRED_RESIDUAL_DEPENDENCE = "UPLIFT_RESIDUAL_DEPENDENCE"
+PAIRED_RESIDUAL_NOT_ESTIMABLE = "UPLIFT_RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
 BOOTSTRAP_SAMPLES = 2000
 SEED = 11
 
@@ -292,7 +299,56 @@ def block_acf(rows, selector, block_ms: int, lags=RESIDUAL_ACF_LAGS) -> dict:
               "means": [round(sum(v) / len(v), 12) for _, v in ordered],
               "counts": [len(v) for _, v in ordered]}
     res = acf_from_block_series(series["block_ids"], series["means"], lags)
-    return {"n_blocks": len(ordered), "series": series, **res}
+    return {"residual_series_kind": SERIES_KIND_MEAN, "n_blocks": len(ordered), "series": series, **res}
+
+
+def paired_delta_from_aggregates(series) -> tuple[list[int], list[float]]:
+    """Predeclared block-level delta: mean_A - mean_B = a_sum/a_count - b_sum/b_count,
+    only for blocks where BOTH counts are >= 1 (others are dropped and so break
+    calendar adjacency). Shared by inference and the promotion gate."""
+    ids, deltas = [], []
+    for b, sa, na, sb, nb in zip(series["block_ids"], series["a_sum"], series["a_count"],
+                                 series["b_sum"], series["b_count"]):
+        if na >= 1 and nb >= 1:
+            ids.append(int(b))
+            deltas.append(float(sa) / na - float(sb) / nb)
+    return ids, deltas
+
+
+def paired_block_acf(rows, sel_a, sel_b, block_ms: int, *, min_blocks: int = MIN_RESAMPLING_BLOCKS,
+                     lags=RESIDUAL_ACF_LAGS) -> dict:
+    """Residual dependence of a DIFFERENCE statistic (mean_A - mean_B).
+
+    Per calendar block the artifact carries a_sum, a_count, b_sum, b_count
+    (both selections jointly, no individual trades). The residual series is
+    the paired block delta; fewer than ``min_blocks`` estimable deltas or too
+    few calendar pairs => not estimable (fail closed).
+    """
+    agg: dict = defaultdict(lambda: [0.0, 0, 0.0, 0])
+    for r in rows:
+        in_a, in_b = sel_a(r), sel_b(r)
+        if not (in_a or in_b):
+            continue
+        g = agg[block_id(r["ts"], block_ms)]
+        if in_a:
+            g[0] += float(r["r"])
+            g[1] += 1
+        if in_b:
+            g[2] += float(r["r"])
+            g[3] += 1
+    ordered = sorted(agg.items())
+    series = {"block_ids": [int(b) for b, _ in ordered],
+              "a_sum": [round(v[0], 12) for _, v in ordered], "a_count": [v[1] for _, v in ordered],
+              "b_sum": [round(v[2], 12) for _, v in ordered], "b_count": [v[3] for _, v in ordered]}
+    ids, deltas = paired_delta_from_aggregates(series)
+    res = acf_from_block_series(ids, deltas, lags)
+    if len(deltas) < min_blocks:
+        res = {**res, "estimable": False, "significant": None,
+               "not_estimable_reason": "TOO_FEW_BLOCKS_WITH_BOTH_POPULATIONS"}
+    return {"residual_series_kind": SERIES_KIND_PAIRED, "delta_definition":
+            "a_sum/a_count - b_sum/b_count per block; blocks lacking A or B are dropped",
+            "n_blocks": len(ordered), "n_delta_blocks": len(deltas),
+            "min_delta_blocks": int(min_blocks), "series": series, **res}
 
 
 def validate_block_series(series, expected_blocks=None) -> str | None:
@@ -320,43 +376,50 @@ def validate_block_series(series, expected_blocks=None) -> str | None:
 
 def acf_from_block_series(block_ids, means, lags=RESIDUAL_ACF_LAGS,
                           min_pairs: int = MIN_RESIDUAL_ACF_PAIRS) -> dict:
-    """Lag-k ACF using CALENDAR adjacency: pair block means only when
+    """Lag-k ACF using CALENDAR adjacency: pair block values only when
     ``block_id_j - block_id_i == k``. Missing blocks break adjacency.
 
     r_k = [mean over the N_k eligible pairs of (x_i - mu)(x_j - mu)] / var,
-    reference band 2/sqrt(N_k). Fewer than ``min_pairs`` eligible pairs at any
-    lag => not estimable (fail closed: INSUFFICIENT_EVIDENCE).
+    reference band 2/sqrt(N_k). NOT ESTIMABLE (fail closed) when any lag has
+    fewer than ``min_pairs`` pairs, or when the series has zero variance (the
+    ACF is undefined; a constant series is not proof of independence).
     """
     n = len(means)
     per = {}
     by_id = dict(zip(block_ids, means))
     mu = (sum(means) / n) if n else 0.0
     var = (sum((m - mu) ** 2 for m in means) / n) if n else 0.0
-    insufficient = False
+    reason = None
+    # Zero variance (up to floating-point residue): the ACF is undefined.
+    spread = (max(means) - min(means)) if n else 0.0
+    if var <= 0 or spread <= 1e-12 * max(1.0, abs(mu)):
+        var = 0.0
+        reason = "ZERO_VARIANCE"
     for k in lags:
         pairs = [(by_id[b], by_id[b + k]) for b in block_ids if b + k in by_id]
         npairs = len(pairs)
-        if npairs < min_pairs:
+        if npairs < min_pairs or var <= 0:
             per[str(k)] = {"eligible_pairs": npairs, "acf": None, "reference_band": None,
                            "significant": None}
-            insufficient = True
-            continue
-        if var <= 0:
-            # Constant block means: no variation, so no dependence to spill over.
-            per[str(k)] = {"eligible_pairs": npairs, "acf": None, "zero_variance": True,
-                           "reference_band": 2 / math.sqrt(npairs), "significant": False}
+            if npairs < min_pairs:
+                reason = reason or "INSUFFICIENT_CALENDAR_PAIRS"
             continue
         acf = (sum((a - mu) * (b - mu) for a, b in pairs) / npairs) / var
         band = 2 / math.sqrt(npairs)
         per[str(k)] = {"eligible_pairs": npairs, "acf": acf, "reference_band": band,
                        "significant": abs(acf) > band}
+    estimable = reason is None
     return {"lags": per, "acf": {k: v["acf"] for k, v in per.items()},
-            "min_calendar_pairs": int(min_pairs), "insufficient_pairs": insufficient,
-            "significant": (None if insufficient
-                            else any(v["significant"] for v in per.values()))}
+            "min_calendar_pairs": int(min_pairs), "estimable": estimable,
+            "not_estimable_reason": reason,
+            "significant": (any(v["significant"] for v in per.values()) if estimable else None)}
 
 
-def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: int) -> dict:
+def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: int,
+          residual_fn=None, kind: str = SERIES_KIND_MEAN) -> dict:
+    paired = kind == SERIES_KIND_PAIRED
+    dep_code = PAIRED_RESIDUAL_DEPENDENCE if paired else RESIDUAL_DEPENDENCE
+    nest_code = PAIRED_RESIDUAL_NOT_ESTIMABLE if paired else RESIDUAL_NOT_ESTIMABLE
     intervals = []
     for ms, ci in sorted(cis.items()):
         n_blk = _n_blocks(rows, selector_for_blocks, ms)
@@ -371,7 +434,8 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
         intervals.append({"block_days": ms / DAY_MS, "block_ms": int(ms), "ci": list(ci),
                           "resampling_blocks": n_blk, "authoritative": reason is None,
                           "invalid_reason": reason,
-                          "residual_dependence": (block_acf(rows, selector_for_blocks, ms)
+                          "residual_dependence": ((residual_fn(ms) if residual_fn is not None
+                                                   else block_acf(rows, selector_for_blocks, ms))
                                                   if ms >= req_ms else None)})
     usable = [iv for iv in intervals if iv["authoritative"]]
     residual = None
@@ -379,8 +443,8 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
         longest = max(usable, key=lambda iv: iv["block_ms"])
         residual = {"longest_usable_block_days": longest["block_days"],
                     **(longest["residual_dependence"] or {})}
-        if residual.get("significant") or residual.get("insufficient_pairs") is not False:
-            reason = (RESIDUAL_DEPENDENCE if residual.get("significant") else RESIDUAL_NOT_ESTIMABLE)
+        if residual.get("significant") or residual.get("estimable") is not True:
+            reason = (dep_code if residual.get("significant") else nest_code)
             for iv in usable:
                 iv["authoritative"] = False
                 iv["invalid_reason"] = reason
@@ -389,9 +453,9 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
     if valid:
         status = AUTHORITY_VALID
     elif residual is not None and residual.get("significant"):
-        status = RESIDUAL_DEPENDENCE
+        status = dep_code
     elif residual is not None:
-        status = RESIDUAL_NOT_ESTIMABLE
+        status = nest_code
     elif any(iv["invalid_reason"] == INSUFFICIENT_RESAMPLING_BLOCKS for iv in intervals
              if iv["block_ms"] >= req_ms):
         status = INSUFFICIENT_RESAMPLING_BLOCKS
@@ -402,9 +466,10 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
     out = {"iid_ci": list(iid), "iid_role": IID_ROLE, "block_intervals": intervals,
            "required_block_ms": int(req_ms), "required_block_days": req_ms / DAY_MS,
            "min_resampling_blocks": int(min_blocks),
-           "residual_dependence_rule": ("CALENDAR lags 1-3 of block means (pairs only when block ids "
+           "residual_series_kind": kind,
+           "residual_dependence_rule": ("CALENDAR lags 1-3 of the %s series (pairs only when block ids " % kind +
                                         "differ by exactly k); any |ACF| above 2/sqrt(pairs), or fewer "
-                                        "than %d pairs at any lag, at the " % MIN_RESIDUAL_ACF_PAIRS +
+                                        "than %d pairs at any lag, or zero variance, at the " % MIN_RESIDUAL_ACF_PAIRS +
                                         "longest usable block length => no authority"),
            "residual_dependence_at_longest_usable": residual}
     for ms in AUTHORITY_BLOCKS_MS:          # legacy display keys (diagnostic)
@@ -453,7 +518,9 @@ def dependence_aware_diff(rows: Sequence[dict], sel_a, sel_b, *,
     iid = fast_ci(rows, sel_a, sel_b, block_ms=None, samples=samples)
     cis = {ms: fast_ci(rows, sel_a, sel_b, block_ms=ms, samples=samples) for ms in _lengths(req)}
     out = {"delta": stat(rows)}
-    out.update(_pack(rows, sel_a, iid, cis, req, min_blocks))
+    out.update(_pack(rows, sel_a, iid, cis, req, min_blocks,
+                     residual_fn=lambda ms: paired_block_acf(rows, sel_a, sel_b, ms, min_blocks=min_blocks),
+                     kind=SERIES_KIND_PAIRED))
     return out
 
 

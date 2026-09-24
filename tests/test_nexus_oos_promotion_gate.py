@@ -22,8 +22,26 @@ def residual(means, block_ids=None, counts=None):
     ids = list(range(100, 100 + len(means))) if block_ids is None else list(block_ids)
     series = {"block_ids": ids, "means": list(means),
               "counts": [3] * len(means) if counts is None else list(counts)}
-    return {"n_blocks": len(means), "series": series,
+    return {"residual_series_kind": inf.SERIES_KIND_MEAN, "n_blocks": len(means), "series": series,
             **inf.acf_from_block_series(ids, list(means))}
+
+
+def paired_residual(a_means, b_means=None, block_ids=None, a_counts=None, b_counts=None):
+    """PAIRED_BLOCK_DELTA report exactly as inference emits it for mean(A) - mean(B)."""
+    n = len(a_means)
+    ids = list(range(100, 100 + n)) if block_ids is None else list(block_ids)
+    b_means = [0.0] * n if b_means is None else list(b_means)
+    a_counts = [3] * n if a_counts is None else list(a_counts)
+    b_counts = [5] * n if b_counts is None else list(b_counts)
+    series = {"block_ids": ids,
+              "a_sum": [round(m * c, 12) for m, c in zip(a_means, a_counts)], "a_count": a_counts,
+              "b_sum": [round(m * c, 12) for m, c in zip(b_means, b_counts)], "b_count": b_counts}
+    d_ids, deltas = inf.paired_delta_from_aggregates(series)
+    res = inf.acf_from_block_series(d_ids, deltas)
+    if len(deltas) < 30:
+        res = {**res, "estimable": False, "significant": None}
+    return {"residual_series_kind": inf.SERIES_KIND_PAIRED, "n_blocks": n,
+            "n_delta_blocks": len(deltas), "series": series, **res}
 
 
 def clean_series(n):
@@ -47,11 +65,12 @@ def _folds(*, positive_key, required_ms=DAY, span_days=180):
             "fold_required_horizon_ms": lay["fold_required_horizon_ms"], positive_key: len(folds)}
 
 
-def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60, 45)):
+def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60, 45), paired=False):
     """Block intervals for 1/2/3-day blocks; horizon in the fixture is < 1 day,
     so all three are long enough; ``blocks`` = independent blocks per length."""
     ivs = [{"block_ms": d * DAY, "block_days": d, "ci": [lo, hi], "resampling_blocks": n,
-            "authoritative": n >= 30, "residual_dependence": residual(clean_series(n))}
+            "authoritative": n >= 30,
+            "residual_dependence": (paired_residual if paired else residual)(clean_series(n))}
            for d, (lo, hi), n in zip((1, 2, 3), ((lo24, hi24), (lo48, hi48), (lo72, hi72)), blocks)]
     valid = [iv["ci"] for iv in ivs if iv["authoritative"]]
     lo = min(c[0] for c in valid) if valid else None
@@ -87,7 +106,7 @@ def _passing_artifact():
             "temporal_folds": _folds(positive_key="folds_positive_approved_expectancy"),
             "inference": {
                 "approved_expectancy": _dep(0.05, 0.3, 0.04, 0.32, 0.045, 0.31),
-                "uplift_vs_baseline": _dep(0.03, 0.2, 0.035, 0.21, 0.04, 0.19),
+                "uplift_vs_baseline": _dep(0.03, 0.2, 0.035, 0.21, 0.04, 0.19, paired=True),
                 "outcome_horizon_resolved_executable": {"max_ms": 20 * 3_600_000},
                 "required_block_ms": DAY,
             },
@@ -243,7 +262,7 @@ class PromotionGateTests(unittest.TestCase):
             "TEMPORAL_ROBUSTNESS_INSUFFICIENT": lambda a: cr(a)["temporal_folds"].update(folds_positive_approved_expectancy=1),
             "INSUFFICIENT_UNIQUE_TEMPORAL_BLOCKS": lambda a: cr(a)["effective_sample"]["approved"].update(unique_blocks=12),
             "INSUFFICIENT_EFFECTIVE_SAMPLE": lambda a: cr(a)["effective_sample"]["approved"].update(effective_n=40.0),
-            "UPLIFT_BLOCK_CI_NOT_POSITIVE": lambda a: cr(a)["inference"].update(uplift_vs_baseline=_dep(0.03, 0.2, -0.01, 0.2, 0.04, 0.2)),
+            "UPLIFT_BLOCK_CI_NOT_POSITIVE": lambda a: cr(a)["inference"].update(uplift_vs_baseline=_dep(0.03, 0.2, -0.01, 0.2, 0.04, 0.2, paired=True)),
             "PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT": lambda a: a["portfolio_replay"].update(portfolio_max_drawdown=0.4),
             "PORTFOLIO_WALK_FORWARD_NOT_POSITIVE": lambda a: a["portfolio_replay"]["walk_forward"].update(folds_positive=2),
             "PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE": lambda a: a["portfolio_replay"].update(walk_forward={}),
@@ -318,7 +337,7 @@ class IidHasZeroPromotionAuthority(unittest.TestCase):
     def test_positive_iid_and_legacy_report_cannot_promote_a_block(self):
         a = _passing_artifact()
         a["candidate_research"]["inference"]["uplift_vs_baseline"] = _dep(
-            -0.05, 0.2, -0.04, 0.2, -0.06, 0.2, iid=(0.5, 0.9))
+            -0.05, 0.2, -0.04, 0.2, -0.06, 0.2, iid=(0.5, 0.9), paired=True)
         a["candidate_research"]["inference"]["approved_expectancy"] = _dep(
             -0.01, 0.3, 0.04, 0.3, 0.02, 0.3, iid=(0.5, 0.9))
         a["report"]["bootstrap_ci_low_r"] = 0.9

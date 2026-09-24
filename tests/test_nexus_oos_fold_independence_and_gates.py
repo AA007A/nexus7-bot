@@ -291,7 +291,7 @@ class ResidualDependenceFailsClosed(unittest.TestCase):
     def test_gate_fails_closed_on_dependence_at_longest_usable_block(self):
         from tests.test_nexus_oos_promotion_gate import residual
         a = _passing_artifact()
-        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        sec = a["candidate_research"]["inference"]["approved_expectancy"]
         longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
         n = longest["resampling_blocks"]
         # Persistent regime across blocks; shorter blocks stay clean.
@@ -300,12 +300,12 @@ class ResidualDependenceFailsClosed(unittest.TestCase):
         r = gate.evaluate(a)
         self.assertFalse(r.promote)
         self.assertIn("RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK", r.blockers)
-        self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", r.blockers)
+        self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", r.blockers)
 
     def test_gate_recomputes_from_series_and_rejects_tampered_acf(self):
         from tests.test_nexus_oos_promotion_gate import residual
         a = _passing_artifact()
-        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        sec = a["candidate_research"]["inference"]["approved_expectancy"]
         longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
         n = longest["resampling_blocks"]
         rd = residual([round(math.sin(2 * math.pi * i / 20.0), 12) for i in range(n)])
@@ -336,7 +336,7 @@ class CalendarResidualACF(unittest.TestCase):
     def _gate_with_series(self, block_ids, means, counts=None, n_override=None):
         from tests.test_nexus_oos_promotion_gate import residual
         a = _passing_artifact()
-        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        sec = a["candidate_research"]["inference"]["approved_expectancy"]
         longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
         longest["residual_dependence"] = residual(means, block_ids=block_ids, counts=counts)
         longest["resampling_blocks"] = n_override if n_override is not None else len(means)
@@ -346,14 +346,14 @@ class CalendarResidualACF(unittest.TestCase):
         from tests.test_nexus_oos_promotion_gate import clean_series
         m = clean_series(45)
         a = _passing_artifact()
-        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        sec = a["candidate_research"]["inference"]["approved_expectancy"]
         longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
         del longest["residual_dependence"]["series"]["block_ids"]
         self.assertIn("RESIDUAL_DEPENDENCE_SERIES_MISSING", gate.evaluate(a).blockers)
         # Arrays of different length also fail closed.
         blockers = self._gate_with_series(list(range(44)), m)
         self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT", blockers)
-        self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", blockers)
+        self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", blockers)
 
     def test_12_duplicate_or_out_of_order_ids_break_authority(self):
         from tests.test_nexus_oos_promotion_gate import clean_series
@@ -390,9 +390,10 @@ class CalendarResidualACF(unittest.TestCase):
         sparse = list(range(0, 90, 2))                 # 45 blocks, no lag-1 / lag-3 neighbours
         blockers = self._gate_with_series(sparse, m)
         self.assertIn(inf.RESIDUAL_NOT_ESTIMABLE, blockers)
-        self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", blockers)
+        self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", blockers)
         res = inf.acf_from_block_series(sparse, m)
-        self.assertTrue(res["insufficient_pairs"])
+        self.assertFalse(res["estimable"])
+        self.assertEqual(res["not_estimable_reason"], "INSUFFICIENT_CALENDAR_PAIRS")
         self.assertIsNone(res["significant"])
         self.assertLess(res["lags"]["1"]["eligible_pairs"], inf.MIN_RESIDUAL_ACF_PAIRS)
 

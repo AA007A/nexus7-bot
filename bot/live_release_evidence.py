@@ -374,6 +374,7 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
 
     # ── Protection: provider-authenticated check identity ──
     prot = envelope["protection"]
+    prot_times = [_try_ts(prot["generated_at_utc"])]
     prot_ok = (prot["candidate_sha"] == cand and prot["result"] == "PASS"
                and prot["evidence_sha256"] == protection_digest(prot)
                and _age_ok(_try_ts(prot["generated_at_utc"]), now, MAX_PROTECTION_EVIDENCE_AGE_S))
@@ -384,19 +385,23 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
             ok = isinstance(chk, dict) and chk.get("result") == "PASS" and chk.get("job_id") and chk.get("run_id")
             if ok:
                 job = sources.ci_job(str(chk["job_id"])) or {}
+                prun = run_ok(chk["run_id"], max_age=MAX_PROTECTION_EVIDENCE_AGE_S)
                 ok = (str(chk["job_id"]) not in used_jobs
                       and str(job.get("run_id")) == str(chk["run_id"])
                       and job.get("name") == name and job.get("head_sha") == cand
-                      and job.get("conclusion") == "success"
-                      and run_ok(chk["run_id"], max_age=MAX_PROTECTION_EVIDENCE_AGE_S) is not None)
+                      and job.get("conclusion") == "success" and prun is not None)
                 used_jobs.add(str(chk["job_id"]))
+                if prun is not None:
+                    prot_times.append(_try_ts(prun.get("completed_at")))
             if not ok:
                 b.append(f"PROTECTION_CHECK_NOT_PROVEN_{name.upper()}")
                 prot_ok = False
     else:
         cert = prot["certificate"]
-        cert_ok = (cert["artifact_name"] == PROTECTION_ARTIFACT_NAME
-                   and run_ok(cert["run_id"], PROTECTION_WORKFLOW, MAX_PROTECTION_EVIDENCE_AGE_S) is not None)
+        crun = run_ok(cert["run_id"], PROTECTION_WORKFLOW, MAX_PROTECTION_EVIDENCE_AGE_S)
+        cert_ok = cert["artifact_name"] == PROTECTION_ARTIFACT_NAME and crun is not None
+        if crun is not None:
+            prot_times.append(_try_ts(crun.get("completed_at")))
         body = None
         if cert_ok:
             fetched = sources.ci_artifact(str(cert["run_id"]), PROTECTION_ARTIFACT_NAME) or {}
@@ -424,8 +429,10 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
     ha = envelope["human_approval"]
     rec = sources.approval(ha["approval_reference"]) or {}
     approved_at = _try_ts(ha["approved_at_utc"])
+    # Approval is the FINAL release authorization: it must not predate any
+    # automated Stage-C evidence it authorizes, including protection evidence.
     prelive_times = [t for t in [deployed_at, observed, _try_ts((oos_run or {}).get("completed_at")),
-                                 *ci_times] if t is not None]
+                                 *ci_times, *prot_times] if t is not None]
     prelive_done = max(prelive_times) if prelive_times else None
     covered = rec.get("deployment_id") == rw["deployment_id"] or (
         rw["deployment_id"] in (rec.get("covered_deployment_ids") or []))

@@ -144,6 +144,9 @@ Wrappers that still decide a risk concept after this pass:
 | P0-44 | P0 | provider trust | `source_kind` string | Any object can claim it | Documented boundary | Trust comes from the protected environment's credentials; `source_kind` is an interface marker only | doc test | none |
 | P0-45 | P0 | human approval | Bound to candidate SHA only | An old approval could authorize a new deployment | Bound to the release instance | Deployment ID (or explicit coverage), research-artifact digest, release-evidence digest; approved after pre-live evidence | `ApprovalBindsReleaseInstance` (2) | none |
 | P1-25 | P1 | residual ACF | Positional adjacency | A gap was treated as lag 1 | Calendar lags | `acf_from_block_series`; per-lag pairs/band; ≥ 20 pairs per lag, else INSUFFICIENT_EVIDENCE; gate validates and recomputes the series | `CalendarResidualACF` (4) | Earlier runs' ACF non-authoritative |
+| P0-46 | P0 | `dependence_aware_diff` residual | Uplift residual ACF came from the A-only block means | An approved-only ACF could authorize uplift | Statistic-specific series | `PAIRED_BLOCK_DELTA` aggregates (a/b sums and counts); the gate rebuilds the delta; wrong/missing kind rejected; `UPLIFT_RESIDUAL_DEPENDENCE[_NOT_ESTIMABLE]` | `tests/test_nexus_oos_paired_residual.py` (8) | none |
+| P1-26 | P1 | zero-variance ACF | Treated as non-significant | A constant series looked "independent" | Undefined ⇒ fail closed | `ZERO_VARIANCE` ⇒ NOT_ESTIMABLE (tolerant of floating-point residue) | tests 6, 7 | none |
+| P1-27 | P1 | Stage-C approval timing | Approval could predate the protection evidence | A reviewer could approve before checks finished | After all automated evidence | Protection run completion and `generated_at` included in the approval lower bound | `ApprovalBindsReleaseInstance` | none |
 | P2-01 | P2 | `pilot_live_runtime`, `pilot_risk_cap_hardening` sizing hooks | Superseded inner sizing wrappers | Dead in the LIVE path; still installed | One authority | Kept (contract/tests depend on them). Scheduled for removal | — | Maintenance only |
 | P2-02 | P2 | Remaining 9 silent handlers | 5 justified best-effort, 4 REVIEW_MEDIUM (runtime_truth ×3, pullback telemetry) | — | classify all | 2 REVIEW_HIGH fixed | selfcheck | REVIEW_MEDIUM remain |
 | P2-03 | P2 | `engine.py` (3992 lines) | Monolith | — | Extract stateful authorities with parity tests | Not attempted in this pass (zero-semantic-change refactor requires its own PR) | — | — |
@@ -169,7 +172,7 @@ Wrappers that still decide a risk concept after this pass:
 |---|---|
 | Baseline offline suite at 77ae453 | 1607/1607 pass |
 | New P0 tests against baseline code | 14 fail (reproduced), 29 pass |
-| Full offline suite (`python -m tests.run_offline`), final code | 1863/1863 pass (1726 before the parity phase) |
+| Full offline suite (`python -m tests.run_offline`), final code | 1872/1872 pass (1726 before the parity phase) |
 | `compileall`, `ruff --select E9,F63,F7,F82`, pyflakes undefined names | pass / pass / 0 |
 | `python -m bot.selfcheck` | 0 critical; silent handlers 12 → 9 |
 | `python -m bot.release_proof` | `RELEASE_PROOF=PASS` (161/161) |

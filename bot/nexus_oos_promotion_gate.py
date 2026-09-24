@@ -140,8 +140,8 @@ def required_block_ms(max_resolved_horizon_ms) -> int | None:
     return max(1, math.ceil(mx / DAY_MS)) * DAY_MS
 
 
-def block_only_authority(section: dict, *, required_ms: int | None,
-                         min_blocks: int) -> tuple[float | None, float | None, str]:
+def block_only_authority(section: dict, *, required_ms: int | None, min_blocks: int,
+                         paired: bool = False) -> tuple[float | None, float | None, str]:
     """Recompute the authority interval from BLOCK intervals only.
 
     An interval counts only if its block length >= ``required_ms`` (the
@@ -174,7 +174,7 @@ def block_only_authority(section: dict, *, required_ms: int | None,
         # per-block aggregate series (block means); stored ACF values are only
         # cross-checked, never trusted.
         _, longest = max(usable_ivs, key=lambda x: x[0])
-        status = residual_dependence_recompute(longest)
+        status = residual_dependence_recompute(longest, paired=paired, min_blocks=min_blocks)
         if status is not None:
             return None, None, status
     if valid:
@@ -184,37 +184,94 @@ def block_only_authority(section: dict, *, required_ms: int | None,
     return None, None, "INSUFFICIENT_RESAMPLING_BLOCKS"
 
 
-def residual_dependence_recompute(iv: dict) -> str | None:
-    """Recompute the CALENDAR residual ACF from block_ids / means / counts.
+def _paired_series_error(series, expected_a_blocks) -> str | None:
+    """Structural checks on a PAIRED_BLOCK_DELTA aggregate series."""
+    if not isinstance(series, dict):
+        return "UPLIFT_RESIDUAL_SERIES_MISSING"
+    keys = ("block_ids", "a_sum", "a_count", "b_sum", "b_count")
+    cols = [series.get(k) for k in keys]
+    if not all(isinstance(c, list) for c in cols):
+        return "UPLIFT_RESIDUAL_SERIES_MISSING"
+    ids, a_sum, a_cnt, b_sum, b_cnt = cols
+    if len({len(c) for c in cols}) != 1:
+        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    if any(isinstance(b, bool) or not isinstance(b, int) for b in ids):
+        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    if any(b2 <= b1 for b1, b2 in zip(ids, ids[1:])):
+        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    for c in a_cnt + b_cnt:
+        if isinstance(c, bool) or not isinstance(c, int) or c < 0:
+            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    if any(na + nb < 1 for na, nb in zip(a_cnt, b_cnt)):
+        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    for v in a_sum + b_sum:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    for sm, n in list(zip(a_sum, a_cnt)) + list(zip(b_sum, b_cnt)):
+        if n == 0 and sm != 0:
+            return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    # The resampling blocks of a difference statistic are the A-population blocks.
+    if expected_a_blocks is None or sum(1 for n in a_cnt if n >= 1) != expected_a_blocks:
+        return "UPLIFT_RESIDUAL_SERIES_INCONSISTENT"
+    return None
 
-    Validates the series (equal lengths, integer strictly increasing unique
-    block ids, positive integer counts, length == resampling_blocks), then
-    recomputes lag-1..3 ACF pairing only blocks whose ids differ by exactly k.
-    Stored ACF values are cross-checked, never trusted. Returns None when
-    there is no significant residual dependence; otherwise a fail-closed code.
+
+def residual_dependence_recompute(iv: dict, *, paired: bool = False,
+                                  min_blocks: int = 30) -> str | None:
+    """Independently recompute the CALENDAR residual ACF of the statistic.
+
+    Single-mean statistic: series block_ids / means / counts (validated).
+    Difference statistic (``paired``): residual_series_kind must be
+    PAIRED_BLOCK_DELTA; the gate rebuilds the per-block delta
+    a_sum/a_count - b_sum/b_count from the joint aggregates (blocks lacking A
+    or B dropped, so they break adjacency). An approved-only block-mean series
+    can never authorize a difference statistic. Lag-1..3 pairs only when block
+    ids differ by exactly k. Stored ACF values are cross-checked, never
+    trusted. Returns None when there is no significant residual dependence.
     """
     from bot import nexus_oos_inference as inf
     rd = iv.get("residual_dependence")
-    series = rd.get("series") if isinstance(rd, dict) else None
+    if not isinstance(rd, dict):
+        return "UPLIFT_RESIDUAL_SERIES_MISSING" if paired else "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+    series = rd.get("series")
     n_blk = _num(iv.get("resampling_blocks"))
-    err = inf.validate_block_series(series, int(n_blk) if n_blk is not None else -1)
-    if err is not None:
-        return err
-    res = inf.acf_from_block_series(series["block_ids"], [float(m) for m in series["means"]])
+    if paired:
+        if rd.get("residual_series_kind") != inf.SERIES_KIND_PAIRED:
+            return "UPLIFT_RESIDUAL_SERIES_KIND_INVALID"
+        err = _paired_series_error(series, int(n_blk) if n_blk is not None else None)
+        if err is not None:
+            return err
+        ids, vals = inf.paired_delta_from_aggregates(series)
+        dep, nest, bad = (inf.PAIRED_RESIDUAL_DEPENDENCE, inf.PAIRED_RESIDUAL_NOT_ESTIMABLE,
+                          "UPLIFT_RESIDUAL_SERIES_INCONSISTENT")
+    else:
+        if rd.get("residual_series_kind") not in (None, inf.SERIES_KIND_MEAN):
+            return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+        err = inf.validate_block_series(series, int(n_blk) if n_blk is not None else -1)
+        if err is not None:
+            return err
+        ids, vals = series["block_ids"], [float(m) for m in series["means"]]
+        dep, nest, bad = ("RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK", inf.RESIDUAL_NOT_ESTIMABLE,
+                          "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT")
+    res = inf.acf_from_block_series(ids, vals)
     reported = rd.get("acf") or {}
     for k, v in res["acf"].items():
         r = reported.get(k)
         if (v is None) != (r is None) or (v is not None and (_num(r) is None or abs(_num(r) - v) > 1e-9)):
-            return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
-    if res["insufficient_pairs"]:
-        return inf.RESIDUAL_NOT_ESTIMABLE
+            return bad
+    if paired and len(vals) < min_blocks:
+        return nest
+    if not res["estimable"]:
+        return nest
     if res["significant"]:
-        return "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
+        return dep
     return None
 
 
-def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks) -> float | None:
-    lo, _, status = block_only_authority(section, required_ms=required_ms, min_blocks=min_blocks)
+def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks,
+               paired: bool = False) -> float | None:
+    lo, _, status = block_only_authority(section, required_ms=required_ms, min_blocks=min_blocks,
+                                         paired=paired)
     if status != "VALID":
         b.append(status)
     reported = _num((section or {}).get("authority_ci_low"))
@@ -346,7 +403,7 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if appr_lo is None or appr_lo <= 0:
         b.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
     up_lo = _authority(infer.get("uplift_vs_baseline") or {}, "UPLIFT", b,
-                       required_ms=req, min_blocks=policy.min_resampling_blocks)
+                       required_ms=req, min_blocks=policy.min_resampling_blocks, paired=True)
     if up_lo is None or up_lo <= 0:
         b.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
     cens = cand.get("censoring")

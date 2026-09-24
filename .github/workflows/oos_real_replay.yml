@@ -128,6 +128,7 @@ jobs:
           python -m unittest tests.test_nexus_oos_censoring_and_horizon -v
           python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v
           python -m unittest tests.test_live_release_evidence -v
+          python -m unittest tests.test_nexus_oos_paired_residual -v
 
       - name: Run real public-market OOS replay (research result)
         run: |

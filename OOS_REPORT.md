@@ -479,6 +479,24 @@ In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward
    - The gate validates the series (equal lengths; integer, strictly increasing, unique IDs; positive integer counts; length = resampling blocks) and recomputes the ACF from it.
    - Runs up to and including `5f5757f` used positional adjacency. Their residual-ACF values are therefore **non-authoritative**. In `5f5757f` the block IDs at the longest usable length were contiguous, so the value is unaffected there, but it is not re-certified.
 
+### C.12 Statistic-specific residual dependence (after `99ea046`)
+1. **Uplift has its own residual series.** For a difference statistic such as uplift (mean(A) − mean(B)), `dependence_aware_diff` used to attach the residual ACF of A's block means alone, so uplift carried the approved-expectancy series.
+   - Now each calendar block reports `a_sum`, `a_count`, `b_sum` and `b_count` (both selections jointly; no individual trades).
+   - The predeclared delta is `a_sum/a_count − b_sum/b_count`, only for blocks containing both populations. Other blocks are dropped, so they break calendar adjacency.
+   - The section is labelled `residual_series_kind = PAIRED_BLOCK_DELTA`. The bootstrap point estimates and block CIs are unchanged.
+2. **The gate rebuilds the delta from the aggregates** and recomputes the calendar lag-1/2/3 ACF. It rejects an uplift section with an approved-only (`BLOCK_MEAN` / `APPROVED_BLOCK_MEAN`), missing or unknown series kind, and it rejects tampered aggregates.
+   - Fewer than 30 blocks containing both populations, or fewer than 20 calendar pairs at any lag, gives `UPLIFT_RESIDUAL_DEPENDENCE_NOT_ESTIMABLE`.
+   - Significant ACF gives `UPLIFT_RESIDUAL_DEPENDENCE`.
+   - Either way, uplift authority is null.
+3. **Zero variance fails closed.** A constant block series, up to floating-point residue, has an undefined ACF. The result is `RESIDUAL_DEPENDENCE_NOT_ESTIMABLE` for a single mean, or `UPLIFT_RESIDUAL_DEPENDENCE_NOT_ESTIMABLE` for a difference. It is never read as "no dependence".
+4. **Calendar adjacency and the minimum of 20 pairs per lag are unchanged.**
+5. **Reading the existing `5f5757f` evidence** (artifact 10818597909):
+   - Approved-expectancy authority stays **VALID**. The longest usable series had contiguous block IDs, and the authority CI [−0.532, −0.308] lies wholly below zero.
+   - Uplift authority is **INSUFFICIENT_EVIDENCE**, because its residual check used the approved-only series.
+   - Overall statistical authority is therefore **INSUFFICIENT_EVIDENCE** under the strict release methodology.
+   - The economic conclusion is still **NEGATIVE**: approved expectancy −0.403 R with a wholly negative authority interval, and 0 of 4 candidate folds positive. Positive uplift over a more negative baseline is not a profitable edge.
+6. **Stage-C approval** is the final release authorization. It must not predate any automated Stage-C evidence it authorizes, including protection evidence (the run completion times and the protection `generated_at`).
+
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.
 
