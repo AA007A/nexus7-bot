@@ -34,12 +34,25 @@ def _candles(interval_min, n, seed, start=1_760_000_000_000):
     return out
 
 
+CONTRACTS = [
+    {"symbol": f"{b}USDTM", "baseCurrency": b, "multiplier": 0.01, "lotSize": 1, "minQty": 1,
+     "tickSize": 0.01, "maxLeverage": 75, "maintainMargin": 0.004}
+    for b in ("AAA", "BBB", "BROKEN")
+]
+
+
 class _Client:
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *a):
         return None
+
+    async def _get(self, path, params=None, auth=False):
+        assert not auth
+        if path == "/api/v1/contracts/active":
+            return CONTRACTS
+        raise AssertionError(path)
 
 
 def _fake_analyze(self, symbol, k15, k1h, k4h, **kwargs):
@@ -52,9 +65,11 @@ def _fake_analyze(self, symbol, k15, k1h, k4h, **kwargs):
     atr = price * 0.004
     if long:
         return Signal(symbol, "LONG", price, price - atr, price + 2.2 * atr, 70, score=70,
-                      entry_type="PULLBACK", regime="TRENDING_UP")
+                      entry_type="PULLBACK", regime="TRENDING_UP", expected_pnl=0.5,
+                      total_fees=0.2)
     return Signal(symbol, "SHORT", price, price + atr, price - 2.2 * atr, 70, score=70,
-                  entry_type="MOMENTUM", regime="TRENDING_DOWN")
+                  entry_type="MOMENTUM", regime="TRENDING_DOWN", expected_pnl=0.5,
+                  total_fees=0.2)
 
 
 class ResearchPipelineTests(unittest.TestCase):
@@ -94,15 +109,19 @@ class ResearchPipelineTests(unittest.TestCase):
     def test_research_sections_present(self):
         a = self.artifact
         self.assertGreater(a["report"]["baseline_candidates"], 20)
-        self.assertIn("robustness", a)
+        self.assertIn("robustness", a["legacy_diagnostic"])
+        self.assertEqual(a["legacy_diagnostic"]["authority"], "NONE")
+        self.assertNotIn("robustness", a, "legacy IID robustness must not sit at top level")
         self.assertIn("portfolio_replay", a)
+        self.assertEqual(a["authority_model"], "BLOCK_BOOTSTRAP_ONLY_V1")
         c = a["candidate_research"]
         self.assertEqual(c["layer"], "CANDIDATE_RESEARCH")
         for key in ("performance", "inference", "effective_sample", "segments_approved",
                     "segments_baseline", "concentration", "cost_stress_approved",
                     "break_even_cost_multiplier", "exit_variants_approved", "ablation",
                     "context_ablation", "strategy_gate_ablation", "threshold_research",
-                    "probability_calibration", "regime_parity"):
+                    "probability_calibration", "regime_parity", "temporal_folds",
+                    "research_status", "population_counts"):
             self.assertIn(key, c, key)
         for key in ("performance", "segments_approved", "ablation"):
             self.assertNotIn(key, a, "candidate metrics must not leak to top level")
@@ -120,16 +139,35 @@ class ResearchPipelineTests(unittest.TestCase):
         self.assertEqual(c["threshold_research"]["runtime_threshold_changed"], False)
         self.assertEqual(c["threshold_research"]["split_method"], "PURGED_EMBARGOED_TEMPORAL_50_25_25")
         inf = c["inference"]["approved_expectancy"] if c["performance"]["approved"]["trades"] else c["inference"]["baseline_expectancy"]
-        for k in ("iid_ci", "block24h_ci", "block48h_ci", "authority_ci_low"):
+        for k in ("iid_ci", "block24h_ci", "block48h_ci", "block72h_ci", "authority_ci_low"):
             self.assertIn(k, inf)
+        self.assertEqual(inf["iid_role"], "DIAGNOSTIC_ONLY")
         eff = c["effective_sample"]["baseline"]
         for k in ("rows", "unique_utc_days", "unique_blocks", "symbols", "effective_n"):
             self.assertIn(k, eff)
         p = a["portfolio_replay"]
         self.assertEqual(p["layer"], "PORTFOLIO_EXECUTION_REPLAY")
+        self.assertEqual(p["engine"], "BAR_BY_BAR_EVENT_ENGINE_V2")
         for k in ("starting_equity", "ending_equity", "portfolio_max_drawdown", "skipped",
-                  "max_concurrent_positions", "by_month"):
+                  "max_concurrent_positions", "by_month", "path_bootstrap", "gate_attribution",
+                  "daily_pnl_semantics_sensitivity", "contract_spec_sensitivity",
+                  "approximate_trade_level_ci"):
             self.assertIn(k, p)
+        self.assertEqual(p["approximate_trade_level_ci"]["authority"], "NONE")
+        self.assertEqual(p["accounting_invariants"], "PASS")
+        self.assertEqual(p["parity"]["status"], "PORTFOLIO_PARITY_INCOMPLETE")
+        self.assertIn("portfolio_replay_legacy", a)
+        m = a["replay_policy_manifest"]
+        self.assertEqual(len(m["policy_sha256"]), 64)
+        self.assertFalse(m["secrets_read"])
+        self.assertIn("parity_attribution", a)
+        for step in ("A0_legacy_model", "A1_unshifted_native_stops", "A2_production_exit_engine",
+                     "A3_cross_geometry", "A4_production_funnel"):
+            self.assertIn(step, a["parity_attribution"])
+        rp_ = a["replay_parity"]
+        self.assertFalse(rp_["portfolio_parity_complete"])
+        self.assertIn("tp1 = tp2 = tp", rp_["tp1_equals_tp2_root_cause"])
+        self.assertTrue(a["methodology"]["closed_candle_sentinel_verified"])
 
     def test_costs_monotone(self):
         cs = self.artifact["candidate_research"]["cost_stress_baseline"]
@@ -151,6 +189,78 @@ class ResearchPipelineTests(unittest.TestCase):
         # decision time; buckets are finite labels.
         for seg in self.artifact["candidate_research"]["segments_baseline"]["volatility_bucket"]:
             self.assertIsInstance(seg, str)
+
+
+def _fake_decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding, threshold):
+    from types import SimpleNamespace
+    ts = int(w15[-1]["ts"])
+    ok = (ts // 900_000) % 2 == 0 or threshold < 0
+    return SimpleNamespace(execution_allowed=ok, confidence=65.0, setup_quality=72.0,
+                           market_regime="TRENDING_UP")
+
+
+class ResearchPipelineWithApprovals(unittest.TestCase):
+    """Same offline pipeline with a deterministic NEXUS stub so approved rows
+    flow through geometry, the portfolio engine, path bootstrap, attribution."""
+
+    @classmethod
+    def setUpClass(cls):
+        async def fake_history(client, symbol, interval, limit):
+            minutes = {"15": 15, "60": 60, "240": 240}[interval]
+            seed = hash((symbol, interval)) % 1000
+            n = {"15": 900, "60": 400, "240": 200}[interval]
+            start = 1_760_000_000_000 - (0 if minutes == 15 else n * minutes * 60_000 // 3)
+            return _candles(minutes, n, seed, start=start)
+
+        async def fake_funding(client, symbol, start_ms, end_ms):
+            return [{"timepoint": t, "fundingRate": 0.0001}
+                    for t in range(start_ms - start_ms % (8 * 3_600_000), end_ms, 8 * 3_600_000)]
+
+        from bot.strategy import Analyzer
+        with patch.object(replay, "fetch_history", fake_history), \
+             patch.object(replay, "fetch_public_funding_history", fake_funding), \
+             patch.object(replay, "PublicKuCoinFuturesClient", _Client), \
+             patch.object(replay, "_decide", _fake_decide), \
+             patch.object(Analyzer, "analyze_mtf", _fake_analyze):
+            cls.artifact = asyncio.run(replay.run_real_replay(["AAAUSDT", "BBBUSDT"], limit_15m=900))
+
+    def test_portfolio_trades_single_position_and_invariants(self):
+        p = self.artifact["portfolio_replay"]
+        self.assertGreater(p["approved_candidates"], 10)
+        self.assertGreater(p["total_trades"], 0)
+        self.assertLessEqual(p["max_concurrent_positions"], 1)
+        self.assertEqual(p["accounting_invariants"], "PASS")
+        self.assertGreater(p["accounting_invariant_checks"], 100)
+        self.assertGreater(p["skipped"].get("liquidation_guard_multi_position", 0)
+                           + p["skipped"].get("same_symbol_open", 0)
+                           + p["skipped"].get("cooldown_or_circuit_breaker", 0), 0)
+        self.assertIn(p["path_bootstrap"]["per_block_length"]["24h"]["replicates"], (200,))
+        self.assertEqual(set(p["gate_attribution"]), set(__import__(
+            "bot.nexus_oos_portfolio_engine", fromlist=["Toggles"]).Toggles.__dataclass_fields__))
+        multi = p["gate_attribution"]["single_position_liquidation_rule"]
+        self.assertGreaterEqual(multi["total_trades"], p["total_trades"])
+
+    def test_attribution_steps_are_populated(self):
+        att = self.artifact["parity_attribution"]
+        self.assertGreater(att["A0_legacy_model"]["n"], 10)
+        self.assertEqual(att["A0_legacy_model"]["n"], att["A1_unshifted_native_stops"]["n"])
+        self.assertIsNotNone(att["A4_production_funnel"]["mean_r"])
+
+    def test_legacy_portfolio_rerun_present(self):
+        leg = self.artifact["portfolio_replay_legacy"]
+        self.assertEqual(leg["authority"], "NONE")
+        self.assertIsNotNone(leg["ending_equity"])
+
+    def test_gate_blocks_on_parity_even_if_research_ran(self):
+        clean = replay._strip_private(self.artifact)
+        res_ = gate.evaluate(json.loads(json.dumps(clean, default=str)))
+        self.assertFalse(res_.promote)
+        for b in ("PORTFOLIO_PARITY_INCOMPLETE", "PRETRADE_CONTEXT_PARITY_INCOMPLETE",
+                  "EXIT_PARITY_INCOMPLETE", "HISTORICAL_CONTEXT_PARITY_INCOMPLETE"):
+            self.assertIn(b, res_.blockers)
+        text = json.dumps(clean, default=str)
+        self.assertNotIn('"_marks"', text)
+        self.assertNotIn('"_path"', text)
 
 
 class ResearchStatisticsTests(unittest.TestCase):

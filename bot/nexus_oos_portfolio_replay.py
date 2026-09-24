@@ -1,4 +1,8 @@
-"""PORTFOLIO_EXECUTION_REPLAY: event-driven replay of NEXUS-approved candidates.
+"""LEGACY portfolio replay (pre-parity), kept only to attribute old-vs-new differences.
+
+The authoritative engine is ``bot.nexus_oos_portfolio_engine``.
+
+PORTFOLIO_EXECUTION_REPLAY (legacy): event-driven replay of NEXUS-approved candidates.
 
 Research only: no network, no exchange mutation, no runtime mutation.
 
@@ -64,7 +68,7 @@ def _mark(position: dict, ts: int) -> float:
     return side * (price - position["entry_fill"]) / position["entry_fill"] * position["notional"]
 
 
-def run_portfolio(rows: Sequence[dict], policy: rp.RiskPolicy, *,
+def run_portfolio_legacy(rows: Sequence[dict], policy: rp.RiskPolicy, *,
                   config: PortfolioConfig = PortfolioConfig(),
                   contract_rules: Mapping[str, rp.QuantityRules] | None = None,
                   mmr: Mapping[str, float] | None = None) -> dict:
@@ -222,7 +226,7 @@ def _report(trades, skipped, curve, config, policy, exposure_ms, margin_time, ma
     trade_rows = [{"ts": t["entry_ts"], "r": t["r"], "symbol": t["symbol"]} for t in trades]
     robust = inf.dependence_aware_mean(trade_rows) if len(trade_rows) >= 2 else {}
     return {
-        "layer": "PORTFOLIO_EXECUTION_REPLAY",
+        "layer": "PORTFOLIO_EXECUTION_REPLAY_LEGACY",
         "policy": {"leverage": policy.leverage, "max_risk_pct": policy.max_risk_pct,
                    "max_margin_pct": policy.max_margin_pct,
                    "operator_margin_cap_pct": policy.operator_margin_cap_pct,

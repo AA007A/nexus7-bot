@@ -55,6 +55,13 @@ class PromotionGateWorkflowContract(unittest.TestCase):
         self.assertIn('exit "${PIPESTATUS[0]}"', block)
         self.assertNotIn("--allow-incomplete-context-parity", text)
 
+    def test_replay_uses_pinned_manifest_and_parity_tests(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("--policy-manifest research/replay_policy_manifest.json", text)
+        self.assertIn('"research/replay_policy_manifest.json"', text)
+        self.assertIn("python -m unittest tests.test_nexus_oos_execution_parity -v", text)
+        self.assertTrue((ROOT / "research" / "replay_policy_manifest.json").is_file())
+
     def test_replay_covers_production_universe(self):
         from bot.config import cfg
         text = WORKFLOW.read_text(encoding="utf-8")

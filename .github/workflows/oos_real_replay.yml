@@ -46,6 +46,14 @@ on:
       - "bot/liquidation_override_guard.py"
       - "bot/daily_stop_*.py"
       - "bot/daily_tracker.py"
+      - "bot/engine.py"
+      - "bot/pilot.py"
+      - "bot/pilot_exposure_capacity.py"
+      - "bot/pre_dispatch_guard.py"
+      - "bot/kucoin_native_tpsl.py"
+      - "bot/native_stop_repair.py"
+      - "bot/runtime_overlays.py"
+      - "bot/runtime_bootstrap.py"
       - "bot/confirmed_rr_exit.py"
       - "bot/trailing_safety_hardening.py"
       - "bot/stagnation_time_hardening.py"
@@ -55,6 +63,7 @@ on:
       - "bot/backtest.py"
       - "bot/decision_affecting_paths.py"
       - "bot/nexus_oos_promotion_gate.py"
+      - "research/replay_policy_manifest.json"
       - "tests/test_nexus_oos_*.py"
       - ".github/workflows/oos_real_replay.yml"
   workflow_dispatch:
@@ -110,12 +119,14 @@ jobs:
           python -m unittest tests.test_nexus_oos_promotion_gate -v
           python -m unittest tests.test_nexus_oos_research_pipeline -v
           python -m unittest tests.test_nexus_oos_dependence_and_portfolio -v
+          python -m unittest tests.test_nexus_oos_execution_parity -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
           python -m bot.nexus_oos_real_replay_corrected \
             --symbols $OOS_SYMBOLS \
             --limit-15m "$OOS_LIMIT_15M" \
+            --policy-manifest research/replay_policy_manifest.json \
             --output artifacts/nexus_oos_real_replay.json
 
       - name: Show evidence summary
@@ -130,28 +141,40 @@ jobs:
               raise SystemExit(0)
           p = json.loads(path.read_text())
           c = p.get('candidate_research') or {}
-          pf = p.get('portfolio_replay') or {}
-          dep = lambda d: {k: (d or {}).get(k) for k in ('delta_expectancy_r', 'delta_iid_ci', 'delta_block24h_ci', 'delta_block48h_ci', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
+          pf = dict(p.get('portfolio_replay') or {})
+          pf.pop('equity_curve_daily', None)
+          dep = lambda d: {k: (d or {}).get(k) for k in ('delta_expectancy_r', 'delta_iid_ci', 'delta_block24h_ci', 'delta_block48h_ci', 'delta_block72h_ci', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
+          rp = p.get('replay_parity') or {}
+          lg = p.get('legacy_diagnostic') or {}
           view = {
               'status': p.get('status'),
+              'research_status': p.get('research_status'),
+              'authority_model': p.get('authority_model'),
               'blockers': p.get('blockers'),
               'nexus_threshold_used': p.get('nexus_threshold_used'),
               'unavailable_symbols': p.get('unavailable_symbols'),
-              'report_iid_edge_gate': p.get('report'),
+              'replay_policy_manifest': {k: (p.get('replay_policy_manifest') or {}).get(k) for k in ('policy_source', 'policy_sha256', 'differs_from_code_default')},
+              'replay_parity': {k: rp.get(k) for k in ('exit_parity_complete', 'exit_parity_blocking_rules', 'pretrade_parity_complete', 'pretrade_parity_blocking_gates', 'portfolio_parity_complete', 'tp1_equals_tp2_root_cause')},
+              'methodology': p.get('methodology'),
+              'parity_attribution': p.get('parity_attribution'),
+              'legacy_diagnostic': {'authority': lg.get('authority'), 'status': lg.get('status'), 'blockers': lg.get('blockers'), 'report': lg.get('report')},
               'symbols': [{k: s.get(k) for k in ('symbol', 'error', 'candles_15m', 'history_days',
                            'history_start_utc', 'history_end_utc', 'approved', 'rejected',
-                           'candidate_count')} for s in p.get('symbols') or []],
-              'robustness_summary': (p.get('robustness') or {}).get('summary'),
+                           'candidate_count', 'parity_counts')} for s in p.get('symbols') or []],
               'candidate_research': {
+                  'population_counts': c.get('population_counts'),
+                  'research_status': c.get('research_status'),
                   'performance': c.get('performance'),
                   'inference': c.get('inference'),
                   'effective_sample': c.get('effective_sample'),
+                  'temporal_folds': c.get('temporal_folds'),
                   'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
                                     for k, v in (c.get('concentration') or {}).items()},
                   'cost_stress_approved': c.get('cost_stress_approved'),
                   'cost_stress_baseline': c.get('cost_stress_baseline'),
                   'break_even_cost_multiplier': c.get('break_even_cost_multiplier'),
                   'exit_variants_approved': c.get('exit_variants_approved'),
+                  'exit_reason_mix_approved': c.get('exit_reason_mix_approved'),
                   'ablation': {k: dep(v) for k, v in (c.get('ablation') or {}).items()},
                   'context_ablation': {k: dep(v) for k, v in (c.get('context_ablation') or {}).items()},
                   'threshold_research': c.get('threshold_research'),
@@ -160,6 +183,7 @@ jobs:
                                         for k, v in (c.get('segments_approved') or {}).items()},
               },
               'portfolio_replay': pf,
+              'portfolio_replay_legacy': p.get('portfolio_replay_legacy'),
           }
           print('```json')
           print(json.dumps(view, indent=2, sort_keys=True, default=str))

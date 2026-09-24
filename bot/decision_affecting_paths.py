@@ -56,6 +56,16 @@ DECISION_AFFECTING_PATHS: tuple[str, ...] = (
     "bot/liquidation_override_guard.py",
     "bot/daily_stop_*.py",
     "bot/daily_tracker.py",
+    # Entry funnel, execution gates and exits of the composed LIVE runtime
+    # (their exact behaviour is reproduced by the execution-parity replay)
+    "bot/engine.py",
+    "bot/pilot.py",
+    "bot/pilot_exposure_capacity.py",
+    "bot/pre_dispatch_guard.py",
+    "bot/kucoin_native_tpsl.py",
+    "bot/native_stop_repair.py",
+    "bot/runtime_overlays.py",
+    "bot/runtime_bootstrap.py",
     # Exits
     "bot/confirmed_rr_exit.py",
     "bot/trailing_safety_hardening.py",
