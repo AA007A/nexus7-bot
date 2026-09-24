@@ -27,12 +27,13 @@ from bot.ai import hook as hk
 from bot.ai import shadow_observer as so
 from bot.ai import training as tr
 from tests.test_ai_decision_authority import DECISION_TS
-from tests.test_ai_phase7b import _WF, passing_artifact, run, runtime_with_bundle, synthetic_rows
+from tests.test_ai_phase7b import (_WF, observer_pins, observer_runtime, passing_artifact, run,
+                                  runtime_with_bundle, synthetic_rows)
 from tests.test_ai_phase7c import SYM, fake_decide, market, signal
 
 M15 = 15 * 60_000
 UNIVERSE = " ".join(fe.SHADOW_UNIVERSE)
-ENV = {"AI_EXECUTION_MODE": "SHADOW", "SHADOW_SYMBOLS": UNIVERSE, "CANDIDATE_SHA": "c" * 40}
+ENV = {"AI_EXECUTION_MODE": "SHADOW", "SHADOW_SYMBOLS": UNIVERSE, "CANDIDATE_SHA": "c" * 40, **observer_pins()}
 EXIT = None
 
 
@@ -61,7 +62,8 @@ def record(**over):
            "entry": 100.0, "signal_stop": 98.0, "final_tp": 106.0, "ai_decision": "ABSTAIN",
            "bundle_sha256": "b" * 64, "policy_sha256": "p" * 64, "code_sha": "c" * 40,
            "probability_calibrated": 0.4, "predicted_net_r": -0.1, "regime": "RANGE",
-           "decision_latency_ms": 1.0, "assumptions": {"fee_rate": 0.0006, "slippage_rate": 0.0005}}
+           "decision_latency_ms": 1.0, "decision_candidate_sha": "c" * 40,
+           "assumptions": {"fee_rate": 0.0006, "slippage_rate": 0.0005}}
     rec.update(over)
     return rec
 
@@ -83,7 +85,7 @@ def mk_window(st, start=DECISION_TS, **over):
 
 
 def observer(store=None, *, p=0.62, gross_r=0.5):
-    r, _ = runtime_with_bundle("SHADOW", p=p, gross_r=gross_r)
+    r = observer_runtime(p=p, gross_r=gross_r)
     st = store or es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
     o = so.ShadowObserver(ENV, client=object(), runtime=r, manifest=rm.load(), store=st)
     o.mmr_proxy[SYM] = 0.004

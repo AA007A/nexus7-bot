@@ -20,14 +20,29 @@ Purpose: fresh forward evidence for `FORWARD_SHADOW_EVIDENCE_V3` (a fixed 30-day
 | `EVIDENCE_DB_AUTHORITY_ID` | non-secret id of the evidence database |
 | `PRODUCTION_DB_AUTHORITY_ID` / `PRODUCTION_DB_FINGERPRINT` | non-secret pins of the production execution database; the evidence database must differ from both |
 | `SHADOW_POLICY_MANIFEST` | optional; defaults to `research/replay_policy_manifest.json` |
+| `SHADOW_REPLAY_POLICY_SHA256` | **required** pin: `replay_policy_manifest_sha256` from the `shadow-observer-deploy-manifest`. The loaded manifest must hash to it. |
+| `SHADOW_FORWARD_CONTRACT_SHA256` | **required** pin: `forward_contract_sha256` (FORWARD_SHADOW_EVIDENCE_V3) from the deploy manifest |
+| `RAILWAY_GIT_COMMIT_SHA` | provided by Railway; the **authoritative** runtime code SHA. It must equal the bundle `training_code_sha` and `bundle_metadata.candidate_code_sha`. |
+| `CANDIDATE_SHA` | offline/tests only. It never overrides `RAILWAY_GIT_COMMIT_SHA`; if both are set and differ, startup is refused. |
 | `AI_EVIDENCE_NEW_WINDOW_AFTER` | normally **unset**. The first window is created automatically only on an empty evidence DB. A later window needs this set to the `window_id` of the latest window (single use; a restart never silently opens a new window). |
 
 `TAKER_FEE` / `BACKTEST_SLIPPAGE` are part of the window cost identity; changing them mid-window invalidates the window.
 
 Must be **absent**: `KUCOIN_API_KEY`, `KUCOIN_API_SECRET`, `KUCOIN_API_PASSPHRASE`. If any is present, `preflight()` refuses to start. `DATABASE_URL` is not needed; if it is set, it must not point at the evidence database.
 
-## Startup sequence (fail closed at each step)
-1. no exchange credentials; 2. read-only public client; 3. ordered 12-symbol universe; 4. PostgreSQL connected; 5. evidence-DB isolation verified (no `trades` table at all, role marker, authority id / fingerprint differ from production); 6. bundle loaded and hashed; 7. policy / feature schema verified; 8. contract V3 verified; 9. evidence window created (or the ACTIVE one loaded with an exact identity match) and **committed**; 10. only then is the market observed.
+## Startup sequence (fail closed at each step; no window and no observation on any failure)
+1. no exchange credentials
+2. read-only public client
+3. exact ordered 12-symbol universe
+4. PostgreSQL connected
+5. evidence-DB isolation verified (no `trades` table at all, role marker, authority id / fingerprint differ from production)
+6. AI bundle loaded through the runtime loader; lifecycle must be `SHADOW_OBSERVER` or `SHADOW_CHALLENGER` (`RESEARCH_CANDIDATE` / `PAPER_CHALLENGER` / `LIVE_CHAMPION` refused here)
+7. policy / feature schema verified, and `bundle_metadata.json` agreeing exactly with the loaded bundle (schema, bundle / policy / feature-schema / dataset-manifest SHAs, hook population and profile, lifecycle, 40-hex candidate SHA)
+8. `FORWARD_SHADOW_EVIDENCE_V3` verified and equal to the deploy pin
+9. replay policy manifest SHA equal to the deploy pin, and `manifest.verify_runtime()` PASS (every in-process production value equals the manifest). Also explicit cost parity: `TAKER_FEE` and `BACKTEST_SLIPPAGE` (BTC), with the x2 rule for non-major symbols.
+10. exact code provenance: a 40-lowercase-hex code SHA equal to the bundle `training_code_sha` and the metadata `candidate_code_sha` (otherwise `CODE_BUNDLE_SHA_MISMATCH`); AI decisions and the `[AI_IDENTITY_OBSERVATION_V1]` line carry this SHA
+11. evidence window created (or the ACTIVE one loaded with an exact identity match) and **committed**; the identity records the parity result (`runtime_manifest_parity_status=PASS`, verified keys, replay-manifest SHA, contract SHA, training-dataset-manifest SHA)
+12. only then is the market observed.
 
 ## Evidence window (`ai_evidence_windows`)
 - One ACTIVE window per DB (unique index). Identity = contract name/sha, code, bundle, policy, feature schema, hook population/profile, ordered universe + sha, evidence DB id/fingerprint, cost identity (taker fee, slippage model/rates, exit-policy sha, replay-manifest sha). `window_id = sha256(identity, bounds)`.
@@ -45,7 +60,7 @@ Must be **absent**: `KUCOIN_API_KEY`, `KUCOIN_API_SECRET`, `KUCOIN_API_PASSPHRAS
 
 ## Artifact export (read-only)
 `python -m bot.ai.forward_artifact --from-evidence-db --output forward_shadow_evidence.json`
-Everything is derived from the DB (bounds, identity, continuity, coverage); digests, identity, boundary uniqueness and heartbeat binding are re-verified; `journal_verified` is computed. The connection is read-only and the output contains no URL or credential. Verdict: `COLLECTING` / `INSUFFICIENT_EVIDENCE` / `BLOCK` only; PASS comes only from the protected evaluator.
+Everything is derived from the DB (bounds, identity, continuity, coverage). Zero-order needs positive observation: every completed boundary needs a SCAN heartbeat with all four safety assertions (`NOT_YET_OBSERVED` / `INCOMPLETE` / `VERIFIED` / `VIOLATION`; a missing safety record fails coverage, a violation is BLOCK). digests, identity, boundary uniqueness and heartbeat binding are re-verified; `journal_verified` is computed. The connection is read-only and the output contains no URL or credential. Verdict: `COLLECTING` / `INSUFFICIENT_EVIDENCE` / `BLOCK` only; PASS comes only from the protected evaluator.
 
 ## Guarantees (tested in `tests/test_ai_phase7c.py`, `tests/test_ai_phase7d.py`, `tests/test_ai_phase7e.py`)
 - The only exchange client is the public GET-only `PublicKuCoinFuturesClient`. Authenticated calls raise, and `assert_read_only` rejects any client exposing order or cancel methods.

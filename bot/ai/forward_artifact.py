@@ -238,6 +238,37 @@ def _completeness(cov: dict, *, closed: bool, broken: bool) -> dict:
             "satisfied": (not fails) if closed else (None if not fails else False)}
 
 
+SAFETY_KEYS = ("exchange_credentials_present", "mutating_client_methods", "execution_lease_acquired",
+               "orders_sent")
+
+
+def _safe(s) -> bool:
+    return isinstance(s, dict) and s.get("exchange_credentials_present") is False and \
+        s.get("mutating_client_methods") is False and s.get("execution_lease_acquired") is False and \
+        s.get("orders_sent") == 0
+
+
+def _zero_order(boundaries: list, heartbeats: list) -> dict:
+    """Zero-order needs POSITIVE observation: every completed (evaluated)
+    boundary needs a SCAN heartbeat carrying all four safety assertions.
+    No SCAN yet => NOT_YET_OBSERVED (never 'verified' by absence of a violation);
+    a completed boundary without a safe SCAN => INCOMPLETE; any unsafe SCAN =>
+    VIOLATION (policy evidence BLOCK)."""
+    completed = sorted({int(b["boundary_ms"]) for b in boundaries if b["status"] != "MISSED"})
+    scans = [h for h in heartbeats if h.get("kind") == "SCAN"]
+    unsafe = [int(h.get("boundary_ms") or h["ts"]) for h in scans
+              if not (isinstance(h.get("safety"), dict) and all(k in h["safety"] for k in SAFETY_KEYS)
+                      and _safe(h["safety"]))]
+    safe_b = {int(h["boundary_ms"]) for h in scans if h.get("boundary_ms") is not None and _safe(h.get("safety"))}
+    missing = [b for b in completed if b not in safe_b]
+    status = ("VIOLATION" if unsafe else "NOT_YET_OBSERVED" if not scans
+              else "INCOMPLETE" if missing else "VERIFIED")
+    return {"status": status, "scan_heartbeats": len(scans), "safe_scan_heartbeats": len(safe_b),
+            "unsafe_scan_heartbeats": len(unsafe), "completed_boundaries": len(completed),
+            "completed_boundaries_without_safe_scan": len(missing),
+            "coverage_fraction": (len([b for b in completed if b in safe_b]) / len(completed)) if completed else None}
+
+
 async def build_forward_shadow_artifact_from_store(store, *, window_id: str | None = None) -> dict:
     """The only public builder. Bounds/identity/journal status are DERIVED."""
     from bot.ai.runtime import JournalIntegrityError
@@ -283,11 +314,10 @@ async def build_forward_shadow_artifact_from_store(store, *, window_id: str | No
         if h.get("window_id") != wid:
             integrity.append("heartbeat not bound to window")
     journal_verified = not integrity
-    safeties = [h.get("safety") for h in hbs if h.get("kind") == "SCAN" and h.get("safety")]
-    zero_violation = any(not (s.get("exchange_credentials_present") is False and
-                              s.get("mutating_client_methods") is False and
-                              s.get("execution_lease_acquired") is False and s.get("orders_sent") == 0)
-                         for s in safeties)
+    zo = _zero_order(bnds, hbs)
+    zero_violation = zo["status"] == "VIOLATION"
+    # the inner builder only needs to know whether a violation was OBSERVED;
+    # positive observation / coverage is reported from ``zo`` below
     safety = {"exchange_credentials_present": False, "mutating_client_methods": False,
               "execution_lease_acquired": False, "orders_sent": 0} if not zero_violation else \
         {"orders_sent": None, "violation": True}
@@ -299,6 +329,9 @@ async def build_forward_shadow_artifact_from_store(store, *, window_id: str | No
         safety=safety, journal_verified=journal_verified, continuity_broken=broken)
     cov = _coverage(w, bnds)
     comp = _completeness(cov, closed=closed, broken=broken)
+    if zo["completed_boundaries_without_safe_scan"]:
+        comp["failures"] = sorted(set(comp["failures"]) | {"SCAN_SAFETY_COVERAGE_INCOMPLETE"})
+        comp["satisfied"] = False
     blockers = set(body["blockers"])
     if w["status"] == es.W_INVALID:
         blockers.add("WINDOW_INVALID_IDENTITY_CHANGE")
@@ -320,6 +353,10 @@ async def build_forward_shadow_artifact_from_store(store, *, window_id: str | No
     verdict = "BLOCK" if blockers else "INSUFFICIENT_EVIDENCE" if closed else "COLLECTING"
     assert verdict in IN_CANDIDATE_VERDICTS
     return {**body, "FROZEN_POLICY_FORWARD_EVIDENCE": fpe,
+            "zero_order_verified": zo["status"] == "VERIFIED", "zero_order_status": zo["status"],
+            "safety": {"source": "SCAN_HEARTBEATS", "status": zo["status"],
+                       "unsafe_scan_heartbeats": zo["unsafe_scan_heartbeats"]},
+            "scan_safety_coverage": zo,
             "window_id": wid, "window_identity": ident, "window_identity_sha256": w["identity_sha256"],
             "window": {"start_ms": w["window_start_ms"], "end_ms": w["window_end_ms"], "status": w["status"],
                        "closed": closed, "closed_at_ms": w.get("closed_at_ms"),

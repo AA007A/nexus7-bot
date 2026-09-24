@@ -412,6 +412,35 @@ def runtime_with_bundle(mode, *, lifecycle=None, paper_trade=None, pin=None, db=
     return r, journal
 
 
+def observer_runtime(*, p=0.62, gross_r=0.5, code_sha="c" * 40, lifecycle="SHADOW_OBSERVER", meta_over=None,
+                     metadata=True):
+    """Isolated-observer fixture: a SHADOW_* bundle whose training_code_sha and
+    bundle_metadata.json candidate_code_sha equal ``code_sha`` (as exported by
+    bot.ai.bundle_export for the exact candidate)."""
+    from bot.ai import bundle_export as bx
+    tmp = tempfile.mkdtemp()
+    b, ca, ra, man = constant_bundle(p=p, gross_r=gross_r, lifecycle=lifecycle, hook_profile=hk.PROFILE_LIVE_PILOT,
+                                     training_code_sha=code_sha)
+    for name, obj in (("manifest.json", man), ("classifier.json", ca), ("regressor.json", ra)):
+        with open(os.path.join(tmp, name), "w") as fh:
+            json.dump(obj, fh)
+    if metadata:
+        meta = {**bx.bundle_metadata(man, candidate_sha=code_sha), **(meta_over or {})}
+        with open(os.path.join(tmp, "bundle_metadata.json"), "w") as fh:
+            json.dump(meta, fh)
+    env = {"AI_EXECUTION_MODE": "SHADOW", "AI_BUNDLE_DIR": tmp, "AI_BUNDLE_SHA256": man["bundle_sha256"]}
+    return rt.AIRuntime(env, journal=rt.DurableAIJournal(FakeDB()), paper_trade=True,
+                        clock_ms=lambda: DECISION_TS + 60_000)
+
+
+def observer_pins() -> dict:
+    """Deploy-pinned identities the isolated observer verifies at startup."""
+    from bot import nexus_oos_replay_manifest as rm
+    from bot.ai import forward_evidence as fe
+    return {"SHADOW_REPLAY_POLICY_SHA256": rm.load().sha256,
+            "SHADOW_FORWARD_CONTRACT_SHA256": fe.CONTRACT_SHA256["SHADOW"]}
+
+
 def gate_call(r, *, symbol, direction, entry, stop, rr, strategy_score, nexus_confidence, cost_fraction,
               taker_fee, k15, k1h, k4h, now_ms, profile=None):
     obs = hk.HookObservation(symbol=symbol, direction=direction, decision_ts=rt.AIRuntime.event_ts(now_ms),

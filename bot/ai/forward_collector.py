@@ -63,7 +63,7 @@ def candidate_record(*, obs, decision, signal_tp: float, final_tp: float, costs:
         "predicted_gross_r": d["expected_r"], "predicted_net_r": d["expected_net_r_after_costs"],
         "ai_decision": "TRADE" if decision.is_trade else "ABSTAIN",
         "vetoes": list(d["vetoes"]), "reason_codes": list(d["reason_codes"]),
-        "decision_latency_ms": d["decision_latency_ms"],
+        "decision_latency_ms": d["decision_latency_ms"], "decision_candidate_sha": d.get("candidate_sha"),
         "assumptions": {"fee_rate": float(fee_rate), "slippage_rate": float(slippage_rate),
                         "fees_r": costs.get("fees_r"), "slippage_buffer_r": costs.get("slippage_r"),
                         "funding_r": costs.get("funding_r"), "cost_contract": cb},

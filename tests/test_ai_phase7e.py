@@ -21,16 +21,17 @@ from bot.ai import forward_evidence as fe
 from bot.ai import shadow_observer as so
 from bot.ai.runtime import JournalIntegrityError
 from tests.test_ai_decision_authority import DECISION_TS
-from tests.test_ai_phase7b import run, runtime_with_bundle
+from tests.test_ai_phase7b import observer_pins, observer_runtime, run, runtime_with_bundle
 from tests.test_ai_phase7c import SYM, fake_decide, market, signal
 from tests.test_ai_phase7d import GOOD, _pg_cluster, bars_from, mk_window, record, fixture_identity
 
 M15 = fe.M15_MS
-ENV = {"AI_EXECUTION_MODE": "SHADOW", "SHADOW_SYMBOLS": " ".join(fe.SHADOW_UNIVERSE), "CANDIDATE_SHA": "c" * 40}
+ENV = {"AI_EXECUTION_MODE": "SHADOW", "SHADOW_SYMBOLS": " ".join(fe.SHADOW_UNIVERSE), "CANDIDATE_SHA": "c" * 40,
+       **observer_pins()}
 EXIT = None
 STEPS = ["NO_CREDENTIALS", "READ_ONLY_CLIENT", "ORDERED_UNIVERSE", "POSTGRESQL_CONNECTED",
          "DB_ISOLATION_VERIFIED", "BUNDLE_LOADED", "POLICY_SCHEMA_VERIFIED", "CONTRACT_V3_VERIFIED",
-         "WINDOW_COMMITTED"]
+         "REPLAY_MANIFEST_RUNTIME_PARITY", "CODE_PROVENANCE_VERIFIED", "WINDOW_COMMITTED"]
 
 
 def setUpModule():
@@ -46,7 +47,7 @@ def mem():
 
 def make(store=None, *, env=None, runtime=None, p=0.62, gross_r=0.5):
     """Observer through steps 1-8 (no window yet)."""
-    r = runtime or runtime_with_bundle("SHADOW", p=p, gross_r=gross_r)[0]
+    r = runtime or observer_runtime(p=p, gross_r=gross_r)
     st = store if store is not None else mem()
     o = so.ShadowObserver(env or ENV, client=object(), runtime=r, manifest=rm.load(), store=st)
     o.mmr_proxy[SYM] = 0.004
@@ -186,15 +187,20 @@ class WindowLock(unittest.TestCase):
     def test_real_code_sha_change_and_explicit_new_window(self):
         o, st = opened()
         old = o.window["window_id"]
-        o2, _ = make(st, env={**ENV, "CANDIDATE_SHA": "9" * 40})
+        new = "9" * 40
+        o2, _ = make(st, env={**ENV, "CANDIDATE_SHA": new}, runtime=observer_runtime(code_sha=new))
         with self.assertRaises(so.ObserverRefused):
             run(o2.open_window(DECISION_TS + M15))
-        o3, _ = make(st, env={**ENV, "CANDIDATE_SHA": "9" * 40, "AI_EVIDENCE_NEW_WINDOW_AFTER": "wrong"})
+        self.assertEqual(run(st.window(old))["status"], es.W_INVALID)
+        o3, _ = make(st, env={**ENV, "CANDIDATE_SHA": new, "AI_EVIDENCE_NEW_WINDOW_AFTER": "wrong"},
+                     runtime=observer_runtime(code_sha=new))
         with self.assertRaises(so.ObserverRefused):
             run(o3.open_window(DECISION_TS + M15))
-        o4, _ = make(st, env={**ENV, "CANDIDATE_SHA": "9" * 40, "AI_EVIDENCE_NEW_WINDOW_AFTER": old})
+        o4, _ = make(st, env={**ENV, "CANDIDATE_SHA": new, "AI_EVIDENCE_NEW_WINDOW_AFTER": old},
+                     runtime=observer_runtime(code_sha=new))
         w = run(o4.open_window(DECISION_TS + M15))
         self.assertNotEqual(w["window_id"], old)
+        self.assertEqual(w["identity"]["code_sha"], new)
         self.assertEqual(w["window_start_ms"], DECISION_TS + 2 * M15)
 
     def test_universe_order_is_pinned(self):
@@ -449,13 +455,14 @@ class Binding(unittest.TestCase):
         with self.assertRaises(es.EvidenceContinuityBroken):
             run(st.put_candidate(wid, record(assumptions={"fee_rate": 0.001, "slippage_rate": 0.0005})))
         self.assertEqual(run(st.window(wid))["continuity_reason"], "COST_IDENTITY_MISMATCH")
-        # a changed fee env on restart is an identity change
+        # a changed fee env on restart fails replay-manifest runtime parity: startup refused,
+        # nothing can be appended to (or created next to) the existing window
         o, st2 = opened()
         with patch.dict(os.environ, {"TAKER_FEE": "0.0009"}):
-            o2, _ = make(st2)
             with self.assertRaises(so.ObserverRefused):
-                run(o2.open_window(DECISION_TS + M15))
-        self.assertEqual(run(st2.window(o.window["window_id"]))["status"], es.W_INVALID)
+                make(st2)
+        self.assertEqual(len(run(st2.windows())), 1)
+        self.assertEqual(run(st2.candidates(o.window["window_id"])), [])
 
     def test_candidate_inherits_the_window_cost_identity(self):
         o, st = opened()
@@ -711,6 +718,227 @@ class RealPostgresWindows(unittest.TestCase):
             await c2.close()
             return n
         self.assertEqual(run(go()), 0)
+
+
+# ── Phase 7E final: runtime provenance lock ─────────────────────────────────
+class RuntimeProvenance(unittest.TestCase):
+    def refused(self, *, env=None, runtime=None, contains=None):
+        st = mem()
+        with self.assertRaises(so.ObserverRefused) as cm:
+            make(st, env=env, runtime=runtime)
+        self.assertEqual(st.t["ai_evidence_windows"], {})                 # no window
+        self.assertEqual(st.t["ai_shadow_candidates"], {})                # no observation
+        if contains:
+            self.assertIn(contains, str(cm.exception))
+        return cm.exception
+
+    # manifest runtime parity
+    def test_verify_runtime_runs_before_window_creation(self):
+        order = []
+        orig_v, orig_c = rm.ReplayManifest.verify_runtime, es.EvidenceStore.create_window
+
+        def v(self_):
+            order.append("verify_runtime")
+            return orig_v(self_)
+
+        async def c(self_, *a, **k):
+            order.append("create_window")
+            return await orig_c(self_, *a, **k)
+        with patch.object(rm.ReplayManifest, "verify_runtime", v), patch.object(es.EvidenceStore, "create_window", c):
+            o, st = opened()
+        self.assertEqual(order, ["verify_runtime", "create_window"])
+        self.assertLess(o.steps.index("REPLAY_MANIFEST_RUNTIME_PARITY"), o.steps.index("WINDOW_COMMITTED"))
+        with patch.object(rm.ReplayManifest, "verify_runtime", side_effect=rm.ManifestError("MISMATCH")):
+            self.refused(contains="RUNTIME_MANIFEST_PARITY_FAILED")
+
+    def test_taker_fee_and_slippage_mismatch_refuse(self):
+        with patch.dict(os.environ, {"TAKER_FEE": "0.0009"}):
+            self.refused(contains="RUNTIME_MANIFEST_PARITY_FAILED")
+        with patch.dict(os.environ, {"BACKTEST_SLIPPAGE": "0.001"}):
+            self.refused(contains="RUNTIME_MANIFEST_PARITY_FAILED")
+
+    def test_min_volume_mult_and_nexus_threshold_mismatch_refuse(self):
+        from bot import nexus_ai
+        from bot.config import cfg
+        with patch.object(cfg, "MIN_VOLUME_MULT", float(cfg.MIN_VOLUME_MULT) + 0.1):
+            self.refused(contains="RUNTIME_MANIFEST_PARITY_FAILED")
+        with patch.object(nexus_ai, "MIN_SCORE", float(nexus_ai.MIN_SCORE) + 1.0):
+            self.refused(contains="RUNTIME_MANIFEST_PARITY_FAILED")
+
+    def test_valid_parity_permits_startup_with_explicit_cost_parity(self):
+        from bot.kucoin_execution_model import configured_taker_fee, slippage_rate_for_symbol
+        o, st = make()
+        man = rm.load()
+        self.assertEqual(o.runtime_parity["status"], "PASS")
+        for k in ("TAKER_FEE", "BACKTEST_SLIPPAGE", "MIN_VOLUME_MULT", "NEXUS_MIN_SCORE_EFFECTIVE", "MIN_ENTRY_SCORE",
+                  "FEE_MULTIPLIER", "TRAILING_TRIGGER", "TRAILING_LOCK", "NEXUS_MAX_SIGNAL_DRIFT_BPS"):
+            self.assertIn(k, o.runtime_parity["verified_keys"])
+        self.assertEqual(configured_taker_fee(), man["TAKER_FEE"])
+        self.assertEqual(slippage_rate_for_symbol("BTCUSDT"), man["BACKTEST_SLIPPAGE"])
+        self.assertEqual(slippage_rate_for_symbol("ATOMUSDT"), 2 * man["BACKTEST_SLIPPAGE"])   # x2 non-major rule
+
+    # code sha
+    def test_code_sha_must_be_exact_40_lower_hex(self):
+        for bad in (None, "", "c" * 39, "c" * 41, "g" * 40, "C" * 40, "main", "claude/nexus7-production"):
+            env = {k: v for k, v in ENV.items() if k != "CANDIDATE_SHA"}
+            if bad is not None:
+                env["CANDIDATE_SHA"] = bad
+            self.refused(env=env, contains="40 lowercase hex")
+
+    def test_railway_sha_is_authority_and_disagreement_refuses(self):
+        a = "a" * 40
+        self.assertEqual(so.resolve_code_sha({"RAILWAY_GIT_COMMIT_SHA": a}), a)
+        self.assertEqual(so.resolve_code_sha({"RAILWAY_GIT_COMMIT_SHA": a, "CANDIDATE_SHA": a}), a)
+        self.assertEqual(so.resolve_code_sha({"CANDIDATE_SHA": a}), a)               # offline only
+        env = {k: v for k, v in ENV.items() if k != "CANDIDATE_SHA"}
+        o, _ = make(env={**env, "RAILWAY_GIT_COMMIT_SHA": a}, runtime=observer_runtime(code_sha=a))
+        self.assertEqual(o.code_sha, a)
+        self.refused(env={**ENV, "RAILWAY_GIT_COMMIT_SHA": a}, runtime=observer_runtime(code_sha=a),
+                     contains="disagree")
+
+    def test_code_sha_must_match_bundle_and_metadata(self):
+        self.refused(runtime=observer_runtime(code_sha="d" * 40, meta_over={"candidate_code_sha": "c" * 40}),
+                     contains="CODE_BUNDLE_SHA_MISMATCH")                   # bundle training_code_sha differs
+        self.refused(runtime=observer_runtime(code_sha="c" * 40, meta_over={"candidate_code_sha": "e" * 40}),
+                     contains="CODE_BUNDLE_SHA_MISMATCH")                   # metadata candidate sha differs
+        self.refused(runtime=observer_runtime(code_sha="d" * 40), contains="CODE_BUNDLE_SHA_MISMATCH")
+
+    # bundle metadata
+    def test_bundle_metadata_must_agree_with_loaded_bundle(self):
+        for over in ({"bundle_sha256": "0" * 64}, {"policy_sha256": "0" * 64}, {"feature_schema_sha256": "0" * 64},
+                     {"hook_profile": "PAPER_OR_UNPILOTED_PRE_GEOMETRY"}, {"hook_population": "X"},
+                     {"dataset_manifest_sha256": "0" * 64}, {"lifecycle_state": "SHADOW_CHALLENGER"},
+                     {"schema": "UNKNOWN"}, {"candidate_code_sha": None}):
+            self.refused(runtime=observer_runtime(meta_over=over), contains="BUNDLE_METADATA_INVALID")
+        self.refused(runtime=observer_runtime(metadata=False), contains="BUNDLE_METADATA_INVALID")
+
+    def test_lifecycle_must_be_shadow_safe(self):
+        for bad in ("RESEARCH_CANDIDATE", "PAPER_CHALLENGER", "LIVE_CHAMPION"):
+            self.refused(runtime=observer_runtime(lifecycle=bad), contains="refused by the isolated observer")
+        for ok in ("SHADOW_OBSERVER", "SHADOW_CHALLENGER"):
+            o, _ = make(runtime=observer_runtime(lifecycle=ok))
+            self.assertIn("CODE_PROVENANCE_VERIFIED", o.steps)
+        self.assertEqual(o.bundle_metadata["claims"],
+                         {"edge_claim": False, "order_authority": False, "live_authority": False})
+
+    # deploy pins
+    def test_replay_policy_and_contract_pins(self):
+        for key in ("SHADOW_REPLAY_POLICY_SHA256", "SHADOW_FORWARD_CONTRACT_SHA256"):
+            self.refused(env={**ENV, key: "0" * 64})
+            self.refused(env={k: v for k, v in ENV.items() if k != key}, contains="deploy-pinned")
+        self.refused(env={**ENV, "SHADOW_REPLAY_POLICY_SHA256": "0" * 64}, contains="REPLAY_POLICY_SHA_MISMATCH")
+        self.refused(env={**ENV, "SHADOW_FORWARD_CONTRACT_SHA256": "0" * 64}, contains="FORWARD_CONTRACT_SHA_MISMATCH")
+
+    def test_window_identity_contains_all_pinned_provenance(self):
+        o, st = opened()
+        ident = run(st.window(o.window["window_id"]))["identity"]
+        man = o.runtime.bundle.manifest
+        expect = {"code_sha": "c" * 40, "bundle_sha256": man["bundle_sha256"],
+                  "policy_sha256": man["decision_policy_sha256"], "feature_schema_sha256": man["feature_schema_sha256"],
+                  "training_dataset_manifest_sha256": man["training_dataset_manifest_sha256"],
+                  "replay_policy_manifest_sha256": rm.load().sha256,
+                  "forward_contract_sha256": fe.CONTRACT_SHA256["SHADOW"],
+                  "runtime_manifest_parity_status": "PASS", "hook_population": man["hook_population"],
+                  "hook_profile": man["hook_profile"], "symbol_universe": list(fe.SHADOW_UNIVERSE),
+                  "evidence_db_authority_id": "test-memory", "evidence_db_fingerprint": "memory",
+                  "bundle_lifecycle_state": "SHADOW_OBSERVER"}
+        for k, v in expect.items():
+            self.assertEqual(ident[k], v, k)
+        self.assertIn("TAKER_FEE", ident["replay_runtime_verified_keys"])
+        self.assertIn("cost_identity", ident)
+        self.assertNotIn("://", json.dumps(ident))
+
+    def test_decision_and_observation_carry_the_verified_code_sha(self):
+        o, st = opened()
+        with self.assertRaises(so.ObserverRefused):
+            make_unstarted = so.ShadowObserver(ENV, client=object(), runtime=observer_runtime(), manifest=rm.load(),
+                                               store=mem())
+            make_unstarted.observation_line()
+        observe(o)
+        rec = run(st.candidates(o.window["window_id"]))[0]
+        sha = o.window["identity"]["code_sha"]
+        self.assertEqual(sha, "c" * 40)
+        self.assertEqual(rec["decision_candidate_sha"], sha)
+        self.assertEqual(rec["code_sha"], sha)
+        self.assertEqual(o.runtime.bundle.manifest["training_code_sha"], sha)
+        self.assertEqual(o.bundle_metadata["candidate_code_sha"], sha)
+        self.assertEqual(o.runtime.authority.candidate_sha, sha)
+        line = o.observation_line(deployment_id="dep-1")
+        self.assertIn(f"candidate_sha={sha}", line)
+        self.assertNotIn("UNAVAILABLE", line.split("candidate_sha=")[1].split()[0])
+        with self.assertRaises(es.WindowRefused):                          # decision sha must equal window sha
+            run(st.put_candidate(o.window["window_id"], {**rec, "candidate_id": "x", "decision_candidate_sha": None}))
+
+
+class ZeroOrderObservation(unittest.TestCase):
+    SAFE = {"exchange_credentials_present": False, "mutating_client_methods": False,
+            "execution_lease_acquired": False, "orders_sent": 0}
+
+    def test_no_scan_heartbeat_is_not_verified(self):
+        o, st = opened()
+        art = run(fa.build_forward_shadow_artifact_from_store(st))
+        self.assertEqual(art["zero_order_status"], "NOT_YET_OBSERVED")
+        self.assertFalse(art["zero_order_verified"])
+
+    def test_safe_completed_boundary_with_scan_is_verified(self):
+        o, st = opened()
+        wire(o)
+        run_boundary(o, DECISION_TS + 20_000)
+        art = run(fa.build_forward_shadow_artifact_from_store(st))
+        self.assertEqual(art["zero_order_status"], "VERIFIED")
+        self.assertTrue(art["zero_order_verified"])
+        cov = art["scan_safety_coverage"]
+        self.assertEqual((cov["completed_boundaries"], cov["safe_scan_heartbeats"], cov["coverage_fraction"]),
+                         (1, 1, 1.0))
+
+    def test_completed_boundary_without_scan_is_coverage_failure(self):
+        st = mem()
+        wid = mk_window(st)
+        for sym in fe.SHADOW_UNIVERSE:
+            run(st.put_boundary(wid, DECISION_TS, sym, "NO_SIGNAL"))
+            run(st.put_boundary(wid, DECISION_TS + M15, sym, "NO_SIGNAL"))
+        run(st.heartbeat(wid, {"ts": DECISION_TS, "kind": "SCAN", "boundary_ms": DECISION_TS, "safety": self.SAFE}))
+        run(st.update_window(wid, last_completed_boundary_ms=DECISION_TS + M15, completed_boundaries=2))
+        art = run(fa.build_forward_shadow_artifact_from_store(st))
+        self.assertEqual(art["zero_order_status"], "INCOMPLETE")
+        self.assertFalse(art["zero_order_verified"])
+        self.assertEqual(art["scan_safety_coverage"]["completed_boundaries_without_safe_scan"], 1)
+        self.assertIn("SCAN_SAFETY_COVERAGE_INCOMPLETE", art["completeness"]["failures"])
+        self.assertFalse(art["FROZEN_POLICY_EVIDENCE_VALIDITY"]["valid"])
+
+    def test_unsafe_heartbeat_blocks(self):
+        for bad in ({"orders_sent": 1}, {"exchange_credentials_present": True}, {"mutating_client_methods": True},
+                    {"execution_lease_acquired": True}):
+            st = mem()
+            wid = mk_window(st)
+            for sym in fe.SHADOW_UNIVERSE:
+                run(st.put_boundary(wid, DECISION_TS, sym, "NO_SIGNAL"))
+            run(st.heartbeat(wid, {"ts": DECISION_TS, "kind": "SCAN", "boundary_ms": DECISION_TS,
+                                   "safety": {**self.SAFE, **bad}}))
+            art = run(fa.build_forward_shadow_artifact_from_store(st))
+            self.assertEqual(art["zero_order_status"], "VIOLATION", bad)
+            self.assertEqual(art["verdict"], "BLOCK")
+            self.assertIn("ZERO_ORDER_ASSERTION_FAILED", art["blockers"])
+
+
+class DeployProvenance(unittest.TestCase):
+    def test_deploy_manifest_pins_replay_policy_and_contract(self):
+        from bot.ai import bundle_export as bx
+        from tests.test_ai_phase7d import ShadowBundleArtifact
+        art = ShadowBundleArtifact._artifact(None)
+        tmp = tempfile.mkdtemp()
+        res = bx.export(art, tmp, candidate_sha="c" * 40)
+        dm = bx.deploy_manifest(res)
+        self.assertEqual(dm["replay_policy_manifest_sha256"], rm.load().sha256)
+        self.assertEqual(dm["pinned_env"]["SHADOW_REPLAY_POLICY_SHA256"], rm.load().sha256)
+        self.assertEqual(dm["pinned_env"]["SHADOW_FORWARD_CONTRACT_SHA256"], fe.CONTRACT_SHA256["SHADOW"])
+        self.assertTrue(dm["provenance"]["mutually_consistent"])
+        self.assertEqual(dm["provenance"]["candidate_code_sha"], dm["provenance"]["training_code_sha"])
+        v = bx.verify(tmp)
+        self.assertTrue(v["metadata_verified"])
+        self.assertEqual(v["candidate_code_sha"], "c" * 40)
+        with self.assertRaises(bx.BundleExportError):
+            bx.export(art, tempfile.mkdtemp(), candidate_sha="d" * 40)          # CODE_BUNDLE_SHA_MISMATCH
 
 
 if __name__ == "__main__":

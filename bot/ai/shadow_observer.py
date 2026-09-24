@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 
 FORBIDDEN_CREDENTIALS = ("KUCOIN_API_KEY", "KUCOIN_API_SECRET", "KUCOIN_API_PASSPHRASE")
@@ -115,6 +116,70 @@ def boundary_status(result: dict) -> str:
     return _STAGE_TO_BOUNDARY.get(stage, "ERROR" if stage == "ERROR" else "COMPLETE")
 
 
+SHA40 = re.compile(r"[0-9a-f]{40}")
+
+
+def resolve_code_sha(env) -> str:
+    """Runtime code identity. On Railway, RAILWAY_GIT_COMMIT_SHA is the
+    authority; CANDIDATE_SHA (offline) may never override it and must agree
+    when both are set. Only an exact 40-lowercase-hex SHA is accepted."""
+    railway = str(env.get("RAILWAY_GIT_COMMIT_SHA", "") or "").strip()
+    cand = str(env.get("CANDIDATE_SHA", "") or "").strip()
+    if railway and cand and railway != cand:
+        raise ObserverRefused("RAILWAY_GIT_COMMIT_SHA and CANDIDATE_SHA disagree")
+    sha = railway or cand
+    if not SHA40.fullmatch(sha):
+        raise ObserverRefused("code sha must be exactly 40 lowercase hex characters")
+    return sha
+
+
+def _pinned(env, key) -> str:
+    v = str(env.get(key, "") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", v):
+        raise ObserverRefused(f"{key} must be deploy-pinned (64 lowercase hex)")
+    return v
+
+
+def _load_metadata(runtime_env) -> dict:
+    import json
+    from pathlib import Path
+    try:
+        meta = json.loads((Path(str(runtime_env.get("AI_BUNDLE_DIR", ""))) / "bundle_metadata.json").read_text())
+    except Exception as exc:
+        raise ObserverRefused(f"BUNDLE_METADATA_INVALID: unreadable ({type(exc).__name__})") from exc
+    if not isinstance(meta, dict):
+        raise ObserverRefused("BUNDLE_METADATA_INVALID: malformed")
+    return meta
+
+
+def verify_runtime_parity(manifest, env) -> dict:
+    """The observer's in-process production values must equal the pinned replay
+    policy manifest (verify_runtime) and its sha must equal the deploy pin.
+    Cost parity is asserted explicitly (fees/slippage move AI costs, forward R
+    and cost stress). Any mismatch refuses startup: no window, no observation."""
+    from bot import nexus_oos_replay_manifest as rm
+    from bot.kucoin_execution_model import configured_taker_fee, slippage_rate_for_symbol
+    if manifest is None:
+        raise ObserverRefused("replay policy manifest not loaded")
+    if _pinned(env, "SHADOW_REPLAY_POLICY_SHA256") != manifest.sha256:
+        raise ObserverRefused("REPLAY_POLICY_SHA_MISMATCH: loaded manifest differs from the deploy pin")
+    try:
+        res = manifest.verify_runtime()
+    except rm.ManifestError as exc:
+        raise ObserverRefused(f"RUNTIME_MANIFEST_PARITY_FAILED: {exc}") from exc
+    if float(configured_taker_fee()) != float(manifest["TAKER_FEE"]):
+        raise ObserverRefused("RUNTIME_MANIFEST_PARITY_FAILED: TAKER_FEE")
+    base = float(slippage_rate_for_symbol("BTCUSDT"))
+    if base != float(manifest["BACKTEST_SLIPPAGE"]):
+        raise ObserverRefused("RUNTIME_MANIFEST_PARITY_FAILED: BACKTEST_SLIPPAGE")
+    for sym in ("XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT", "NEARUSDT",
+                "ATOMUSDT"):
+        if float(slippage_rate_for_symbol(sym)) != base * 2.0:
+            raise ObserverRefused(f"RUNTIME_MANIFEST_PARITY_FAILED: non-major slippage rule ({sym})")
+    return {"status": "PASS", "verified_keys": sorted(res["verified_keys"]),
+            "replay_policy_manifest_sha256": manifest.sha256}
+
+
 class ShadowObserver:
     def __init__(self, env=None, *, client=None, runtime=None, manifest=None, symbols=None, store=None,
                  log=None):
@@ -138,7 +203,9 @@ class ShadowObserver:
         self.closed = False
         self.mmr_proxy: dict = {}
         self.log = log
-        self.code_sha = self.env.get("RAILWAY_GIT_COMMIT_SHA") or self.env.get("CANDIDATE_SHA")
+        self.code_sha = None                                          # set only after verification (start)
+        self.runtime_parity = None
+        self.bundle_metadata = None
         self.health = {"observer_running": False, "last_successful_scan_ms": None,
                        "last_completed_boundary_ms": None, "db_durable": False, "bundle_verified": False,
                        "policy_verified": False, "schema_verified": False, "symbols_configured": list(self.symbols),
@@ -163,12 +230,16 @@ class ShadowObserver:
         return {"exchange_credentials_present": creds, "mutating_client_methods": mutating,
                 "execution_lease_acquired": False, "orders_sent": self.orders_sent}
 
-    def start(self, candidate_sha=None) -> None:
-        """Steps 4-8: PostgreSQL, isolation, bundle, policy/schema, contract."""
+    def start(self) -> None:
+        """Steps 4-10: PostgreSQL, isolation, bundle, policy/schema/metadata,
+        contract V3 (deploy-pinned), replay-manifest runtime parity
+        (deploy-pinned), exact code provenance. Any failure refuses startup."""
+        from bot.ai import bundle_export as bx
         from bot.ai import features as fx
         from bot.ai import forward_evidence as fe
         from bot.ai import hook as ai_hook
         from bot.ai.runtime import AIRuntime
+        code_sha = resolve_code_sha(self.env)
         if self.store is None or getattr(self.store, "backend", None) != "postgresql" \
                 and not getattr(self.store, "allow", False):
             raise ObserverRefused("evidence mode requires the durable PostgreSQL evidence store")
@@ -176,27 +247,58 @@ class ShadowObserver:
         if not (self.store.identity or {}).get("authority_id") or not (self.store.identity or {}).get("fingerprint"):
             raise ObserverRefused("evidence DB isolation not verified")
         self.steps.append("DB_ISOLATION_VERIFIED")
+        # 6. bundle (runtime loader) + SHADOW-safe lifecycle for this isolated process
         if self.runtime is None:
             self.runtime = AIRuntime(self.env, paper_trade=True, log=self.log, journal=_EvidenceOnlyJournal())
         if self.runtime.mode != "SHADOW":
             raise ObserverRefused("observer runtime must be SHADOW")
-        self.runtime.startup(candidate_sha=candidate_sha or self.code_sha, hook_profile=ai_hook.PROFILE_LIVE_PILOT)
+        self.runtime.startup(candidate_sha=code_sha, hook_profile=ai_hook.PROFILE_LIVE_PILOT)
         if self.runtime.halts.halted or self.runtime.bundle is None:
             raise ObserverRefused(f"bundle not verified: {sorted(self.runtime.halts.active)}")
-        self.steps.append("BUNDLE_LOADED")
         b = self.runtime.bundle
+        if b.manifest.get("lifecycle_state") not in bx.SHADOW_LIFECYCLES:
+            raise ObserverRefused(f"lifecycle {b.manifest.get('lifecycle_state')} refused by the isolated "
+                                  f"observer (only {list(bx.SHADOW_LIFECYCLES)})")
+        self.steps.append("BUNDLE_LOADED")
+        # 7. policy / schema / bundle_metadata.json
         pol_ok = b.policy.sha256 == b.manifest["decision_policy_sha256"]
         sch_ok = b.manifest["feature_schema_sha256"] == fx.schema_hash()
         if not (pol_ok and sch_ok):
             raise ObserverRefused("policy/schema not verified")
+        self.bundle_metadata = _load_metadata(self.runtime.env)
+        try:
+            bx.verify_metadata(self.bundle_metadata, b.manifest)
+        except bx.BundleExportError as exc:
+            raise ObserverRefused(f"BUNDLE_METADATA_INVALID: {exc}") from exc
         self.steps.append("POLICY_SCHEMA_VERIFIED")
+        # 8. contract V3, deploy-pinned
         c = fe.SHADOW_CONTRACT
         if c["name"] != "FORWARD_SHADOW_EVIDENCE_V3" or fe._sha(c) != fe.CONTRACT_SHA256["SHADOW"] or \
                 c["symbol_universe"] != self.symbols:
             raise ObserverRefused("forward contract V3 not verified")
+        if _pinned(self.env, "SHADOW_FORWARD_CONTRACT_SHA256") != fe.CONTRACT_SHA256["SHADOW"]:
+            raise ObserverRefused("FORWARD_CONTRACT_SHA_MISMATCH: deploy-pinned contract sha differs")
         self.steps.append("CONTRACT_V3_VERIFIED")
+        # 9. replay policy manifest: deploy-pinned sha + runtime parity (incl. explicit cost parity)
+        self.runtime_parity = verify_runtime_parity(self.manifest, self.env)
+        self.steps.append("REPLAY_MANIFEST_RUNTIME_PARITY")
+        # 10. exact code provenance: runtime code sha == bundle training sha == metadata candidate sha
+        if not (code_sha == b.manifest.get("training_code_sha") == self.bundle_metadata.get("candidate_code_sha")):
+            raise ObserverRefused("CODE_BUNDLE_SHA_MISMATCH: runtime code sha, bundle training_code_sha and "
+                                  "bundle_metadata candidate_code_sha must be identical")
+        if getattr(self.runtime.authority, "candidate_sha", None) != code_sha:
+            raise ObserverRefused("AI decision authority not bound to the verified code sha")
+        self.code_sha = code_sha
+        self.steps.append("CODE_PROVENANCE_VERIFIED")
         self.health.update(observer_running=True, db_durable=getattr(self.store, "backend", "") == "postgresql",
-                           bundle_verified=True, policy_verified=pol_ok, schema_verified=sch_ok)
+                           bundle_verified=True, policy_verified=pol_ok, schema_verified=sch_ok,
+                           bundle_metadata_verified=True, runtime_manifest_parity="PASS", code_sha=code_sha)
+
+    def observation_line(self, deployment_id=None) -> str:
+        """[AI_IDENTITY_OBSERVATION_V1] with the VERIFIED code sha (never null)."""
+        if self.code_sha is None:
+            raise ObserverRefused("code provenance not verified")
+        return self.runtime.observation_line(candidate_sha=self.code_sha, deployment_id=deployment_id)
 
     # ── window identity / lifecycle ─────────────────────────────────────
     def cost_identity(self) -> dict:
@@ -213,9 +315,17 @@ class ShadowObserver:
         from bot.ai import forward_collector as fc
         from bot.ai import forward_evidence as fe
         b = self.runtime.bundle
+        if self.code_sha is None or self.runtime_parity is None:
+            raise ObserverRefused("provenance not verified; no window identity")
         return {"contract_name": fe.SHADOW_CONTRACT["name"], "contract_sha256": fe.CONTRACT_SHA256["SHADOW"],
+                "forward_contract_sha256": fe.CONTRACT_SHA256["SHADOW"],
                 "code_sha": self.code_sha, "bundle_sha256": b.sha256, "policy_sha256": b.policy.sha256,
                 "feature_schema_sha256": b.manifest["feature_schema_sha256"],
+                "training_dataset_manifest_sha256": b.manifest.get("training_dataset_manifest_sha256"),
+                "bundle_lifecycle_state": b.manifest.get("lifecycle_state"),
+                "replay_policy_manifest_sha256": self.manifest.sha256,
+                "runtime_manifest_parity_status": self.runtime_parity["status"],
+                "replay_runtime_verified_keys": list(self.runtime_parity["verified_keys"]),
                 "hook_population": b.manifest.get("hook_population"), "hook_profile": b.manifest.get("hook_profile"),
                 "symbol_universe": list(self.symbols), "symbol_universe_sha256": fe.universe_sha256(self.symbols),
                 "evidence_db_authority_id": self.store.identity.get("authority_id"),
@@ -223,11 +333,11 @@ class ShadowObserver:
                 "cost_identity": self.cost_identity(), "collector_version": fc.COLLECTOR_VERSION}
 
     async def open_window(self, now_ms: int) -> dict:
-        """Step 9: load the ACTIVE window (exact identity match) or create the
+        """Step 11: load the ACTIVE window (exact identity match) or create the
         first/explicitly requested one; committed before any observation."""
         from bot.ai import evidence_store as es
         from bot.ai import forward_evidence as fe
-        if "CONTRACT_V3_VERIFIED" not in self.steps:
+        if "CODE_PROVENANCE_VERIFIED" not in self.steps:
             raise ObserverRefused("startup sequence incomplete; window refused")
         ident = self.window_identity()
         act = await self.store.active_window()
@@ -493,20 +603,20 @@ async def main() -> None:           # pragma: no cover - service entry point (no
     install_runtime()
     obs = ShadowObserver(env, manifest=manifest, log=log)   # 1-3. no credentials, read-only client, universe
     obs.store = store = await EvidenceStore.connect(env)    # 4-5. PostgreSQL + isolation; refuses otherwise
-    obs.start()                                       # 6-8. bundle, policy/schema, contract V3
-    await obs.open_window(int(time.time() * 1000))    # 9. window created/loaded and committed
+    obs.start()                                       # 6-10. bundle, policy/schema/metadata, contract,
+                                                      #       manifest runtime parity, code provenance
+    await obs.open_window(int(time.time() * 1000))    # 11. window created/loaded and committed
     log.warning("[AI_SHADOW_WINDOW] %s", json.dumps({k: obs.window[k] for k in (
         "window_id", "window_start_ms", "window_end_ms", "status", "last_completed_boundary_ms")}, sort_keys=True))
     log.warning("[AI_SHADOW_EVIDENCE_DB] %s", json.dumps(store.identity, sort_keys=True))
-    async with obs.client:                            # 10. only now observe the market
+    async with obs.client:                            # 12. only now observe the market
         for c in await obs.client._get("/api/v1/contracts/active") or []:
             if isinstance(c, dict) and str(c.get("symbol", "")).endswith("USDTM"):
                 base = {"XBT": "BTC"}.get(str(c.get("baseCurrency", "")), str(c.get("baseCurrency", "")))
                 info = xp.instrument_from_public_contract(c)
                 if "contractMaintainMarginReference" in info:
                     obs.mmr_proxy[f"{base}USDT"] = info["contractMaintainMarginReference"]
-        log.warning(obs.runtime.observation_line(candidate_sha=obs.code_sha,
-                                                 deployment_id=env.get("RAILWAY_DEPLOYMENT_ID")))
+        log.warning(obs.observation_line(deployment_id=env.get("RAILWAY_DEPLOYMENT_ID")))
         while not obs.closed:
             now = time.time()
             await asyncio.sleep(900 - (now % 900) + 20)     # 20 s after each 15m boundary

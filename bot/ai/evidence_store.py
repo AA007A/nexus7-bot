@@ -153,7 +153,8 @@ def window_id_for(identity: dict, window_start_ms: int, window_end_ms: int) -> s
 # Candidate fields that must equal the window identity (no mixing across windows).
 CANDIDATE_IDENTITY_FIELDS = {"code_sha": "code_sha", "bundle_sha256": "bundle_sha256",
                              "policy_sha256": "policy_sha256", "feature_schema_sha256": "feature_schema_sha256",
-                             "hook_population": "hook_population", "hook_profile": "hook_profile"}
+                             "hook_population": "hook_population", "hook_profile": "hook_profile",
+                             "decision_candidate_sha": "code_sha"}
 
 
 class EvidenceStore:

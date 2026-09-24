@@ -60,7 +60,8 @@ POLICY = dec.DecisionPolicy(min_p_profitable=0.55, min_expected_net_r=0.05, allo
                             supported_regimes=dec.TRADABLE_REGIMES)
 
 
-def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLENGER", hook_profile=None):
+def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLENGER", hook_profile=None,
+                    training_code_sha="t" * 40):
     d = len(fx.MODEL_FEATURES)
     clf = mdl.LogisticL2.from_params({"l2": 1.0, "iters": 1, "std": {"mean": [0.0] * d, "scale": [1.0] * d},
                                       "w": [0.0] * d, "b": math.log(p / (1 - p))})
@@ -72,7 +73,7 @@ def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLE
     ca = mdl.artifact(clf, role="A", calibration={"kind": "IDENTITY"}, **common)
     ra = mdl.artifact(reg, role="B", **common)
     man = dec.bundle_manifest(classifier_artifact=ca, regressor_artifact=ra, calibration={"kind": "IDENTITY"},
-                              policy=policy, training_code_sha="t" * 40, dataset_manifest_sha256="d" * 64,
+                              policy=policy, training_code_sha=training_code_sha, dataset_manifest_sha256="d" * 64,
                               training_period={}, selection_evidence={}, created_at="2026-09-24T00:00:00Z",
                               lifecycle_state=lifecycle, hook_profile=hook_profile)
     b = dec.ModelBundle.load(json.dumps(man), json.dumps(ca), json.dumps(ra),

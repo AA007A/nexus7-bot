@@ -386,6 +386,19 @@ Evidence goes only to a dedicated PostgreSQL database, never SQLite and never th
 - **Verification:** it re-verifies every digest, the window identity, boundary uniqueness and canonicality, and heartbeat/candidate binding. `journal_verified` is computed.
 - **Export:** `python -m bot.ai.forward_artifact --from-evidence-db --output PATH` connects read-only. The output is sanitized (no URL or credential) and byte-reproducible.
 
+### 13.5 Runtime provenance lock (Phase 7E final)
+- **Replay-manifest parity:** the observer refuses to start unless `manifest.verify_runtime()` passes. The loaded manifest SHA must equal the deploy-pinned `SHADOW_REPLAY_POLICY_SHA256`, and fee / slippage parity is asserted explicitly. This runs before any window is created.
+- **Code SHA:**
+  - It must be exactly 40 lowercase hex characters.
+  - `RAILWAY_GIT_COMMIT_SHA` is the authority on Railway; `CANDIDATE_SHA` never overrides it, and a disagreement refuses startup.
+  - It must equal the bundle `training_code_sha` and `bundle_metadata.candidate_code_sha` (`CODE_BUNDLE_SHA_MISMATCH`).
+  - The AI decision authority, every candidate's `decision_candidate_sha` and the identity observation line carry it.
+- **Bundle metadata:** `bundle_metadata.json` is loaded and must agree exactly with the loaded bundle. Only the SHADOW-safe lifecycles (`SHADOW_OBSERVER`, `SHADOW_CHALLENGER`) are accepted by the isolated observer. The generic lifecycle table is unchanged.
+- **Contract pin:** the forward contract SHA must equal the deploy-pinned `SHADOW_FORWARD_CONTRACT_SHA256`.
+- **Window identity** adds `forward_contract_sha256`, `replay_policy_manifest_sha256`, `runtime_manifest_parity_status`, `replay_runtime_verified_keys`, `training_dataset_manifest_sha256` and `bundle_lifecycle_state`.
+- **Zero-order:** it is verified only by positive observation. With no SCAN heartbeat the status is `NOT_YET_OBSERVED`. A completed boundary without a safe SCAN heartbeat is `INCOMPLETE`, a coverage failure that disqualifies policy evidence. Any unsafe SCAN is `VIOLATION` (BLOCK).
+- **Deploy manifest** adds `replay_policy_manifest_sha256`, `training_code_sha`, `dataset_manifest_sha256`, the pinned env values and a `provenance` block with `mutually_consistent`. The exporter refuses a bundle whose `training_code_sha` differs from the candidate SHA.
+
 ## 14. What is not done
 - **Deployment:** nothing is deployed, and no Railway variable has changed. `AI_EXECUTION_MODE` stays unset (OFF) in production.
 - **LIVE:** no LIVE_CHAMPION exists, and no trusted Stage-C or AI-identity provider is implemented in-candidate.

@@ -513,9 +513,11 @@ class ShadowObserverIsolation(unittest.TestCase):
         from bot import nexus_oos_replay_manifest as rm
         from bot.ai import evidence_store as es
         from bot.ai import forward_evidence as fe
-        r, j = runtime_with_bundle("SHADOW")
+        from tests.test_ai_phase7b import observer_pins, observer_runtime
+        r = observer_runtime()
         store = es.MemoryEvidenceStore(allow_non_durable_for_tests=True)
-        obs = so.ShadowObserver(self.ENV, client=SimpleNamespace(), runtime=r, manifest=rm.load(),
+        obs = so.ShadowObserver({**self.ENV, "CANDIDATE_SHA": "c" * 40, **observer_pins()}, client=SimpleNamespace(),
+                                runtime=r, manifest=rm.load(),
                                 symbols=list(fe.SHADOW_UNIVERSE), store=store)
         obs.start()
         run(obs.open_window(DECISION_TS - 1))                  # window committed before any candidate
