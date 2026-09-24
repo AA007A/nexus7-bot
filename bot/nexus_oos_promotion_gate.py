@@ -63,12 +63,20 @@ class GatePolicy:
     max_symbol_share_of_positive_r: float = 0.50
     max_period_share_of_positive_r: float = 0.50
     min_temporal_folds_positive: int = 3
-    min_independent_blocks: int = 30
+    min_resampling_blocks: int = 30
     min_walk_forward_folds_positive: int = 3
-    require_live_policy_attestation: bool = True
+    # RESEARCH gate: a pending LIVE attestation is allowed (never means
+    # production-ready). LIVE gate: ATTESTED_MATCH is mandatory.
+    require_live_policy_attestation: bool = False
     min_history_days: float = 150.0
     require_context_parity: bool = True
     cost_stress_scenarios: tuple[str, ...] = ("fees_plus_50pct", "slippage_x2")
+
+
+RESEARCH_GATE = "RESEARCH_PROMOTION_GATE"
+LIVE_GATE = "LIVE_RELEASE_GATE"
+LIVE_ATTESTATION_PENDING = "LIVE_ATTESTATION_PENDING"
+PENDING_STATES = frozenset({LIVE_ATTESTATION_PENDING})
 
 
 @dataclass
@@ -76,13 +84,24 @@ class GateResult:
     promote: bool
     blockers: list[str] = field(default_factory=list)
     exit_code: int = EXIT_BLOCKED
+    gate: str = RESEARCH_GATE
+    live_policy_attestation: str | None = None
 
     def to_dict(self) -> dict:
+        live = self.gate == LIVE_GATE
         return {
-            "gate": "PRODUCTION_PROMOTION_GATE",
-            "verdict": "PROMOTE" if self.promote else "BLOCK",
+            "gate": self.gate,
+            "verdict": ("PASS" if self.promote else "BLOCK"),
             "blockers": sorted(set(self.blockers)),
             "exit_code": self.exit_code,
+            "live_policy_attestation": self.live_policy_attestation,
+            # Only the LIVE gate can ever state production readiness. Even then
+            # enabling real orders remains a manual, human-authorized action.
+            "production_ready": bool(live and self.promote),
+            "authorizes_real_trading": False,
+            "meaning": ("all automated LIVE preconditions met; real orders still require the "
+                        "explicit human enablement step" if live else
+                        "research/code-merge evidence only; NEVER production readiness"),
         }
 
 
@@ -124,13 +143,13 @@ def block_only_authority(section: dict, *, required_ms: int | None,
     ivs = (section or {}).get("block_intervals")
     if not isinstance(ivs, list) or not ivs:
         return None, None, "BLOCK_INTERVALS_MISSING"
-    valid, long_enough = [], []
+    valid, long_enough, usable_ivs = [], [], []
     for iv in ivs:
         if not isinstance(iv, dict):
             continue
         ms = _num(iv.get("block_ms"))
         ci = iv.get("ci") or [None, None]
-        n_blk = _num(iv.get("independent_blocks"))
+        n_blk = _num(iv.get("resampling_blocks"))
         if ms is None or ms < required_ms:
             continue
         long_enough.append(iv)
@@ -138,11 +157,24 @@ def block_only_authority(section: dict, *, required_ms: int | None,
         if n_blk is None or n_blk < min_blocks or lo is None or hi is None:
             continue
         valid.append((lo, hi))
+        usable_ivs.append((ms, iv))
+    if usable_ivs:
+        # Predeclared residual-dependence rule, recomputed from the reported ACF.
+        _, longest = max(usable_ivs, key=lambda x: x[0])
+        rd = longest.get("residual_dependence")
+        if not isinstance(rd, dict):
+            return None, None, "RESIDUAL_DEPENDENCE_NOT_REPORTED"
+        band = _num(rd.get("band"))
+        acfs = [_num(v) for v in (rd.get("acf") or {}).values()]
+        if band is None or not acfs or any(a is None for a in acfs):
+            return None, None, "RESIDUAL_DEPENDENCE_NOT_REPORTED"
+        if any(abs(a) > band for a in acfs):
+            return None, None, "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
     if valid:
         return min(lo for lo, _ in valid), max(hi for _, hi in valid), "VALID"
     if not long_enough:
         return None, None, "AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON"
-    return None, None, "INSUFFICIENT_INDEPENDENT_BLOCKS"
+    return None, None, "INSUFFICIENT_RESAMPLING_BLOCKS"
 
 
 def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks) -> float | None:
@@ -155,6 +187,33 @@ def _authority(section: dict, name: str, b: list, *, required_ms, min_blocks) ->
     if lo is None and reported is not None:
         b.append(f"{name}_AUTHORITY_CI_INCONSISTENT")
     return lo
+
+
+def folds_independent(section: dict, *, required_ms: int | None) -> tuple[bool, str | None]:
+    """Recompute fold independence from the reported dates (never trust flags).
+
+    Each fold's decision window must be followed by an outcome-completion
+    window (>= the required outcome horizon) plus an embargo (>= that horizon),
+    and the market time it used must end before the next fold's first decision.
+    """
+    folds = (section or {}).get("folds")
+    if not isinstance(folds, list) or not folds:
+        return False, "FOLDS_MISSING"
+    emb, req_rep = _num(section.get("fold_embargo_ms")), _num(section.get("fold_required_horizon_ms"))
+    if emb is None or req_rep is None or emb < req_rep:
+        return False, "FOLD_EMBARGO_BELOW_REQUIRED_HORIZON"
+    if required_ms is not None and (emb < required_ms or req_rep < required_ms):
+        return False, "FOLD_EMBARGO_BELOW_GATE_HORIZON"
+    gap = emb + req_rep
+    for a, b_ in zip(folds, folds[1:]):
+        used = _num(a.get("max_market_ts_used"))
+        nxt = _num(b_.get("decision_start_ts"))
+        end = _num(a.get("decision_end_ts"))
+        if used is None or nxt is None or end is None or used >= nxt or nxt - end < gap:
+            return False, "FOLD_MARKET_TIME_OVERLAP"
+    if section.get("folds_overlap_free") is not True:
+        return False, "FOLDS_REPORTED_NOT_OVERLAP_FREE"
+    return True, None
 
 
 def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
@@ -212,7 +271,11 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     manifest = artifact.get("replay_policy_manifest")
     if not isinstance(manifest, dict) or not manifest.get("policy_sha256"):
         b.append("REPLAY_POLICY_MANIFEST_MISSING")
-    if policy.require_live_policy_attestation and artifact.get("policy_parity") != "ATTESTED_MATCH":
+    parity_state = artifact.get("policy_parity")
+    if parity_state not in ("ATTESTED_MATCH", *PENDING_STATES):
+        # A mismatched or invalid attestation blocks even research promotion.
+        b.append("LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID")
+    if policy.require_live_policy_attestation and parity_state != "ATTESTED_MATCH":
         b.append("LIVE_POLICY_NOT_ATTESTED")
 
     symbols = artifact.get("symbols")
@@ -226,11 +289,6 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         if not days or any(d is None or d < policy.min_history_days for d in days):
             b.append("HISTORY_HORIZON_TOO_SHORT")
 
-    folds = cand.get("temporal_folds") or {}
-    folds_pos = _num(folds.get("folds_positive_approved_expectancy"))
-    if folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
-        b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
-
     # ── CANDIDATE_RESEARCH (signal edge, horizon-aware block authority only) ──
     infer = cand.get("inference") or {}
     horizon = infer.get("outcome_horizon_resolved_executable") or {}
@@ -238,12 +296,22 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     reported_req = _num(infer.get("required_block_ms"))
     if req is not None and (reported_req is None or reported_req < req):
         b.append("AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON")
+
+    folds = cand.get("temporal_folds") or {}
+    if folds.get("status") not in (None, "OK"):
+        b.append("INSUFFICIENT_INDEPENDENT_TEMPORAL_FOLDS")
+    ok, why = folds_independent(folds, required_ms=req)
+    if not ok:
+        b.append("TEMPORAL_FOLDS_NOT_INDEPENDENT")
+    folds_pos = _num(folds.get("folds_positive_approved_expectancy"))
+    if not ok or folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
+        b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
     appr_lo = _authority(infer.get("approved_expectancy") or {}, "APPROVED_EXPECTANCY", b,
-                         required_ms=req, min_blocks=policy.min_independent_blocks)
+                         required_ms=req, min_blocks=policy.min_resampling_blocks)
     if appr_lo is None or appr_lo <= 0:
         b.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
     up_lo = _authority(infer.get("uplift_vs_baseline") or {}, "UPLIFT", b,
-                       required_ms=req, min_blocks=policy.min_independent_blocks)
+                       required_ms=req, min_blocks=policy.min_resampling_blocks)
     if up_lo is None or up_lo <= 0:
         b.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
     cens = cand.get("censoring")
@@ -252,9 +320,9 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     elif cens.get("censoring_material") is not False:
         b.append("CENSORING_MATERIAL")
     adequacy = cand.get("sample_adequacy") or {}
-    n_ind = _num(adequacy.get("independent_blocks_approved"))
-    if n_ind is None or n_ind < policy.min_independent_blocks:
-        b.append("INSUFFICIENT_INDEPENDENT_BLOCKS")
+    n_ind = _num(adequacy.get("resampling_blocks_approved"))
+    if n_ind is None or n_ind < policy.min_resampling_blocks:
+        b.append("INSUFFICIENT_RESAMPLING_BLOCKS")
     eff = ((cand.get("effective_sample") or {}).get("approved")) or {}
     blocks = _num(eff.get("unique_blocks"))
     if blocks is None or blocks < policy.min_approved_unique_blocks:
@@ -308,9 +376,16 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         # CI are approximate and never read.
         wf = port.get("walk_forward") or {}
         folds_pos, folds_tot = _num(wf.get("folds_positive")), _num(wf.get("folds_total"))
+        if wf.get("status") not in (None, "OK"):
+            b.append("INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS")
+        wf_ok, _ = folds_independent(wf, required_ms=req)
+        if not wf_ok:
+            b.append("PORTFOLIO_FOLDS_NOT_INDEPENDENT")
+        if wf.get("fold_account_state") != "RESET_FOR_REGIME_ROBUSTNESS":
+            b.append("PORTFOLIO_FOLD_ACCOUNT_STATE_UNDECLARED")
         if folds_pos is None or folds_tot is None or folds_tot < 1:
             b.append("PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE")
-        elif folds_pos < policy.min_walk_forward_folds_positive:
+        elif not wf_ok or folds_pos < policy.min_walk_forward_folds_positive:
             b.append("PORTFOLIO_WALK_FORWARD_NOT_POSITIVE")
         trades = _num(port.get("total_trades"))
         if trades is None or trades < policy.min_portfolio_trades:
@@ -326,30 +401,76 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
             b.append(f"METHODOLOGY_{flag.upper()}_NOT_CONFIRMED")
 
     b = sorted(set(b))
-    return GateResult(not b, b, EXIT_PROMOTE if not b else EXIT_BLOCKED)
+    pending = (LIVE_ATTESTATION_PENDING if parity_state in PENDING_STATES else parity_state)
+    return GateResult(not b, b, EXIT_PROMOTE if not b else EXIT_BLOCKED,
+                      gate=RESEARCH_GATE, live_policy_attestation=pending)
+
+
+def evaluate_live(artifact: dict, *, candidate_sha: str | None, protection_readiness: str | None,
+                  human_authorization: str | None, policy: GatePolicy = GatePolicy()) -> GateResult:
+    """LIVE_RELEASE_GATE (stage C). Everything the research gate requires, plus
+    the exact candidate SHA, an ATTESTED_MATCH live policy, protection-readiness
+    evidence and an explicit human authorization. Never deploys anything."""
+    from dataclasses import replace as _replace
+    res = evaluate(artifact, _replace(policy, require_live_policy_attestation=True,
+                                      require_context_parity=True))
+    b = list(res.blockers)
+    art_sha = (artifact or {}).get("candidate_sha") if isinstance(artifact, dict) else None
+    if not candidate_sha or not art_sha or str(art_sha) != str(candidate_sha):
+        b.append("CANDIDATE_SHA_NOT_EXACT")
+    if str(protection_readiness or "").strip().upper() != "PASS":
+        b.append("PROTECTION_READINESS_NOT_PROVEN")
+    if not str(human_authorization or "").strip():
+        b.append("HUMAN_AUTHORIZATION_MISSING")
+    b = sorted(set(b))
+    code = res.exit_code if res.exit_code in (EXIT_MISSING, EXIT_CORRUPT) else (
+        EXIT_PROMOTE if not b else EXIT_BLOCKED)
+    return GateResult(not b, b, code, gate=LIVE_GATE,
+                      live_policy_attestation=(artifact or {}).get("policy_parity")
+                      if isinstance(artifact, dict) else None)
+
+
+def _load(path: str | Path):
+    p = Path(path)
+    if not p.is_file():
+        return None, GateResult(False, ["ARTIFACT_MISSING"], EXIT_MISSING)
+    try:
+        return json.loads(p.read_text(encoding="utf-8")), None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, GateResult(False, ["ARTIFACT_CORRUPT"], EXIT_CORRUPT)
 
 
 def evaluate_path(path: str | Path, policy: GatePolicy = GatePolicy()) -> GateResult:
-    p = Path(path)
-    if not p.is_file():
-        return GateResult(False, ["ARTIFACT_MISSING"], EXIT_MISSING)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return GateResult(False, ["ARTIFACT_CORRUPT"], EXIT_CORRUPT)
-    return evaluate(data, policy)
+    data, err = _load(path)
+    return err if err is not None else evaluate(data, policy)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("artifact")
+    parser.add_argument("--gate", choices=("research", "live"), default="research",
+                        help="research = RESEARCH_PROMOTION_GATE (code-merge evidence); "
+                             "live = LIVE_RELEASE_GATE (stage C, before real orders).")
     parser.add_argument(
         "--allow-incomplete-context-parity", action="store_true",
-        help="Research use only. Never passed by the PR promotion workflow.",
+        help="Research gate only. Never passed by the PR workflow; ignored by the live gate.",
     )
+    parser.add_argument("--candidate-sha", default=None)
+    parser.add_argument("--protection-readiness", default=None,
+                        help="PASS only when protection readiness evidence exists (live gate).")
+    parser.add_argument("--human-authorization", default=None,
+                        help="Named human authorization reference (live gate).")
     args = parser.parse_args(argv)
-    policy = GatePolicy(require_context_parity=not args.allow_incomplete_context_parity)
-    result = evaluate_path(args.artifact, policy)
+    if args.gate == "live":
+        data, err = _load(args.artifact)
+        result = err if err is not None else evaluate_live(
+            data, candidate_sha=args.candidate_sha, protection_readiness=args.protection_readiness,
+            human_authorization=args.human_authorization)
+        if err is not None:
+            result.gate = LIVE_GATE
+    else:
+        policy = GatePolicy(require_context_parity=not args.allow_incomplete_context_parity)
+        result = evaluate_path(args.artifact, policy)
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return result.exit_code
 

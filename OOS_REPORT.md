@@ -406,19 +406,55 @@ The `0c3ebc1` replay is **DIAGNOSTIC_ONLY** because of two defects fixed here.
    - The latest eligible decision is moved back by the look-forward, so every decision has the same 30 days of future data.
    - Unresolved positions after that stay right-censored.
 3. **Block authority respects the outcome horizon.** The median, p95, p99 and maximum resolved horizons are reported. The required block length is the maximum resolved horizon, rounded up to whole UTC days.
-   - A block interval has authority only if its length is at least that required length **and** it spans at least 30 independent blocks (predeclared; percentile cluster bootstraps under-cover with fewer clusters).
+   - A block interval has authority only if its length is at least that required length **and** it spans at least 30 **resampling blocks** (predeclared; percentile cluster bootstraps under-cover with fewer clusters). Non-overlapping blocks are resampling units, not proven-independent samples; see the residual-dependence rule in §C.9.
    - Authority is the most conservative interval across all qualifying predeclared lengths (1, 2, 3, 7, 14 and 30 days, plus the required length).
-   - If no length qualifies, authority is null with `AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON` or `INSUFFICIENT_INDEPENDENT_BLOCKS`.
+   - If no length qualifies, authority is null with `AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON` or `INSUFFICIENT_RESAMPLING_BLOCKS`.
    - IID never substitutes for an invalid block interval. The gate re-derives the required length itself.
-4. **Sample adequacy is reported:** decision history days, authority block days, independent blocks and effective n at that block length. Fewer than 30 independent blocks ⇒ `INSUFFICIENT_EVIDENCE`, never a shorter block.
+4. **Sample adequacy is reported:** decision history days, authority block days, resampling blocks and effective n at that block length. Fewer than 30 resampling blocks ⇒ `INSUFFICIENT_EVIDENCE`, never a shorter block.
 5. **Purge and embargo** use the actual resolved `outcome_end_ts`. The embargo is at least the longest resolved horizon; the 10 h assumption from the legacy model is gone. Censored rows are open-ended and are purged from TRAIN and VALIDATION.
 6. **Portfolio end state.** Unresolved positions stay open at the end of the replay and are marked, never force-realized. The report separates:
    - `realized_pnl` and `realized_return`;
    - `unrealized_pnl_at_end` and `marked_final_equity`;
    - `open_positions_at_end`, plus worst and best bounds.
    `PORTFOLIO_CENSORING_MATERIAL` is set when a censored position was still open before the last candidate (the later path is unknowable) or when the bounds straddle the starting equity.
-7. **The path bootstrap is `APPROXIMATE_NON_AUTHORITATIVE`.** It splices a position's real future into a neighbouring synthetic block drawn from an unrelated period. Portfolio robustness authority is now walk-forward: four independent calendar folds of decisions on the real market timeline. A fold counts only if its marked and realized returns are both positive and its censoring is not material. The gate requires 3 of 4.
-8. **Live policy attestation.** At startup the bot logs one line, `[NON_SECRET_POLICY_ATTESTATION] sha256=… KEY=VALUE …`, containing only a whitelist of 30 numeric policy keys. The replay compares that sha256 with its manifest's. Without an attested match, `policy_parity = PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED` and the gate blocks with `LIVE_POLICY_NOT_ATTESTED`. Nothing is read from Railway, and this code is not deployed in this phase.
+7. **The path bootstrap is `APPROXIMATE_NON_AUTHORITATIVE`.** It splices a position's real future into a neighbouring synthetic block drawn from an unrelated period. Portfolio robustness authority is now walk-forward: four purged, embargoed calendar folds on the real market timeline (§C.9). A fold counts only if its marked and realized returns are both positive and its censoring is not material. The gate requires 3 of 4.
+8. **Live policy attestation.** At startup the bot logs one line, `[NON_SECRET_POLICY_ATTESTATION] sha256=… KEY=VALUE …`, containing only a whitelist of 30 numeric policy keys. The replay compares that sha256 with its manifest's. Without a LIVE line, `policy_parity = LIVE_ATTESTATION_PENDING`: the research gate may pass, the live release gate blocks with `LIVE_POLICY_NOT_ATTESTED` (§C.9). A mismatched or invalid attestation blocks both gates. Nothing is read from Railway, and this code is not deployed in this phase.
+
+### C.9 Fold independence, residual dependence and staged gates (after `07a5a6a`)
+In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward folds were contiguous slices, so a trade decided late in fold K could resolve inside fold K+1. Their fold conclusions are **NON_AUTHORITATIVE**. Fixed here:
+
+1. **Purged, embargoed calendar folds** (`inf.purged_calendar_folds`, both layers). Each fold is laid out as:
+   - `DECISION_WINDOW [s, e)`;
+   - `OUTCOME_COMPLETION_WINDOW [e, e + H)`, where H is the authoritative resolved horizon (ceil whole days);
+   - `EMBARGO [e + H, e + H + E)`, with E ≥ H.
+
+   The next fold's decisions start at `e + H + E`. Four folds, each with at least 14 decision days. Otherwise the result is `INSUFFICIENT_INDEPENDENT_FOLDS` for candidates or `INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS` for the portfolio, with zero folds. The embargo is never reduced to fit folds: a smaller embargo raises. Longer trades raise H automatically.
+2. **Candidate folds** (`temporal_folds`). Only RESOLVED outcomes that end before the fold's outcome window closes are kept; decisions resolving later are counted as `purged_boundary_decisions`, and censored ones as `censored_excluded`. Each fold reports:
+   - decision start and end;
+   - eligible decisions and resolved approved trades;
+   - approved expectancy, baseline expectancy and uplift;
+   - symbols represented;
+   - `max_market_ts_used`.
+
+   The replay asserts `max(outcome_end_ts in K) < min(decision_ts in K+1)`.
+3. **Portfolio folds** (`walk_forward_folds`). Each fold's trades are truncated at its outcome-window end. A still-open position becomes `RIGHT_CENSORED_FOLD_END`, is marked, and is never carried into the next fold. `fold_account_state = RESET_FOR_REGIME_ROBUSTNESS`: every fold restarts from the starting equity. This is a regime-robustness test and is distinct from the continuous portfolio replay (`portfolio_replay` top level), which is never reset.
+4. **Artifact metadata and gate recomputation.** Both fold sections carry `folds_overlap_free`, `fold_embargo_ms`, `fold_required_horizon_ms`, `folds_authoritative` and `folds_total`. The gate recomputes independence from the fold dates:
+   - embargo ≥ reported horizon ≥ the gate's own re-derived horizon;
+   - gap between folds ≥ horizon + embargo;
+   - `max_market_ts_used` < next `decision_start_ts`.
+
+   It blocks with `TEMPORAL_FOLDS_NOT_INDEPENDENT` or `PORTFOLIO_FOLDS_NOT_INDEPENDENT`. It never trusts the flag alone.
+5. **Terminology.** `independent_blocks` is renamed `resampling_blocks`. Non-overlapping blocks are not claimed to be independent.
+6. **Residual-dependence rule (predeclared).** For every block length at or above the required horizon, the artifact reports the lag-1/2/3 ACF of consecutive block means with a 2/√n band. If any |ACF| exceeds the band at the **longest otherwise-usable** length, no length carries authority (`RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK` ⇒ INSUFFICIENT_EVIDENCE). A shorter block is never substituted. The gate recomputes this from the reported ACF.
+7. **Staged gates.** `python -m bot.nexus_oos_promotion_gate --gate research|live`.
+
+   | Stage | Gate | Attestation | Meaning |
+   |---|---|---|---|
+   | A: research / code merge | `RESEARCH_PROMOTION_GATE` | `LIVE_ATTESTATION_PENDING` or `ATTESTED_MATCH` | Research evidence only. `production_ready` is always false. |
+   | B: pre-live / shadow attestation | none (operator captures the LIVE line) | Produces the `[NON_SECRET_POLICY_ATTESTATION]` line | Not created in this phase. |
+   | C: live release | `LIVE_RELEASE_GATE` | `ATTESTED_MATCH` required | Everything in A, plus the exact `candidate_sha`, protection readiness `PASS`, explicit human authorization, and full context parity. Only this gate can report `production_ready = true`. Even then `authorizes_real_trading` is false: enabling orders stays a manual step. |
+
+   Attestation is not removed from production safety. It moves to the stage where it can be produced. CI runs the live gate as informational only; it cannot pass there because no protection readiness or human authorization is supplied.
 
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.

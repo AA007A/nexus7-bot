@@ -9,17 +9,32 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bot import nexus_oos_inference as inf
 from bot import nexus_oos_promotion_gate as gate
 
 
 DAY = 86_400_000
+D0 = 1_735_689_600_000   # 2025-01-01T00:00Z
+CLEAN_ACF = {"n_blocks": 60, "band": 0.26, "acf": {"1": 0.05, "2": -0.04, "3": 0.02},
+             "significant": False}
+
+
+def _folds(*, positive_key, required_ms=DAY, span_days=180):
+    """Purged/embargoed calendar folds exactly as the replay lays them out."""
+    lay = inf.purged_calendar_folds(D0, D0 + span_days * DAY, required_horizon_ms=required_ms)
+    folds = [{**w, "max_market_ts_used": w["decision_end_ts"] + required_ms // 2}
+             for w in lay["windows"]]
+    return {"status": lay["status"], "folds": folds, "folds_total": len(folds),
+            "folds_authoritative": len(folds), "folds_overlap_free": True,
+            "fold_embargo_ms": lay["fold_embargo_ms"],
+            "fold_required_horizon_ms": lay["fold_required_horizon_ms"], positive_key: len(folds)}
 
 
 def _dep(lo24, hi24, lo48, hi48, lo72, hi72, *, iid=(0.01, 0.5), blocks=(90, 60, 45)):
     """Block intervals for 1/2/3-day blocks; horizon in the fixture is < 1 day,
     so all three are long enough; ``blocks`` = independent blocks per length."""
-    ivs = [{"block_ms": d * DAY, "block_days": d, "ci": [lo, hi], "independent_blocks": n,
-            "authoritative": n >= 30}
+    ivs = [{"block_ms": d * DAY, "block_days": d, "ci": [lo, hi], "resampling_blocks": n,
+            "authoritative": n >= 30, "residual_dependence": copy.deepcopy(CLEAN_ACF)}
            for d, (lo, hi), n in zip((1, 2, 3), ((lo24, hi24), (lo48, hi48), (lo72, hi72)), blocks)]
     valid = [iv["ci"] for iv in ivs if iv["authoritative"]]
     lo = min(c[0] for c in valid) if valid else None
@@ -34,6 +49,7 @@ def _passing_artifact():
         "authority_model": "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2",
         "status": "AI_EDGE_PROVEN",
         "policy_parity": "ATTESTED_MATCH",
+        "candidate_sha": "c" * 40,
         "blockers": [],
         "historical_context_parity_complete": True,
         "replay_parity": {"exit_parity_complete": True, "pretrade_parity_complete": True,
@@ -50,7 +66,7 @@ def _passing_artifact():
         "candidate_research": {
             "performance": {"baseline": {"trades": 2000},
                             "approved": {"trades": 400, "net_expectancy_r": 0.20}},
-            "temporal_folds": {"folds_positive_approved_expectancy": 4},
+            "temporal_folds": _folds(positive_key="folds_positive_approved_expectancy"),
             "inference": {
                 "approved_expectancy": _dep(0.05, 0.3, 0.04, 0.32, 0.045, 0.31),
                 "uplift_vs_baseline": _dep(0.03, 0.2, 0.035, 0.21, 0.04, 0.19),
@@ -58,7 +74,7 @@ def _passing_artifact():
                 "required_block_ms": DAY,
             },
             "censoring": {"censoring_material": False, "censored_count": 3, "censored_rate": 0.01},
-            "sample_adequacy": {"independent_blocks_approved": 90, "adequate": True},
+            "sample_adequacy": {"resampling_blocks_approved": 90, "adequate": True},
             "effective_sample": {"approved": {"unique_blocks": 80, "effective_n": 250.0}},
             "concentration": {
                 "approved_by_symbol": {"groups_positive": 5, "top_share_of_positive_r": 0.3},
@@ -75,7 +91,8 @@ def _passing_artifact():
             "portfolio_max_drawdown": 0.08, "research_max_drawdown_limit": 0.25,
             "realized_return": 0.10,
             "end_state": {"portfolio_censoring_material": False, "open_positions_at_end": 0},
-            "walk_forward": {"folds_positive": 4, "folds_total": 4},
+            "walk_forward": {**_folds(positive_key="folds_positive"),
+                             "fold_account_state": "RESET_FOR_REGIME_ROBUSTNESS"},
             "path_bootstrap": {"status": "APPROXIMATE_NON_AUTHORITATIVE", "authority": "NONE",
                                "net_return_ci": [0.02, 0.3]},
             "approximate_trade_level_ci": {"authority_ci_low": -0.5, "authority": "NONE"},
@@ -216,8 +233,8 @@ class PromotionGateTests(unittest.TestCase):
             "PORTFOLIO_CENSORING_MATERIAL": lambda a: a["portfolio_replay"]["end_state"].update(portfolio_censoring_material=True),
             "CENSORING_MATERIAL": lambda a: cr(a)["censoring"].update(censoring_material=True),
             "CENSORING_REPORT_MISSING": lambda a: cr(a).pop("censoring"),
-            "INSUFFICIENT_INDEPENDENT_BLOCKS": lambda a: cr(a)["sample_adequacy"].update(independent_blocks_approved=12),
-            "LIVE_POLICY_NOT_ATTESTED": lambda a: a.update(policy_parity="PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED"),
+            "INSUFFICIENT_RESAMPLING_BLOCKS": lambda a: cr(a)["sample_adequacy"].update(resampling_blocks_approved=12),
+            "LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID": lambda a: a.update(policy_parity="ATTESTED_MISMATCH"),
             "INSUFFICIENT_PORTFOLIO_TRADES": lambda a: a["portfolio_replay"].update(total_trades=10),
             "TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING": lambda a: a["portfolio_replay"].update(contributing_symbols=1),
         }

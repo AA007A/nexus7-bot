@@ -816,22 +816,53 @@ def _grid_break_even(rows: list[dict]) -> dict:
     return {"multiplier": None, "note": f"POSITIVE_BEYOND_{pts[-1][0]:g}X_COST", "curve": curve}
 
 
-def temporal_folds(exe: list[dict], folds: int = 4) -> dict:
-    """Chronological folds of executable candidates (point estimates only;
-    used by the gate as a count of positive folds, never as a CI)."""
-    rows = sorted(exe, key=lambda r: r["ts"])
+def temporal_folds(exe_all: list[dict], *, required_horizon_ms: int, folds: int | None = None) -> dict:
+    """Candidate robustness folds: CALENDAR-time, purged and embargoed.
+
+    Layout from ``inf.purged_calendar_folds`` over the decision span of all
+    executable rows: each fold's decision window is followed by an embargo of
+    at least the required resolved-outcome horizon. A decision whose realized
+    outcome ends at or after the fold's outcome window end is PURGED. Censored
+    rows never enter a completed-trade statistic. Point estimates only.
+    """
+    from bot import nexus_oos_inference as inf
+    k = folds or inf.FOLD_COUNT
+    rows = sorted(exe_all, key=lambda r: int(r["ts"]))
+    if not rows:
+        return {"status": inf.FOLDS_INSUFFICIENT, "folds": [], "folds_total": 0,
+                "folds_authoritative": 0, "folds_overlap_free": False,
+                "folds_positive_approved_expectancy": 0, "folds_positive_uplift": 0}
+    layout = inf.purged_calendar_folds(int(rows[0]["ts"]), int(rows[-1]["ts"]) + 1,
+                                       required_horizon_ms=required_horizon_ms, folds=k)
     out = []
-    if len(rows) >= folds:
-        for k in range(folds):
-            part = rows[len(rows) * k // folds: len(rows) * (k + 1) // folds]
-            appr = [float(r["r"]) for r in part if r.get("approved")]
-            base = [float(r["r"]) for r in part]
-            am = (sum(appr) / len(appr)) if appr else None
-            bm = (sum(base) / len(base)) if base else None
-            out.append({"fold": k + 1, "start_ts": part[0]["ts"], "end_ts": part[-1]["ts"],
-                        "approved": len(appr), "approved_mean_r": am, "baseline_mean_r": bm,
-                        "uplift_r": (am - bm) if am is not None and bm is not None else None})
-    return {"folds": out,
+    for w in layout["windows"]:
+        part = [r for r in rows if w["decision_start_ts"] <= int(r["ts"]) < w["decision_end_ts"]]
+        resolved = [r for r in part if r.get("outcome_status") == "RESOLVED" and r.get("r") is not None]
+        kept = [r for r in resolved if int(r["outcome_end_ts"]) < w["outcome_window_end_ts"]]
+        appr = [float(r["r"]) for r in kept if r.get("approved")]
+        base = [float(r["r"]) for r in kept]
+        am = (sum(appr) / len(appr)) if appr else None
+        bm = (sum(base) / len(base)) if base else None
+        out.append({**w, "eligible_decisions": len(part),
+                    "purged_boundary_decisions": len(resolved) - len(kept),
+                    "censored_excluded": len(part) - len(resolved),
+                    "resolved_approved_trades": len(appr), "resolved_trades": len(base),
+                    "approved_mean_r": am, "baseline_mean_r": bm,
+                    "uplift_r": (am - bm) if am is not None and bm is not None else None,
+                    "symbols_represented": len({r["symbol"] for r in kept}),
+                    "max_market_ts_used": max((int(r["outcome_end_ts"]) for r in kept),
+                                              default=w["decision_start_ts"])})
+    try:
+        overlap_free = inf.assert_folds_overlap_free(out) if out else False
+    except AssertionError:
+        overlap_free = False
+    authoritative = layout["status"] == "OK" and overlap_free
+    return {"method": "PURGED_EMBARGOED_CALENDAR_FOLDS", "status": layout["status"],
+            "layout": {k_: v for k_, v in layout.items() if k_ != "windows"},
+            "fold_embargo_ms": layout["fold_embargo_ms"],
+            "fold_required_horizon_ms": layout["fold_required_horizon_ms"],
+            "folds": out, "folds_total": len(out), "folds_overlap_free": bool(overlap_free),
+            "folds_authoritative": len(out) if authoritative else 0,
             "folds_positive_approved_expectancy": sum(1 for f in out if (f["approved_mean_r"] or -1) > 0),
             "folds_positive_uplift": sum(1 for f in out if (f["uplift_r"] or -1) > 0)}
 
@@ -977,7 +1008,7 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         "required_block_ms": req_ms,
         "required_block_days": req_ms / inf.DAY_MS,
         "predeclared_block_days": list(inf.PREDECLARED_BLOCK_DAYS),
-        "min_independent_blocks": inf.MIN_INDEPENDENT_BLOCKS,
+        "min_resampling_blocks": inf.MIN_RESAMPLING_BLOCKS,
         "authority_model": inf.AUTHORITY_MODEL,
         "iid_role": inf.IID_ROLE,
     }
@@ -994,11 +1025,11 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
     out["sample_adequacy"] = {
         "decision_history_days": history_days,
         "authority_block_days": req_ms / inf.DAY_MS,
-        "independent_blocks_approved": n_blk,
-        "independent_blocks_possible": (history_days * inf.DAY_MS) // req_ms if req_ms else 0,
+        "resampling_blocks_approved": n_blk,
+        "resampling_blocks_possible": (history_days * inf.DAY_MS) // req_ms if req_ms else 0,
         "effective_sample_approved": out["effective_sample"]["approved"].get("effective_n"),
-        "min_independent_blocks": inf.MIN_INDEPENDENT_BLOCKS,
-        "adequate": n_blk >= inf.MIN_INDEPENDENT_BLOCKS,
+        "min_resampling_blocks": inf.MIN_RESAMPLING_BLOCKS,
+        "adequate": n_blk >= inf.MIN_RESAMPLING_BLOCKS,
         "result_if_inadequate": "INSUFFICIENT_EVIDENCE",
     }
     out["segments_approved"] = res.segments(approved)
@@ -1045,7 +1076,7 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         "production_regime": "nexus_ai decision market_regime at each decision (primary)",
         "research_regime": "nexus_oos_research.classify_regime on closed 1h candles (diagnostic only)",
     }
-    out["temporal_folds"] = temporal_folds(exe, folds=4)
+    out["temporal_folds"] = temporal_folds(exe_all, required_horizon_ms=req_ms)
     out["research_status"] = research_status(
         out["inference"], out["performance"]["approved"].get("net_expectancy_r"),
         censoring_material=out["censoring"]["censoring_material"],
@@ -1159,7 +1190,8 @@ CANONICAL_BLOCKER_KEYS = (
 
 async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
                           research: bool = True, manifest_path: str | None = None,
-                          live_policy_attestation: str | None = None) -> dict:
+                          live_policy_attestation: str | None = None,
+                          candidate_sha: str | None = None) -> dict:
     # Install the production wrapper stack in a PAPER-safe process. No exchange
     # mutation methods are called by this replay.
     from bot.runtime_bootstrap import install as install_runtime
@@ -1265,6 +1297,7 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
             "legacy_exit_model": "SL, TP1 50% + break-even, TP2, 40-bar time exit (legacy_diagnostic only)",
         },
     }
+    artifact["candidate_sha"] = candidate_sha
     if research and manifest is not None:
         ex, pre = xp.exit_parity_status(), xp.pretrade_parity_status()
         from bot import policy_attestation as pa
@@ -1272,9 +1305,10 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         att = pa.compare(manifest, live_policy_attestation)
         artifact["live_policy_attestation"] = att
         artifact["policy_parity"] = att["status"]
-        if att["status"] != pa.STATUS_MATCH:
-            blockers.append("LIVE_POLICY_NOT_ATTESTED" if att["status"] == pa.STATUS_NOT_ATTESTED
-                            else "LIVE_POLICY_ATTESTATION_" + att["status"])
+        # A pending attestation is not a research blocker (stage A); only the
+        # LIVE_RELEASE_GATE requires ATTESTED_MATCH. Mismatch/invalid block always.
+        if att["status"] not in (pa.STATUS_MATCH, pa.STATUS_NOT_ATTESTED):
+            blockers.append("LIVE_POLICY_ATTESTATION_" + att["status"])
         artifact["replay_parity"] = {
             "exit_parity_matrix": list(xp.EXIT_PARITY_MATRIX),
             "pretrade_gate_matrix": list(xp.PRETRADE_GATE_MATRIX),
@@ -1308,10 +1342,13 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         # market timeline). Portfolio robustness authority: walk-forward folds.
         port["path_bootstrap"] = pe.path_bootstrap_diagnostic(
             rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy, replicates=100)
-        port["walk_forward"] = pe.walk_forward_folds(rows, manifest, instruments=instruments,
-                                                     mmr_proxy=mmr_proxy, folds=4)
+        port["walk_forward"] = pe.walk_forward_folds(
+            rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+            required_horizon_ms=cand["inference"]["required_block_ms"])
         port["robustness"] = {
-            "method": "WALK_FORWARD_INDEPENDENT_CALENDAR_FOLDS",
+            "method": "PURGED_EMBARGOED_CALENDAR_FOLDS",
+            "status": port["walk_forward"]["status"],
+            "folds_overlap_free": port["walk_forward"]["folds_overlap_free"],
             "folds_positive": port["walk_forward"]["folds_positive"],
             "folds_total": port["walk_forward"]["folds_total"],
             "path_bootstrap_authority": "NONE",
@@ -1352,9 +1389,19 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         if cand["censoring"]["censoring_material"]:
             blockers.append("CENSORING_MATERIAL")
         if not cand["sample_adequacy"]["adequate"]:
-            blockers.append("INSUFFICIENT_INDEPENDENT_BLOCKS")
+            blockers.append("INSUFFICIENT_RESAMPLING_BLOCKS")
         if port["end_state"]["portfolio_censoring_material"]:
             blockers.append("PORTFOLIO_CENSORING_MATERIAL")
+        tf = cand["temporal_folds"]
+        if tf["status"] != "OK":
+            blockers.append("INSUFFICIENT_INDEPENDENT_TEMPORAL_FOLDS")
+        elif not tf["folds_overlap_free"]:
+            blockers.append("TEMPORAL_FOLDS_NOT_INDEPENDENT")
+        wf = port["walk_forward"]
+        if wf["status"] != "OK":
+            blockers.append("INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS")
+        elif not wf["folds_overlap_free"]:
+            blockers.append("PORTFOLIO_FOLDS_NOT_INDEPENDENT")
     elif research:
         blockers.append("NO_CANDIDATES")
     artifact["blockers"] = sorted(set(blockers))
@@ -1384,6 +1431,8 @@ def main(argv=None) -> int:
                         help="Pinned replay policy (default research/replay_policy_manifest.json).")
     parser.add_argument("--live-policy-attestation", default=None,
                         help="File with one [NON_SECRET_POLICY_ATTESTATION] line copied from LIVE logs.")
+    parser.add_argument("--candidate-sha", default=None,
+                        help="Exact commit SHA the replay ran on (recorded for the live gate).")
     parser.add_argument("--no-research", action="store_true",
                         help="Skip research sections (faster; no promotion evidence).")
     args = parser.parse_args(argv)
@@ -1397,7 +1446,8 @@ def main(argv=None) -> int:
         report = asyncio.run(run_real_replay(args.symbols, limit_15m=args.limit_15m,
                                              research=not args.no_research,
                                              manifest_path=args.policy_manifest,
-                                             live_policy_attestation=attestation))
+                                             live_policy_attestation=attestation,
+                                             candidate_sha=args.candidate_sha))
     except ManifestError as exc:
         print(json.dumps({"status": "REPLAY_POLICY_MANIFEST_INVALID", "error": str(exc)}))
         return 2

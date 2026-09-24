@@ -617,7 +617,7 @@ def calibration_report(rows: Sequence[dict], heuristic: Callable[[float], float]
         return _brier([base_rate] * len(y), y) - _brier([_p(r) for r in draw], y)
     blk = inf.required_block_ms(test)
     lo, hi = inf.block_bootstrap_ci(test, _improvement, samples=500, block_ms=blk)
-    if len({inf.block_id(r["ts"], blk) for r in test}) < inf.MIN_INDEPENDENT_BLOCKS:
+    if len({inf.block_id(r["ts"], blk) for r in test}) < inf.MIN_RESAMPLING_BLOCKS:
         lo = hi = None     # insufficient independent blocks: no authority
     out["brier_improvement_block_ci"] = [lo, hi]
     out["brier_improvement_block_days"] = blk / inf.DAY_MS

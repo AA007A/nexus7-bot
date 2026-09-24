@@ -14,11 +14,11 @@ of every symbol whose decision falls in a selected block is carried together.
 Authority (fail closed):
 * a block length is authoritative only if it is >= the required dependence
   horizon (ceil of the maximum resolved outcome horizon, in whole UTC days)
-  AND the selected rows span >= MIN_INDEPENDENT_BLOCKS distinct blocks;
+  AND the selected rows span >= MIN_RESAMPLING_BLOCKS distinct blocks;
 * authority = min lower / max upper across every authoritative predeclared
   length (PREDECLARED_BLOCK_DAYS plus the required length itself);
 * no authoritative length => authority is None with an explicit status
-  (AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON / INSUFFICIENT_INDEPENDENT_BLOCKS);
+  (AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON / INSUFFICIENT_RESAMPLING_BLOCKS);
 * the IID row bootstrap is DIAGNOSTIC ONLY and can never substitute.
 
 Block lengths are fixed in advance and never chosen by outcome.
@@ -48,17 +48,28 @@ LONG_BLOCK_MS = 3 * DAY_MS
 # is >= the required dependence horizon (ceil of the MAXIMUM resolved outcome
 # horizon, in whole UTC days) plus that required length itself. Authority is
 # the most conservative interval across every candidate that is also backed by
-# >= MIN_INDEPENDENT_BLOCKS blocks. Never the most favourable one.
+# >= MIN_RESAMPLING_BLOCKS blocks. Never the most favourable one.
 PREDECLARED_BLOCK_DAYS = (1, 2, 3, 7, 14, 30)
 AUTHORITY_BLOCKS_MS = (DEFAULT_BLOCK_MS, SENSITIVITY_BLOCK_MS, LONG_BLOCK_MS)  # display only
 # Percentile cluster bootstraps under-cover badly with few clusters; 30 is the
-# conventional minimum number of independent clusters. Predeclared, not tuned.
-MIN_INDEPENDENT_BLOCKS = 30
+# conventional minimum number of resampling clusters. Predeclared, not tuned.
+# Non-overlapping blocks keep within-block dependence; they do NOT prove that
+# adjacent blocks are statistically independent (see the residual-dependence
+# rule below).
+MIN_RESAMPLING_BLOCKS = 30
 AUTHORITY_MODEL = "HORIZON_AWARE_BLOCK_BOOTSTRAP_V2"
 IID_ROLE = "DIAGNOSTIC_ONLY"
 AUTHORITY_VALID = "VALID"
 AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON = "AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON"
-INSUFFICIENT_INDEPENDENT_BLOCKS = "INSUFFICIENT_INDEPENDENT_BLOCKS"
+INSUFFICIENT_RESAMPLING_BLOCKS = "INSUFFICIENT_RESAMPLING_BLOCKS"
+RESIDUAL_DEPENDENCE = "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
+# Predeclared residual-dependence rule (fixed before results): at the LONGEST
+# block length that is otherwise usable for authority, compute the ACF of
+# consecutive block-mean R at lags 1..3. If any |ACF| exceeds the 2/sqrt(n)
+# reference band, dependence spills across blocks even at the most
+# conservative usable length: no authority (INSUFFICIENT_EVIDENCE). A shorter
+# block is never substituted.
+RESIDUAL_ACF_LAGS = (1, 2, 3)
 BOOTSTRAP_SAMPLES = 2000
 SEED = 11
 
@@ -256,9 +267,30 @@ def _block_key(block_ms: int) -> str:
 
 
 AUTHORITY_RULE = ("block length >= required dependence horizon (ceil max resolved outcome "
-                  "horizon, whole UTC days) AND >= %d independent blocks; authority = min lower / "
+                  "horizon, whole UTC days) AND >= %d resampling blocks AND no significant residual block dependence (lags 1-3) at the longest usable length; authority = min lower / "
                   "max upper over every such predeclared block length; IID diagnostic only"
-                  % MIN_INDEPENDENT_BLOCKS)
+                  % MIN_RESAMPLING_BLOCKS)
+
+
+def block_acf(rows, selector, block_ms: int, lags=RESIDUAL_ACF_LAGS) -> dict:
+    """ACF of consecutive block-mean R (selected rows) with a 2/sqrt(n) band."""
+    groups: dict = defaultdict(list)
+    for r in rows:
+        if selector(r):
+            groups[block_id(r["ts"], block_ms)].append(float(r["r"]))
+    means = [sum(v) / len(v) for _, v in sorted(groups.items())]
+    n = len(means)
+    out = {"n_blocks": n, "band": (2 / math.sqrt(n)) if n >= 10 else None,
+           "acf": {str(k): None for k in lags}, "significant": None}
+    if n < 10:
+        return out
+    mu = sum(means) / n
+    den = sum((m - mu) ** 2 for m in means)
+    for k in lags:
+        if k < n and den > 0:
+            out["acf"][str(k)] = sum((means[i] - mu) * (means[i - k] - mu) for i in range(k, n)) / den
+    out["significant"] = any(v is not None and abs(v) > out["band"] for v in out["acf"].values())
+    return out
 
 
 def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: int) -> dict:
@@ -268,28 +300,45 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
         if ms < req_ms:
             reason = AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON
         elif n_blk < min_blocks:
-            reason = INSUFFICIENT_INDEPENDENT_BLOCKS
+            reason = INSUFFICIENT_RESAMPLING_BLOCKS
         elif ci[0] is None or ci[1] is None:
             reason = "CI_NOT_ESTIMABLE"
         else:
             reason = None
         intervals.append({"block_days": ms / DAY_MS, "block_ms": int(ms), "ci": list(ci),
-                          "independent_blocks": n_blk, "authoritative": reason is None,
-                          "invalid_reason": reason})
+                          "resampling_blocks": n_blk, "authoritative": reason is None,
+                          "invalid_reason": reason,
+                          "residual_dependence": (block_acf(rows, selector_for_blocks, ms)
+                                                  if ms >= req_ms else None)})
+    usable = [iv for iv in intervals if iv["authoritative"]]
+    residual = None
+    if usable:
+        longest = max(usable, key=lambda iv: iv["block_ms"])
+        residual = {"longest_usable_block_days": longest["block_days"],
+                    **(longest["residual_dependence"] or {})}
+        if residual.get("significant"):
+            for iv in usable:
+                iv["authoritative"] = False
+                iv["invalid_reason"] = RESIDUAL_DEPENDENCE
     valid = [iv for iv in intervals if iv["authoritative"]]
     auth = conservative_interval(*[tuple(iv["ci"]) for iv in valid])
     if valid:
         status = AUTHORITY_VALID
-    elif any(iv["invalid_reason"] == INSUFFICIENT_INDEPENDENT_BLOCKS for iv in intervals
+    elif residual is not None and residual.get("significant"):
+        status = RESIDUAL_DEPENDENCE
+    elif any(iv["invalid_reason"] == INSUFFICIENT_RESAMPLING_BLOCKS for iv in intervals
              if iv["block_ms"] >= req_ms):
-        status = INSUFFICIENT_INDEPENDENT_BLOCKS
+        status = INSUFFICIENT_RESAMPLING_BLOCKS
     elif all(iv["block_ms"] < req_ms for iv in intervals):
         status = AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON
     else:
         status = "CI_NOT_ESTIMABLE"
     out = {"iid_ci": list(iid), "iid_role": IID_ROLE, "block_intervals": intervals,
            "required_block_ms": int(req_ms), "required_block_days": req_ms / DAY_MS,
-           "min_independent_blocks": int(min_blocks)}
+           "min_resampling_blocks": int(min_blocks),
+           "residual_dependence_rule": ("any |ACF| (lags 1-3) of block means above 2/sqrt(n) at the "
+                                        "longest usable block length => no authority"),
+           "residual_dependence_at_longest_usable": residual}
     for ms in AUTHORITY_BLOCKS_MS:          # legacy display keys (diagnostic)
         if ms in cis:
             out[_block_key(ms)] = list(cis[ms])
@@ -310,11 +359,11 @@ def _lengths(req_ms: int) -> list[int]:
 
 def dependence_aware_mean(rows: Sequence[dict], selector: Callable[[dict], bool] = lambda r: True,
                           *, samples: int = BOOTSTRAP_SAMPLES, required_ms: int | None = None,
-                          min_blocks: int = MIN_INDEPENDENT_BLOCKS) -> dict:
+                          min_blocks: int = MIN_RESAMPLING_BLOCKS) -> dict:
     """IID (diagnostic) and block CIs of the mean R of selected RESOLVED rows.
 
     Censored rows are ignored. Authority exists only for block lengths >= the
-    required dependence horizon with enough independent blocks; otherwise
+    required dependence horizon with enough resampling blocks; otherwise
     ``authority_ci_low/high`` are None (fail closed).
     """
     rows = [r for r in rows if _is_resolved(r) and r.get("r") is not None]
@@ -329,7 +378,7 @@ def dependence_aware_mean(rows: Sequence[dict], selector: Callable[[dict], bool]
 
 def dependence_aware_diff(rows: Sequence[dict], sel_a, sel_b, *,
                           samples: int = BOOTSTRAP_SAMPLES, required_ms: int | None = None,
-                          min_blocks: int = MIN_INDEPENDENT_BLOCKS) -> dict:
+                          min_blocks: int = MIN_RESAMPLING_BLOCKS) -> dict:
     rows = [r for r in rows if _is_resolved(r) and r.get("r") is not None]
     req = int(required_ms) if required_ms is not None else required_block_ms(rows)
     stat = diff_mean_r(sel_a, sel_b)
@@ -365,9 +414,9 @@ def dependence_diagnostics(rows: Sequence[dict], max_lag: int = 3) -> dict:
         "outcome_horizon": outcome_horizon_stats(rows),
         "required_block_days": required_block_ms(rows) / DAY_MS,
         "block_lengths_predeclared_days": list(PREDECLARED_BLOCK_DAYS),
-        "min_independent_blocks": MIN_INDEPENDENT_BLOCKS,
+        "min_resampling_blocks": MIN_RESAMPLING_BLOCKS,
         "note": ("Block lengths are fixed in advance. Only lengths >= the required "
-                 "dependence horizon with enough independent blocks carry authority."),
+                 "dependence horizon with enough resampling blocks carry authority."),
     }
 
 
@@ -378,7 +427,7 @@ def effective_sample(rows: Sequence[dict], selector: Callable[[dict], bool] = la
 
     n_eff = n / (1 + (m_bar - 1) * icc), with the one-way ANOVA intra-block
     correlation of R clipped to [0, 1]. ``unique_blocks`` is also reported
-    and is the more conservative independent-unit count.
+    and is the more conservative resampling-unit count.
     """
     sel = [r for r in rows if selector(r)]
     n = len(sel)
@@ -487,3 +536,57 @@ def assert_no_leakage(split: dict) -> None:
 def iter_selectors(names: Iterable[str]):
     for name in names:
         yield name, (lambda r, _n=name: bool((r.get("variants") or {}).get(_n)))
+
+
+# ── purged / embargoed calendar folds (candidate and portfolio robustness) ──
+# Predeclared: 4 folds; each fold's decision window must be >= MIN_FOLD_DECISION_DAYS.
+FOLD_COUNT = 4
+MIN_FOLD_DECISION_DAYS = 14
+FOLDS_INSUFFICIENT = "INSUFFICIENT_INDEPENDENT_FOLDS"
+
+
+def purged_calendar_folds(t0: int, t1: int, *, required_horizon_ms: int, embargo_ms: int | None = None,
+                          folds: int = FOLD_COUNT,
+                          min_decision_days: float = MIN_FOLD_DECISION_DAYS) -> dict:
+    """Calendar-time fold layout over the decision span [t0, t1).
+
+    fold k: DECISION_WINDOW [s_k, e_k) + OUTCOME_COMPLETION_WINDOW [e_k, e_k + H)
+    + EMBARGO [e_k + H, e_k + H + E); the next fold's decisions start at
+    s_{k+1} = e_k + H + E. H = ``required_horizon_ms`` (the authoritative
+    resolved horizon) and E >= H always (a smaller embargo raises: fold count
+    is never increased by shrinking the embargo). When the folds' decision
+    windows would be shorter than ``min_decision_days`` the layout is
+    INSUFFICIENT and no folds are produced.
+    """
+    req = int(required_horizon_ms)
+    if embargo_ms is not None and int(embargo_ms) < req:
+        raise ValueError("embargo shorter than the required outcome horizon")
+    emb = max(req, int(embargo_ms or 0))
+    gap = req + emb
+    span = int(t1) - int(t0)
+    width = (span - (folds - 1) * gap) // folds if folds > 0 else 0
+    base = {"folds_requested": folds, "fold_embargo_ms": emb, "fold_required_horizon_ms": req,
+            "fold_outcome_completion_ms": req, "fold_gap_ms": gap,
+            "min_fold_decision_days": min_decision_days, "decision_span_days": span / DAY_MS,
+            "fold_decision_window_days": max(0, width) / DAY_MS}
+    if width < min_decision_days * DAY_MS:
+        return {**base, "status": FOLDS_INSUFFICIENT, "windows": []}
+    windows = []
+    s = int(t0)
+    for k in range(folds):
+        e = s + width
+        windows.append({"fold": k + 1, "decision_start_ts": s, "decision_end_ts": e,
+                        "outcome_window_end_ts": e + req, "embargo_end_ts": e + gap})
+        s = e + gap
+    return {**base, "status": "OK", "windows": windows}
+
+
+def assert_folds_overlap_free(folds: list[dict]) -> bool:
+    """max(market time used by fold K) < min(decision_ts of fold K+1)."""
+    for a, b in zip(folds, folds[1:]):
+        used_end = a.get("max_market_ts_used")
+        if used_end is None:
+            used_end = int(a["outcome_window_end_ts"]) - 1   # window end is exclusive
+        if int(used_end) >= int(b["decision_start_ts"]):
+            raise AssertionError(f"fold {a['fold']} market time overlaps fold {b['fold']}")
+    return True

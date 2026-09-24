@@ -684,38 +684,92 @@ def path_bootstrap_diagnostic(rows, manifest, *, instruments, mmr_proxy=None, re
             "reason": PATH_BOOTSTRAP_REASON}
 
 
-def walk_forward_folds(rows, manifest, *, instruments, mmr_proxy=None, folds: int = 4) -> dict:
-    """Conservative portfolio robustness: K contiguous, non-overlapping calendar
-    periods of DECISIONS, each replayed independently from the starting equity
-    on the REAL market timeline (a position entered in fold k keeps its real
-    path even past the fold end; nothing is spliced). Authority metric: number
-    of folds with positive marked return, with censoring reported per fold."""
+def _truncate_to_window(row: dict, end_ts: int) -> dict:
+    """Cut a trade's market data at ``end_ts`` (exclusive). A trade that has not
+    resolved before ``end_ts`` becomes RIGHT_CENSORED_FOLD_END: its later legs,
+    marks and funding are dropped, never used by this fold."""
+    last_leg = max((int(l[0]) for l in row["legs"]), default=None)
+    resolved = row.get("outcome_status", "RESOLVED") == "RESOLVED"
+    if resolved and last_leg is not None and last_leg < end_ts:
+        return row
+    out = dict(row)
+    out["legs"] = [l for l in row["legs"] if int(l[0]) < end_ts]
+    out["marks"] = [m for m in (row.get("marks") or []) if int(m[0]) < end_ts]
+    out["funding"] = [f for f in (row.get("funding") or []) if int(f[0]) < end_ts]
+    censor = row.get("censor_ts")
+    if resolved or censor is None or int(censor) >= end_ts:
+        out["outcome_status"] = "RIGHT_CENSORED_FOLD_END"
+        out["censor_ts"] = max([int(row["ts"])] + [int(m[0]) for m in out["marks"]]
+                               + [int(l[0]) for l in out["legs"]])
+    return out
+
+
+def _max_market_ts(rows: Sequence[dict]) -> int | None:
+    ts = [int(t[0]) for r in rows for key in ("legs", "marks", "funding") for t in (r.get(key) or [])]
+    ts += [int(r["censor_ts"]) for r in rows if r.get("censor_ts")]
+    ts += [int(r["ts"]) for r in rows]
+    return max(ts) if ts else None
+
+
+def walk_forward_folds(rows, manifest, *, instruments, mmr_proxy=None, folds: int | None = None,
+                       required_horizon_ms: int | None = None, decision_span=None) -> dict:
+    """PURGED / EMBARGOED portfolio robustness folds (regime robustness).
+
+    Layout = inf.purged_calendar_folds: DECISION_WINDOW + OUTCOME_COMPLETION_WINDOW,
+    then EMBARGO, then the next fold. The embargo is >= the required outcome
+    horizon (max resolved horizon of the approved trades, ceil whole days, and
+    never below ``required_horizon_ms``). Each fold's trades are truncated at
+    its outcome-window end, so no fold uses market time of the next fold.
+    Each fold restarts from STARTING_EQUITY: fold_account_state =
+    RESET_FOR_REGIME_ROBUSTNESS (this is NOT a continuous portfolio replay).
+    If four folds cannot fit: INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS.
+    """
+    k = folds or inf.FOLD_COUNT
     cands = sorted((r for r in rows if r.get("approved") and r.get("executable")),
                    key=lambda r: int(r["ts"]))
+    own = inf.required_block_ms([{"ts": r["ts"], "outcome_end_ts": max(int(l[0]) for l in r["legs"]),
+                                  "outcome_status": "RESOLVED"}
+                                 for r in cands
+                                 if r.get("outcome_status", "RESOLVED") == "RESOLVED" and r["legs"]])
+    req = max(own, int(required_horizon_ms or 0))
+    base = {"method": "PURGED_EMBARGOED_CALENDAR_FOLDS",
+            "fold_account_state": "RESET_FOR_REGIME_ROBUSTNESS",
+            "not_a_continuous_backtest": True, "authority": "PORTFOLIO_ROBUSTNESS",
+            "rule": "a fold counts as positive only if marked AND realized return > 0 and its "
+                    "censoring is not material; folds must be overlap-free"}
+    if not cands:
+        return {**base, "status": "INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS", "folds": [],
+                "folds_total": 0, "folds_positive": 0, "folds_authoritative": 0,
+                "folds_overlap_free": False, "fold_embargo_ms": req, "fold_required_horizon_ms": req}
+    t0, t1 = decision_span or (int(cands[0]["ts"]), int(cands[-1]["ts"]) + 1)
+    layout = inf.purged_calendar_folds(t0, t1, required_horizon_ms=req, folds=k)
+    status = ("OK" if layout["status"] == "OK" else "INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS")
     out = []
-    if cands:
-        t0, t1 = int(cands[0]["ts"]), int(cands[-1]["ts"]) + 1
-        span = t1 - t0
-        for k in range(folds):
-            lo = t0 + span * k // folds
-            hi = t0 + span * (k + 1) // folds
-            part = [r for r in cands if lo <= int(r["ts"]) < hi]
-            rep = run_portfolio(part, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
-                                record_curve=True, check_invariants=True)
-            out.append({"fold": k + 1, "decision_start_ts": lo, "decision_end_ts": hi,
-                        "candidates": len(part), "trades": rep["total_trades"],
-                        "net_return_marked": rep["net_return"],
-                        "realized_return": rep["realized_return"],
-                        "open_positions_at_end": rep["end_state"]["open_positions_at_end"],
-                        "censoring_material": rep["end_state"]["portfolio_censoring_material"],
-                        "max_drawdown": rep["portfolio_max_drawdown"]})
+    for w in layout["windows"]:
+        part = [_truncate_to_window(r, w["outcome_window_end_ts"]) for r in cands
+                if w["decision_start_ts"] <= int(r["ts"]) < w["decision_end_ts"]]
+        rep = run_portfolio(part, manifest, instruments=instruments, mmr_proxy=mmr_proxy,
+                            record_curve=True, check_invariants=True)
+        out.append({**w, "candidates": len(part), "trades": rep["total_trades"],
+                    "net_return_marked": rep["net_return"],
+                    "realized_return": rep["realized_return"],
+                    "open_positions_at_end": rep["end_state"]["open_positions_at_end"],
+                    "censoring_material": rep["end_state"]["portfolio_censoring_material"],
+                    "max_drawdown": rep["portfolio_max_drawdown"],
+                    "max_market_ts_used": _max_market_ts(part)})
+    try:
+        overlap_free = inf.assert_folds_overlap_free(out) if out else False
+    except AssertionError:
+        overlap_free = False
     positive = sum(1 for f in out if f["net_return_marked"] > 0 and f["realized_return"] > 0
                    and not f["censoring_material"])
-    return {"method": "WALK_FORWARD_INDEPENDENT_CALENDAR_FOLDS", "folds": out,
-            "folds_total": len(out), "folds_positive": positive,
-            "authority": "PORTFOLIO_ROBUSTNESS",
-            "rule": "a fold counts as positive only if marked AND realized return > 0 and its "
-                    "censoring is not material"}
+    authoritative = status == "OK" and overlap_free
+    return {**base, "status": status, "layout": {k_: v for k_, v in layout.items() if k_ != "windows"},
+            "fold_embargo_ms": layout["fold_embargo_ms"],
+            "fold_required_horizon_ms": layout["fold_required_horizon_ms"],
+            "folds": out, "folds_total": len(out), "folds_overlap_free": bool(overlap_free),
+            "folds_authoritative": len(out) if authoritative else 0,
+            "folds_positive": positive if authoritative else 0}
 
 
 def contract_spec_sensitivity(rows, manifest, *, instruments, mmr_proxy=None) -> dict:

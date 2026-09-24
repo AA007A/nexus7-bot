@@ -46,10 +46,13 @@ if __name__ == "__main__":
 class PromotionGateWorkflowContract(unittest.TestCase):
     def test_pr_workflow_runs_strict_gate_last(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json", text)
-        gate_idx = text.index("Production promotion gate (strict)")
+        self.assertIn("python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json --gate research", text)
+        gate_idx = text.index("Research promotion gate (strict)")
         self.assertGreater(gate_idx, text.index("Upload replay evidence"))
+        # The strict research gate is the last step; the live gate is informational.
+        self.assertGreater(gate_idx, text.index("Live release gate (informational, stage C)"))
         block = text[gate_idx:]
+        self.assertNotIn("- name:", block[len("Research promotion gate (strict)"):])
         # Never allowed to pass through for pull requests.
         self.assertIn("continue-on-error: ${{ github.event_name == 'workflow_dispatch' &&", block)
         self.assertIn('exit "${PIPESTATUS[0]}"', block)
@@ -61,6 +64,7 @@ class PromotionGateWorkflowContract(unittest.TestCase):
         self.assertIn('"research/replay_policy_manifest.json"', text)
         self.assertIn("python -m unittest tests.test_nexus_oos_execution_parity -v", text)
         self.assertIn("python -m unittest tests.test_nexus_oos_censoring_and_horizon -v", text)
+        self.assertIn("python -m unittest tests.test_nexus_oos_fold_independence_and_gates -v", text)
         self.assertTrue((ROOT / "research" / "replay_policy_manifest.json").is_file())
 
     def test_replay_covers_production_universe(self):

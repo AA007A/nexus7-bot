@@ -159,11 +159,11 @@ class HorizonAwareAuthority(unittest.TestCase):
                 self.assertEqual(iv["invalid_reason"], "AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON")
         self.assertTrue(all(iv["block_ms"] >= 5 * DAY for iv in d["block_intervals"] if iv["authoritative"]))
 
-    def test_insufficient_independent_blocks_gives_no_authority_and_iid_cannot_substitute(self):
+    def test_insufficient_resampling_blocks_gives_no_authority_and_iid_cannot_substitute(self):
         d = inf.dependence_aware_mean(self._rows(10 * DAY, days=60), lambda r: r["approved"], samples=300)
         self.assertIsNone(d["authority_ci_low"])
         self.assertIsNone(d["authority_ci_high"])
-        self.assertEqual(d["authority_status"], "INSUFFICIENT_INDEPENDENT_BLOCKS")
+        self.assertEqual(d["authority_status"], "INSUFFICIENT_RESAMPLING_BLOCKS")
         self.assertIsNotNone(d["iid_ci"][0])      # IID exists but has no authority
 
     def test_gate_rejects_short_blocks_against_long_horizon(self):
@@ -175,13 +175,13 @@ class HorizonAwareAuthority(unittest.TestCase):
         self.assertIn("AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON", r.blockers)
         self.assertIn("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE", r.blockers)
 
-    def test_gate_requires_minimum_independent_blocks(self):
+    def test_gate_requires_minimum_resampling_blocks(self):
         from tests.test_nexus_oos_promotion_gate import _passing_artifact, _dep
         a = _passing_artifact()
         a["candidate_research"]["inference"]["approved_expectancy"] = _dep(
             0.05, 0.3, 0.04, 0.32, 0.045, 0.31, blocks=(12, 8, 6))
         r = gate.evaluate(a)
-        self.assertIn("INSUFFICIENT_INDEPENDENT_BLOCKS", r.blockers)
+        self.assertIn("INSUFFICIENT_RESAMPLING_BLOCKS", r.blockers)
         self.assertFalse(r.promote)
 
     def test_no_stale_ten_hour_assumption(self):
@@ -233,7 +233,7 @@ class PathBootstrapHasNoAuthority(unittest.TestCase):
 
     def test_walk_forward_uses_real_timeline(self):
         rows = []
-        for d in range(8):
+        for d in range(0, 120, 3):
             ts = D0 + d * DAY
             rows.append({"ts": ts, "symbol": "BTCUSDT", "direction": "LONG", "approved": True,
                          "executable": True, "strategy_score": 70, "score_adjusted": 70, "rr": 3.0,
@@ -243,8 +243,12 @@ class PathBootstrapHasNoAuthority(unittest.TestCase):
                          "fee_rate": 0.0006, "cost_fraction": 0.0022, "outcome_status": "RESOLVED",
                          "month": "2025-10"})
         wf = pe.walk_forward_folds(rows, _manifest(), instruments=INSTR, mmr_proxy=MMR, folds=4)
+        self.assertEqual(wf["status"], "OK")
         self.assertEqual(wf["folds_total"], 4)
-        self.assertEqual(sum(f["candidates"] for f in wf["folds"]), 8)
+        self.assertTrue(wf["folds_overlap_free"])
+        # Decisions inside an outcome-completion window or embargo are in no fold.
+        self.assertLess(sum(f["candidates"] for f in wf["folds"]), 40)
+        self.assertGreater(sum(f["candidates"] for f in wf["folds"]), 20)
 
 
 class NativeVersusLocalGeometry(unittest.TestCase):
@@ -304,12 +308,18 @@ class LivePolicyAttestation(unittest.TestCase):
         self.assertEqual(res["mismatches"], {"LEVERAGE": {"replay": "50", "live": "20"}})
         self.assertEqual(pa.compare(m, "garbage")["status"], pa.STATUS_INVALID)
 
-    def test_gate_blocks_without_live_attestation(self):
+    def test_pending_is_research_only_and_mismatch_blocks_everywhere(self):
         from tests.test_nexus_oos_promotion_gate import _passing_artifact
-        for status in (pa.STATUS_NOT_ATTESTED, pa.STATUS_MISMATCH, pa.STATUS_INVALID, None):
-            a = copy.deepcopy(_passing_artifact())
+        a = copy.deepcopy(_passing_artifact())
+        a["policy_parity"] = pa.STATUS_NOT_ATTESTED
+        self.assertEqual(pa.STATUS_NOT_ATTESTED, gate.LIVE_ATTESTATION_PENDING)
+        self.assertTrue(gate.evaluate(a).promote)
+        self.assertIn("LIVE_POLICY_NOT_ATTESTED", gate.evaluate_live(
+            a, candidate_sha=a["candidate_sha"], protection_readiness="PASS",
+            human_authorization="operator").blockers)
+        for status in (pa.STATUS_MISMATCH, pa.STATUS_INVALID, None):
             a["policy_parity"] = status
-            self.assertIn("LIVE_POLICY_NOT_ATTESTED", gate.evaluate(a).blockers)
+            self.assertIn("LIVE_POLICY_ATTESTATION_MISMATCH_OR_INVALID", gate.evaluate(a).blockers)
 
     def test_bootstrap_installs_attestation_log(self):
         src = (rm.DEFAULT_PATH.parent.parent / "bot" / "runtime_bootstrap.py").read_text(encoding="utf-8")

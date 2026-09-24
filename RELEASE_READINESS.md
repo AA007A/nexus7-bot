@@ -18,13 +18,13 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 
 | Layer | Status | Evidence |
 |---|---|---|
-| **ENGINEERING_SAFETY** | **Met (offline)** | Non-overridable drawdown gate; daily-stop override removed (P1-03); conservative daily-stop precision; stop-risk-authoritative sizing; strict CI promotion gate. 1,726/1,726 offline tests pass; `RELEASE_PROOF=PASS`; the runtime contract passes in the controlled-LIVE bootstrap. Not validated in PAPER or SHADOW. |
+| **ENGINEERING_SAFETY** | **Met (offline)** | Non-overridable drawdown gate; daily-stop override removed (P1-03); conservative daily-stop precision; stop-risk-authoritative sizing; strict CI research promotion gate. 1,726/1,726 offline tests pass; `RELEASE_PROOF=PASS`; the runtime contract passes in the controlled-LIVE bootstrap. Not validated in PAPER or SHADOW. |
 | **SIGNAL_EDGE** | **Failed: NEGATIVE EXPECTANCY** | NEXUS-approved −0.324 R per candidate, authority CI [−0.496, −0.175]; every symbol, month and regime negative. |
 | **STATISTICAL_CONFIDENCE** | **Failed** | Uplift +0.051 R, authority CI [−0.043, +0.143]. IID looked significant; dependence-aware inference does not. Effective n about 1,283 over 171 unique days. |
 | **PORTFOLIO_EDGE** | **Failed** | Portfolio replay −49.4%, max drawdown 50.3%, halted by the drawdown hard gate; −0.788 R per trade. |
 | **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). |
-| **STATISTICAL_AUTHORITY** | **Horizon-aware (see OOS_REPORT §C.8)** | Authority only for blocks ≥ the max resolved outcome horizon with ≥ 30 independent blocks. Censored outcomes are excluded and the censoring must be immaterial. The `0c3ebc1` replay is diagnostic only. |
-| **POLICY_PARITY** | **Not attested** | `PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED`. The attestation mechanism exists, but no LIVE line has been captured; this phase does not deploy. |
+| **STATISTICAL_AUTHORITY** | **Horizon-aware (see OOS_REPORT §C.8)** | Authority only for blocks ≥ the max resolved outcome horizon with ≥ 30 resampling blocks and no significant residual block dependence at the longest usable length. Censored outcomes are excluded and the censoring must be immaterial. Fold robustness needs purged, embargoed calendar folds (§C.9). The `0c3ebc1` replay is diagnostic only; the `07a5a6a` fold results are non-authoritative. |
+| **POLICY_PARITY** | **Pending (stage B)** | `LIVE_ATTESTATION_PENDING`. The attestation mechanism exists, but no LIVE line has been captured; this phase does not deploy. Allowed by the research gate; the live release gate requires `ATTESTED_MATCH`. |
 | **REPLAY_PARITY** | **INCOMPLETE** | Production exits and pre-trade gates are traced and classified (OOS_REPORT §C). Exits are bar-approximated. Spread/depth, market-risk feeds, the pilot session cap and private CROSS MMR are not replayable. The gate blocks with EXIT/PRETRADE/PORTFOLIO_PARITY_INCOMPLETE. |
 | **RELEASE_READINESS** | **Not ready** | See blockers. |
 
@@ -38,12 +38,19 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 7. **Horizon.** 180 days (7 months) is covered; 365 days or more needs sharding. Multi-year durability: INSUFFICIENT EVIDENCE.
 8. **The probability heuristic is miscalibrated**, and confidence is anti-predictive. It stays telemetry/veto only.
 9. **Strategy-level gates are not ablated** (refactor required).
-9a. **Live policy parity is not attested** (no `[NON_SECRET_POLICY_ATTESTATION]` line from LIVE yet).
+9a. **Live policy parity is not attested** (no `[NON_SECRET_POLICY_ATTESTATION]` line from LIVE yet). The `LIVE_RELEASE_GATE` blocks on this.
 9b. **Production capacity facts.** At most one concurrent LIVE position, and 2 new orders per process session. Trailing after TP1 uses an un-rescaled peak (P1-17).
 10. **PAPER and SHADOW validation** of this candidate have not been performed.
 11. **Production state.** Live drawdown is 59.40%, above the 50% limit. Once deployed, this code blocks all new entries until an operator performs a reviewed HWM rebase or equity recovers. That is the intended outcome.
 12. **Branch protection** (required checks) is a repository setting and cannot be verified from code.
 13. **Human approval** has not been given.
+
+## Release stages
+| Stage | What | Gate | Status |
+|---|---|---|---|
+| A | Research / code merge | `RESEARCH_PROMOTION_GATE` (strict in CI). `LIVE_ATTESTATION_PENDING` allowed. Never means PRODUCTION_READY = YES | Runs on every PR head |
+| B | Pre-live / shadow attestation: capture the LIVE `[NON_SECRET_POLICY_ATTESTATION]` line | none | **Not started.** Not created in this phase |
+| C | Live release | `LIVE_RELEASE_GATE`: exact SHA, `ATTESTED_MATCH`, protection readiness, risk gates, CI evidence, explicit human authorization | Blocked |
 
 ## Verdict
 The engineering and risk-control hardening is done and tested offline. The trading strategy has measured negative expectancy, and its NEXUS filter has no statistically established edge. Deploying it would expose capital to a strategy with negative expected value.

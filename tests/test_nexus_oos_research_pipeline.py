@@ -252,7 +252,13 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
         self.assertEqual(p["path_bootstrap"]["authority"], "NONE")
         self.assertEqual(p["path_bootstrap"]["status"], "APPROXIMATE_NON_AUTHORITATIVE")
         self.assertEqual(p["path_bootstrap"]["per_block_length"]["24h"]["replicates"], 100)
-        self.assertEqual(p["walk_forward"]["folds_total"], 4)
+        # A few days of fixture history cannot hold four purged 14-day folds:
+        # the honest outcome is INSUFFICIENT, never a shrunken embargo.
+        wf = p["walk_forward"]
+        self.assertEqual(wf["status"], "INSUFFICIENT_INDEPENDENT_PORTFOLIO_PERIODS")
+        self.assertEqual((wf["folds_total"], wf["folds_authoritative"]), (0, 0))
+        self.assertGreaterEqual(wf["fold_embargo_ms"], wf["fold_required_horizon_ms"])
+        self.assertEqual(wf["fold_account_state"], "RESET_FOR_REGIME_ROBUSTNESS")
         self.assertEqual(p["effective_live_max_concurrent_positions"], 1)
         self.assertEqual(p["configured_max_positions"], 2)
         self.assertEqual(set(p["gate_attribution"]), set(__import__(
