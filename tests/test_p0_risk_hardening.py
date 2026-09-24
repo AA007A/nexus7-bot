@@ -540,3 +540,14 @@ class RiskPolicyConfigurationContract(unittest.TestCase):
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     unittest.main()
+
+
+class RuntimeTruthCaptureFailuresAreVisible(unittest.TestCase):
+    def test_capture_failure_is_counted_and_logged(self):
+        from bot import runtime_truth_hooks as hooks
+        hooks.CAPTURE_FAILURES.clear()
+        with patch("bot.logger.log") as log:
+            hooks._note_capture_failure("rest_kline", ValueError("x"))
+            hooks._note_capture_failure("rest_kline", ValueError("x"))
+        self.assertEqual(hooks.CAPTURE_FAILURES["rest_kline"], 2)
+        self.assertEqual(log.warning.call_count, 1)

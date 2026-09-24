@@ -19,6 +19,21 @@ _ACTIVE_CLIENT = contextvars.ContextVar("bgx_truth_active_client", default=None)
 _LAST_WS_EVENT_ID = contextvars.ContextVar("bgx_truth_last_ws_event_id", default=None)
 _LAST_REST_EVENT_ID = contextvars.ContextVar("bgx_truth_last_rest_event_id", default=None)
 _PREVIOUS_WS_SESSION = None
+# Evidence-capture failures are telemetry-only (market data passes through
+# unchanged) but must never be invisible: they are counted and logged.
+CAPTURE_FAILURES: dict[str, int] = {}
+
+
+def _note_capture_failure(kind: str, exc: BaseException) -> None:
+    count = CAPTURE_FAILURES.get(kind, 0) + 1
+    CAPTURE_FAILURES[kind] = count
+    if count == 1 or count % 1000 == 0:
+        from bot.logger import log
+        log.warning(
+            "[RUNTIME_TRUTH_CAPTURE_FAILURE] kind=%s error=%s count=%d "
+            "decision_effect=NONE evidence_complete=false",
+            kind, type(exc).__name__, count,
+        )
 
 
 def _remember_signal(result):
@@ -176,8 +191,8 @@ def install_transport_and_cache(KuCoinClient):
                     "/api/v1/kline/query", dict(self.url.query), int(self.status), raw
                 )
                 _LAST_REST_EVENT_ID.set(event_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_capture_failure("rest_kline", exc)
         return await original_response_json(self, *args, **kwargs)
 
     aiohttp.ClientResponse.json = response_json_with_truth
@@ -206,8 +221,8 @@ def install_transport_and_cache(KuCoinClient):
                     if not self._seen_data:
                         self._seen_data = True
                         truth.request_checkpoint("WS_RECONNECT_STABILIZED")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _note_capture_failure("ws_payload", exc)
             return raw
 
     class ConnectProxy:
