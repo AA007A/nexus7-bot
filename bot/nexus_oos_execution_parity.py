@@ -309,6 +309,7 @@ def production_geometry(sig, *, leverage: int, mmr: float | None, fee_multiplier
            "original_stop_pct": geo.get("original_stop_pct"),
            "final_stop_pct": geo.get("final_stop_pct"),
            "retained_fraction": geo.get("retained_fraction"),
+           "rr": geo.get("rr"),
            "mmr_used": mmr, "mmr_source": "PUBLIC_MAINTAIN_MARGIN_PROXY" if mmr is not None
            else "liquidation.DEFAULT_MMR"}
     if status == "ADJUSTED":

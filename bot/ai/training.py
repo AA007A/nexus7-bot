@@ -56,8 +56,11 @@ def cost_estimate_r(cost_fraction: float, stop_distance_pct: float) -> float:
 
 
 def dataset(rows):
-    """Executable, RESOLVED rows carrying canonical AI features (current schema)."""
-    out = [r for r in rows if r.get("executable") and r.get("outcome_status") == "RESOLVED"
+    """AI_RUNTIME_HOOK_POPULATION_V1 rows only (``ai_hook_eligible``: the
+    candidate reaches TradingEngine._ai_gate), RESOLVED, with canonical AI
+    features of the current schema. NEXUS-rejected / geometry-blocked
+    candidates never enter training, validation or test."""
+    out = [r for r in rows if r.get("ai_hook_eligible") is True and r.get("outcome_status") == "RESOLVED"
            and r.get("r") is not None and isinstance(r.get("ai_features"), list)
            and len(r["ai_features"]) == len(fx.MODEL_FEATURES)]
     return sorted(out, key=lambda r: int(r["ts"]))
@@ -211,22 +214,29 @@ def _key(r):
 
 def selection_stability(steps) -> dict:
     """Predeclared rule: STABLE iff every step selected the same classifier
-    (kind + hyperparameters), the same regressor, the same enabled directions
-    and the same (p, edge) thresholds, and no step is ABSTAIN_ALL."""
+    (kind + hyperparameters), the same regressor and the IDENTICAL decision
+    policy (decision_policy_sha256: thresholds, directions, supported regimes,
+    probability_authorizes, uncertainty buffer, freshness, latency, version),
+    and no step is ABSTAIN_ALL."""
     sig = [(json.dumps(s["selected_classifier"], sort_keys=True),
             json.dumps(s["selected_regressor"], sort_keys=True),
-            tuple(s["policy"]["allowed_directions"]),
-            (s["policy"]["min_p_profitable"], s["policy"]["min_expected_net_r"])) for s in steps]
+            DecisionPolicy.from_json(s["policy"]).sha256) for s in steps]
     abstain = any(not s["policy"]["allowed_directions"] for s in steps)
     stable = bool(sig) and not abstain and all(x == sig[0] for x in sig)
     return {"status": "MODEL_SELECTION_STABLE" if stable else "MODEL_SELECTION_UNSTABLE",
-            "rule": "same classifier, regressor, directions and thresholds in every step; no ABSTAIN_ALL"}
+            "rule": "same classifier, regressor and decision_policy_sha256 in every step; no ABSTAIN_ALL",
+            "policy_sha256_by_step": [x[2] for x in sig]}
 
 
-def walk_forward(rows, *, required_ms: int, samples: int = 1000) -> dict:
+AUTHORITY_BOOTSTRAP_SAMPLES = 1000      # predeclared; the AI gate requires exactly this
+
+
+def walk_forward(rows, *, required_ms: int, samples: int = AUTHORITY_BOOTSTRAP_SAMPLES) -> dict:
     from bot import nexus_oos_research as res
     data = dataset(rows)
-    base = {"data_label": DATA_LABEL, "feature_schema": fx.FEATURE_SCHEMA_VERSION,
+    from bot.ai import hook as ai_hook
+    base = {"population": ai_hook.POPULATION, "hook_profile": ai_hook.TRAINING_PROFILE,
+            "data_label": DATA_LABEL, "feature_schema": fx.FEATURE_SCHEMA_VERSION,
             "feature_schema_sha256": fx.schema_hash(), "model_features": list(fx.MODEL_FEATURES),
             "classifier_grid": [list(x) for x in CLASSIFIER_GRID],
             "regressor_grid": [list(x) for x in REGRESSOR_GRID], "p_grid": list(P_GRID),
@@ -284,7 +294,7 @@ def walk_forward(rows, *, required_ms: int, samples: int = 1000) -> dict:
             "_approved_keys": [_key(r) for r in appr],
         })
     ids = {id(r) for r in approved_test}
-    pooled = [dict(r, ai_approved=id(r) in ids) for r in all_test]
+    pooled = sorted((dict(r, ai_approved=id(r) in ids) for r in all_test), key=lambda r: int(r["ts"]))
     authority = None
     if approved_test:
         authority = {
@@ -293,8 +303,13 @@ def walk_forward(rows, *, required_ms: int, samples: int = 1000) -> dict:
             "ai_uplift_vs_baseline": inf.dependence_aware_diff(
                 pooled, lambda r: r["ai_approved"], lambda r: True, samples=samples,
                 required_ms=required_ms)}
-        # Compact influence aggregates are RETAINED: the AI promotion gate
-        # recomputes residual dependence itself and never trusts the verdict.
+        # Compact per-block aggregates are RETAINED at every authoritative block
+        # length: the AI gate recomputes the bootstrap CIs, the residual ACF and
+        # the authority interval (AI_AGGREGATE_BLOCK_BOOTSTRAP_V1).
+        for sec in authority.values():
+            sec["bootstrap"] = {"model": "AI_AGGREGATE_BLOCK_BOOTSTRAP_V1", "samples": int(samples),
+                                "seed": inf.SEED, "unit_order": "BLOCK_ID_ASCENDING",
+                                "percentiles": [0.025, 0.975]}
     return {**base, "status": "OK", "layout": {k: v for k, v in lay.items() if k != "windows"},
             "folds": [{"fold": w["fold"], "decision_start_ts": w["decision_start_ts"],
                        "decision_end_ts": w["decision_end_ts"],
@@ -323,7 +338,8 @@ def dataset_manifest(rows) -> dict:
             "data_label": DATA_LABEL, "feature_schema_sha256": fx.schema_hash()}
 
 
-def build_shadow_challenger(rows, wf: dict, *, training_code_sha: str | None, created_at: str) -> dict:
+def build_shadow_challenger(rows, wf: dict, *, training_code_sha: str | None, created_at: str,
+                            lifecycle_state: str = "SHADOW_CHALLENGER") -> dict:
     """ONLY after the AI research gate PASSED and selection is STABLE (the
     caller enforces both). Refit the step-2 selections on all development
     folds F1..F3, calibrate on F4, keep the step-2 validated policy. This is
@@ -356,8 +372,8 @@ def build_shadow_challenger(rows, wf: dict, *, training_code_sha: str | None, cr
         training_period=common["training_period"],
         selection_evidence={"steps": [s["policy_sha256"] for s in wf["steps"]],
                             "stability": wf["selection_stability"]["status"]},
-        created_at=created_at, lifecycle_state="SHADOW_CHALLENGER")
-    return {"created": True, "lifecycle_state": "SHADOW_CHALLENGER", "bundle": bundle, "classifier_artifact": ca,
+        created_at=created_at, lifecycle_state=lifecycle_state)
+    return {"created": True, "lifecycle_state": lifecycle_state, "bundle": bundle, "classifier_artifact": ca,
             "regressor_artifact": ra, "bundle_sha256": bundle["bundle_sha256"],
             "decision_policy_sha256": policy.sha256, "feature_schema_sha256": fx.schema_hash(),
             "note": "not new OOS evidence; prospective SHADOW evaluation only; never LIVE_CHAMPION"}

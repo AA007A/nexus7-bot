@@ -10,15 +10,20 @@ LIVE_CHAMPION. This phase can create at most a SHADOW_CHALLENGER.
 """
 from __future__ import annotations
 
-STATES = ("RESEARCH_CANDIDATE", "SHADOW_CHALLENGER", "PAPER_CHALLENGER", "LIVE_CHAMPION")
+STATES = ("SHADOW_OBSERVER", "RESEARCH_CANDIDATE", "SHADOW_CHALLENGER", "PAPER_CHALLENGER", "LIVE_CHAMPION")
+# SHADOW_OBSERVER: a zero-order observation bundle built when the historical
+# evidence did NOT pass the AI gate. NO EDGE CLAIM, NO ORDER AUTHORITY, NO LIVE
+# AUTHORITY. It only collects fresh forward observations; it can never be
+# promoted (a new candidate must pass the gate to become a SHADOW_CHALLENGER).
+OBSERVER_CLAIMS = {"edge_claim": False, "order_authority": False, "live_authority": False}
 REQUIREMENTS = {
     ("RESEARCH_CANDIDATE", "SHADOW_CHALLENGER"): ("AI_RESEARCH_PROMOTION_GATE", "MODEL_SELECTION_STABLE"),
     ("SHADOW_CHALLENGER", "PAPER_CHALLENGER"): ("FORWARD_SHADOW_EVIDENCE",),
-    ("PAPER_CHALLENGER", "LIVE_CHAMPION"): ("FORWARD_PAPER_EVIDENCE", "STAGE_C_CODE", "STAGE_C_AI_IDENTITY",
-                                            "HUMAN_APPROVAL"),
+    ("PAPER_CHALLENGER", "LIVE_CHAMPION"): ("FORWARD_PAPER_EVIDENCE", "AI_EFFECTIVE_EXECUTION_EDGE",
+                                            "STAGE_C_CODE", "STAGE_C_AI_IDENTITY", "HUMAN_APPROVAL"),
 }
 # Execution modes each state may run in (LIVE only for a LIVE_CHAMPION).
-ALLOWED_MODES = {"RESEARCH_CANDIDATE": ("SHADOW",), "SHADOW_CHALLENGER": ("SHADOW",),
+ALLOWED_MODES = {"SHADOW_OBSERVER": ("SHADOW",), "RESEARCH_CANDIDATE": ("SHADOW",), "SHADOW_CHALLENGER": ("SHADOW",),
                  "PAPER_CHALLENGER": ("SHADOW", "PAPER"), "LIVE_CHAMPION": ("SHADOW", "PAPER", "LIVE")}
 
 

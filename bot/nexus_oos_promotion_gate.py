@@ -501,7 +501,8 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
 
 
 def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, now=None,
-                  policy: GatePolicy = GatePolicy()) -> GateResult:
+                  policy: GatePolicy = GatePolicy(),
+                  release_authority_kind: str = "NEXUS_ONLY") -> GateResult:
     """LIVE_RELEASE_GATE (stage C). Never deploys, never mutates anything.
 
     The research gate is evaluated ONLY on the OOS artifact fetched from the
@@ -516,7 +517,7 @@ def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, n
     from dataclasses import replace as _replace
     from bot import live_release_evidence as lre
     ev = lre.verify(evidence, local_artifact=local_artifact if isinstance(local_artifact, dict) else None,
-                    sources=sources, now=now)
+                    sources=sources, now=now, release_authority_kind=release_authority_kind)
     comp = ev["components"]
     trusted = ev["trusted_artifact"]
     if trusted is not None:
@@ -527,7 +528,24 @@ def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, n
     prelive = all(comp[k] == "PASS" for k in (
         "RESEARCH_ARTIFACT_AUTHENTICATED", "POLICY_CONTENT_MATCH", "LIVE_PROVENANCE_AUTHENTICATED",
         "EXACT_DEPLOYMENT_SHA_MATCH", "CI_EVIDENCE", "RELEASE_VERIFIER_TRUSTED"))
-    live_ok = prelive and res.promote and all(v == "PASS" for v in comp.values())
+    ai_verdict = (ev.get("ai_identity") or {}).get("verdict", "BLOCK")
+    if release_authority_kind == "AI_LIVE":
+        # AI LIVE: the AI identity binding is PART of the verdict (never PASS
+        # with AI_IDENTITY = BLOCK). NEXUS_ONLY keeps its own semantics.
+        if ai_verdict != "PASS":
+            b.append("AI_IDENTITY_NOT_PROVEN")
+        # Historical AI evidence is AI_HOOK_EDGE only while effective-execution
+        # parity is INCOMPLETE; it can never authorize AI LIVE on its own.
+        from bot.ai import ai_gate
+        ai_live = ai_gate.evaluate(trusted or {})["live_historical_promotion"]
+        if ai_live["verdict"] != "PASS":
+            b.append("AI_LIVE_PROMOTION_EVIDENCE_NOT_PROVEN")
+            b.extend(x for x in ai_live["blockers"] if x == "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE")
+    elif release_authority_kind != "NEXUS_ONLY":
+        b.append("RELEASE_AUTHORITY_KIND_UNKNOWN")
+    live_ok = (prelive and res.promote and all(v == "PASS" for v in comp.values())
+               and (release_authority_kind != "AI_LIVE"
+                    or (ai_verdict == "PASS" and "AI_LIVE_PROMOTION_EVIDENCE_NOT_PROVEN" not in b)))
     b = sorted(set(b))
     code = EXIT_PROMOTE if (live_ok and not b) else EXIT_BLOCKED
     stages = {"RESEARCH_PROMOTION": "PASS" if res.promote else "BLOCK",
@@ -538,7 +556,8 @@ def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, n
               "release_verifier_sha": ev["release_verifier_sha"],
               # AI_EXECUTION_MODE=LIVE additionally requires this == PASS
               # (bot.ai.runtime.authorize_ai_live); NEXUS-only LIVE ignores it.
-              "AI_IDENTITY": (ev.get("ai_identity") or {}).get("verdict", "BLOCK"),
+              "release_authority_kind": release_authority_kind,
+              "AI_IDENTITY": ai_verdict,
               "ai_identity": ev.get("ai_identity")}
     return GateResult(bool(live_ok and not b), b, code, gate=LIVE_GATE,
                       policy_content=(trusted or {}).get("policy_parity"),

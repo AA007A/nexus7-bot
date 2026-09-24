@@ -18,9 +18,13 @@ import json
 import math
 from dataclasses import dataclass, field
 
-FEATURE_SCHEMA_VERSION = "NEXUS7_AI_FEATURES_V2"   # V2: explicit __missing flag inputs
+FEATURE_SCHEMA_VERSION = "NEXUS7_AI_FEATURES_V3"   # V3: canonical closed windows (V2: __missing flags)
 
 TF_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
+# Canonical feature windows: the LAST N CLOSED candles per timeframe (the
+# replay's analysis windows). Runtime caches hold more history; EMA/ATR
+# values depend on history length, so every path truncates to these.
+FEATURE_WINDOWS = {"15m": 80, "1h": 50, "4h": 30}
 
 CAUSAL = "CAUSAL_CLOSED_CANDLES"
 CONTEXT = "CAUSAL_DECISION_CONTEXT"
@@ -86,7 +90,8 @@ MODEL_FEATURES: tuple[str, ...] = BASE_MODEL_FEATURES + tuple(f"{n}__missing" fo
 def schema_hash() -> str:
     body = [[s.name, s.version, s.source, s.timeframe, s.missing_policy, s.causality]
             for s in FEATURE_SPECS]
-    return hashlib.sha256(json.dumps([FEATURE_SCHEMA_VERSION, body, list(MODEL_FEATURES)]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([FEATURE_SCHEMA_VERSION, body, list(MODEL_FEATURES),
+                                      FEATURE_WINDOWS]).encode()).hexdigest()
 
 
 class FeatureCausalityError(ValueError):
@@ -229,14 +234,20 @@ def closed_only(window, tf: str, decision_ts: int) -> list:
     return [c for c in (window or ()) if _ts(c) + TF_MS[tf] <= int(decision_ts)]
 
 
+def canonical_window(window, tf: str, decision_ts: int) -> list:
+    """Closed candles only, sorted, de-duplicated by open time, last N."""
+    by_ts = {_ts(c): c for c in closed_only(window, tf, decision_ts)}
+    return [by_ts[t] for t in sorted(by_ts)][-FEATURE_WINDOWS[tf]:]
+
+
 def candidate_features(k15, k1h, k4h, *, decision_ts: int, direction: str, strategy_score: float,
                        entry: float, stop: float, rr: float, cost_fraction: float,
                        nexus_confidence: float | None):
     """Canonical entry point used by BOTH the replay and the live engine gate:
     closed windows -> FeatureVector + regime. Returns (FeatureVector, regime)."""
     from bot.ai import regime as rg
-    w15, w1h, w4h = (closed_only(k15, "15m", decision_ts), closed_only(k1h, "1h", decision_ts),
-                     closed_only(k4h, "4h", decision_ts))
+    w15, w1h, w4h = (canonical_window(k15, "15m", decision_ts), canonical_window(k1h, "1h", decision_ts),
+                     canonical_window(k4h, "4h", decision_ts))
     fv = compute_features(w15, w1h, w4h, decision_ts=decision_ts, direction=direction,
                           strategy_score=strategy_score, entry=entry, stop=stop, rr=rr,
                           cost_fraction=cost_fraction, nexus_confidence=nexus_confidence)

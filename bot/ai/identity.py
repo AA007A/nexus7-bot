@@ -138,6 +138,7 @@ def verify_ai_identity(envelope: dict | None, *, sources, now=None) -> dict:
         b.append("AI_IDENTITY_OBSERVATION_NOT_FOUND_IN_DEPLOYMENT_LOGS")
     else:
         o = max(obs, key=lambda x: x["generated_at"])
+        out["observed_at"] = o["generated_at"]
         if o["ai_mode"] != "LIVE":
             b.append("AI_RUNTIME_MODE_NOT_LIVE")
         if o["candidate_sha"] != cand:

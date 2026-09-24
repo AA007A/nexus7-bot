@@ -205,8 +205,11 @@ def _artifact_bytes(fetched) -> bytes | None:
     return content if isinstance(content, (bytes, bytearray)) else None
 
 
+RELEASE_KINDS = ("NEXUS_ONLY", "AI_LIVE")
+
+
 def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSources | None,
-           now: _dt.datetime | None = None) -> dict:
+           now: _dt.datetime | None = None, release_authority_kind: str = "NEXUS_ONLY") -> dict:
     """Verify a Stage-C envelope against trusted sources. Never mutates anything.
 
     Returns component verdicts, blockers and ``trusted_artifact`` (the research
@@ -430,13 +433,29 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
     else:
         b.append("PROTECTION_EVIDENCE_NOT_PROVEN")
 
+    # ── AI identity: mandatory for AI_LIVE; reported for NEXUS_ONLY ──
+    from bot.ai import identity as ai_identity
+    out["release_authority_kind"] = release_authority_kind
+    out["ai_identity"] = ai_identity.verify_ai_identity(envelope, sources=sources, now=now)
+    ai_observed = (_try_ts(out["ai_identity"].get("observed_at"))
+                   if release_authority_kind == "AI_LIVE" else None)
+    if release_authority_kind not in RELEASE_KINDS:
+        b.append("RELEASE_AUTHORITY_KIND_UNKNOWN")
+    claimed_kind = envelope.get("release_authority_kind")
+    if (claimed_kind is not None and claimed_kind != release_authority_kind) or (
+            release_authority_kind == "NEXUS_ONLY" and "ai_identity" in envelope):
+        b.append("RELEASE_AUTHORITY_KIND_AMBIGUOUS")
+    if release_authority_kind == "AI_LIVE" and out["ai_identity"]["verdict"] != "PASS":
+        b.append("AI_IDENTITY_NOT_PROVEN")
+
     # ── Human approval: bound to THIS release instance ──
     ha = envelope["human_approval"]
     rec = sources.approval(ha["approval_reference"]) or {}
     approved_at = _try_ts(ha["approved_at_utc"])
     # Approval is the FINAL release authorization: it must not predate any
     # automated Stage-C evidence it authorizes, including protection evidence.
-    prelive_times = [t for t in [deployed_at, observed, _try_ts((oos_run or {}).get("completed_at")),
+    prelive_times = [t for t in [deployed_at, observed, ai_observed,
+                                 _try_ts((oos_run or {}).get("completed_at")),
                                  *ci_times, *prot_times] if t is not None]
     prelive_done = max(prelive_times) if prelive_times else None
     covered = rec.get("deployment_id") == rw["deployment_id"] or (
@@ -455,10 +474,6 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
         comp["HUMAN_APPROVAL_EVIDENCE"] = "PASS"
     else:
         b.append("HUMAN_APPROVAL_NOT_PROVEN")
-
-    # ── AI identity (required only for AI_EXECUTION_MODE=LIVE; reported always) ──
-    from bot.ai import identity as ai_identity
-    out["ai_identity"] = ai_identity.verify_ai_identity(envelope, sources=sources, now=now)
 
     out["source_authenticated"] = (comp["LIVE_PROVENANCE_AUTHENTICATED"] == "PASS"
                                    and comp["RESEARCH_ARTIFACT_AUTHENTICATED"] == "PASS"

@@ -132,6 +132,7 @@ jobs:
           python -m unittest tests.test_nexus_oos_influence_residual -v
           python -m unittest tests.test_ai_decision_authority -v
           python -m unittest tests.test_ai_phase7b -v
+          python -m unittest tests.test_ai_phase7c -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
@@ -190,8 +191,10 @@ jobs:
                   'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
                                     for k, v in (c.get('concentration') or {}).items()},
                   'cost_stress_approved': c.get('cost_stress_approved'),
-                  'ai_meta_model': {k: (c.get('ai_meta_model') or {}).get(k) for k in ('status', 'data_label', 'pooled_test', 'authority_summary', 'dataset_manifest', 'error', 'selection_stability', 'research_promotion_gate', 'portfolio_by_test_fold', 'portfolio_pooled_test')},
+                  'ai_meta_model': {k: (c.get('ai_meta_model') or {}).get(k) for k in ('status', 'population', 'hook_profile', 'data_label', 'pooled_test', 'authority_summary', 'dataset_manifest', 'error', 'selection_stability', 'research_promotion_gate', 'portfolio_by_test_fold', 'portfolio_pooled_test')},
                   'ai_shadow_challenger': {k: ((c.get('ai_meta_model') or {}).get('shadow_challenger') or {}).get(k) for k in ('created', 'reason', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256')},
+                  'ai_shadow_observer': {k: ((c.get('ai_meta_model') or {}).get('shadow_observer') or {}).get(k) for k in ('created', 'reason', 'lifecycle_state', 'bundle_sha256', 'decision_policy_sha256', 'feature_schema_sha256', 'claims')},
+                  'ai_effective_execution_parity': c.get('ai_effective_execution_parity'),
                   'ai_meta_model_steps': [{k: s.get(k) for k in ('step', 'train_folds', 'validation_fold', 'test_fold', 'n_train', 'n_validation', 'n_test', 'selected_classifier', 'selected_regressor', 'policy', 'policy_sha256', 'windows', 'test_calibration', 'test_ai_cost_stress', 'test_ai_by_regime', 'test_ai_by_symbol', 'test_ai_approved', 'test_baseline', 'test_nexus_production', 'test_ai_by_direction')} for s in ((c.get('ai_meta_model') or {}).get('steps') or [])],
                   'ai_authority': {k: {kk: (v or {}).get(kk) for kk in ('mean_r', 'delta', 'authority_status', 'authority_ci_low', 'authority_ci_high', 'residual_dependence_at_longest_usable')} for k, v in (((c.get('ai_meta_model') or {}).get('authority')) or {}).items()},
                   'loss_decomposition': {'answers': (c.get('loss_decomposition') or {}).get('answers'), 'approved': {k: v for k, v in ((c.get('loss_decomposition') or {}).get('approved') or {}).items() if k in ('by_direction', 'by_regime', 'by_exit_reason', 'by_symbol', 'costs_r', 'by_utc_hour', 'by_holding_hours')}},

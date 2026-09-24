@@ -17,6 +17,10 @@ import json
 SHADOW_CONTRACT = {
     "name": "FORWARD_SHADOW_EVIDENCE_V1",
     "mode": "SHADOW",
+    "process": "ISOLATED_SHADOW_OBSERVER (bot.ai.shadow_observer; deploy/ai_shadow_observer); zero exchange "
+               "mutation capability; no exchange credentials; not the production engine",
+    "hook_population": "AI_RUNTIME_HOOK_POPULATION_V1",
+    "hook_profile": "LIVE_PILOT_POST_CROSS_GEOMETRY",
     "min_calendar_days": 30,
     "min_ai_decisions": 300,
     "min_ai_approved_resolved": 60,
@@ -37,6 +41,9 @@ SHADOW_CONTRACT = {
 PAPER_CONTRACT = {
     "name": "FORWARD_PAPER_EVIDENCE_V1",
     "mode": "PAPER",
+    "hook_profile_requirement": "LIVE_PILOT_POST_CROSS_GEOMETRY. A PAPER_TRADE engine runs the pre-geometry "
+                                "hook profile, so PAPER evidence cannot transfer to LIVE until a paper path "
+                                "reproduces the LIVE pilot hook (runtime halts on a profile mismatch)",
     "min_calendar_days": 30,
     "min_paper_trades": 60,
     "min_symbols_traded": 3,

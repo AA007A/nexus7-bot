@@ -459,6 +459,7 @@ class TradingEngine:
         # no-op). It never sends orders; PAPER/LIVE only add a mandatory "no".
         from bot.ai.runtime import AIRuntime
         self.ai_runtime = AIRuntime(paper_trade=self.paper_trade, log=log)
+        self._ai_hook_windows: Dict[str, tuple] = {}   # windows NEXUS used, reused by the AI hook
 
         # ── Lock de posições (race condition) ─────────────────────
         # self.positions é mutado por 7 pontos em corrotinas diferentes:
@@ -2634,6 +2635,10 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"nexus: news sentiment indisponível: {_e}")
 
+            # The AI hook reuses exactly these windows (no second fetch).
+            if getattr(self, "_ai_hook_windows", None) is None:
+                self._ai_hook_windows = {}
+            self._ai_hook_windows[sig.symbol] = (k15, k1h, k4h)
             return await asyncio.to_thread(
                 nexus_ai.decide, symbol=sig.symbol,
                 k15=k15, k1h=k1h, k4h=k4h,
@@ -2666,7 +2671,9 @@ class TradingEngine:
         ident = runtime_identity()
         sha = ident.get("candidate_sha")
         # No trusted Stage-C provider exists in-candidate: AI LIVE halts here.
-        rt.startup(candidate_sha=None if sha == "UNAVAILABLE" else sha, stage_c_result=None)
+        from bot.ai import hook as ai_hook
+        rt.startup(candidate_sha=None if sha == "UNAVAILABLE" else sha, stage_c_result=None,
+                   hook_profile=ai_hook.engine_profile(self))
         log.warning(rt.observation_line(candidate_sha=sha, deployment_id=ident.get("deployment_id")))
 
         async def _lookup(oid):
@@ -2684,20 +2691,25 @@ class TradingEngine:
         log.warning(f"[AI_RECOVERY] {res} halted={rt.halts.halted}")
 
     async def _ai_gate(self, sig, nx_dec):
+        """AI_RUNTIME_HOOK_POPULATION_V1 call site: sig / nx_dec exactly as
+        held here (LIVE pilot: post CROSS geometry + NEXUS recheck)."""
+        from bot.ai import hook as ai_hook
         from bot.ai.runtime import GateOutcome
         rt = getattr(self, "ai_runtime", None)
         if rt is None or not rt.enabled:
             return GateOutcome(True, False, "AI_OFF")
         try:
             from bot.professional_risk_adapter import conservative_cost_fraction
-            return await rt.gate(
-                symbol=sig.symbol, direction=sig.direction, entry=float(sig.entry),
-                stop=float(sig.sl), rr=float(sig.rr), strategy_score=float(sig.score or 0),
-                nexus_confidence=float(getattr(nx_dec, "confidence", 0.0) or 0.0),
-                cost_fraction=conservative_cost_fraction(sig.symbol), taker_fee=float(TAKER_FEE),
-                k15=self.client.get_cached_klines(sig.symbol, "15", 200),
-                k1h=self.client.get_cached_klines(sig.symbol, "60", 100),
-                k4h=self.client.get_cached_klines(sig.symbol, "240", 120))
+            now_ms = int(time.time() * 1000)
+            obs = ai_hook.from_engine(
+                sig, nx_dec, decision_ts=rt.event_ts(now_ms),
+                cost_fraction=conservative_cost_fraction(sig.symbol),
+                profile=ai_hook.engine_profile(self))
+            windows = (getattr(self, "_ai_hook_windows", {}) or {}).pop(sig.symbol, None) or (
+                self.client.get_cached_klines(sig.symbol, "15", 200),
+                self.client.get_cached_klines(sig.symbol, "60", 100),
+                self.client.get_cached_klines(sig.symbol, "240", 120))
+            return await rt.gate(obs, *windows, taker_fee=float(TAKER_FEE), now_ms=now_ms)
         except Exception as exc:
             return GateOutcome(not rt.authoritative, rt.authoritative, f"AI_GATE_ERROR:{type(exc).__name__}")
 

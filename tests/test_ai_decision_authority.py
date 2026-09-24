@@ -60,7 +60,7 @@ POLICY = dec.DecisionPolicy(min_p_profitable=0.55, min_expected_net_r=0.05, allo
                             supported_regimes=dec.TRADABLE_REGIMES)
 
 
-def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLENGER"):
+def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLENGER", hook_profile=None):
     d = len(fx.MODEL_FEATURES)
     clf = mdl.LogisticL2.from_params({"l2": 1.0, "iters": 1, "std": {"mean": [0.0] * d, "scale": [1.0] * d},
                                       "w": [0.0] * d, "b": math.log(p / (1 - p))})
@@ -74,7 +74,7 @@ def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLE
     man = dec.bundle_manifest(classifier_artifact=ca, regressor_artifact=ra, calibration={"kind": "IDENTITY"},
                               policy=policy, training_code_sha="t" * 40, dataset_manifest_sha256="d" * 64,
                               training_period={}, selection_evidence={}, created_at="2026-09-24T00:00:00Z",
-                              lifecycle_state=lifecycle)
+                              lifecycle_state=lifecycle, hook_profile=hook_profile)
     b = dec.ModelBundle.load(json.dumps(man), json.dumps(ca), json.dumps(ra),
                              pinned_bundle_sha=man["bundle_sha256"])
     return b, ca, ra, man
@@ -454,6 +454,7 @@ class TrainingDiscipline(unittest.TestCase):
             ts = T0 + i * 3 * H1
             r = 0.8 * f[0] + rng.gauss(0, 1.0)
             rows.append({"ts": ts, "outcome_end_ts": ts + H1, "executable": True, "approved": i % 3 == 0,
+                         "ai_hook_eligible": True,
                          "outcome_status": "RESOLVED", "r": r, "gross_r": r + 0.2, "ai_features": f,
                          "direction": "LONG" if i % 2 else "SHORT", "symbol": "BTCUSDT",
                          "ai_regime": "TREND_UP"})

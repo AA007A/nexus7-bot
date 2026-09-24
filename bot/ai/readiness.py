@@ -14,7 +14,7 @@ from pathlib import Path
 from bot.ai import decision as dec
 from bot.ai import features as fx
 
-SCHEMA = "NEXUS7_AI_OPERATION_READINESS_V2"
+SCHEMA = "NEXUS7_AI_OPERATION_READINESS_V3"
 
 
 def _authenticated(artifact, candidate_sha) -> bool:
@@ -56,12 +56,25 @@ def build(artifact: dict | None, *, candidate_sha: str | None) -> dict:
         "ai_research_promotion_gate": {"verdict": gate["verdict"], "blockers": gate["blockers"],
                                        "components": comp, "recomputed": gate["recomputed"]},
         "model_selection_stability": (ai.get("selection_stability") or {}).get("status"),
+        "ai_runtime_hook_population": {"definition": ai.get("population"), "profile": ai.get("hook_profile"),
+                                       "counts": ((cand.get("population_counts") or {})
+                                                  .get("ai_hook_population"))},
+        "ai_hook_edge": gate["ai_hook_edge"],
+        "ai_effective_execution_parity": gate["ai_effective_execution_parity"],
+        "ai_effective_execution_edge": gate["ai_effective_execution_edge"],
+        "ai_live_historical_promotion": gate["live_historical_promotion"],
+        "aggregate_bootstrap_verifier": (gate.get("recomputed") or {}).get("model"),
+        "shadow_observer": {k: (ai.get("shadow_observer") or {}).get(k)
+                            for k in ("created", "lifecycle_state", "bundle_sha256", "decision_policy_sha256",
+                                      "claims", "reason")},
         "shadow_challenger": {"created": bool(sc.get("created")),
                               "bundle_sha256": sc.get("bundle_sha256"),
                               "decision_policy_sha256": sc.get("decision_policy_sha256"),
                               "lifecycle_state": sc.get("lifecycle_state"),
                               "reason": sc.get("reason")},
-        "execution_mode_support": {"OFF": "DEFAULT_NO_OP", "SHADOW": "CODE_READY",
+        "execution_mode_support": {"OFF": "DEFAULT_NO_OP",
+                                   "SHADOW": "AI_HAS_NO_ORDER_AUTHORITY_IN_ENGINE; forward evidence only from "
+                                             "the isolated observer (bot.ai.shadow_observer)",
                                    "PAPER": "CODE_READY_REQUIRES_PAPER_TRADE_ENGINE",
                                    "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C_AND_AI_IDENTITY"},
         "oos_status": {"ai_meta_model_status": ai.get("status", "NOT_RUN"),
@@ -80,7 +93,7 @@ def build(artifact: dict | None, *, candidate_sha: str | None) -> dict:
             [f"AI_{k}_BLOCK" if not k.startswith("AI_") else f"{k}_BLOCK"
              for k, v in components.items() if v != "PASS"]
             + ["NO_FORWARD_SHADOW_EVIDENCE", "NO_FORWARD_PAPER_EVIDENCE", "NO_LIVE_CHAMPION",
-               "STAGE_C_EVIDENCE_NOT_AVAILABLE"])),
+               "STAGE_C_EVIDENCE_NOT_AVAILABLE", "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE"])),
         "secrets_included": False,
     }
 

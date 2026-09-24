@@ -15,7 +15,7 @@ import argparse
 import asyncio
 import json
 from bisect import bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Iterable
@@ -572,6 +572,7 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
             nx = _decide(nexus_ai, symbol, w15, w1h, w4h, sig, ticker, funding, threshold)
             approved_initial = getattr(nx, "execution_allowed", False) is True
             geometry = None
+            nx2 = None
             approved_final = approved_initial
             if parity:
                 geometry = xp.production_geometry(sig, leverage=leverage, mmr=mmr,
@@ -676,21 +677,30 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
         if final is None:
             counts["parity_outcome_unavailable"] += 1
             executable = False
-        # Canonical AI features: the SAME call used by SHADOW / PAPER / LIVE.
-        try:
-            from bot.ai import features as ai_fx
-            fv, ai_regime = ai_fx.candidate_features(
-                w15, w1h, w4h, decision_ts=int(decision_ts), direction=direction,
-                strategy_score=float(getattr(sig, "score", 0) or 0), entry=float(sig.entry),
-                stop=float(final_sl), rr=float(sig.rr), cost_fraction=float(cost_fraction),
-                nexus_confidence=float(getattr(nx, "confidence", 0.0) or 0.0))
-            row["ai_features"] = [round(float(x), 10) for x in fv.model_input()]
-            row["ai_features_missing"] = list(fv.missing)
-            row["ai_feature_hash"] = fv.feature_hash()
-            row["ai_regime"] = ai_regime
-        except Exception as exc:
-            row["ai_features"] = None
-            row["ai_features_error"] = type(exc).__name__
+        # AI_RUNTIME_HOOK_POPULATION_V1: the exact state before TradingEngine._ai_gate
+        # (LIVE pilot profile = training population; pre-geometry profile diagnostic).
+        from bot.ai import hook as ai_hook
+        hook_kw = dict(decision_ts=int(decision_ts), funnel=funnel,
+                       min_entry_score=float(manifest["MIN_ENTRY_SCORE"]), nx_initial=nx,
+                       geometry=geometry, nx_final=nx2, cost_fraction=float(cost_fraction))
+        hk = ai_hook.evaluate_candidate(sig, profile=ai_hook.PROFILE_LIVE_PILOT, **hook_kw)
+        hk_pre = ai_hook.evaluate_candidate(sig, profile=ai_hook.PROFILE_PRE_GEOMETRY, **hook_kw)
+        row["ai_hook_population"] = ai_hook.POPULATION
+        row["ai_hook_eligible"] = bool(hk["eligible"])
+        row["ai_hook_stage"] = hk["stage"]
+        row["ai_hook_eligible_pre_geometry"] = bool(hk_pre["eligible"])
+        row["ai_features"] = None
+        if hk["eligible"]:
+            obs = hk["observation"]
+            row["ai_hook_observation"] = obs.to_dict()
+            try:
+                fv, ai_regime = ai_hook.features(obs, w15, w1h, w4h)
+                row["ai_features"] = [round(float(x), 10) for x in fv.model_input()]
+                row["ai_features_missing"] = list(fv.missing)
+                row["ai_feature_hash"] = fv.feature_hash()
+                row["ai_regime"] = ai_regime
+            except Exception as exc:
+                row["ai_features_error"] = type(exc).__name__
         row.update({
             "session": funnel["session"], "session_penalty": funnel["session_penalty"],
             "score_adjusted": funnel["adjusted_score"],
@@ -1005,6 +1015,32 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         "resolved_executable_outcomes": len(exe),
         "censored_executable_outcomes": sum(1 for r in exe_all if r.get("outcome_status") != "RESOLVED"),
         "approved_production_including_censored": sum(1 for r in exe_all if r.get("approved")),
+        # AI_RUNTIME_HOOK_POPULATION_V1 funnel (LIVE pilot profile; stateless).
+        "ai_hook_population": {
+            "definition": "AI_RUNTIME_HOOK_POPULATION_V1",
+            "profile": "LIVE_PILOT_POST_CROSS_GEOMETRY",
+            "strategy_candidates": len(all_rich),
+            "executable_candidates": sum(1 for r in all_rich if r.get("executable")),
+            "initial_nexus_approved": sum(1 for r in all_rich if r.get("approved_legacy")),
+            "ai_hook_eligible": sum(1 for r in all_rich if r.get("ai_hook_eligible")),
+            "ai_hook_eligible_resolved": sum(1 for r in all_rich if r.get("ai_hook_eligible")
+                                             and r.get("outcome_status") == "RESOLVED"),
+            "ai_hook_eligible_pre_geometry_profile": sum(
+                1 for r in all_rich if r.get("ai_hook_eligible_pre_geometry")),
+            "post_ai_downstream_eligible": sum(1 for r in all_rich if r.get("ai_hook_eligible")
+                                               and r.get("executable")),
+            "production_approved": sum(1 for r in all_rich if r.get("approved")),
+            "hook_stage_counts": dict(sorted(
+                Counter(str(r.get("ai_hook_stage")) for r in all_rich).items())),
+            "semantics": {
+                "executable": "geometry SAFE/ADJUSTED and scan funnel and not pre-dispatch drift "
+                              "(does NOT require NEXUS)",
+                "approved": "executable and final NEXUS approval (production approval, no AI)",
+                "approved_legacy": "initial NEXUS approval on the original signal geometry",
+                "ai_hook_eligible": "reaches TradingEngine._ai_gate: scan funnel, initial NEXUS, "
+                                    "CROSS geometry not BLOCK, NEXUS recheck when ADJUSTED",
+            },
+        },
     }
     out["performance"] = {
         "baseline": res.performance(exe),
@@ -1100,7 +1136,13 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
     from bot.ai import training as ai_train
     out["loss_decomposition"] = ai_diag.decomposition(exe_all)
     try:
-        out["ai_meta_model"] = ai_train.walk_forward(exe_all, required_ms=req_ms)
+        out["ai_meta_model"] = ai_train.walk_forward(all_rich, required_ms=req_ms)
+        from bot.ai import hook as ai_hook
+        out["ai_effective_execution_parity"] = {
+            "status": ai_hook.EFFECTIVE_EXECUTION_PARITY,
+            "missing": list(ai_hook.EFFECTIVE_EXECUTION_PARITY_MISSING),
+            "meaning": "AI results are AI_HOOK_EDGE (selection among candidates reaching the runtime "
+                       "hook); they are not proof of AI_EFFECTIVE_EXECUTION_EDGE on final real orders"}
         out["ai_meta_model"]["dataset_manifest"] = ai_train.dataset_manifest(exe_all)
     except Exception as exc:          # reported, never silently dropped
         out["ai_meta_model"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -1486,6 +1528,17 @@ def _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy)
         ai["shadow_challenger"] = {"created": False,
                                    "reason": ("AI_RESEARCH_GATE_BLOCK" if gate["verdict"] != "PASS"
                                               else "MODEL_SELECTION_UNSTABLE")}
+        # Zero-order observation bundle: NO EDGE CLAIM, NO ORDER AUTHORITY,
+        # NO LIVE AUTHORITY. Only for collecting fresh forward SHADOW data.
+        from bot.ai import lifecycle as ai_lc
+        try:
+            obs_b = ai_train.build_shadow_challenger(
+                all_rich, ai, training_code_sha=_os.environ.get("GITHUB_SHA"),
+                created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                lifecycle_state="SHADOW_OBSERVER")
+            ai["shadow_observer"] = {**obs_b, "claims": dict(ai_lc.OBSERVER_CLAIMS)}
+        except Exception as exc:
+            ai["shadow_observer"] = {"created": False, "reason": type(exc).__name__}
 
 
 def _ai_port_summary(rep: dict) -> dict:

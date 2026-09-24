@@ -1,4 +1,15 @@
 {
+  "aggregate_bootstrap_verifier": null,
+  "ai_effective_execution_edge": "BLOCK",
+  "ai_effective_execution_parity": "INCOMPLETE",
+  "ai_hook_edge": "BLOCK",
+  "ai_live_historical_promotion": {
+    "blockers": [
+      "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE",
+      "AI_META_MODEL_STATUS_MISSING"
+    ],
+    "verdict": "BLOCK"
+  },
   "ai_research_promotion_gate": {
     "blockers": [
       "AI_META_MODEL_STATUS_MISSING"
@@ -14,6 +25,11 @@
     },
     "recomputed": {},
     "verdict": "BLOCK"
+  },
+  "ai_runtime_hook_population": {
+    "counts": null,
+    "definition": null,
+    "profile": null
   },
   "ai_version": "NEXUS7_AI_DECISION_AUTHORITY_V2",
   "candidate_sha": null,
@@ -33,7 +49,7 @@
     "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C_AND_AI_IDENTITY",
     "OFF": "DEFAULT_NO_OP",
     "PAPER": "CODE_READY_REQUIRES_PAPER_TRADE_ENGINE",
-    "SHADOW": "CODE_READY"
+    "SHADOW": "AI_HAS_NO_ORDER_AUTHORITY_IN_ENGINE; forward evidence only from the isolated observer (bot.ai.shadow_observer)"
   },
   "feature_schema": {
     "live_only_excluded": [
@@ -81,18 +97,18 @@
       "hour_sin__missing",
       "hour_cos__missing"
     ],
-    "sha256": "0e8cb451a8c1ec5739bbf1c6504d742305b802aaf6f03ed4f79609059c7e68f4",
-    "version": "NEXUS7_AI_FEATURES_V2"
+    "sha256": "ae0f97b06f39028ab5858dbfde3127d567f1b6b7f666fa8109083b5277e739f3",
+    "version": "NEXUS7_AI_FEATURES_V3"
   },
   "forward_paper_evidence": {
     "contract": "FORWARD_PAPER_EVIDENCE_V1",
-    "contract_sha256": "9aff274e5049d3c591f6f658d597dc6fb846529832379b721ead26fb6ef1af54",
+    "contract_sha256": "f7eca124520a7c9c34b09e38d5392618efeb694f6ccc0641106854464f194308",
     "reason": "no forward window observed yet",
     "verdict": "INSUFFICIENT_EVIDENCE"
   },
   "forward_shadow_evidence": {
     "contract": "FORWARD_SHADOW_EVIDENCE_V1",
-    "contract_sha256": "4cb055f188ac5f7d905225bcc94b5870f3b48413480d5c915ffadda3cc994d9b",
+    "contract_sha256": "b6ebf1265c498606e418e998269dc2cd1cb4a4e778913b26ea350b5c4cc3e2b5",
     "reason": "no forward window observed yet",
     "verdict": "INSUFFICIENT_EVIDENCE"
   },
@@ -100,6 +116,7 @@
   "known_blockers": [
     "AI_CALIBRATION_BLOCK",
     "AI_COST_STRESS_BLOCK",
+    "AI_EFFECTIVE_EXECUTION_PARITY_INCOMPLETE",
     "AI_EXPECTANCY_AUTHORITY_BLOCK",
     "AI_PORTFOLIO_ROBUSTNESS_BLOCK",
     "AI_RESEARCH_ARTIFACT_AUTHENTICATED_BLOCK",
@@ -120,11 +137,19 @@
   },
   "restart_ai_reconciliation": "CLIENT_OID_RECONCILE_BEFORE_NEW_ENTRY",
   "risk_invariant_status": "ENFORCED_BY_AUTHORITY_CHAIN_TESTED",
-  "schema": "NEXUS7_AI_OPERATION_READINESS_V2",
+  "schema": "NEXUS7_AI_OPERATION_READINESS_V3",
   "secrets_included": false,
   "shadow_challenger": {
     "bundle_sha256": null,
     "created": false,
+    "decision_policy_sha256": null,
+    "lifecycle_state": null,
+    "reason": null
+  },
+  "shadow_observer": {
+    "bundle_sha256": null,
+    "claims": null,
+    "created": null,
     "decision_policy_sha256": null,
     "lifecycle_state": null,
     "reason": null

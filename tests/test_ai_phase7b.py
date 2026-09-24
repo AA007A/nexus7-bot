@@ -17,6 +17,7 @@ from bot.ai import decision as dec
 from bot.ai import features as fx
 from bot.ai import forward_evidence as fe
 from bot.ai import halt as hl
+from bot.ai import hook as hk
 from bot.ai import identity as aid
 from bot.ai import lifecycle as lc
 from bot.ai import runtime as rt
@@ -44,6 +45,7 @@ def synthetic_rows(n=2400, seed=5, signal=1.2):
         ts = T0 + i * 3 * H1
         r = signal * f[0] + rng.gauss(0, 0.6)
         out.append({"ts": ts, "outcome_end_ts": ts + H1, "executable": True, "approved": i % 3 == 0,
+                    "ai_hook_eligible": True,
                     "outcome_status": "RESOLVED", "r": r, "gross_r": r + 0.1, "ai_features": f,
                     "direction": "LONG" if i % 2 else "SHORT", "symbol": SYMS[i % 5],
                     "ai_regime": ["TREND_UP", "RANGE", "CHOP"][i % 3]})
@@ -57,7 +59,7 @@ def passing_artifact():
     """Real walk-forward authority aggregates + positive portfolio/cost/concentration."""
     if "wf" not in _WF:
         from bot import nexus_oos_inference as inf
-        _WF["wf"] = tr.walk_forward(synthetic_rows(), required_ms=inf.DAY_MS, samples=300)
+        _WF["wf"] = tr.walk_forward(synthetic_rows(), required_ms=inf.DAY_MS)
     ai = copy.deepcopy(_WF["wf"])
     ai.pop("_fitted", None)
     pooled = ai["pooled_test"]
@@ -83,26 +85,78 @@ class AIResearchGate(unittest.TestCase):
         self.assertEqual(g["verdict"], "PASS", g["blockers"])
         self.assertTrue(all(v == "PASS" for v in g["components"].values()))
 
-    def test_never_trusts_stored_status_or_ci(self):
-        # (a) block CIs below zero while the stored summary claims VALID and positive
+    @staticmethod
+    def _shift(section, delta, paired):
+        """Shift the TRUE aggregates by delta R per selected trade (all lengths)."""
+        for iv in section["block_intervals"]:
+            ser = (iv.get("residual_dependence") or {}).get("series")
+            if not ser:
+                continue
+            ks, kn = ("a_sum", "a_count") if paired else ("sum_r", "count")
+            ser[ks] = [round(v + delta * c, 12) for v, c in zip(ser[ks], ser[kn])]
+        section["mean_r" if not paired else "delta"] = (section.get("mean_r" if not paired else "delta")
+                                                        or 0.0) + delta
+
+    def test_forged_positive_stored_ci_does_not_create_pass(self):
         art = passing_artifact()
-        sec = _ai(art)["authority"]["ai_approved_expectancy"]
-        for bi in sec["block_intervals"]:
-            bi["ci"] = [-0.5, 0.1]
-        sec.update({"authority_status": "VALID", "authority_ci_low": 9.9, "authority_ci_high": 10.0})
+        auth = _ai(art)["authority"]
+        for name, paired in (("ai_approved_expectancy", False), ("ai_uplift_vs_baseline", True)):
+            sec = auth[name]
+            self._shift(sec, -3.0, paired)                  # true aggregate CI now clearly negative
+            for iv in sec["block_intervals"]:
+                iv["ci"] = [5.0, 6.0]                       # forged stored CIs
+            sec.update({"authority_status": "VALID", "authority_ci_low": 5.0, "authority_ci_high": 6.0})
         g = ai_gate.evaluate(art)
-        self.assertEqual(g["components"]["AI_EXPECTANCY_AUTHORITY"], "BLOCK")
-        self.assertIn("AI_EXPECTANCY_CI_NOT_POSITIVE", g["blockers"])
-        # (b) zero-variance influence series behind a stored "not significant" ACF
-        art = passing_artifact()
-        sec = _ai(art)["authority"]["ai_approved_expectancy"]
-        res = sec["residual_dependence_at_longest_usable"]
-        mu = res["aggregate_point_estimate"]
-        res["series"]["sum_r"] = [mu * c for c in res["series"]["count"]]
-        res.update({"significant": False, "estimable": True, "acf": {"1": 0.0, "2": 0.0, "3": 0.0}})
-        g = ai_gate.evaluate(art)
-        self.assertEqual(g["components"]["AI_EXPECTANCY_AUTHORITY"], "BLOCK")
         self.assertEqual(g["verdict"], "BLOCK")
+        self.assertEqual(g["components"]["AI_EXPECTANCY_AUTHORITY"], "BLOCK")
+        self.assertEqual(g["components"]["AI_UPLIFT_AUTHORITY"], "BLOCK")
+        rec = g["recomputed"]["ai_expectancy"]
+        self.assertEqual(rec["model"], "AI_AGGREGATE_BLOCK_BOOTSTRAP_V1")
+        self.assertLess(rec["ci"][1], 0)
+        self.assertFalse(rec["stored_comparison"]["all_interval_cis_match"])
+
+    def test_forged_negative_stored_ci_does_not_destroy_true_positive(self):
+        art = passing_artifact()
+        truth = ai_gate.evaluate(art)["recomputed"]["ai_expectancy"]["ci"]
+        sec = _ai(art)["authority"]["ai_approved_expectancy"]
+        for iv in sec["block_intervals"]:
+            iv["ci"] = [-6.0, -5.0]
+        sec.update({"authority_status": "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK",
+                    "authority_ci_low": -6.0, "authority_ci_high": -5.0})
+        sec["residual_dependence_at_longest_usable"]["acf"] = {"1": 0.99, "2": 0.99, "3": 0.99}
+        g = ai_gate.evaluate(art)
+        self.assertEqual(g["verdict"], "PASS", g["blockers"])
+        self.assertEqual(g["recomputed"]["ai_expectancy"]["ci"], truth)
+        self.assertGreater(truth[0], 0)
+
+    def test_recomputed_ci_equals_the_replay_bootstrap(self):
+        art = passing_artifact()
+        g = ai_gate.evaluate(art)
+        for rec in g["recomputed"]["ai_expectancy"]["intervals"] + g["recomputed"]["ai_uplift"]["intervals"]:
+            if rec["ci"][0] is not None:
+                self.assertTrue(rec["stored_matches"], rec)
+
+    def test_zero_variance_series_blocks(self):
+        art = passing_artifact()
+        sec = _ai(art)["authority"]["ai_approved_expectancy"]
+        for iv in sec["block_intervals"]:
+            ser = (iv.get("residual_dependence") or {}).get("series")
+            if ser:
+                mu = sum(ser["sum_r"]) / sum(ser["count"])
+                ser["sum_r"] = [mu * c for c in ser["count"]]
+        g = ai_gate.evaluate(art)
+        self.assertEqual(g["components"]["AI_EXPECTANCY_AUTHORITY"], "BLOCK")
+
+    def test_bootstrap_parameters_are_pinned(self):
+        art = passing_artifact()
+        _ai(art)["authority"]["ai_approved_expectancy"]["bootstrap"]["samples"] = 100
+        self.assertIn("AI_EXPECTANCY_AUTHORITY_BOOTSTRAP_SAMPLES_UNKNOWN", ai_gate.evaluate(art)["blockers"])
+
+    def test_deleting_an_interval_blocks(self):
+        art = passing_artifact()
+        sec = _ai(art)["authority"]["ai_approved_expectancy"]
+        sec["block_intervals"] = [iv for iv in sec["block_intervals"] if iv["block_ms"] != 3 * 86_400_000]
+        self.assertIn("AI_EXPECTANCY_AUTHORITY_AGGREGATE_INTERVAL_MISSING", ai_gate.evaluate(art)["blockers"])
 
     def test_status_label_and_missing(self):
         self.assertIn("AI_META_MODEL_STATUS_MISSING", ai_gate.evaluate({})["blockers"])
@@ -211,7 +265,7 @@ class FailClosedSelection(unittest.TestCase):
 
 class FeatureSchemaAndIdentity(unittest.TestCase):
     def test_zero_with_flag_companions(self):
-        self.assertEqual(fx.FEATURE_SCHEMA_VERSION, "NEXUS7_AI_FEATURES_V2")
+        self.assertEqual(fx.FEATURE_SCHEMA_VERSION, "NEXUS7_AI_FEATURES_V3")
         for n in fx.FLAGGED_FEATURES:
             self.assertIn(f"{n}__missing", fx.MODEL_FEATURES)
         fv = feature_vector(nexus_confidence=None)
@@ -294,9 +348,9 @@ class GoldenFeatureParity(unittest.TestCase):
     def test_runtime_gate_uses_the_same_features(self):
         k15, k1h, k4h, forming = self._candles()
         r, journal = runtime_with_bundle("SHADOW")
-        out = run(r.gate(symbol="BTCUSDT", direction="LONG", entry=100.0, stop=99.0, rr=2.5, strategy_score=72,
-                         nexus_confidence=65.0, cost_fraction=0.0022, taker_fee=0.0006,
-                         k15=k15 + [forming], k1h=k1h, k4h=k4h, now_ms=DECISION_TS + 60_000))
+        out = run(gate_call(r, symbol="BTCUSDT", direction="LONG", entry=100.0, stop=99.0, rr=2.5,
+                            strategy_score=72, nexus_confidence=65.0, cost_fraction=0.0022, taker_fee=0.0006,
+                            k15=k15 + [forming], k1h=k1h, k4h=k4h, now_ms=DECISION_TS + 60_000))
         replay_fv, _ = fx.candidate_features(k15, k1h, k4h, decision_ts=DECISION_TS, direction="LONG",
                                              strategy_score=72, entry=100.0, stop=99.0, rr=2.5,
                                              cost_fraction=0.0022, nexus_confidence=65.0)
@@ -304,7 +358,7 @@ class GoldenFeatureParity(unittest.TestCase):
         self.assertEqual(out.decision.timestamp, DECISION_TS)
 
 
-GOLDEN_MODEL_INPUT_SHA256 = "41b06dddc865abf926be8fa5fe1376bfa0d86ea230d81844eab5dd0e8a20710d"
+GOLDEN_MODEL_INPUT_SHA256 = "e61f05e844077aa51f10b6e7b12aec3f39e5ca2e5bf313445a318784a3ecfa27"
 
 
 # ── runtime fixtures ──────────────────────────────────────────────────────
@@ -331,25 +385,39 @@ class FakeDB:
                 for k, v in self.rows.items() if v["status"] in ("INTENT_CREATED", "SUBMITTED", "PENDING_UNKNOWN")]
 
 
-def write_bundle(tmp, lifecycle="SHADOW_CHALLENGER", p=0.62):
-    b, ca, ra, man = constant_bundle(p=p, lifecycle=lifecycle)
+def write_bundle(tmp, lifecycle="SHADOW_CHALLENGER", p=0.62, hook_profile=None):
+    b, ca, ra, man = constant_bundle(p=p, lifecycle=lifecycle, hook_profile=hook_profile)
     for name, obj in (("manifest.json", man), ("classifier.json", ca), ("regressor.json", ra)):
         with open(os.path.join(tmp, name), "w") as fh:
             json.dump(obj, fh)
     return man["bundle_sha256"]
 
 
-def runtime_with_bundle(mode, *, lifecycle=None, paper_trade=None, pin=None, db=None, stage_c=None, p=0.62):
+def runtime_with_bundle(mode, *, lifecycle=None, paper_trade=None, pin=None, db=None, stage_c=None, p=0.62,
+                        bundle_profile=None, engine_profile=None):
+    """PAPER engines run the pre-geometry hook profile; LIVE pilot the post-geometry one."""
     tmp = tempfile.mkdtemp()
     lifecycle = lifecycle or {"SHADOW": "SHADOW_CHALLENGER", "PAPER": "PAPER_CHALLENGER",
                               "LIVE": "LIVE_CHAMPION"}.get(mode, "SHADOW_CHALLENGER")
-    sha = write_bundle(tmp, lifecycle, p=p)
+    default_profile = hk.PROFILE_PRE_GEOMETRY if mode == "PAPER" else hk.PROFILE_LIVE_PILOT
+    bundle_profile = bundle_profile or default_profile
+    engine_profile = engine_profile or default_profile
+    sha = write_bundle(tmp, lifecycle, p=p, hook_profile=bundle_profile)
     env = {"AI_EXECUTION_MODE": mode, "AI_BUNDLE_DIR": tmp, "AI_BUNDLE_SHA256": pin or sha}
     journal = rt.DurableAIJournal(db or FakeDB())
     r = rt.AIRuntime(env, journal=journal, paper_trade=(mode == "PAPER") if paper_trade is None else paper_trade,
                      clock_ms=lambda: DECISION_TS + 60_000)
-    r.startup(candidate_sha="c" * 40, stage_c_result=stage_c)
+    r.startup(candidate_sha="c" * 40, stage_c_result=stage_c, hook_profile=engine_profile)
     return r, journal
+
+
+def gate_call(r, *, symbol, direction, entry, stop, rr, strategy_score, nexus_confidence, cost_fraction,
+              taker_fee, k15, k1h, k4h, now_ms, profile=None):
+    obs = hk.HookObservation(symbol=symbol, direction=direction, decision_ts=rt.AIRuntime.event_ts(now_ms),
+                             entry=entry, stop=stop, rr=rr, strategy_score=strategy_score,
+                             nexus_confidence=nexus_confidence, cost_fraction=cost_fraction,
+                             profile=profile or r.hook_profile or hk.PROFILE_LIVE_PILOT)
+    return r.gate(obs, k15, k1h, k4h, taker_fee=taker_fee, now_ms=now_ms)
 
 
 def gate_kwargs(**over):
@@ -367,7 +435,7 @@ class RuntimeModes(unittest.TestCase):
         r = rt.AIRuntime({})
         self.assertEqual(r.mode, "OFF")
         r.startup()
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         self.assertEqual((out.allow, out.authoritative, out.decision), (True, False, None))
 
     def test_invalid_mode_halts(self):
@@ -377,13 +445,13 @@ class RuntimeModes(unittest.TestCase):
 
     def test_shadow_decides_journals_and_never_blocks(self):
         r, j = runtime_with_bundle("SHADOW")
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         self.assertTrue(out.allow)
         self.assertFalse(out.authoritative)
         self.assertIsNotNone(out.decision)
         self.assertEqual(j.db.rows[out.decision.decision_id]["status"], "SHADOW_TRADE")
         r2, _ = runtime_with_bundle("SHADOW", p=0.3)
-        out2 = run(r2.gate(**gate_kwargs()))
+        out2 = run(gate_call(r2, **gate_kwargs()))
         self.assertTrue(out2.allow)                        # AI abstains but has no authority in SHADOW
         self.assertEqual(out2.reason, "SHADOW_ABSTAIN")
         src = inspect.getsource(rt)
@@ -393,11 +461,11 @@ class RuntimeModes(unittest.TestCase):
     def test_paper_is_mandatory_authorization(self):
         r, j = runtime_with_bundle("PAPER")
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        ok = run(r.gate(**gate_kwargs()))
+        ok = run(gate_call(r, **gate_kwargs()))
         self.assertTrue(ok.allow and ok.authoritative, ok.reason)
         r2, _ = runtime_with_bundle("PAPER", p=0.3)
         run(r2.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        no = run(r2.gate(**gate_kwargs()))
+        no = run(gate_call(r2, **gate_kwargs()))
         self.assertFalse(no.allow)
         self.assertTrue(no.reason.startswith("AI_ABSTAIN"))
 
@@ -409,11 +477,14 @@ class RuntimeModes(unittest.TestCase):
         r, _ = runtime_with_bundle("LIVE")
         self.assertIn("STAGE_C_EVIDENCE_INVALID", r.halts.active)
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        self.assertFalse(run(r.gate(**gate_kwargs())).allow)
+        self.assertFalse(run(gate_call(r, **gate_kwargs())).allow)
         stage_ok_no_ai = {"gate": "LIVE_RELEASE_GATE", "verdict": "PASS", "live_provenance_authenticated": True,
-                          "production_ready": True, "stages": {"AI_IDENTITY": "BLOCK"}}
+                          "production_ready": True,
+                          "stages": {"AI_IDENTITY": "BLOCK", "release_authority_kind": "AI_LIVE"}}
         self.assertEqual(rt.authorize_ai_live(stage_ok_no_ai), ["STAGE_C_AI_IDENTITY_NOT_PASSED"])
-        full = dict(stage_ok_no_ai, stages={"AI_IDENTITY": "PASS"})
+        full = dict(stage_ok_no_ai, stages={"AI_IDENTITY": "PASS", "release_authority_kind": "AI_LIVE"})
+        nexus_only = dict(stage_ok_no_ai, stages={"AI_IDENTITY": "PASS", "release_authority_kind": "NEXUS_ONLY"})
+        self.assertEqual(rt.authorize_ai_live(nexus_only), ["STAGE_C_NOT_AI_LIVE_RELEASE"])
         self.assertEqual(rt.authorize_ai_live(full), [])
         r3, _ = runtime_with_bundle("LIVE", stage_c=full)
         self.assertFalse(r3.halts.halted, r3.halts.active)
@@ -425,7 +496,7 @@ class RuntimeModes(unittest.TestCase):
     def test_startup_model_mismatch_halts_before_any_entry(self):
         r, _ = runtime_with_bundle("PAPER", pin="0" * 64)
         self.assertIn("MODEL_ARTIFACT_MISMATCH", r.halts.active)
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         self.assertFalse(out.allow)
         missing = rt.AIRuntime({"AI_EXECUTION_MODE": "PAPER"}, journal=rt.DurableAIJournal(FakeDB()),
                                paper_trade=True)
@@ -435,20 +506,20 @@ class RuntimeModes(unittest.TestCase):
     def test_journal_write_failure_blocks_authoritative_trade(self):
         r, _ = runtime_with_bundle("PAPER", db=FakeDB(fail=True))
         r.recovered = True
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         self.assertFalse(out.allow)
         self.assertTrue(out.reason.startswith("AI_JOURNAL"))
 
     def test_recovery_required_before_new_authoritative_entry(self):
         r, _ = runtime_with_bundle("PAPER")
-        self.assertEqual(run(r.gate(**gate_kwargs())).reason, "AI_RECOVERY_NOT_COMPLETE")
+        self.assertEqual(run(gate_call(r, **gate_kwargs())).reason, "AI_RECOVERY_NOT_COMPLETE")
 
     def test_same_market_event_is_never_reordered(self):
         r, _ = runtime_with_bundle("PAPER")
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        first = run(r.gate(**gate_kwargs()))
+        first = run(gate_call(r, **gate_kwargs()))
         self.assertTrue(first.allow)
-        again = run(r.gate(**gate_kwargs(now_ms=DECISION_TS + 120_000)))
+        again = run(gate_call(r, **gate_kwargs(now_ms=DECISION_TS + 120_000)))
         self.assertFalse(again.allow)
         self.assertEqual(again.reason, "DUPLICATE_MARKET_EVENT")
 
@@ -468,7 +539,7 @@ class DurableJournalRestart(unittest.TestCase):
         db = FakeDB()
         r, _ = runtime_with_bundle("PAPER", db=db)
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         run(r.bind_intent(out.decision, "bgx7-abc"))
         run(r.mark(out.decision, "PENDING_UNKNOWN"))
         # restart: new runtime, same durable store
@@ -482,7 +553,7 @@ class DurableJournalRestart(unittest.TestCase):
         self.assertEqual((res["open"], res["found"]), (1, 1))
         self.assertEqual(looked, ["bgx7-abc"])
         self.assertEqual(db.rows[out.decision.decision_id]["status"], "RECONCILED_FOUND")
-        again = run(r2.gate(**gate_kwargs()))
+        again = run(gate_call(r2, **gate_kwargs()))
         self.assertFalse(again.allow)
         self.assertEqual(again.reason, "DUPLICATE_MARKET_EVENT")
 
@@ -490,7 +561,7 @@ class DurableJournalRestart(unittest.TestCase):
         db = FakeDB()
         r, _ = runtime_with_bundle("PAPER", db=db)
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
-        out = run(r.gate(**gate_kwargs()))
+        out = run(gate_call(r, **gate_kwargs()))
         run(r.bind_intent(out.decision, "bgx7-xyz"))
         r2, _ = runtime_with_bundle("PAPER", db=db)
 
@@ -498,7 +569,7 @@ class DurableJournalRestart(unittest.TestCase):
             raise ConnectionError
         run(r2.recover(boom))
         self.assertIn("RECONCILIATION_UNCERTAIN", r2.halts.active)
-        self.assertFalse(run(r2.gate(**gate_kwargs(now_ms=DECISION_TS + 20 * M15))).allow)
+        self.assertFalse(run(gate_call(r2, **gate_kwargs(now_ms=DECISION_TS + 20 * M15))).allow)
 
     def test_journal_survives_process_restart_in_sqlite(self):
         from bot import database as db
@@ -511,7 +582,7 @@ class DurableJournalRestart(unittest.TestCase):
                 await db.init()
                 r, _ = runtime_with_bundle("PAPER", db=db)
                 await r.recover(lambda oid: asyncio.sleep(0, "FOUND"))
-                out = await r.gate(**gate_kwargs())
+                out = await gate_call(r, **gate_kwargs())
                 await r.bind_intent(out.decision, "bgx7-sqlite")
                 await db._conn.close()
                 db._conn = None
@@ -564,7 +635,7 @@ class HaltAuthority(unittest.TestCase):
         r, _ = runtime_with_bundle("PAPER")
         run(r.recover(lambda oid: asyncio.sleep(0, "FOUND")))
         r.halts.raise_halt("FEATURE_SCHEMA_MISMATCH", source="TEST")
-        self.assertFalse(run(r.gate(**gate_kwargs())).allow)
+        self.assertFalse(run(gate_call(r, **gate_kwargs())).allow)
 
     def test_recover_is_journaled(self):
         from bot.ai import journal as jr

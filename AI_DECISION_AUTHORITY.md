@@ -200,7 +200,101 @@ A missing, unknown, changed, stale or unapproved identity is a BLOCK. `evaluate_
 - Restart: every INTENT_CREATED, SUBMITTED or PENDING_UNKNOWN decision is reconciled by client_oid before any new AI-authorized entry. An unknown result halts with RECONCILIATION_UNCERTAIN. Nothing is resubmitted, and the same 15m market event is never re-decided into a new order (`DUPLICATE_MARKET_EVENT`).
 - Parity: a golden test pins replay-versus-runtime model input, feature hash and regime, with the forming candle removed by `closed_only`.
 
-## 11. What is not done
+## 11. Phase 7C: runtime hook parity and evidence lock
+
+### 11.1 `AI_RUNTIME_HOOK_POPULATION_V1` (`bot/ai/hook.py`)
+The AI trains and is tested **only** on candidates that reach `TradingEngine._ai_gate(sig, nx_dec)`, carrying exactly the state the engine holds at that point.
+
+A candidate is `ai_hook_eligible` only if every step below passes:
+1. The scan funnel passes: session-adjusted score of at least the minimum, the regime allows the direction, and expected PnL is above 0.
+2. The initial NEXUS decision approves.
+3. In the LIVE pilot profile only, CROSS geometry is not BLOCK. When the geometry is ADJUSTED, the NEXUS recheck also approves.
+
+The engine sets `sig.score` to the session-adjusted score before `_open`. In the LIVE pilot profile, the CROSS wrapper around `_nexus_validate` then changes `sig.sl`, `sig.tp` and `sig.rr` to the compressed geometry and returns the recheck decision. The hook observation therefore carries:
+- the session-adjusted score;
+- the compressed stop and its RR;
+- the confidence of the decision that authorized that geometry.
+
+The previous replay features mixed the compressed stop with the original RR, the raw score and the initial confidence, which was a defect. They also used 80-candle windows where the engine used 200.
+
+| Profile | When | Hook geometry |
+|---|---|---|
+| `LIVE_PILOT_POST_CROSS_GEOMETRY` (training profile) | `paper_trade` off and pilot enabled | compressed |
+| `PAPER_OR_UNPILOTED_PRE_GEOMETRY` | otherwise | original |
+
+A bundle binds `hook_population` and `hook_profile`:
+- **Authoritative modes:** a profile mismatch halts with `AI_HOOK_PROFILE_MISMATCH`.
+- **SHADOW:** the decision is journaled as `SHADOW_PROFILE_MISMATCH`.
+
+Consequence: a PAPER_TRADE engine cannot produce LIVE-profile evidence (see the PAPER forward contract).
+
+Features use the canonical closed windows (`FEATURE_WINDOWS` = 80 / 50 / 30), feature schema `NEXUS7_AI_FEATURES_V3`. The engine reuses the exact windows its `_nexus_validate` fetched.
+
+A golden end-to-end test covers five cases, comparing every hook field and the features, missing flags, hash and regime between the engine and the replay:
+- the real bootstrap-wrapped `_nexus_validate` followed by the real `_ai_gate`;
+- the replay reconstruction of the same candidate;
+- the compressed-stop case;
+- the pre-geometry case;
+- the NEXUS-rejected and recheck-rejected cases, where neither path reaches the hook.
+
+The replay reports hook-population counts in `population_counts.ai_hook_population`:
+- `strategy_candidates`, `executable_candidates` and `initial_nexus_approved`;
+- `ai_hook_eligible` and `post_ai_downstream_eligible`;
+- `production_approved`;
+- a count per stopping stage.
+
+### 11.2 Effective-execution parity
+Downstream of the hook, the engine still runs the legacy `scoring.calculate` pre-score, pilot guards, pre-dispatch spread and depth, and market-risk feeds. The replay reproduces none of these, and historical order flow, macro and news are not fabricated. So `AI_EFFECTIVE_EXECUTION_PARITY = INCOMPLETE`.
+
+Historical AI results are `AI_HOOK_EDGE` only. They can justify a zero-order SHADOW observation. `ai_gate.live_historical_promotion` blocks while parity is incomplete. AI LIVE (Stage C `AI_LIVE`) and LIVE_CHAMPION promotion require `AI_EFFECTIVE_EXECUTION_EDGE`.
+
+### 11.3 `AI_AGGREGATE_BLOCK_BOOTSTRAP_V1` (`bot/ai/aggregate_bootstrap.py`)
+The AI gate rebuilds every bootstrap draw from the retained per-block aggregates at every authoritative length:
+- **Mean:** Σ sampled `sum_r` ÷ Σ sampled `count`.
+- **Uplift:** Σ `a_sum`/Σ `a_count` − Σ `b_sum`/Σ `b_count`.
+
+It uses the pinned seed (11), the pinned sample count (1000), the same block universe and the 2.5/97.5 percentiles. It also recomputes the point estimate, the influence-score residual ACF and the authority interval. A deleted interval, a different sample count or a zero-variance series blocks.
+
+Stored CIs, status and ACF are comparison fields only. On real replay aggregates the recomputed CIs equal the stored ones exactly. A forged positive stored CI cannot create a PASS, and a forged negative one cannot destroy a true PASS.
+
+### 11.4 Stage C: `release_authority_kind`
+- `evaluate_live(..., release_authority_kind="NEXUS_ONLY" | "AI_LIVE")`.
+- **AI_LIVE:** `AI_IDENTITY == PASS` and AI effective-execution evidence are part of `live_ok`. A result of PASS together with `AI_IDENTITY = BLOCK` is impossible.
+- **Approval timing:** the human approval must post-date the authenticated `AI_IDENTITY_OBSERVATION_V1`, and the approval digest binds `ai_identity`.
+- **NEXUS_ONLY:** unchanged. An envelope carrying `ai_identity` and evaluated as NEXUS_ONLY is `RELEASE_AUTHORITY_KIND_AMBIGUOUS`.
+- **Runtime:** requires `release_authority_kind == AI_LIVE`.
+
+### 11.5 Journal integrity and transitions
+- **Sealing:** `record_sha256 = record_digest(record)`, which excludes itself, is recomputed on every write.
+- **Verification:** every critical load (restart, reconciliation, duplicate detection, order binding) checks the digest, the decision_id, the status column and the client_oid column. Any mismatch halts with `AI_JOURNAL_INTEGRITY_FAILURE` and no trade happens.
+- **Transitions:** only these moves are allowed. Anything else, including backwards moves, fails closed.
+
+  | From | Allowed next statuses |
+  |---|---|
+  | ABSTAIN | none (terminal) |
+  | APPROVED | INTENT_CREATED, DOWNSTREAM_BLOCKED |
+  | INTENT_CREATED | SUBMITTED, PENDING_UNKNOWN, RECONCILED_FOUND, RECONCILED_NOT_FOUND |
+  | SUBMITTED | FILLED, PENDING_UNKNOWN, RECONCILED_FOUND, RECONCILED_NOT_FOUND |
+  | PENDING_UNKNOWN | PENDING_UNKNOWN, RECONCILED_FOUND, RECONCILED_NOT_FOUND |
+  | RECONCILED_FOUND | FILLED, CLOSED |
+  | FILLED | CLOSED |
+
+- **SHADOW statuses:** all terminal. A SHADOW event is never rewritten.
+
+### 11.6 Selection stability
+Stability requires the same classifier, the same regressor and an identical `decision_policy_sha256` in every step. The policy hash covers thresholds, directions, supported regimes, `probability_authorizes`, the buffer, freshness and latency.
+
+### 11.7 SHADOW semantics and the isolated observer
+In the production engine, `AI_EXECUTION_MODE=SHADOW` only means the AI has no order authority; the legacy engine can still trade. Forward SHADOW evidence therefore comes from `bot/ai/shadow_observer.py`, deploy-ready in `deploy/ai_shadow_observer/` and not deployed. The observer:
+- never constructs `TradingEngine` and never takes the execution lease;
+- uses only the GET-only public client;
+- refuses exchange credentials and any mode other than SHADOW;
+- rebuilds the LIVE-pilot hook with the replay's primitives;
+- journals durably.
+
+When the gate blocks, the replay builds a zero-order `SHADOW_OBSERVER` bundle: no edge claim, no order authority, no LIVE authority, never promotable.
+
+## 12. What is not done
 - **Deployment:** nothing is deployed, and no Railway variable has changed. `AI_EXECUTION_MODE` stays unset (OFF) in production.
 - **LIVE:** no LIVE_CHAMPION exists, and no trusted Stage-C or AI-identity provider is implemented in-candidate.
 - **Forward evidence:** no forward SHADOW or PAPER evidence exists yet.

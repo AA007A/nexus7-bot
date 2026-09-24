@@ -138,7 +138,9 @@ class AIDecision:
 def bundle_manifest(*, classifier_artifact: dict, regressor_artifact: dict, calibration: dict,
                     policy: DecisionPolicy, training_code_sha: str | None, dataset_manifest_sha256: str | None,
                     training_period: dict, selection_evidence: dict, created_at: str,
-                    lifecycle_state: str = "RESEARCH_CANDIDATE") -> dict:
+                    lifecycle_state: str = "RESEARCH_CANDIDATE", hook_population: str | None = None,
+                    hook_profile: str | None = None) -> dict:
+    from bot.ai import hook as ai_hook
     body = {"schema": BUNDLE_SCHEMA, "ai_version": AI_VERSION,
             "classifier_sha256": classifier_artifact["sha256"],
             "regressor_sha256": regressor_artifact["sha256"],
@@ -149,7 +151,9 @@ def bundle_manifest(*, classifier_artifact: dict, regressor_artifact: dict, cali
             "training_code_sha": training_code_sha,
             "training_dataset_manifest_sha256": dataset_manifest_sha256,
             "training_period": training_period, "selection_evidence": selection_evidence,
-            "created_at": created_at, "lifecycle_state": lifecycle_state}
+            "created_at": created_at, "lifecycle_state": lifecycle_state,
+            "hook_population": hook_population or ai_hook.POPULATION,
+            "hook_profile": hook_profile or ai_hook.TRAINING_PROFILE}
     return {**body, "bundle_sha256": hashlib.sha256(_canon(body)).hexdigest()}
 
 
@@ -189,6 +193,10 @@ class ModelBundle:
             raise mdl.ModelIntegrityError("FEATURE_SCHEMA_MISMATCH")
         if man.get("ai_version") != AI_VERSION:
             raise mdl.ModelIntegrityError("AI_VERSION_MISMATCH")
+        from bot.ai import hook as ai_hook
+        if man.get("hook_population") != ai_hook.POPULATION or man.get("hook_profile") not in (
+                ai_hook.PROFILE_LIVE_PILOT, ai_hook.PROFILE_PRE_GEOMETRY):
+            raise mdl.ModelIntegrityError("HOOK_POPULATION_MISMATCH")
         policy = DecisionPolicy.from_json(man["decision_policy"])
         if policy.sha256 != man.get("decision_policy_sha256"):
             raise mdl.ModelIntegrityError("POLICY_HASH_MISMATCH")

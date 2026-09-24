@@ -1,0 +1,12 @@
+# ISOLATED AI SHADOW OBSERVER — deploy-ready, NOT deployed.
+# Use ONLY for a separate Railway service (or research project), never the
+# production trading service. It never starts TradingEngine, never takes the
+# LIVE execution lease and holds no exchange credentials.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m bot.ai.shadow_observer"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
