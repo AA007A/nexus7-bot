@@ -73,6 +73,9 @@ Drawdown: `(63.7943 − 25.9007) / 63.7943 = 59.40% ≥ 50%` ⇒ **new entries B
 |---|---|---|
 | `candidate_sequence_drawdown_r` | candidate research | Drawdown of cumulative R of *overlapping* candidates in decision order. **Not** an account drawdown. |
 | `portfolio_max_drawdown` | portfolio execution replay | Marked-equity drawdown of the bar-by-bar event engine (every 15m close) under the pinned manifest and production gates. The only account-drawdown estimate. |
-| `path_bootstrap` | portfolio execution replay | Authority for portfolio robustness: block-resampled candidate timelines re-run through the state machine. |
+| `path_bootstrap` | portfolio execution replay | `APPROXIMATE_NON_AUTHORITATIVE`: spliced candidate timelines are not a coherent market path. |
+| `walk_forward` | portfolio execution replay | Portfolio robustness authority: independent calendar folds on the real timeline. |
+| `end_state` | portfolio execution replay | Open (right-censored) positions at the end, marked and bounded; never force-realized. `ending_equity` is the MARKED final equity; `realized_return` is reported separately. |
+| `marked_r`, `bound_worst_r`, `bound_best_r` | candidate research | Diagnostics for right-censored outcomes. Never a realized R. |
 | `approximate_trade_level_ci` | portfolio execution replay | Resampled accepted trades. `authority: NONE`. |
 | `heuristic_win_probability` | NEXUS | Uncalibrated score transform; EV derived from it may only veto (`nexus_probability_semantics`). |

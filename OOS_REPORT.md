@@ -394,6 +394,32 @@ A single 365-day job does not fit the 350-minute CI budget. The design keeps pat
 4. **Global inference.** Block bootstrap, purged splits and ablations run on the merged rows. Never run them per shard and average.
 5. **Central portfolio replay.** Run the event engine once over the merged, globally ordered event stream. Positions crossing a shard boundary keep their state because the engine never sees shard boundaries. Per-shard portfolio results are never averaged.
 
+### C.8 Statistical-validity corrections (after `0c3ebc1`)
+The `0c3ebc1` replay is **DIAGNOSTIC_ONLY** because of two defects fixed here.
+
+1. **Censored outcomes are not trades.** The `0c3ebc1` simulator closed any position still open at 30 days or at the end of the data at the last close, and that artificial close received an R.
+   - Outcomes are now `RESOLVED`, `RIGHT_CENSORED_DATA_END` or `RIGHT_CENSORED_RESEARCH_LIMIT`.
+   - A censored outcome has `realized_r = null` and no manufactured exit leg or fee. It is excluded from every completed-trade statistic: expectancy, cost stress, segments, ablation, thresholds, calibration and bootstrap.
+   - Diagnostics only: `marked_r` plus reasonable bounds, with the open remainder closed at the current native stop (worst) or at the native TP (best).
+   - **Materiality rule (predeclared):** material if the censored share is above 5%, or if worst-vs-best bounds change the sign of the approved expectancy or of the uplift. Material ⇒ `CENSORING_MATERIAL` ⇒ BLOCK.
+2. **Windows are explicit.** History = WARMUP (80 bars) + DECISION_WINDOW (`--limit-15m`, 180 days) + OUTCOME_LOOKFORWARD (`OUTCOME_LOOKFORWARD_BARS`, 30 days, pinned in the manifest and ≥ the 30-day research cap).
+   - The latest eligible decision is moved back by the look-forward, so every decision has the same 30 days of future data.
+   - Unresolved positions after that stay right-censored.
+3. **Block authority respects the outcome horizon.** The median, p95, p99 and maximum resolved horizons are reported. The required block length is the maximum resolved horizon, rounded up to whole UTC days.
+   - A block interval has authority only if its length is at least that required length **and** it spans at least 30 independent blocks (predeclared; percentile cluster bootstraps under-cover with fewer clusters).
+   - Authority is the most conservative interval across all qualifying predeclared lengths (1, 2, 3, 7, 14 and 30 days, plus the required length).
+   - If no length qualifies, authority is null with `AUTHORITY_BLOCK_SHORTER_THAN_OUTCOME_HORIZON` or `INSUFFICIENT_INDEPENDENT_BLOCKS`.
+   - IID never substitutes for an invalid block interval. The gate re-derives the required length itself.
+4. **Sample adequacy is reported:** decision history days, authority block days, independent blocks and effective n at that block length. Fewer than 30 independent blocks ⇒ `INSUFFICIENT_EVIDENCE`, never a shorter block.
+5. **Purge and embargo** use the actual resolved `outcome_end_ts`. The embargo is at least the longest resolved horizon; the 10 h assumption from the legacy model is gone. Censored rows are open-ended and are purged from TRAIN and VALIDATION.
+6. **Portfolio end state.** Unresolved positions stay open at the end of the replay and are marked, never force-realized. The report separates:
+   - `realized_pnl` and `realized_return`;
+   - `unrealized_pnl_at_end` and `marked_final_equity`;
+   - `open_positions_at_end`, plus worst and best bounds.
+   `PORTFOLIO_CENSORING_MATERIAL` is set when a censored position was still open before the last candidate (the later path is unknowable) or when the bounds straddle the starting equity.
+7. **The path bootstrap is `APPROXIMATE_NON_AUTHORITATIVE`.** It splices a position's real future into a neighbouring synthetic block drawn from an unrelated period. Portfolio robustness authority is now walk-forward: four independent calendar folds of decisions on the real market timeline. A fold counts only if its marked and realized returns are both positive and its censoring is not material. The gate requires 3 of 4.
+8. **Live policy attestation.** At startup the bot logs one line, `[NON_SECRET_POLICY_ATTESTATION] sha256=… KEY=VALUE …`, containing only a whitelist of 30 numeric policy keys. The replay compares that sha256 with its manifest's. Without an attested match, `policy_parity = PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED` and the gate blocks with `LIVE_POLICY_NOT_ATTESTED`. Nothing is read from Railway, and this code is not deployed in this phase.
+
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.
 

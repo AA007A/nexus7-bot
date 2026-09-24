@@ -23,6 +23,8 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 | **STATISTICAL_CONFIDENCE** | **Failed** | Uplift +0.051 R, authority CI [−0.043, +0.143]. IID looked significant; dependence-aware inference does not. Effective n about 1,283 over 171 unique days. |
 | **PORTFOLIO_EDGE** | **Failed** | Portfolio replay −49.4%, max drawdown 50.3%, halted by the drawdown hard gate; −0.788 R per trade. |
 | **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). |
+| **STATISTICAL_AUTHORITY** | **Horizon-aware (see OOS_REPORT §C.8)** | Authority only for blocks ≥ the max resolved outcome horizon with ≥ 30 independent blocks. Censored outcomes are excluded and the censoring must be immaterial. The `0c3ebc1` replay is diagnostic only. |
+| **POLICY_PARITY** | **Not attested** | `PRODUCTION_REPORTED_NOT_CRYPTOGRAPHICALLY_ATTESTED`. The attestation mechanism exists, but no LIVE line has been captured; this phase does not deploy. |
 | **REPLAY_PARITY** | **INCOMPLETE** | Production exits and pre-trade gates are traced and classified (OOS_REPORT §C). Exits are bar-approximated. Spread/depth, market-risk feeds, the pilot session cap and private CROSS MMR are not replayable. The gate blocks with EXIT/PRETRADE/PORTFOLIO_PARITY_INCOMPLETE. |
 | **RELEASE_READINESS** | **Not ready** | See blockers. |
 
@@ -36,6 +38,7 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 7. **Horizon.** 180 days (7 months) is covered; 365 days or more needs sharding. Multi-year durability: INSUFFICIENT EVIDENCE.
 8. **The probability heuristic is miscalibrated**, and confidence is anti-predictive. It stays telemetry/veto only.
 9. **Strategy-level gates are not ablated** (refactor required).
+9a. **Live policy parity is not attested** (no `[NON_SECRET_POLICY_ATTESTATION]` line from LIVE yet).
 9b. **Production capacity facts.** At most one concurrent LIVE position, and 2 new orders per process session. Trailing after TP1 uses an un-rescaled peak (P1-17).
 10. **PAPER and SHADOW validation** of this candidate have not been performed.
 11. **Production state.** Live drawdown is 59.40%, above the 50% limit. Once deployed, this code blocks all new entries until an operator performs a reviewed HWM rebase or equity recovers. That is the intended outcome.
