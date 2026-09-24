@@ -439,7 +439,7 @@ async def nexus_approved_msg(d: dict) -> str:
         f"🛑 Stop:       `${d.get('stop_loss',0):,.4f}`\n"
         f"🎯 Alvo:       `${d.get('take_profit',0):,.4f}`\n"
         f"⚖️ R:R líq:    `{d.get('risk_reward',0):.2f}`\n"
-        f"📈 EV:         `{d.get('expected_value',0):+.3f}%`\n"
+        f"📈 EV heur.:   `{d.get('expected_value',0):+.3f}%` _(p heurístico, não calibrado)_\n"
         f"📡 Dados:      `{d.get('data_quality',0):.0f}/100`\n"
         f"`{'─'*28}`\n"
         f"*Modelos ({len(used)} ativos):*\n" + "\n".join(lines) + "\n"
@@ -458,7 +458,7 @@ async def nexus_veto_msg(d: dict) -> str:
     if d.get("risk_reward"):
         extra += f"⚖️ R:R líq: `{d['risk_reward']:.2f}`  "
     if d.get("expected_value"):
-        extra += f"📈 EV: `{d['expected_value']:+.3f}%`"
+        extra += f"📈 EV heur.: `{d['expected_value']:+.3f}%` (p não calibrado)"
     if extra:
         extra = f"{extra}\n"
 

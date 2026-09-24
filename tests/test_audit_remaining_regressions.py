@@ -91,3 +91,24 @@ class AuditRemainingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeuristicProbabilityIsLabelled(unittest.TestCase):
+    def test_probability_is_declared_uncalibrated_and_veto_only(self):
+        from bot import nexus_probability_semantics as sem
+        self.assertFalse(sem.EMPIRICALLY_CALIBRATED)
+        self.assertEqual(sem.PROBABILITY_KIND, "HEURISTIC_SCORE_TRANSFORM_UNCALIBRATED")
+        self.assertEqual(sem.EXECUTION_ROLE, "VETO_ONLY_NEVER_APPROVES")
+
+    def test_operator_text_labels_ev_as_heuristic(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1] / "bot"
+        for name in ("notifier.py", "nexus_terminal_notifications.py"):
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertNotIn('f"📈 EV:', text, name)
+            self.assertIn("EV heur.", text, name)
+
+    def test_approval_requires_score_threshold_not_ev(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "bot" / "nexus_ai.py").read_text(encoding="utf-8")
+        self.assertIn("allowed = score >= threshold", src)

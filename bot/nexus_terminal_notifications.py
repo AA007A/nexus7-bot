@@ -285,7 +285,7 @@ async def _notify_reject(notifier, sig, decision, validation_reason: str | None)
         f"🧠 Score NEXUS: `{nexus_score}`\n"
         f"🎯 Confiança: `{confidence}{'%' if metrics['confidence'] is not None else ''}`\n"
         f"⚖️ R:R líquido: `{rr}`\n"
-        f"📈 EV: `{ev}{ev_suffix}`\n"
+        f"📈 EV heur.: `{ev}{ev_suffix}` (p não calibrado)\n"
         f"❌ Motivo: _{reason[:180]}_\n"
         f"`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`\n"
         f"_Nenhuma ordem foi enviada._"
