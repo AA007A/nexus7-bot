@@ -41,3 +41,23 @@ class DecisionAffectingPathsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromotionGateWorkflowContract(unittest.TestCase):
+    def test_pr_workflow_runs_strict_gate_last(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("python -m bot.nexus_oos_promotion_gate artifacts/nexus_oos_real_replay.json", text)
+        gate_idx = text.index("Production promotion gate (strict)")
+        self.assertGreater(gate_idx, text.index("Upload replay evidence"))
+        block = text[gate_idx:]
+        # Never allowed to pass through for pull requests.
+        self.assertIn("continue-on-error: ${{ github.event_name == 'workflow_dispatch' &&", block)
+        self.assertIn('exit "${PIPESTATUS[0]}"', block)
+        self.assertNotIn("--allow-incomplete-context-parity", text)
+
+    def test_replay_covers_production_universe(self):
+        from bot.config import cfg
+        text = WORKFLOW.read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if "OOS_SYMBOLS:" in l)
+        for symbol in cfg.SYMBOLS:
+            self.assertIn(symbol, line)
