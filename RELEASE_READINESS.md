@@ -1,7 +1,7 @@
 # RELEASE_READINESS
 
 - PR: #415 (draft; **do not merge**). Branch: `claude/nexus7-production-hardening-5aq2sc`.
-- Starting SHA of this phase: `a1a5ea0d7e840b42d70060d3a80fba4ccd3e9af2`. Original baseline: `77ae453e3d01dc269c3b1ee3a4225900c22d9634`.
+- Starting SHA of the replay-parity phase: `70b00b4fe403aa2fad7ace01a951555f8e731c34`. Earlier phase start: `a1a5ea0`. Original baseline and current production: `77ae453e3d01dc269c3b1ee3a4225900c22d9634`.
 - Deployments: **none**. Railway variables read or changed: **none**. Exchange orders: **none**. Merges: **none**.
 
 ## Exact-SHA CI record
@@ -22,7 +22,8 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 | **SIGNAL_EDGE** | **Failed: NEGATIVE EXPECTANCY** | NEXUS-approved −0.324 R per candidate, authority CI [−0.496, −0.175]; every symbol, month and regime negative. |
 | **STATISTICAL_CONFIDENCE** | **Failed** | Uplift +0.051 R, authority CI [−0.043, +0.143]. IID looked significant; dependence-aware inference does not. Effective n about 1,283 over 171 unique days. |
 | **PORTFOLIO_EDGE** | **Failed** | Portfolio replay −49.4%, max drawdown 50.3%, halted by the drawdown hard gate; −0.788 R per trade. |
-| **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). Exit parity gap: partial TP never exercised; trailing, CHoCH and invalidation not modeled. The pre-trade score gate is not modeled. |
+| **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). |
+| **REPLAY_PARITY** | **INCOMPLETE** | Production exits and pre-trade gates are traced and classified (OOS_REPORT §C). Exits are bar-approximated. Spread/depth, market-risk feeds, the pilot session cap and private CROSS MMR are not replayable. The gate blocks with EXIT/PRETRADE/PORTFOLIO_PARITY_INCOMPLETE. |
 | **RELEASE_READINESS** | **Not ready** | See blockers. |
 
 ## Remaining blockers
@@ -31,10 +32,11 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 3. **Portfolio replay loses 49%** and hits the 50% drawdown hard gate.
 4. **No cost-stress survival.** Break-even requires about 86% lower costs.
 5. **Historical context parity is incomplete** (OI, order book). The production gate is not relaxed for this.
-6. **The replay exit model is not at parity** with the production exit engine (P1-13 and the unmodeled discretionary exits).
+6. **Replay parity is incomplete.** Exits are bar-approximated, and several pre-trade gates are not replayable (OOS_REPORT §C). The legacy exit-model bugs are fixed: shifted native stops, the 40-bar exit and the TP1 rule.
 7. **Horizon.** 180 days (7 months) is covered; 365 days or more needs sharding. Multi-year durability: INSUFFICIENT EVIDENCE.
 8. **The probability heuristic is miscalibrated**, and confidence is anti-predictive. It stays telemetry/veto only.
 9. **Strategy-level gates are not ablated** (refactor required).
+9b. **Production capacity facts.** At most one concurrent LIVE position, and 2 new orders per process session. Trailing after TP1 uses an un-rescaled peak (P1-17).
 10. **PAPER and SHADOW validation** of this candidate have not been performed.
 11. **Production state.** Live drawdown is 59.40%, above the 50% limit. Once deployed, this code blocks all new entries until an operator performs a reviewed HWM rebase or equity recovers. That is the intended outcome.
 12. **Branch protection** (required checks) is a repository setting and cannot be verified from code.

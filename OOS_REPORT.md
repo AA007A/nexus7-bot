@@ -5,7 +5,7 @@ This report only states numbers read from exact-SHA CI runs. Every section names
 Layers are kept separate:
 
 - **CANDIDATE_RESEARCH** (signal edge). Every strategy candidate is evaluated at a closed-candle decision time, and its net R is computed after modeled fees, slippage and funding. Candidates overlap in time, so they are not independent trades.
-- **PORTFOLIO_EXECUTION_REPLAY** (executable edge). NEXUS-approved candidates are walked chronologically under production position and risk constraints. This layer exists only from `2932572` onward.
+- **PORTFOLIO_EXECUTION_REPLAY** (executable edge). NEXUS-approved candidates are walked chronologically under production position and risk constraints. This layer exists only from `2932572` onward. From `a761d80` it is a bar-by-bar event engine with production execution parity (section C).
 
 ---
 
@@ -313,6 +313,92 @@ The executable strategy would have reached the 50% drawdown hard gate within abo
 
 ---
 
+## C. Replay-parity phase (code `a761d80` and later)
+
+This section describes **methodology and code**. It deliberately contains no run IDs for the new code: committing them would change the SHA they prove. The exact run IDs and the old-vs-new numbers for each immutable head are posted as a PR comment and printed in the Actions summary ("Show evidence summary").
+
+Historical final-head evidence under the previous code: `70b00b4`, run 35957755830 (replay OK, strict gate BLOCK). NEXUS-approved −0.3236 R, block authority CI [−0.495, −0.179]. Uplift +0.051 R, CI [−0.049, +0.132]. Portfolio 1000 → 505.69 (−49.4%), max drawdown 50.3%, 123 trades, −0.788 R per trade.
+
+### C.1 Statistical authority (P0-STAT-01/02)
+- **Authority:** min lower / max upper over VALID UTC-block intervals of predeclared lengths 24h, 48h and 72h.
+- **IID:** reported as `DIAGNOSTIC_ONLY` and never enters the authority.
+- **Gate:** recomputes the authority from the block intervals and blocks on any mismatch. It never reads the legacy IID report and ignores legacy IID blocker codes. It requires `authority_model = BLOCK_BOOTSTRAP_ONLY_V1`.
+- **Legacy edge report:** moved to `legacy_diagnostic` with `authority: NONE`.
+- **Status separation:** `candidate_research.research_status` is the research result; the gate verdict is the only promotion authority.
+- **Dependence diagnostics:** daily-block autocorrelation at lags 1–3 and lag-1 autocorrelation per block length. These support the block lengths but do not select them.
+
+### C.2 Production facts established from the composed LIVE runtime
+| Fact | Source | Consequence for the replay |
+|---|---|---|
+| TP1 == TP2 in every production signal | `calc_sl_tp` has no caller; `Signal.__post_init__` sets `tp1 = tp2 = tp` | Not a replay bug; the partial is driven by the 1R rule instead |
+| Partial TP at `fill ± (|fill − sl| + fill·0.0003)`, 50%, then stop → fill | `engine._manage_partial_tp`, `partial_tp_execution_hardening` | Replayed |
+| Native SL/TP at the **unshifted** signal levels (entry order triggers); local levels are shifted by the fill delta | `kucoin_native_tpsl`; `engine._open` shifts `sig.sl/tp` after `place_order` | Legacy replay shifted them (bug); corrected |
+| No time exit | exit stack | Legacy 40-bar exit removed (research censoring cap only) |
+| Stagnation, CHoCH and regime exits disabled in LIVE | `operator_loss_policy.no_discretionary_loss_exit` installed last | Not applied |
+| 90 min minimum hold is telemetry only | `_sync_positions` logs only | Not applied |
+| 2R exit uses the CURRENT stop distance (inert after break-even) | `confirmed_rr_exit.check` | Replayed |
+| Trailing: gives back `TRAILING_LOCK` of the peak excursion; `peak_pnl` is not rescaled after the partial; a stop on the wrong side of the mark is rejected | `trailing_safety_hardening`, `native_stop_repair` | Replayed as-is (finding P1-17) |
+| Post-NEXUS liquidation-safe geometry: compress SL/TP proportionally when ≥ 40% of the stop remains, re-run NEXUS, else block | `kucoin_contract_risk_hardening` | Replayed with public MMR as proxy |
+| At most ONE concurrent LIVE position | `engine._open` `liquidation.analyze(n_open_positions=len+1)`; override forbidden | Replayed; CROSS stress is unreachable |
+| Pilot: 2 concurrent positions, 2 new orders per process session | `bot.pilot` | Concurrent cap replayed; session cap NOT_REPLAYABLE |
+| Legacy pre-trade score is advisory after exact NEXUS approval | `legacy_pretrade_advisory` | Not authoritative |
+| Daily PnL = realized today (UTC) + full unrealized of open positions; limit from current equity | `daily_stop_runtime_hardening` | Replayed (plus equity-anchored sensitivity) |
+| Sizing at the SIGNAL entry/stop with drift allowance and the conservative cost model | `final_sizing_invariants.size_pilot_entry` | Replayed; parity proven on identical snapshots |
+| Analyzer drops the last candle; replay receives only closed candles | `market_data_integrity` appends a disposable sentinel | Verified (`closed_candle_sentinel_verified`) |
+
+The full classification is in the artifact: `replay_parity.exit_parity_matrix` and `replay_parity.pretrade_gate_matrix`. Classes: FULLY_REPLAYED / APPROXIMATED / NOT_REPLAYABLE / LIVE_ONLY / INACTIVE_IN_LIVE / TELEMETRY_ONLY / NOT_AUTHORITATIVE_IN_LIVE / UNREACHABLE.
+
+**Parity status: INCOMPLETE.**
+- **Exits:** native SL/TP, partial, break-even, trailing and 2R are APPROXIMATED at 15m resolution; restart state is LIVE_ONLY.
+- **Pre-trade:** NEXUS context, CROSS MMR, drift and viability are APPROXIMATED. Spread/depth, market-risk feeds and the pilot session cap are NOT_REPLAYABLE; operational pilot checks are LIVE_ONLY.
+- **Consequence:** the gate therefore blocks with `EXIT_PARITY_INCOMPLETE`, `PRETRADE_CONTEXT_PARITY_INCOMPLETE` and `PORTFOLIO_PARITY_INCOMPLETE`.
+
+### C.3 Candidate research on production-parity outcomes
+- **Baseline:** every production-EXECUTABLE strategy candidate, meaning geometry SAFE or ADJUSTED, regime allows the direction, expected PnL > 0, session-adjusted score ≥ minimum, and drift within the limit. Each is evaluated as if executed.
+- **Approved:** NEXUS approval on the original geometry, plus re-approval on the adjusted geometry when compressed.
+- **Outcome:** production exit emulation with fees, slippage and funding at actual timepoints. R is measured against the planned stop risk.
+- **Step-wise attribution on identical data (`parity_attribution`):**
+  - **A0:** legacy model.
+  - **A1:** + unshifted native stops.
+  - **A2:** + production exit engine.
+  - **A3:** + liquidation-safe geometry with NEXUS re-approval.
+  - **A4:** + production funnel (= production approval).
+- **Legacy portfolio engine:** re-run on the same data (`portfolio_replay_legacy`).
+
+### C.4 Portfolio engine v2
+- **Timeline:** every closed 15m bar from the first decision to the last exit.
+- **Precedence at bar close T:** FUNDING → EXITS → MARK → DAILY_RESET (00:00 UTC) → ACCOUNT (equity, research HWM, drawdown, daily PnL, circuit breakers) → CANDIDATES (score × rr desc, symbol) → ENTRY at the next open.
+- **Accounting identities asserted at every step:**
+  - equity = cash + unrealized;
+  - available = equity − committed margin;
+  - cash ledger = start + realized − fees + funding;
+  - margin released pro rata exactly once;
+  - no mark or funding after close;
+  - events on the 15m grid.
+- **Robustness authority:** path bootstrap. UTC-block-resampled candidate timelines (24/48/72 h) are re-run through the full state machine; the most conservative lower bound of net return is used. The trade-level CI is kept with `authority: NONE`.
+- **Sensitivities:**
+  - daily-PnL semantics;
+  - one production gate disabled at a time (attribution);
+  - contract specs (lot ×10, multiplier ×10, 10 USDT minimum notional, MMR ×2). Specs are `CURRENT_CONTRACT_SPEC_PROXY`; no historical specs are available.
+
+### C.5 Pinned policy
+- **Source:** `research/replay_policy_manifest.json` holds non-secret values only, each with its provenance.
+- **Artifact:** `replay_policy_manifest.policy_sha256`.
+- **Fail-closed checks:** the CLI exits 2 when the manifest is missing or malformed, when a key is missing, extra or mistyped, when the risk policy is invalid, or when a value production reads in-process differs from the runtime.
+
+### C.6 365-day architecture (design; not implemented in this phase)
+A single 365-day job does not fit the 350-minute CI budget. The design keeps path dependence:
+1. **History stage.** Fetch 15m/1h/4h candles, funding and contract specs per symbol for the whole horizon. Verify contiguity, then write a content-addressed cache (hash of symbol, interval, start, end).
+2. **Candidate shards.** Split into (symbol × month) shards. Each shard replays decisions inside its window, using warm-up candles from the cache before the window and forward candles after it, so that exits crossing the boundary are complete. The shard emits candidate rows with their full production-parity paths. Shards are pure functions of the cache and the manifest hash.
+3. **Deterministic merge.** Concatenate the rows and sort by (decision_ts, symbol). Reject duplicates or gaps. Record the merged hash.
+4. **Global inference.** Block bootstrap, purged splits and ablations run on the merged rows. Never run them per shard and average.
+5. **Central portfolio replay.** Run the event engine once over the merged, globally ordered event stream. Positions crossing a shard boundary keep their state because the engine never sees shard boundaries. Per-shard portfolio results are never averaged.
+
+### C.7 Results
+The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.
+
+---
+
 ## Verdict
 
 **NEGATIVE EXPECTANCY** in both the candidate layer and the portfolio layer, on 12 symbols over 180 days.
@@ -325,3 +411,5 @@ The executable strategy would have reached the 50% drawdown hard gate within abo
 | CONTEXT_PARITY | Incomplete: no historical OI or order book. Ablation shows no measurable effect of the replayable optional context |
 
 Status: `AI_EDGE_NOT_PROVEN`.
+
+The verdict above is from the historical (pre-parity) model. Section C describes the parity rerun of the same unchanged strategy; its exact-SHA result is in the PR comment. `REPLAY_PARITY = INCOMPLETE` by construction (C.2).

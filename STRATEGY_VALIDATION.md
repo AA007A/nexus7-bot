@@ -44,19 +44,25 @@ This work changed **no strategy threshold, gate, indicator, NEXUS weight or exit
 - Higher 15m volume multiple goes with worse outcomes.
 - These were found after the fact. Any hypothesis built on them (for example "PULLBACK-only") must be pre-registered and tested on data not used here.
 
-## Exits
-- One-at-a-time variants: a 4 h stagnation exit and a 20-bar time exit are both worse. An 80-bar time exit is about equal to current.
-- **Parity gap P1-13:** signals carry tp1 == tp2, so partial TP and break-even are never exercised by the replay.
-- Trailing stop, CHoCH exit, regime/signal invalidation and the 90-minute min-hold are **not modeled**.
-- Hard SL is modeled first on every bar (same-bar ambiguity resolves STOP_FIRST).
+## Exits (production facts, traced in the replay-parity phase)
+- **TP1 == TP2 is production reality.** `calc_sl_tp` has no caller, and `Signal` sets `tp1 = tp2 = tp`. The production partial ignores `tp1`: it closes 50% at 1R + 0.03% and moves the stop to the fill price.
+- **Native SL/TP sit at the unshifted signal levels.** The legacy replay shifted them by the fill delta; that was a replay bug.
+- **The live exit stack** is native SL, native TP, 1R partial with break-even, trailing and the 2R exit.
+- **Disabled or inactive in LIVE:** stagnation, CHoCH and regime exits are disabled by `operator_loss_policy`. The 90-minute hold is telemetry only. There is no time exit.
+- **Trailing quirk.** After the partial, the excursion is read at twice its size because `peak_pnl` is not rescaled. The stop that results is often rejected for being on the wrong side of the mark (finding P1-17). This is not changed here; it belongs in the strategy phase.
+- **Replay.** `nexus_oos_execution_parity.simulate_production_exit` reproduces these rules at 15m resolution. The EXIT_PARITY_MATRIX marks the bar-resolution rules APPROXIMATED.
+- **Superseded:** the one-at-a-time exit variants from the historical model (4 h stagnation, 20/80-bar time exits). The parity model's variants are no_partial_tp, no_trailing, no_rr_double and shifted_native_stops_legacy_bug.
 
 ## Probability / EV
 - Heuristic p: Brier 0.263 vs 0.222 for the base rate; ECE 0.20.
 - The Platt slope is negative: higher confidence goes with lower realized win rate.
 - Not promotable. The heuristic stays telemetry/veto only, and the EV veto was not removed.
 
+## Replay parity before any strategy change
+The same unchanged strategy is re-run through the parity replay (OOS_REPORT §C). Strategy research starts only after that result is recorded. If candidate expectancy stays materially negative, the verdict is STRATEGY_EDGE_FAILED.
+
 ## Research-mode next steps (candidate branch only)
-1. Build a production-parity exit model: partial TP, trailing, CHoCH, stagnation and min-hold.
+1. (done in the replay) Production-parity exit model: partial TP, trailing, 2R, native stops. Remaining approximations are listed in the exit matrix.
 2. Refactor strategy gates into injectable predicates (zero behavior change), then ablate them.
 3. Pre-register a PULLBACK-only / LONG-only hypothesis and test it on fresh data, for example the next 90 days forward.
 4. Collect historical OI and order-book data (or record them forward) to close the context-parity gap.

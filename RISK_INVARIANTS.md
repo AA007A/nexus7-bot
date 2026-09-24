@@ -57,10 +57,22 @@ Daily stop: `min(25.9007 × 3% = 0.777021, 100) = 0.777021 USDT` (displayed `0.7
 
 Drawdown: `(63.7943 − 25.9007) / 63.7943 = 59.40% ≥ 50%` ⇒ **new entries BLOCKED**. This holds whatever `LIVE_RISK_OVERRIDE_APPROVED` is set to.
 
+## Production execution facts (reproduced by the replay, not changed)
+
+| Fact | Owner | Note |
+|---|---|---|
+| At most one concurrent LIVE position | `engine._open` → `liquidation.analyze(n_open_positions=len+1)`; `liquidation_override_guard` | Any second position is not stop-effective. `MAX_POSITIONS=2` and the CROSS stress gate are unreachable for a second entry |
+| Post-NEXUS liquidation-safe geometry | `kucoin_contract_risk_hardening._geometry_from_exact_mmr` | Compresses SL/TP proportionally (keeping R:R) when ≥ 40% of the stop remains, then re-runs NEXUS. Otherwise BLOCK |
+| Daily PnL for the daily stop | `daily_stop_runtime_hardening._update_daily_pnl_hardened` | Realized PnL of today's UTC closes plus the full unrealized PnL of open positions. The limit is computed from the current equity |
+| Native SL/TP levels | `kucoin_native_tpsl` (entry-order triggers) | Unshifted signal levels. Local levels are shifted by the fill delta |
+| Pilot session cap | `bot.pilot.MAX_NEW_ORDER_SUBMISSIONS_PER_SESSION = 2` | Per process session. Not replayable |
+
 ## Research-only metrics (never risk authority)
 
 | Metric | Layer | Meaning |
 |---|---|---|
 | `candidate_sequence_drawdown_r` | candidate research | Drawdown of cumulative R of *overlapping* candidates in decision order. **Not** an account drawdown. |
-| `portfolio_max_drawdown` | portfolio execution replay | Marked-equity drawdown of the event-driven replay under production position/risk constraints. The only account-drawdown estimate. |
+| `portfolio_max_drawdown` | portfolio execution replay | Marked-equity drawdown of the bar-by-bar event engine (every 15m close) under the pinned manifest and production gates. The only account-drawdown estimate. |
+| `path_bootstrap` | portfolio execution replay | Authority for portfolio robustness: block-resampled candidate timelines re-run through the state machine. |
+| `approximate_trade_level_ci` | portfolio execution replay | Resampled accepted trades. `authority: NONE`. |
 | `heuristic_win_probability` | NEXUS | Uncalibrated score transform; EV derived from it may only veto (`nexus_probability_semantics`). |
