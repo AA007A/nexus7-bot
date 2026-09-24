@@ -9,13 +9,16 @@ Candidate rows are NOT independent observations:
 This module therefore resamples UTC time BLOCKS. Every candidate of every
 symbol whose decision falls in a selected block is carried together, which
 preserves both serial overlap inside the block and cross-asset correlation.
-The IID row bootstrap is kept only as a diagnostic comparison. Promotion
-authority always uses the most conservative valid interval.
+The IID row bootstrap is kept only as a DIAGNOSTIC comparison and has ZERO
+promotion authority: it can never turn a BLOCK into a PROMOTE or a PROMOTE
+into a BLOCK. Authority is the most conservative VALID BLOCK interval among
+the predeclared block lengths (24h, 48h, 72h): minimum lower bound and maximum
+upper bound across valid block intervals only.
 
 Blocks are non-overlapping calendar-aligned UTC windows (a clustered
-bootstrap). The default 24h block is >= 2.4x the 10h outcome horizon; a 48h
-block is also evaluated and the lag-1 autocorrelation of block means is
-reported so a reviewer can see whether dependence spills across blocks.
+bootstrap). The block lengths are fixed in advance (AUTHORITY_BLOCKS_MS) and
+never chosen by outcome. Lag-1..3 autocorrelation of block means is reported
+so a reviewer can see whether dependence spills across blocks.
 
 Splits are temporal and purged: a TRAIN candidate whose outcome_end_ts reaches
 into the next partition is removed, and an embargo >= the maximum observed
@@ -33,6 +36,12 @@ DAY_MS = 24 * HOUR_MS
 REPLAY_MAX_HORIZON_MS = 40 * 15 * 60 * 1000          # 10 hours
 DEFAULT_BLOCK_MS = DAY_MS
 SENSITIVITY_BLOCK_MS = 2 * DAY_MS
+LONG_BLOCK_MS = 3 * DAY_MS
+# Predeclared authority candidates. Order is fixed; authority takes the most
+# conservative valid interval across ALL of them (never a favourable one).
+AUTHORITY_BLOCKS_MS = (DEFAULT_BLOCK_MS, SENSITIVITY_BLOCK_MS, LONG_BLOCK_MS)
+AUTHORITY_MODEL = "BLOCK_BOOTSTRAP_ONLY_V1"
+IID_ROLE = "DIAGNOSTIC_ONLY"
 BOOTSTRAP_SAMPLES = 2000
 SEED = 11
 
@@ -174,6 +183,7 @@ def lag1_block_autocorrelation(rows: Sequence[dict], block_ms: int = DEFAULT_BLO
 
 
 def conservative_interval(*intervals: tuple[float | None, float | None]) -> dict:
+    """Min lower / max upper over the VALID intervals passed in."""
     valid = [(lo, hi) for lo, hi in intervals if lo is not None and hi is not None]
     if not valid:
         return {"low": None, "high": None, "valid_intervals": 0}
@@ -181,45 +191,91 @@ def conservative_interval(*intervals: tuple[float | None, float | None]) -> dict
             "valid_intervals": len(valid)}
 
 
-def dependence_aware_mean(rows: Sequence[dict], selector: Callable[[dict], bool] = lambda r: True,
-                          *, samples: int = BOOTSTRAP_SAMPLES) -> dict:
-    """IID (diagnostic), 24h block and 48h block CIs of the mean R of selected rows.
+def block_authority(block_intervals: dict) -> dict:
+    """Authority from BLOCK intervals only. IID is never an argument here."""
+    return conservative_interval(*block_intervals.values())
 
-    ``authority`` is the most conservative valid interval of the three; when
-    no block interval is valid, authority is invalid (None) — IID alone never
-    carries promotion authority.
+
+def _block_key(block_ms: int) -> str:
+    return f"block{int(block_ms) // HOUR_MS}h_ci"
+
+
+AUTHORITY_RULE = ("min lower / max upper over VALID block intervals only "
+                  "{24h, 48h, 72h}; IID is diagnostic only and never used")
+
+
+def _pack(point, n, iid, blocks: dict) -> dict:
+    auth = block_authority(blocks)
+    out = {"iid_ci": list(iid), "iid_role": IID_ROLE}
+    for ms, ci in blocks.items():
+        out[_block_key(ms)] = list(ci)
+    out.update({
+        "authority_ci_low": auth["low"],
+        "authority_ci_high": auth["high"],
+        "authority_valid_block_intervals": auth["valid_intervals"],
+        "authority_rule": AUTHORITY_RULE,
+        "authority_model": AUTHORITY_MODEL,
+    })
+    return out
+
+
+def dependence_aware_mean(rows: Sequence[dict], selector: Callable[[dict], bool] = lambda r: True,
+                          *, samples: int = BOOTSTRAP_SAMPLES,
+                          block_lengths_ms: Sequence[int] = AUTHORITY_BLOCKS_MS) -> dict:
+    """IID (diagnostic) and block CIs of the mean R of selected rows.
+
+    ``authority`` uses valid BLOCK intervals only; when no block interval is
+    valid the authority is None (fail closed).
     """
     rows = list(rows)
     iid = fast_ci(rows, selector, block_ms=None, samples=samples)
-    b24 = fast_ci(rows, selector, block_ms=DEFAULT_BLOCK_MS, samples=samples)
-    b48 = fast_ci(rows, selector, block_ms=SENSITIVITY_BLOCK_MS, samples=samples)
-    block_valid = any(lo is not None for lo, _ in (b24, b48))
-    auth = conservative_interval(iid, b24, b48) if block_valid else {"low": None, "high": None, "valid_intervals": 0}
+    blocks = {ms: fast_ci(rows, selector, block_ms=ms, samples=samples) for ms in block_lengths_ms}
     sel = [r for r in rows if selector(r)]
-    return {
-        "mean_r": (sum(float(r["r"]) for r in sel) / len(sel)) if sel else None,
-        "n": len(sel),
-        "iid_ci": list(iid),
-        "block24h_ci": list(b24),
-        "block48h_ci": list(b48),
-        "authority_ci_low": auth["low"],
-        "authority_ci_high": auth["high"],
-        "authority_rule": "min lower / max upper over valid {IID, 24h block, 48h block}; requires a valid block CI",
-    }
+    out = {"mean_r": (sum(float(r["r"]) for r in sel) / len(sel)) if sel else None, "n": len(sel)}
+    out.update(_pack(out["mean_r"], len(sel), iid, blocks))
+    return out
 
 
 def dependence_aware_diff(rows: Sequence[dict], sel_a, sel_b, *,
-                          samples: int = BOOTSTRAP_SAMPLES) -> dict:
+                          samples: int = BOOTSTRAP_SAMPLES,
+                          block_lengths_ms: Sequence[int] = AUTHORITY_BLOCKS_MS) -> dict:
     rows = list(rows)
     stat = diff_mean_r(sel_a, sel_b)
     iid = fast_ci(rows, sel_a, sel_b, block_ms=None, samples=samples)
-    b24 = fast_ci(rows, sel_a, sel_b, block_ms=DEFAULT_BLOCK_MS, samples=samples)
-    b48 = fast_ci(rows, sel_a, sel_b, block_ms=SENSITIVITY_BLOCK_MS, samples=samples)
-    block_valid = any(lo is not None for lo, _ in (b24, b48))
-    auth = conservative_interval(b24, b48, iid) if block_valid else {"low": None, "high": None}
-    return {"delta": stat(rows), "iid_ci": list(iid), "block24h_ci": list(b24),
-            "block48h_ci": list(b48), "authority_ci_low": auth["low"],
-            "authority_ci_high": auth["high"]}
+    blocks = {ms: fast_ci(rows, sel_a, sel_b, block_ms=ms, samples=samples) for ms in block_lengths_ms}
+    out = {"delta": stat(rows)}
+    out.update(_pack(out["delta"], len(rows), iid, blocks))
+    return out
+
+
+def dependence_diagnostics(rows: Sequence[dict], max_lag: int = 3) -> dict:
+    """Autocorrelation of daily-block mean R at lags 1..max_lag plus the
+    per-block-length lag-1 check. Supports (not selects) the block lengths."""
+    daily = [sum(float(r["r"]) for r in b) / len(b) for b in _blocks(rows, DAY_MS) if b]
+    n = len(daily)
+    acf = {}
+    if n >= 10:
+        mu = sum(daily) / n
+        den = sum((m - mu) ** 2 for m in daily)
+        for lag in range(1, max_lag + 1):
+            num = sum((daily[i] - mu) * (daily[i - lag] - mu) for i in range(lag, n))
+            acf[str(lag)] = (num / den) if den > 0 else None
+    band = (2 / math.sqrt(n)) if n >= 10 else None
+    significant_lags = [int(k) for k, v in acf.items() if v is not None and band and abs(v) > band]
+    return {
+        "daily_blocks": n,
+        "daily_acf": acf,
+        "significance_band": band,
+        "significant_daily_lags": significant_lags,
+        "per_block_length_lag1": {f"{ms // HOUR_MS}h": lag1_block_autocorrelation(rows, ms)
+                                  for ms in AUTHORITY_BLOCKS_MS},
+        "max_outcome_horizon_hours": (max((int(r.get("outcome_end_ts", r["ts"])) - int(r["ts"])
+                                           for r in rows), default=0) / HOUR_MS) if rows else None,
+        "block_lengths_predeclared_hours": [ms // HOUR_MS for ms in AUTHORITY_BLOCKS_MS],
+        "note": ("Block lengths are fixed in advance. Lag-k dependence at daily "
+                 "resolution beyond lag 1 argues for the longer blocks; authority "
+                 "already takes the most conservative valid block interval."),
+    }
 
 
 # ── effective sample size ────────────────────────────────────────────────────

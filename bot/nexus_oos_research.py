@@ -422,8 +422,8 @@ def paired_ablation(rows: Sequence[dict], variant_key: str, *,
     """FULL approved set vs variant approved set on the SAME candidate population.
 
     Δ = full − variant (positive: the removed component adds expectancy).
-    IID and 24h/48h UTC-block bootstrap intervals are reported; the verdict
-    uses only the dependence-aware authority interval.
+    IID and 24h/48h/72h UTC-block bootstrap intervals are reported; the verdict
+    uses only the block-only authority interval (IID is diagnostic).
     """
     from bot import nexus_oos_inference as inf
 
@@ -449,6 +449,8 @@ def paired_ablation(rows: Sequence[dict], variant_key: str, *,
         "delta_iid_ci": dep["iid_ci"],
         "delta_block24h_ci": dep["block24h_ci"],
         "delta_block48h_ci": dep["block48h_ci"],
+        "delta_block72h_ci": dep["block72h_ci"],
+        "delta_iid_role": "DIAGNOSTIC_ONLY",
         "delta_ci_low_r": lo, "delta_ci_high_r": hi,
         "delta_profit_factor": (
             (fm.get("profit_factor") or 0) - (vm.get("profit_factor") or 0)

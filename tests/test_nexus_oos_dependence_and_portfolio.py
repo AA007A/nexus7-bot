@@ -77,6 +77,60 @@ class BlockBootstrapTests(unittest.TestCase):
         rows = [{"ts": T0 + i, "r": 1.0 + i * 1e-6} for i in range(50)]  # one block only
         d = inf.dependence_aware_mean(rows, samples=200)
         self.assertIsNone(d["authority_ci_low"])
+        self.assertIsNotNone(d["iid_ci"][0])
+
+
+class IidZeroAuthorityInInference(unittest.TestCase):
+    """P0-STAT-01: authority = min lower / max upper over VALID BLOCK intervals only."""
+
+    def _rows(self):
+        rng = random.Random(9)
+        rows = []
+        for day in range(90):
+            shock = rng.gauss(0.05, 0.6)
+            for k in range(12):
+                rows.append({"ts": T0 + day * inf.DAY_MS + k * H, "r": shock + rng.gauss(0, 0.2),
+                             "approved": k % 3 == 0})
+        return rows
+
+    def _block_only(self, d):
+        cis = [d[k] for k in ("block24h_ci", "block48h_ci", "block72h_ci") if d[k][0] is not None]
+        return min(c[0] for c in cis), max(c[1] for c in cis)
+
+    def test_mean_authority_equals_block_only_interval(self):
+        d = inf.dependence_aware_mean(self._rows(), samples=400)
+        self.assertEqual((d["authority_ci_low"], d["authority_ci_high"]), self._block_only(d))
+        self.assertEqual(d["iid_role"], "DIAGNOSTIC_ONLY")
+        self.assertEqual(d["authority_model"], "BLOCK_BOOTSTRAP_ONLY_V1")
+        self.assertIn("block72h_ci", d)
+
+    def test_diff_authority_equals_block_only_interval(self):
+        rows = self._rows()
+        d = inf.dependence_aware_diff(rows, lambda r: r["approved"], lambda r: True, samples=400)
+        self.assertEqual((d["authority_ci_low"], d["authority_ci_high"]), self._block_only(d))
+
+    def test_iid_cannot_widen_or_narrow_authority(self):
+        rows = self._rows()
+        from unittest.mock import patch
+        real = inf.fast_ci
+
+        def fake(rows_, sel_a, sel_b=None, *, block_ms, samples=inf.BOOTSTRAP_SAMPLES, seed=inf.SEED):
+            if block_ms is None:
+                return (-99.0, 99.0)   # absurd IID interval
+            return real(rows_, sel_a, sel_b, block_ms=block_ms, samples=samples, seed=seed)
+
+        base = inf.dependence_aware_mean(rows, samples=300)
+        with patch.object(inf, "fast_ci", fake):
+            wild = inf.dependence_aware_mean(rows, samples=300)
+        self.assertEqual(wild["iid_ci"], [-99.0, 99.0])
+        self.assertEqual((wild["authority_ci_low"], wild["authority_ci_high"]),
+                         (base["authority_ci_low"], base["authority_ci_high"]))
+
+    def test_dependence_diagnostics_reports_lags_and_predeclared_blocks(self):
+        dd = inf.dependence_diagnostics(self._rows())
+        self.assertEqual(dd["block_lengths_predeclared_hours"], [24, 48, 72])
+        self.assertEqual(set(dd["daily_acf"]), {"1", "2", "3"})
+        self.assertEqual(set(dd["per_block_length_lag1"]), {"24h", "48h", "72h"})
 
 
 class PurgedSplitTests(unittest.TestCase):
@@ -148,8 +202,8 @@ class CandidateVsPortfolioMetrics(unittest.TestCase):
         self.assertIn("candidate_sequence_drawdown_r", perf)
         self.assertNotIn("max_drawdown_r", perf)
         self.assertNotIn("portfolio_max_drawdown", perf)
-        port = pr.run_portfolio([_trade(T0)], _policy())
-        self.assertEqual(port["layer"], "PORTFOLIO_EXECUTION_REPLAY")
+        port = pr.run_portfolio_legacy([_trade(T0)], _policy())
+        self.assertEqual(port["layer"], "PORTFOLIO_EXECUTION_REPLAY_LEGACY")
         self.assertIn("portfolio_max_drawdown", port)
         self.assertNotIn("candidate_sequence_drawdown_r", port)
 
@@ -157,7 +211,7 @@ class CandidateVsPortfolioMetrics(unittest.TestCase):
 class PortfolioReplayInvariants(unittest.TestCase):
     def test_max_positions_never_exceeded(self):
         rows = [_trade(T0 + i * 60_000, f"S{i}USDT", hours=5) for i in range(6)]
-        out = pr.run_portfolio(rows, _policy(max_positions=2))
+        out = pr.run_portfolio_legacy(rows, _policy(max_positions=2))
         self.assertEqual(out["max_concurrent_positions"], 2)
         self.assertEqual(out["total_trades"], 2)
         self.assertEqual(out["skipped"]["position_limit"], 4)
@@ -165,7 +219,7 @@ class PortfolioReplayInvariants(unittest.TestCase):
     def test_same_symbol_overlap_prevented(self):
         rows = [_trade(T0, "BTCUSDT", hours=5), _trade(T0 + H, "BTCUSDT", hours=5),
                 _trade(T0 + 6 * H, "BTCUSDT", hours=1)]
-        out = pr.run_portfolio(rows, _policy())
+        out = pr.run_portfolio_legacy(rows, _policy())
         self.assertEqual(out["skipped"]["same_symbol_open"], 1)
         self.assertEqual(out["total_trades"], 2)
 
@@ -173,16 +227,16 @@ class PortfolioReplayInvariants(unittest.TestCase):
         rows = [_trade(T0, "AUSDT", hours=5), _trade(T0 + H, "BUSDT", hours=5),
                 _trade(T0 + 2 * H, "CUSDT", hours=1),       # both slots busy -> skipped
                 _trade(T0 + 5 * H + 1, "DUSDT", hours=1)]   # after A exits -> admitted
-        out = pr.run_portfolio(rows, _policy(max_positions=2))
+        out = pr.run_portfolio_legacy(rows, _policy(max_positions=2))
         self.assertEqual(out["total_trades"], 3)
         self.assertEqual(out["skipped"]["position_limit"], 1)
 
     def test_daily_stop_blocks_later_same_day_entries(self):
         losers = [_trade(T0 + i * H, f"L{i}USDT", hours=0.5, r=-1.0) for i in range(5)]
         later = [_trade(T0 + 10 * H, "XUSDT", hours=1)]
-        out = pr.run_portfolio(losers + later, _policy(max_risk_pct=0.01, daily_stop_loss_pct=0.02))
+        out = pr.run_portfolio_legacy(losers + later, _policy(max_risk_pct=0.01, daily_stop_loss_pct=0.02))
         self.assertGreater(out["blocked_daily_stop"], 0)
-        next_day = pr.run_portfolio(losers + [_trade(T0 + inf.DAY_MS + H, "XUSDT", hours=1)],
+        next_day = pr.run_portfolio_legacy(losers + [_trade(T0 + inf.DAY_MS + H, "XUSDT", hours=1)],
                                     _policy(max_risk_pct=0.01, daily_stop_loss_pct=0.02))
         self.assertEqual(next_day["blocked_daily_stop"], out["blocked_daily_stop"] - 1)
 
@@ -190,19 +244,19 @@ class PortfolioReplayInvariants(unittest.TestCase):
         losers = [_trade(T0 + d * inf.DAY_MS, f"L{d}USDT", hours=1, r=-1.0) for d in range(12)]
         later = [_trade(T0 + 30 * inf.DAY_MS + d * inf.DAY_MS, f"W{d}USDT", hours=1, r=2.0) for d in range(5)]
         pol = _policy(max_risk_pct=0.02, max_drawdown=0.10, daily_stop_loss_pct=0.05)
-        out = pr.run_portfolio(losers + later, pol)
+        out = pr.run_portfolio_legacy(losers + later, pol)
         self.assertGreater(out["blocked_drawdown"], 0)
         self.assertLessEqual(out["ending_equity"], out["starting_equity"])
 
     def test_loss_per_trade_bounded_by_risk_budget(self):
         rows = [_trade(T0 + d * inf.DAY_MS, "AUSDT", hours=1, r=-1.0) for d in range(3)]
-        out = pr.run_portfolio(rows, _policy(max_risk_pct=0.01))
+        out = pr.run_portfolio_legacy(rows, _policy(max_risk_pct=0.01))
         # r=-1 includes costs; sizing prices those costs, so each loss <= 1% of equity.
         self.assertGreater(out["ending_equity"], 1000.0 * (0.99 ** 3) - 1e-6)
 
     def test_deterministic_same_timestamp_ordering(self):
         rows = [_trade(T0, "ZUSDT"), _trade(T0, "AUSDT"), _trade(T0, "MUSDT")]
-        out = pr.run_portfolio(rows, _policy(max_positions=2))
+        out = pr.run_portfolio_legacy(rows, _policy(max_positions=2))
         self.assertEqual(set(out["by_symbol"]), {"AUSDT", "MUSDT"})
         self.assertIn("not profit-optimized", out["same_timestamp_ordering"])
 

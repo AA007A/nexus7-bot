@@ -15,13 +15,20 @@ Uplift of NEXUS over a losing baseline is NOT sufficient. Promotion needs
 BOTH layers:
 
 * CANDIDATE_RESEARCH (signal edge): approved expectancy > 0 and its
-  dependence-aware (UTC-block bootstrap) lower bound > 0; uplift authority
-  lower bound > 0; adequate unique temporal blocks / effective sample.
+  block-bootstrap authority lower bound > 0 (recomputed here from the 24h /
+  48h / 72h UTC-block intervals); uplift authority lower bound > 0; adequate
+  unique temporal blocks / effective sample; temporal folds.
 * PORTFOLIO_EXECUTION_REPLAY (executable edge): net expectancy > 0, final
-  equity > starting equity, robustness lower bound > 0, max equity drawdown
-  within the research limit, enough trades and contributing symbols.
+  equity > starting equity, PATH-bootstrap lower bound > 0, max equity
+  drawdown within the research limit, enough trades and contributing symbols,
+  accounting invariants proven.
+* REPLAY PARITY: exit parity, pre-trade gate parity and portfolio parity
+  complete; pinned replay policy manifest present; closed-candle sentinel
+  verified.
 
-IID row-bootstrap intervals are diagnostics and never carry authority.
+IID row-bootstrap intervals are diagnostics with ZERO authority: the gate
+never reads them, and legacy IID blocker codes are ignored, so IID can turn
+neither a BLOCK into a PROMOTE nor a PROMOTE into a BLOCK.
 
 Exit codes: 0 PROMOTE, 1 BLOCKED (evidence insufficient/negative),
 2 ARTIFACT_MISSING, 3 ARTIFACT_CORRUPT.
@@ -82,34 +89,71 @@ def _num(value):
     return out if math.isfinite(out) else None
 
 
+BLOCK_CI_KEYS = ("block24h_ci", "block48h_ci", "block72h_ci")
+# Legacy IID-derived codes. If a (malformed) artifact still carries them they
+# are ignored: IID has zero promotion authority in either direction.
+LEGACY_IID_BLOCKERS = frozenset({"UPLIFT_NOT_STATISTICALLY_POSITIVE", "UPLIFT_CI_NOT_POSITIVE"})
+REQUIRED_AUTHORITY_MODEL = "BLOCK_BOOTSTRAP_ONLY_V1"
+
+
+def block_only_authority(section: dict) -> tuple[float | None, float | None]:
+    """Recompute the authority interval from BLOCK intervals only.
+
+    Never reads ``iid_ci``. Returns (None, None) when no block interval is
+    valid (fail closed).
+    """
+    valid = []
+    for key in BLOCK_CI_KEYS:
+        ci = (section or {}).get(key)
+        if isinstance(ci, (list, tuple)) and len(ci) == 2:
+            lo, hi = _num(ci[0]), _num(ci[1])
+            if lo is not None and hi is not None:
+                valid.append((lo, hi))
+    if not valid:
+        return None, None
+    return min(lo for lo, _ in valid), max(hi for _, hi in valid)
+
+
+def _authority(section: dict, name: str, b: list) -> float | None:
+    lo, _ = block_only_authority(section)
+    reported = _num((section or {}).get("authority_ci_low"))
+    if lo is not None and reported is not None and abs(lo - reported) > 1e-9:
+        b.append(f"{name}_AUTHORITY_CI_INCONSISTENT")
+    if lo is not None and reported is None:
+        b.append(f"{name}_AUTHORITY_CI_INCONSISTENT")
+    return lo
+
+
 def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
-    """Fail-closed evaluation. Any missing evidence field is a blocker."""
+    """Fail-closed evaluation. Any missing evidence field is a blocker.
+
+    Statistical authority: UTC-block bootstrap intervals only (recomputed
+    here from the block intervals; IID is never read).
+    """
     if not isinstance(artifact, dict):
         return GateResult(False, ["ARTIFACT_CORRUPT"], EXIT_CORRUPT)
     b: list[str] = []
 
-    status = artifact.get("status")
-    if status != "AI_EDGE_PROVEN":
+    if artifact.get("authority_model") != REQUIRED_AUTHORITY_MODEL:
+        b.append("AUTHORITY_MODEL_UNSUPPORTED")
+    if artifact.get("status") != "AI_EDGE_PROVEN":
         b.append("STATUS_NOT_AI_EDGE_PROVEN")
     for blocker in artifact.get("blockers") or []:
-        b.append(str(blocker))
+        if str(blocker) not in LEGACY_IID_BLOCKERS:
+            b.append(str(blocker))
 
-    rep = artifact.get("report")
-    if not isinstance(rep, dict):
-        return GateResult(False, b + ["REPORT_MISSING"], EXIT_CORRUPT)
+    cand = artifact.get("candidate_research")
+    if not isinstance(cand, dict):
+        return GateResult(False, sorted(set(b + ["CANDIDATE_RESEARCH_MISSING"])), EXIT_CORRUPT)
 
-    base_n = _num(rep.get("known_baseline_outcomes"))
-    appr_n = _num(rep.get("known_approved_outcomes"))
+    perf = cand.get("performance") or {}
+    base_n = _num((perf.get("baseline") or {}).get("trades"))
+    appr_n = _num((perf.get("approved") or {}).get("trades"))
     if base_n is None or base_n < policy.min_baseline_samples:
         b.append("INSUFFICIENT_BASELINE_SAMPLE")
     if appr_n is None or appr_n < policy.min_approved_samples:
         b.append("INSUFFICIENT_APPROVED_SAMPLE")
-
-    uplift_lo = _num(rep.get("bootstrap_ci_low_r"))
-    if uplift_lo is None or uplift_lo <= 0:
-        b.append("UPLIFT_CI_NOT_POSITIVE")
-
-    nexus_exp = _num(rep.get("nexus_expectancy_r"))
+    nexus_exp = _num((perf.get("approved") or {}).get("net_expectancy_r"))
     if nexus_exp is None or nexus_exp <= 0:
         b.append("APPROVED_EXPECTANCY_NOT_POSITIVE")
 
@@ -122,6 +166,20 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if policy.require_context_parity and parity is not True:
         b.append("HISTORICAL_CONTEXT_PARITY_INCOMPLETE")
 
+    rparity = artifact.get("replay_parity")
+    if not isinstance(rparity, dict):
+        b.append("REPLAY_PARITY_MISSING")
+    else:
+        if rparity.get("exit_parity_complete") is not True:
+            b.append("EXIT_PARITY_INCOMPLETE")
+        if rparity.get("pretrade_parity_complete") is not True:
+            b.append("PRETRADE_CONTEXT_PARITY_INCOMPLETE")
+        if rparity.get("portfolio_parity_complete") is not True:
+            b.append("PORTFOLIO_PARITY_INCOMPLETE")
+    manifest = artifact.get("replay_policy_manifest")
+    if not isinstance(manifest, dict) or not manifest.get("policy_sha256"):
+        b.append("REPLAY_POLICY_MANIFEST_MISSING")
+
     symbols = artifact.get("symbols")
     if not isinstance(symbols, list) or not symbols:
         b.append("SYMBOLS_MISSING")
@@ -132,21 +190,17 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         if not days or any(d is None or d < policy.min_history_days for d in days):
             b.append("HISTORY_HORIZON_TOO_SHORT")
 
-    rob = ((artifact.get("robustness") or {}).get("summary")) or {}
-    folds_pos = _num(rob.get("temporal_folds_positive_uplift"))
+    folds = cand.get("temporal_folds") or {}
+    folds_pos = _num(folds.get("folds_positive_approved_expectancy"))
     if folds_pos is None or folds_pos < policy.min_temporal_folds_positive:
         b.append("TEMPORAL_ROBUSTNESS_INSUFFICIENT")
 
-    # ── CANDIDATE_RESEARCH (signal edge, dependence-aware) ──
-    cand = artifact.get("candidate_research")
-    if not isinstance(cand, dict):
-        b.append("CANDIDATE_RESEARCH_MISSING")
-        cand = {}
+    # ── CANDIDATE_RESEARCH (signal edge, block-bootstrap authority only) ──
     infer = cand.get("inference") or {}
-    appr_lo = _num((infer.get("approved_expectancy") or {}).get("authority_ci_low"))
+    appr_lo = _authority(infer.get("approved_expectancy") or {}, "APPROVED_EXPECTANCY", b)
     if appr_lo is None or appr_lo <= 0:
         b.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
-    up_lo = _num((infer.get("uplift_vs_baseline") or {}).get("authority_ci_low"))
+    up_lo = _authority(infer.get("uplift_vs_baseline") or {}, "UPLIFT", b)
     if up_lo is None or up_lo <= 0:
         b.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
     eff = ((cand.get("effective_sample") or {}).get("approved")) or {}
@@ -181,6 +235,8 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
     if not isinstance(port, dict):
         b.append("PORTFOLIO_REPLAY_MISSING")
     else:
+        if port.get("accounting_invariants") != "PASS":
+            b.append("PORTFOLIO_ACCOUNTING_INVARIANTS_NOT_PROVEN")
         p_exp = _num(port.get("net_expectancy_r"))
         if p_exp is None or p_exp <= 0:
             b.append("PORTFOLIO_EXPECTANCY_NOT_POSITIVE")
@@ -190,7 +246,9 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
         mdd, limit = _num(port.get("portfolio_max_drawdown")), _num(port.get("research_max_drawdown_limit"))
         if mdd is None or limit is None or mdd > limit:
             b.append("PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT")
-        p_lo = _num((port.get("robustness") or {}).get("authority_ci_low"))
+        # Authority: path bootstrap (candidate timeline re-run through the
+        # state machine). The trade-level CI is approximate and never read.
+        p_lo = _num((port.get("path_bootstrap") or {}).get("authority_ci_low"))
         if p_lo is None:
             b.append("PORTFOLIO_ROBUSTNESS_NOT_ESTIMABLE")
         elif p_lo <= 0:
@@ -203,8 +261,8 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
             b.append("TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING")
 
     method = artifact.get("methodology") or {}
-    for flag in ("closed_candles_only", "historical_clock_frozen", "fees_included",
-                 "slippage_included"):
+    for flag in ("closed_candles_only", "closed_candle_sentinel_verified", "historical_clock_frozen",
+                 "fees_included", "slippage_included"):
         if method.get(flag) is not True:
             b.append(f"METHODOLOGY_{flag.upper()}_NOT_CONFIRMED")
 
@@ -220,10 +278,7 @@ def evaluate_path(path: str | Path, policy: GatePolicy = GatePolicy()) -> GateRe
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return GateResult(False, ["ARTIFACT_CORRUPT"], EXIT_CORRUPT)
-    result = evaluate(data, policy)
-    if not isinstance(data, dict) or "report" not in data:
-        result.exit_code = EXIT_CORRUPT
-    return result
+    return evaluate(data, policy)
 
 
 def main(argv=None) -> int:
