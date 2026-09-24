@@ -288,10 +288,31 @@ def override_may_authorize(action: RiskAction) -> bool:
 # ── Daily stop ───────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class DailyStopLimit:
+    """Daily loss limit. ``limit`` is the INTERNAL risk value used by gates.
+
+    ``limit`` is never above the exact configured limit: it is computed in
+    Decimal, quantized DOWN to 1e-8 USDT, and converted to the largest float
+    that does not exceed that value. ``display_limit`` (floored to cents) is
+    for human-facing text only and must never be fed back into a gate.
+    """
     limit: float
     pct_limit: float
     absolute_limit: float | None
     source: str
+    exact_pct_limit: Decimal = Decimal(0)
+    display_limit: str = "0.00"
+
+
+_INTERNAL_QUANTUM = Decimal("0.00000001")
+_DISPLAY_QUANTUM = Decimal("0.01")
+
+
+def _float_not_above(value: Decimal) -> float:
+    """Nearest float <= value (float() rounds to nearest, possibly upward)."""
+    out = float(value)
+    while Decimal(out) > value:
+        out = math.nextafter(out, -math.inf)
+    return out
 
 
 def effective_daily_stop_limit(balance, policy_or_pct, absolute=None) -> DailyStopLimit:
@@ -300,6 +321,11 @@ def effective_daily_stop_limit(balance, policy_or_pct, absolute=None) -> DailySt
     ``absolute`` <= 0 or None means "not configured". A non-finite absolute is
     treated as invalid and ignored (the percentage still governs), so a broken
     absolute value can only fail towards the stricter percentage limit.
+
+    Arithmetic is exact (Decimal from the decimal text of the inputs) and every
+    quantization rounds towards a SMALLER loss limit, so display rounding can
+    never loosen the circuit breaker (formerly ``round(balance * pct, 2)``
+    turned 25.9007 * 3% = 0.777021 into 0.78).
     """
     if isinstance(policy_or_pct, RiskPolicy):
         pct = policy_or_pct.daily_stop_loss_pct
@@ -312,11 +338,15 @@ def effective_daily_stop_limit(balance, policy_or_pct, absolute=None) -> DailySt
         raise RiskPolicyError("daily stop requires a positive confirmed balance")
     if not 0 < pct <= MAX_DAILY_STOP_PCT_CEILING:
         raise RiskPolicyError("daily stop percentage outside valid range")
-    pct_limit = round(bal * pct, 2)
-    if pct_limit <= 0:
-        # Sub-cent accounts: keep a strictly positive limit rather than 0,
-        # which downstream readers treat as "not configured".
-        pct_limit = bal * pct
+
+    exact = Decimal(repr(bal)) * Decimal(repr(pct))
+    internal = exact.quantize(_INTERNAL_QUANTUM, rounding=ROUND_FLOOR)
+    if internal <= 0:
+        # Sub-1e-8 limits: keep a strictly positive limit (0 means "not
+        # configured" downstream) without exceeding the exact value.
+        internal = exact
+    pct_limit = _float_not_above(internal)
+
     abs_limit = None
     if absolute is not None and not isinstance(absolute, bool):
         try:
@@ -325,9 +355,12 @@ def effective_daily_stop_limit(balance, policy_or_pct, absolute=None) -> DailySt
             a = float("nan")
         if math.isfinite(a) and a > 0:
             abs_limit = a
-    if abs_limit is not None and abs_limit < pct_limit:
-        return DailyStopLimit(abs_limit, pct_limit, abs_limit, "ABSOLUTE_STRICTER")
-    return DailyStopLimit(pct_limit, pct_limit, abs_limit, "PERCENT_STRICTER" if abs_limit else "PERCENT_ONLY")
+    if abs_limit is not None and Decimal(repr(abs_limit)) < internal:
+        chosen, source = abs_limit, "ABSOLUTE_STRICTER"
+    else:
+        chosen, source = pct_limit, "PERCENT_STRICTER" if abs_limit else "PERCENT_ONLY"
+    display = str(Decimal(repr(chosen)).quantize(_DISPLAY_QUANTUM, rounding=ROUND_FLOOR))
+    return DailyStopLimit(chosen, pct_limit, abs_limit, source, exact, display)
 
 
 # ── Position sizing ──────────────────────────────────────────────────────────

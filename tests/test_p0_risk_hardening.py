@@ -7,6 +7,7 @@ leverage=50x, runtime reported ``execution_effect=ALLOW_NEW_ENTRIES``.
 Each class maps to one required scenario (A..F) from the hardening brief.
 """
 import asyncio
+from decimal import Decimal
 import logging
 import math
 import os
@@ -299,7 +300,8 @@ class ScenarioC_RiskQuantityIsAuthoritative(unittest.TestCase):
 class ScenarioD_DailyStopUsesStricterLimit(unittest.TestCase):
     def test_absolute_100_does_not_loosen_3pct_on_small_account(self):
         lim = rp.effective_daily_stop_limit(EQUITY, 0.03, 100.0)
-        self.assertAlmostEqual(lim.limit, round(EQUITY * 0.03, 2))
+        self.assertAlmostEqual(lim.limit, EQUITY * 0.03)
+        self.assertLessEqual(Decimal(lim.limit), Decimal("25.9007") * Decimal("0.03"))
         self.assertLess(lim.limit, 100.0)
         self.assertEqual(lim.source, "PERCENT_STRICTER")
 
@@ -311,7 +313,7 @@ class ScenarioD_DailyStopUsesStricterLimit(unittest.TestCase):
     def test_absolute_disabled_or_invalid_uses_pct(self):
         for absolute in (0.0, -5.0, None, float("nan"), float("inf"), "x", True):
             lim = rp.effective_daily_stop_limit(EQUITY, 0.03, absolute)
-            self.assertAlmostEqual(lim.limit, round(EQUITY * 0.03, 2), msg=repr(absolute))
+            self.assertAlmostEqual(lim.limit, EQUITY * 0.03, msg=repr(absolute))
 
     def test_invalid_balance_fails_closed(self):
         for bal in (0.0, -1.0, float("nan")):
@@ -334,17 +336,63 @@ class ScenarioD_DailyStopUsesStricterLimit(unittest.TestCase):
         engine = self._engine(EQUITY)
         with _CfgPatch(DAILY_STOP_LOSS=100.0, DAILY_STOP_LOSS_PCT=0.03):
             dsh.sync_daily_limits(engine)
-        self.assertAlmostEqual(engine.daily_stop_loss, round(EQUITY * 0.03, 2))
-        self.assertAlmostEqual(engine.daily_tracker.daily_stop_loss, round(EQUITY * 0.03, 2))
+        self.assertAlmostEqual(engine.daily_stop_loss, EQUITY * 0.03)
+        self.assertAlmostEqual(engine.daily_tracker.daily_stop_loss, EQUITY * 0.03)
 
     def test_daily_tracker_reset_uses_stricter_limit(self):
         from bot.daily_tracker import DailyTracker
         with _CfgPatch(DAILY_STOP_LOSS=100.0, DAILY_STOP_LOSS_PCT=0.03):
             t = DailyTracker()
             t.recalc_limits(EQUITY)
-            self.assertAlmostEqual(t.daily_stop_loss, round(EQUITY * 0.03, 2))
+            self.assertAlmostEqual(t.daily_stop_loss, EQUITY * 0.03)
             t.recalc_limits(10_000.0)
             self.assertAlmostEqual(t.daily_stop_loss, 100.0)
+
+
+class DailyStopPrecisionIsConservative(unittest.TestCase):
+    BALANCES = ("25.9007", "10.01", "1.01", "0.99", "100.005", "1000.005",
+                "0.01", "0.005", "12345.678901", "63.7943")
+    PCTS = ("0.03", "0.01", "0.025", "0.2", "0.0333")
+
+    def test_internal_limit_never_exceeds_exact_percentage_limit(self):
+        for b in self.BALANCES:
+            for p in self.PCTS:
+                lim = rp.effective_daily_stop_limit(float(b), float(p))
+                exact = Decimal(b) * Decimal(p)
+                self.assertLessEqual(Decimal(lim.limit), exact, (b, p))
+                self.assertGreater(lim.limit, 0.0, (b, p))
+                # Conservative, but not materially tighter than exact.
+                self.assertLess(exact - Decimal(lim.limit), Decimal("0.00000002"), (b, p))
+
+    def test_production_state_is_not_rounded_up_to_cents(self):
+        lim = rp.effective_daily_stop_limit(25.9007, 0.03)
+        self.assertEqual(lim.exact_pct_limit, Decimal("0.777021"))
+        self.assertLess(lim.limit, 0.78)
+        self.assertEqual(lim.display_limit, "0.77")
+
+    def test_display_value_is_floored_and_separate(self):
+        for b in self.BALANCES:
+            lim = rp.effective_daily_stop_limit(float(b), 0.03)
+            self.assertLessEqual(Decimal(lim.display_limit), Decimal(lim.limit) + Decimal("0"), b)
+
+    def test_stricter_absolute_still_wins_exactly(self):
+        lim = rp.effective_daily_stop_limit(1000.005, 0.03, 30.0)
+        self.assertEqual(lim.limit, 30.0)
+        self.assertEqual(lim.source, "ABSOLUTE_STRICTER")
+        lim = rp.effective_daily_stop_limit(1000.005, 0.03, 30.00015)
+        self.assertEqual(lim.source, "PERCENT_STRICTER")
+        self.assertLessEqual(Decimal(lim.limit), Decimal("30.00015"))
+
+    def test_runtime_writers_use_internal_not_display_value(self):
+        from bot import daily_stop_runtime_hardening as dsh
+        from types import SimpleNamespace as NS
+        engine = NS(risk=NS(balance=25.9007), daily_target=0.0, daily_stop_loss=0.0,
+                    daily_tracker=NS(daily_target=0.0, daily_stop_loss=0.0, daily_stopped=False),
+                    daily_stopped=False)
+        with _CfgPatch(DAILY_STOP_LOSS=0.0, DAILY_STOP_LOSS_PCT=0.03):
+            dsh.sync_daily_limits(engine)
+        self.assertLessEqual(Decimal(engine.daily_stop_loss), Decimal("0.777021"))
+        self.assertGreater(engine.daily_stop_loss, 0.77)
 
 
 # ─────────────────────────────────────────────────────────────── E ──
