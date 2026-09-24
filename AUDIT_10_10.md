@@ -1,0 +1,126 @@
+# AUDIT_10_10 — NEXUS-7 / BGX CAPITAL production hardening audit
+
+- Baseline SHA: `77ae453e3d01dc269c3b1ee3a4225900c22d9634` (confirmed with `git rev-parse HEAD`)
+- Branch: `claude/nexus7-production-hardening-5aq2sc`
+- Scope of this pass: P0 risk authority (drawdown, sizing, loss budget, daily stop, CROSS stress), configuration contract, provider health, silent exceptions, CI decision-path coverage.
+- Nothing here was deployed. No Railway variable was read or changed. No order was sent.
+
+"10/10" here grades engineering, risk control and evidence quality. It says nothing about expected returns.
+
+---
+
+## 1. Execution path: signal to protected position
+
+```
+KuCoinClient WS/REST ─► market_data_integrity (closed-candle, stale fail-closed)
+  ─► Analyzer.analyze (strategy.py) ─► adaptive_mtf_entry ─► pullback_confirmation_hardening
+  ─► TradingEngine._scan_all_and_enter            [gated by: active, daily stop (durable_daily_stop),
+                                                   daily PnL checkpoint, risk.can_open (drawdown +
+                                                   policy validity + MAX_POSITIONS), IntegrityGuard,
+                                                   viable_symbols]
+  ─► TradingEngine._open(sig)                        (engine.py:2666)
+       ├─ durable.can_open                            durable state confirmed
+       ├─ NexusRuntimeEngine._nexus_validate          NEXUS ensemble decision
+       │    └─ _prepare_professional_risk             fresh account capital, HWM, V3.can_open, set_plan(entry, SL, risk_pct)
+       ├─ _refresh_entry_balance (pre-sizing)
+       ├─ PilotGuard.can_open_pilot                    checks 1..14 incl. 9B drawdown (now DRAWDOWN_MODE-independent)
+       ├─ engine.minimum_base_quantity(info, entry)    ◄ FINAL SIZING AUTHORITY (final_sizing_invariants)
+       │    = floor_lot(min(RiskManagerV3 adapter qty, risk_policy.size_new_entry qty))
+       ├─ pre-trade score (score.py)
+       ├─ _refresh_entry_balance (final)               ◄ cross_portfolio_stress (2nd position) ─► pilot_risk_cap
+       │                                                 fresh spread/depth/drift + equity loss-budget recheck
+       ├─ order registry + durable intent (before network I/O)
+       └─ KuCoinClient.place_order ─► live_execution_fence (ownership lease/fencing token)
+              ─► pilot_submission_counter ─► kucoin_native_tpsl (protected entry, readback verify)
+              ─► kucoin_cross_margin_order ─► fill normalization ─► wait_for_fill (visibility race)
+  ─► post-open protection verification (prelive_protection_failclosed) ─► native stop repair
+  ─► position management loop: _guard_naked_positions, _sync_positions, stagnation/invalidation,
+     partial TP (durable_partial_exit), trailing, RR exit ─► reconciliation (durable_reconcile_hardening)
+```
+
+## 2. Position-sizing authorities (before → after)
+
+| Layer (install order) | Before | After |
+|---|---|---|
+| `bot/quantity.minimum_base_quantity` | exchange minimum lot | unchanged (used only outside LIVE pilot) |
+| `pilot_live_runtime` | 50% available as position notional (preliminary) | unchanged, inner, superseded |
+| `pilot_risk_cap_hardening` | `min(target, risk)` | unchanged, inner, superseded; its fresh pre-dispatch recheck now uses the **equity** loss budget |
+| `operator_runtime_policy._install_margin_sizing` | **50% available as initial margin at 50x = quantity authority** | **removed** |
+| `final_sizing_invariants` (outermost) | **OPERATOR_50PCT_EQUITY authority; RiskManagerV3 "VALIDATION_GATE" only** | `floor_lot(min(RiskManagerV3 qty, risk_policy.size_new_entry qty))` |
+| `ProfessionalRiskAdapter.size` (PAPER + LIVE) | `stop_risk_size` (risk + margin) | `risk_policy.size_new_entry` (risk, margin, operator cap, liquidation, portfolio, lot) |
+| `final_loss_budget.validate` | `limit = margin × 0.50` | `limit = equity × risk_pct` |
+
+## 3. Drawdown / daily-stop authorities (before → after)
+
+| Concept | Writers/readers | After |
+|---|---|---|
+| Drawdown gate | `RiskManager.can_open`, `RiskManagerV3.can_open` (both patched by `operator_runtime_policy`), `NexusRuntimeEngine._update_balance` (`DRAWDOWN_MODE`), `PilotGuard` 9B, `status_observability` | All delegate to `risk_policy.drawdown_entry_decision`. Override and `DRAWDOWN_MODE` have no authority. |
+| Engine `active` restore | `_protect_drawdown_update` set `active=True` under override | Removed. The legacy pause is preserved. |
+| Daily stop limit | `engine.py` ×2, `DailyTracker.recalc_limits`, `daily_stop_runtime_hardening._sync_limits`, `nexus_runtime_engine` | All call `risk_policy.effective_daily_stop_limit` (the stricter of the two limits) |
+| Daily-stop date override | `durable_daily_stop` (`DAILY_STOP_OVERRIDE_UTC_DAY`) | **Unchanged. Open item P1-03.** |
+
+## 4. Runtime wrapper stack
+
+`runtime_bootstrap.install` makes 53 explicit `.install(...)` calls and `runtime_overlays.install` makes 26. `runtime_contract_guard` (the last one) pins 14 final callables and 8 markers, and refuses startup on drift. The ownership contract is unchanged by this pass. The following were verified by executing `sitecustomize.py` in both SHADOW/PAPER and the production-like controlled-LIVE environment (50x, `LIVE_RISK_OVERRIDE_APPROVED=true`, `DAILY_STOP_LOSS=100`): `RUNTIME_CONTRACT status=PASS`, `sitecustomize status=ok`.
+
+Wrappers that still decide a risk concept after this pass:
+- `operator_runtime_policy`: owns `can_open` and `_update_balance`/`run`, and delegates the decision to `risk_policy`.
+- `final_sizing_invariants`: owns LIVE quantity, and delegates to `risk_policy`.
+- `pilot_risk_cap_hardening` / `pilot_live_runtime`: inner sizing wrappers, now dead weight in the LIVE path (P2-01).
+
+---
+
+## 5. Findings
+
+| ID | Sev | File / function | Root cause | Current (baseline) behavior | Desired invariant | Fix | Tests | Residual risk |
+|---|---|---|---|---|---|---|---|---|
+| P0-01 | P0 | `operator_runtime_policy._install_drawdown_advisory`, `_protect_drawdown_update` | Operator override implemented as bypass of the hard gate | DD 59.40% ≥ 50% with `LIVE_RISK_OVERRIDE_APPROVED=true` → `can_open=True`, `active` restored, `ALLOW_NEW_ENTRIES` | DD ≥ MAX_DRAWDOWN ⇒ new entry BLOCK. The override may authorize only risk-reducing actions | Gates delegate to `risk_policy.drawdown_entry_decision`. The override is logged `override_effect=NONE`. `active` is never restored | `test_p0_risk_hardening.ScenarioA_*` (9), `test_operator_runtime_policy`, `test_operator_runtime_risk_override`, `test_operator_runtime_policy_contract` | Production is **currently above the limit (59.40%)**. After deploy the bot will open no new positions until the HWM is rebased by a verified cash-flow reconciliation or equity recovers. This is intended. |
+| P0-02 | P0 | `nexus_runtime_engine._update_balance`, `pilot.PilotGuard.evaluate` | `DRAWDOWN_MODE` default `ADVISORY` meant the limit never blocked here | Advisory mode: entries allowed over the limit | Same as P0-01 | Gate is independent of `DRAWDOWN_MODE`. The alert reads `HARD_GATE` | `ScenarioA.test_drawdown_mode_advisory_does_not_allow_entries`, `test_nexus_runtime_drawdown_advisory` | `DRAWDOWN_MODE` is now telemetry-only. It should be removed from config in a later cleanup. |
+| P0-03 | P0 | `final_sizing_invariants`, `operator_runtime_policy._install_margin_sizing` | Operator 50%-margin figure used as the quantity target; RiskManagerV3 demoted to validation | Qty = 50% available × 50x / price. At equity 25.90 and a 0.4% stop: loss ≈ 4.01 USDT = **15.5% of equity**; old limit allowed up to 25% | final qty = min of all safe caps. Margin is a CAP | Canonical `risk_policy.size_new_entry`, and final = `min(RiskManagerV3, canonical)` | `ScenarioB_*`, `ScenarioC_*`, `test_final_sizing_invariants` (10), `test_professional_risk_adapter` | Sizing is only as good as the SL geometry and the cost model. Gap risk beyond the stop is not bounded. |
+| P0-04 | P0 | `final_loss_budget.measure/validate` | Budget expressed as a fraction of entry margin, so leverage scaled the loss budget | `limit = margin × 0.50` ≈ 25% equity at 50x/50% margin | `projected_loss_at_stop ≤ equity × risk_pct` | Equity-based. `equity` is a required keyword | `test_final_loss_budget` (7), `ScenarioB.test_final_loss_budget_is_equity_based` | none known |
+| P0-05 | P0 | `daily_stop_runtime_hardening._sync_limits`, `DailyTracker.recalc_limits`, `engine.py` | A positive absolute replaced the percentage | balance 25.90, 3%, abs 100 → stop = **-100 USDT** (386% of balance) | the more restrictive valid limit | `effective_daily_stop_limit` used by every writer | `ScenarioD_*` (7) | `DAILY_STOP_OVERRIDE_UTC_DAY` still bypasses a proven daily-stop breach (P1-03). |
+| P0-06 | P0 | `risk_policy.size_new_entry` | The minimum lot could be treated as a floor | (baseline pilot path already floored, but not risk-bounded) | min lot > safe qty ⇒ NO TRADE | `MINIMUM_ORDER` block, never escalation | `ScenarioE_*`, `test_final_sizing_invariants.test_minimum_lot_above_budget_is_no_trade` | On a 25.90 USDT account, BTC and wide-stop setups will be skipped. This is correct behavior. |
+| P0-07 | P0 | `cross_portfolio_stress` | Hard-coded 0.90 risk-rate ceiling; no slippage on stop fills | 90% of the liquidation point accepted | Configurable conservative threshold; slippage included; fail closed | Policy-owned `MAX_STOP_STRESS_RISK_RATE` (default 0.50, ceiling 0.90) plus slippage | `ScenarioF_*` (7), `test_cross_portfolio_stress` | The risk-rate formula approximates KuCoin CROSS (maintenance / margin balance, liquidation at 100%). The exact endpoint semantics are **not verified against a live account**. The stress runs only for the 2nd position; the 1st is bounded by the per-position liquidation cap. |
+| P0-08 | P0 | new `risk_policy.RiskPolicy.violations` | Each module interpreted config independently; no contradiction check | e.g. MAX_RISK_PCT 0.25 accepted silently | Invalid/contradictory policy fails closed with a precise message | `violations()` blocks at `can_open`, in sizing and in the stress gate. `[RISK_POLICY_INVALID]` logged at install | `RiskPolicyConfigurationContract` (9) | Blocks new entries rather than startup, so open positions stay managed (startup block = engine not started). |
+| P1-01 | P1 | `sizing_semantics_log_hardening.normalize_record` | LogRecordFactory rewrote log text | Would rewrite truthful "risk-authoritative" lines into "OPERATOR_50PCT_EQUITY" | Logs never misstate authority | Filter inverted: only superseded legacy lines relabelled | `test_sizing_semantics_log_hardening` (5) | none |
+| P1-02 | P1 | `status_observability._drawdown_blocked` | Override considered; errors reported "not blocked" | `/status` reported not blocked under override | Status mirrors the gate; unknown ⇒ blocked | Delegates to `risk_policy` | covered by `test_status_*` suites | none |
+| P1-03 | P1 | `durable_daily_stop._operator_override_active` | Date-scoped break-glass bypass of a proven daily stop | `DAILY_STOP_OVERRIDE_UTC_DAY=<today>` re-enables entries after a daily-stop breach | Overrides may not authorize new exposure | **Not changed in this pass.** It is explicit, expires daily and is logged CRITICAL, but it contradicts the override principle | — | **Open blocker.** |
+| P1-04 | P1 | `market_risk_runtime` | Key presence ≈ "configured"; no health taxonomy | CoinGlass 401 logged, but health was an ad-hoc string | CONFIGURED/AUTHORIZED/FRESH/FAILED/FALLBACK_ACTIVE | `classify_provider_health` + `[MARKET_RISK_PROVIDER_HEALTH]` | `test_market_risk_runtime` (+3) | The CoinGlass entitlement itself is not fixed (it needs an operator key/plan). Binance fallback remains. |
+| P1-05 | P1 | `runtime_truth_hooks` (2 × REVIEW_HIGH) | `except Exception: pass` in evidence capture | Capture failures invisible | Telemetry failure isolated but visible | Counted in `CAPTURE_FAILURES` and logged | `RuntimeTruthCaptureFailuresAreVisible` | none |
+| P1-06 | P1 | `final_loss_budget.emit_telemetry` | Generic `except Exception: pass` | Silent | Visible | Narrow except, logs `telemetry_error` | `test_observability_only_hardening` | A logging failure now propagates and fails the entry closed (intended). |
+| P1-07 | P1 | `.github/workflows/oos_real_replay.yml` | Path filter covered only OOS modules | strategy/NEXUS/config/sizing changes did not trigger replay | Decision-affecting PRs trigger OOS evidence | `bot/decision_affecting_paths.py` + drift test | `test_decision_affecting_paths` (3) | Whether the check is **required** is a branch-protection setting outside the repo. |
+| P1-08 | P1 | `nexus_probability.heuristic_win_probability` | Linear map `0.30 + c×0.45` capped at 0.75 | Docstring already says "not an empirically calibrated probability" | Probability calibrated OOS or labelled heuristic | Not changed. The label is already truthful at source. Calibration is **INSUFFICIENT EVIDENCE** (see OOS_REPORT) | — | Downstream consumers (EV) still multiply by this number. |
+| P1-09 | P1 | Strategy edge | — | OOS replay: baseline −0.70R, NEXUS-approved −0.53R net | Positive net expectancy before capital exposure | None. No threshold changes without evidence | — | **Open blocker. See OOS_REPORT.** |
+| P2-01 | P2 | `pilot_live_runtime`, `pilot_risk_cap_hardening` sizing hooks | Superseded inner sizing wrappers | Dead in the LIVE path; still installed | One authority | Kept (contract/tests depend on them). Scheduled for removal | — | Maintenance only |
+| P2-02 | P2 | Remaining 9 silent handlers | 5 justified best-effort, 4 REVIEW_MEDIUM (runtime_truth ×3, pullback telemetry) | — | classify all | 2 REVIEW_HIGH fixed | selfcheck | REVIEW_MEDIUM remain |
+| P2-03 | P2 | `engine.py` (3992 lines) | Monolith | — | Extract stateful authorities with parity tests | Not attempted in this pass (zero-semantic-change refactor requires its own PR) | — | — |
+
+### Required regression scenarios A–J
+
+| | Scenario | Status | Where |
+|---|---|---|---|
+| A | DD 59.40%, limit 50%, override=true ⇒ BLOCK | new, passing | `tests/test_p0_risk_hardening.py::ScenarioA_*` |
+| B | equity 25.9007, 1%, 50x ⇒ loss ≤ budget | new, passing (8×6×6×5×4 grid) | `ScenarioB_*` |
+| C | V3 qty < operator qty ⇒ final ≤ risk qty | new, passing | `ScenarioC_*`, `test_final_sizing_invariants` |
+| D | 25.9007, 3%, abs 100 ⇒ stricter | new, passing | `ScenarioD_*` |
+| E | min contract > risk qty ⇒ NO TRADE | new, passing | `ScenarioE_*` |
+| F | stale/missing CROSS data ⇒ BLOCK | new, passing | `ScenarioF_*` |
+| G | CoinGlass 401 ⇒ unhealthy + fallback, no signal | new, passing | `test_market_risk_runtime::test_coinglass_401_*` |
+| H | restart between submit and ack ⇒ no duplicate | **pre-existing**, passing | `test_durable_execution_restart::test_unresolved_live_intent_blocks_without_resubmission`, `test_exec02_ambiguous_order::test_B2_*`, `test_kucoin_native_tpsl::test_ambiguous_response_recovers_by_client_oid_without_resubmit` |
+| I | fill, protection ack delayed ⇒ protect/fail closed | **pre-existing**, passing | `test_prelive_protection_failclosed::*`, `test_kucoin_native_tpsl::test_http_success_without_readback_is_not_verified` |
+| J | partial TP + restart ⇒ exchange-authoritative, idempotent | **pre-existing**, passing | `test_durable_partial_exit::*`, `test_exec03_partial_fill_reconcile::test_C6_*`, `test_partial_tp_execution_hardening::test_confirmed_fill_and_be_use_exchange_remaining_quantity` |
+
+## 6. Verification performed
+
+| Check | Result |
+|---|---|
+| Baseline offline suite at 77ae453 | 1607/1607 pass |
+| New P0 tests against baseline code | 14 fail (reproduced), 29 pass |
+| Full offline suite after fixes (`python -m tests.run_offline`) | 1669/1669 pass |
+| `compileall`, `ruff --select E9,F63,F7,F82`, pyflakes undefined names | pass / pass / 0 |
+| `python -m bot.selfcheck` | 0 critical; silent handlers 12 → 9 |
+| `python -m bot.release_proof` | `RELEASE_PROOF=PASS` (161/161) |
+| CI named safety packs (durable, chaos, TPSL, fill, PAPER/SHADOW E2E) | pass |
+| Hardened entrypoint score-drift fail-closed | pass |
+| Full bootstrap under controlled-LIVE env (offline) | `RUNTIME_CONTRACT status=PASS` |
+| Real OOS replay | **not runnable here** (exchange hosts blocked by sandbox proxy). Latest CI evidence cited in OOS_REPORT.md |
