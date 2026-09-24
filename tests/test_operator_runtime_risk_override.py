@@ -53,7 +53,7 @@ class OperatorRuntimeRiskOverrideTests(unittest.TestCase):
 
         self.assertFalse(engine.active)
 
-    def test_drawdown_pause_can_be_explicitly_overridden(self):
+    def test_override_cannot_restore_drawdown_pause(self):
         engine = _Engine(drawdown=1.0)
         os.environ[policy.RISK_OVERRIDE_ENV] = "true"
 
@@ -68,7 +68,7 @@ class OperatorRuntimeRiskOverrideTests(unittest.TestCase):
         )
         asyncio.run(guarded())
 
-        self.assertTrue(engine.active)
+        self.assertFalse(engine.active)
         self.assertTrue(engine._dd_alerted)
 
     def test_operator_margin_fraction_remains_50_percent(self):

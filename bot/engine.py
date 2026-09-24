@@ -46,6 +46,7 @@ from bot.integrity import IntegrityGuard, Severity
 from bot.order_state import OrderRegistry, OrderState, InvalidTransition
 from bot.pilot import PilotGuard
 from bot.quantity import minimum_base_quantity, validate_base_quantity
+from bot.risk_policy import effective_daily_stop_limit
 from bot.paper_loss_budget import cap_quantity as cap_paper_quantity
 from bot import liquidation as liq
 from bot import durable_execution as durable
@@ -841,8 +842,9 @@ class TradingEngine:
             if bal > 0:
                 if cfg.DAILY_TARGET <= 0:
                     self.daily_target = round(bal * cfg.DAILY_TARGET_PCT, 2)
-                if cfg.DAILY_STOP_LOSS <= 0:
-                    self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = effective_daily_stop_limit(
+                    bal, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+                ).limit
                 self.daily_tracker.daily_target    = self.daily_target
                 self.daily_tracker.daily_stop_loss = self.daily_stop_loss
 
@@ -3936,7 +3938,9 @@ class TradingEngine:
             # apenas mantemos meta/stop coerentes com o saldo atual.
             if bal > 0:
                 self.daily_target    = round(bal * cfg.DAILY_TARGET_PCT, 2)
-                self.daily_stop_loss = round(bal * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = effective_daily_stop_limit(
+                    bal, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+                ).limit
 
             if self.risk.drawdown >= cfg.MAX_DRAWDOWN:
                 if not getattr(self, "_dd_alerted", False):

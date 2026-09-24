@@ -9,6 +9,44 @@ entry-stop flag afterward so validation can continue without exchange effects.
 """
 
 
+def sync_daily_limits(engine):
+    """Publish the canonical daily target/stop to the engine and its tracker.
+
+    The stop is ``risk_policy.effective_daily_stop_limit``: the MORE
+    restrictive of ``balance * DAILY_STOP_LOSS_PCT`` and a positive absolute
+    ``DAILY_STOP_LOSS``. An absolute value can tighten, never loosen, the
+    circuit breaker (previously a positive absolute replaced the percentage:
+    balance 25.90 with DAILY_STOP_LOSS=100 produced a -100 USDT stop).
+    """
+    from bot.config import cfg
+    from bot.risk_policy import effective_daily_stop_limit
+
+    tracker = getattr(engine, "daily_tracker", None)
+    if tracker is None:
+        return
+
+    balance = float(getattr(getattr(engine, "risk", None), "balance", 0.0) or 0.0)
+    target = float(getattr(engine, "daily_target", 0.0) or 0.0)
+    stop = float(getattr(engine, "daily_stop_loss", 0.0) or 0.0)
+
+    if balance > 0:
+        if float(getattr(cfg, "DAILY_TARGET", 0.0) or 0.0) > 0:
+            target = float(cfg.DAILY_TARGET)
+        else:
+            target = round(balance * float(cfg.DAILY_TARGET_PCT), 2)
+
+        stop = effective_daily_stop_limit(
+            balance, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS
+        ).limit
+
+        engine.daily_target = target
+        engine.daily_stop_loss = stop
+
+    tracker.daily_target = target
+    tracker.daily_stop_loss = stop
+    tracker.daily_stopped = bool(getattr(engine, "daily_stopped", False))
+
+
 def install(TradingEngine, log):
     if getattr(TradingEngine, "_daily_stop_runtime_hardened", False):
         return
@@ -18,35 +56,6 @@ def install(TradingEngine, log):
     orig_check_daily_reset = TradingEngine._check_daily_reset
     orig_update_daily_pnl = TradingEngine._update_daily_pnl
 
-    def _sync_limits(engine):
-        from bot.config import cfg
-
-        tracker = getattr(engine, "daily_tracker", None)
-        if tracker is None:
-            return
-
-        balance = float(getattr(getattr(engine, "risk", None), "balance", 0.0) or 0.0)
-        target = float(getattr(engine, "daily_target", 0.0) or 0.0)
-        stop = float(getattr(engine, "daily_stop_loss", 0.0) or 0.0)
-
-        if balance > 0:
-            if float(getattr(cfg, "DAILY_TARGET", 0.0) or 0.0) > 0:
-                target = float(cfg.DAILY_TARGET)
-            else:
-                target = round(balance * float(cfg.DAILY_TARGET_PCT), 2)
-
-            if float(getattr(cfg, "DAILY_STOP_LOSS", 0.0) or 0.0) > 0:
-                stop = float(cfg.DAILY_STOP_LOSS)
-            else:
-                stop = round(balance * float(cfg.DAILY_STOP_LOSS_PCT), 2)
-
-            engine.daily_target = target
-            engine.daily_stop_loss = stop
-
-        tracker.daily_target = target
-        tracker.daily_stop_loss = stop
-        tracker.daily_stopped = bool(getattr(engine, "daily_stopped", False))
-
     def _paper_or_shadow(engine) -> bool:
         return bool(
             getattr(engine, "paper_trade", False)
@@ -55,12 +64,12 @@ def install(TradingEngine, log):
 
     async def _connect_hardened(self, *args, **kwargs):
         result = await orig_connect(self, *args, **kwargs)
-        _sync_limits(self)
+        sync_daily_limits(self)
         return result
 
     async def _update_balance_hardened(self, *args, **kwargs):
         result = await orig_update_balance(self, *args, **kwargs)
-        _sync_limits(self)
+        sync_daily_limits(self)
         return result
 
     def _check_daily_reset_hardened(self, *args, **kwargs):
@@ -68,9 +77,9 @@ def install(TradingEngine, log):
         # wrapper had a chance to synchronize it. Sync first so operator-facing
         # reset telemetry reflects the same configured limit that enforcement
         # uses, then sync again in case the core reset changes daily state.
-        _sync_limits(self)
+        sync_daily_limits(self)
         result = orig_check_daily_reset(self, *args, **kwargs)
-        _sync_limits(self)
+        sync_daily_limits(self)
         return result
 
     def _update_daily_pnl_hardened(self, *args, **kwargs):
@@ -82,7 +91,7 @@ def install(TradingEngine, log):
                 for p in self.positions.values()
             )
             tracker.daily_pnl = realized + unrealized
-            _sync_limits(self)
+            sync_daily_limits(self)
 
         result = orig_update_daily_pnl(self, *args, **kwargs)
 

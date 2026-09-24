@@ -21,6 +21,7 @@ from bot.nexus_validation_observability import observe_nexus_validation
 from bot.notifier import notify
 from bot.professional_risk import CapitalState
 from bot.professional_risk_adapter import ProfessionalRiskAdapter
+from bot.risk_policy import drawdown_entry_decision, effective_daily_stop_limit
 from bot.shadow_balance_semantics import refresh_shadow_risk
 
 
@@ -69,11 +70,10 @@ class TradingEngine(CoreTradingEngine):
         SHADOW remains mutation-free and uses the same authenticated read-only
         equity semantics through ``refresh_shadow_risk``.
 
-        In controlled LIVE, account drawdown is deliberately advisory-only:
-        the durable high-water mark, drawdown percentage, one-shot alert and all
-        telemetry remain active, but MAX_DRAWDOWN does not mutate ``active`` or
-        veto entries by itself. Independent daily-stop, integrity, NEXUS,
-        protection, ownership and market-risk gates remain authoritative.
+        ``drawdown >= MAX_DRAWDOWN`` sets ``_drawdown_hard_gate_active`` and
+        blocks NEW entries regardless of ``DRAWDOWN_MODE`` (which is now
+        telemetry-only). It does not mutate ``active``: existing positions keep
+        being managed, protected and reconciled.
         """
         if getattr(self, "paper_trade", False):
             return await super()._update_balance()
@@ -90,25 +90,27 @@ class TradingEngine(CoreTradingEngine):
 
             if equity > 0:
                 self.daily_target = round(equity * cfg.DAILY_TARGET_PCT, 2)
-                self.daily_stop_loss = round(equity * cfg.DAILY_STOP_LOSS_PCT, 2)
+                self.daily_stop_loss = effective_daily_stop_limit(equity, cfg.DAILY_STOP_LOSS_PCT, cfg.DAILY_STOP_LOSS).limit
 
-            over_limit = self.risk.drawdown >= cfg.MAX_DRAWDOWN
-            hard_gate = cfg.DRAWDOWN_MODE == "HARD_GATE"
-            self._drawdown_hard_gate_active = bool(over_limit and hard_gate)
+            # DRAWDOWN_MODE no longer selects whether the limit blocks new
+            # entries: a breach always blocks new exposure (risk_policy).
+            decision = drawdown_entry_decision(self.risk.drawdown, cfg.MAX_DRAWDOWN)
+            over_limit = not decision.can_open
+            self._drawdown_hard_gate_active = bool(over_limit)
             if over_limit:
-                entries_blocked = self._drawdown_hard_gate_active
+                entries_blocked = True
                 if not getattr(self, "_dd_alerted", False):
                     self._dd_alerted = True
                     log.warning(
                         "[DRAWDOWN_POLICY] drawdown_pct=%.2f threshold_pct=%.2f "
-                        "mode=%s entries_blocked=%s reason=MAX_DRAWDOWN",
+                        "mode=HARD_GATE configured_mode=%s entries_blocked=%s reason=MAX_DRAWDOWN",
                         self.risk.drawdown * 100.0,
                         cfg.MAX_DRAWDOWN * 100.0,
                         cfg.DRAWDOWN_MODE,
                         str(entries_blocked).lower(),
                     )
                     await notify(
-                        f"⚠️ *DRAWDOWN ELEVADO — {cfg.DRAWDOWN_MODE}*\n"
+                        f"⚠️ *DRAWDOWN ELEVADO — HARD_GATE*\n"
                         f"`{'━'*28}`\n"
                         f"📉 Drawdown:     `{self.risk.drawdown:.1%}`\n"
                         f"💼 Equity:       `${equity:,.2f} USDT`\n"

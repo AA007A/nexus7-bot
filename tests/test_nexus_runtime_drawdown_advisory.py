@@ -46,11 +46,14 @@ async def _exercise_runtime_drawdown_advisory():
         engine._dd_alerted = False
 
         await engine._update_balance()
+        # Position management stays active; NEW entries are hard-blocked
+        # regardless of DRAWDOWN_MODE.
         assert engine.active is True
+        assert engine._drawdown_hard_gate_active is True
         assert engine._dd_alerted is True
         assert len(messages) == 1
-        assert "ADVISORY" in messages[0]
-        assert "Novas entradas bloqueadas: False" in messages[0]
+        assert "HARD_GATE" in messages[0]
+        assert "Novas entradas bloqueadas: True" in messages[0]
 
         # One-shot alert semantics stay intact while drawdown remains elevated.
         await engine._update_balance()
@@ -61,6 +64,7 @@ async def _exercise_runtime_drawdown_advisory():
         engine.risk.drawdown = 0.0
         await engine._update_balance()
         assert engine.active is True
+        assert engine._drawdown_hard_gate_active is False
         assert engine._dd_alerted is False
     finally:
         runtime.account_balance_semantics.read_account_state = original_read
@@ -68,5 +72,11 @@ async def _exercise_runtime_drawdown_advisory():
         runtime.notify = original_notify
 
 
-def test_runtime_drawdown_is_advisory_and_never_pauses_live_engine():
-    asyncio.run(_exercise_runtime_drawdown_advisory())
+def test_runtime_drawdown_blocks_new_entries_but_keeps_managing_positions():
+    for mode in ("ADVISORY", "HARD_GATE"):
+        old = cfg.DRAWDOWN_MODE
+        cfg.DRAWDOWN_MODE = mode
+        try:
+            asyncio.run(_exercise_runtime_drawdown_advisory())
+        finally:
+            cfg.DRAWDOWN_MODE = old

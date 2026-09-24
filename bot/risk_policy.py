@@ -448,6 +448,7 @@ def size_new_entry(
     leverage: float | None = None,
     maintenance_margin_rate: float | None = None,
     open_risks: Iterable[OpenRisk] = (),
+    max_adverse_entry_drift: float = 0.0,
 ) -> SizingDecision:
     """Compute the final new-entry quantity as the minimum of all safe caps.
 
@@ -461,6 +462,10 @@ def size_new_entry(
                   (MAX_POSITIONS * equity * MAX_RISK_PCT - open projected losses)
     The minimum is floored to the exchange lot. If that is below the exchange
     minimum, the entry is BLOCKED: quantity is never escalated to the minimum.
+
+    ``max_adverse_entry_drift`` (fraction) sizes for the worst fill the
+    pre-dispatch guard will still accept, so the fresh-price recheck of the
+    same loss budget holds for every accepted fill price.
     """
     violations = policy.violations()
     if violations:
@@ -474,6 +479,7 @@ def size_new_entry(
         cost = _finite(cost_fraction, "cost_fraction")
         lev = _finite(policy.leverage if leverage is None else leverage, "leverage")
         rpct = _finite(policy.max_risk_pct if risk_pct is None else risk_pct, "risk_pct")
+        drift = _finite(max_adverse_entry_drift, "max_adverse_entry_drift")
     except RiskPolicyError as exc:
         return _blocked(f"invalid_input:{exc}", "INPUT")
 
@@ -484,8 +490,8 @@ def size_new_entry(
         return _blocked("invalid_entry_stop", "GEOMETRY", equity=eq, available=avail)
     if not ((side == "LONG" and sl < px) or (side == "SHORT" and sl > px)):
         return _blocked("stop_not_protective_for_direction", "GEOMETRY", equity=eq, available=avail)
-    if cost < 0:
-        return _blocked("negative_cost_fraction", "INPUT", equity=eq, available=avail)
+    if cost < 0 or not 0 <= drift < 0.05:
+        return _blocked("invalid_cost_or_drift", "INPUT", equity=eq, available=avail)
     if not 1.0 <= lev <= MAX_LEVERAGE_CEILING:
         return _blocked("leverage_out_of_bounds", "INPUT", equity=eq, available=avail)
     # The per-trade risk can be reduced (post-target, size multipliers) but
@@ -494,7 +500,9 @@ def size_new_entry(
         return _blocked("risk_pct_exceeds_policy", "RISK_POLICY", equity=eq, available=avail)
 
     stop_distance = abs(px - sl)
-    loss_per_unit = stop_distance + px * cost
+    # Worst accepted fill: entry moved adversely by ``drift``; costs scale
+    # with the fill notional.
+    loss_per_unit = stop_distance + px * drift + px * (1.0 + drift) * cost
     risk_budget = eq * rpct
 
     caps: dict[str, float] = {}

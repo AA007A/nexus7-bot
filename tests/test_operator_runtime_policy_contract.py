@@ -1,31 +1,30 @@
 import inspect
 
 from bot import operator_runtime_policy as policy
+from bot import risk_policy
 
 
-def test_operator_margin_fraction_remains_fifty_percent():
-    assert policy.MARGIN_FRACTION == 0.50
+def test_operator_margin_fraction_is_a_cap_constant():
+    assert policy.MARGIN_FRACTION == risk_policy.DEFAULT_OPERATOR_MARGIN_CAP_PCT == 0.50
 
 
-def test_operator_policy_uses_configured_leverage_without_mutating_it():
+def test_operator_policy_never_mutates_leverage():
     source = inspect.getsource(policy)
-    assert "target_margin = available * MARGIN_FRACTION" in source
-    assert "target_notional = target_margin * leverage" in source
-    assert "leverage = float(cfg.LEVERAGE)" in source
     assert "cfg.LEVERAGE =" not in source
 
 
-def test_drawdown_policy_is_fail_closed_by_default_with_explicit_override():
+def test_operator_policy_no_longer_owns_quantity():
+    assert not hasattr(policy, "_install_margin_sizing")
+    source = inspect.getsource(policy)
+    assert "authority=operator_margin_policy" not in source
+    assert "return target_qty" not in source
+
+
+def test_drawdown_policy_has_no_override_path_for_new_entries():
     source = inspect.getsource(policy._install_drawdown_advisory)
     protected = inspect.getsource(policy._protect_drawdown_update)
-    assert "override=false entries_blocked=true" in source
-    assert "override=true entries_blocked=false" in source
-    assert "legacy_pause_preserved=true active_restored=false override=false" in protected
-    assert "legacy_pause_neutralized=true active_restored=true override=true" in protected
-
-
-def test_margin_policy_returns_operator_target_quantity_not_stop_risk_telemetry():
-    source = inspect.getsource(policy._install_margin_sizing)
-    assert "stop_risk_qty_advisory" in source
-    assert "authority=operator_margin_policy" in source
-    assert "return target_qty" in source
+    assert "override_effect=NONE" in source
+    assert "override=true entries_blocked=false" not in source
+    assert "ALLOW_NEW_ENTRIES" not in source + protected
+    assert "legacy_pause_preserved=true active_restored=false" in protected
+    assert "self.active = True" not in protected

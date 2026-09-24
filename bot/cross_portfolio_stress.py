@@ -24,7 +24,34 @@ from bot.config import cfg
 from bot.kucoin import TAKER_FEE
 
 
-MAX_STOP_STRESS_RISK_RATE = 0.90
+# Retained name for imports; the authoritative value comes from the canonical
+# risk policy (env MAX_STOP_STRESS_RISK_RATE, default 0.50, ceiling 0.90).
+MAX_STOP_STRESS_RISK_RATE = 0.50
+
+
+def max_stop_stress_risk_rate() -> float:
+    """Configured stop-stress risk-rate ceiling; invalid policy raises.
+
+    KuCoin CROSS semantics: account risk rate = maintenance margin / margin
+    balance (equity incl. unrealized PnL); forced liquidation begins at 100%.
+    The stress projection below is therefore compared against a fraction of
+    that liquidation point. 0.50 means: after every bot position (plus the
+    candidate) stops out simultaneously, with fees and slippage, maintenance
+    must still be covered twice over.
+    """
+    from bot.risk_policy import load_policy
+
+    policy = load_policy(cfg)
+    violations = [v for v in policy.violations() if "MAX_STOP_STRESS_RISK_RATE" in v]
+    if violations:
+        raise ValueError(violations[0])
+    return float(policy.max_stop_stress_risk_rate)
+
+
+def _slippage_rate() -> float:
+    from bot.risk_policy import load_policy
+
+    return float(load_policy(cfg).expected_slippage_pct)
 
 
 @dataclass(frozen=True)
@@ -37,6 +64,8 @@ class StressResult:
     closing_fees: float = 0.0
     opening_fee: float = 0.0
     existing_positions: int = 0
+    slippage: float = 0.0
+    limit: float = float("nan")
 
 
 def _positive(value):
@@ -221,9 +250,16 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
     if len(open_rows) != len(positions_local):
         return StressResult(False, "exchange_local_position_count_mismatch")
 
+    try:
+        limit = max_stop_stress_risk_rate()
+        slippage_rate = _slippage_rate()
+    except (ValueError, TypeError) as exc:
+        return StressResult(False, f"risk_policy_invalid_{type(exc).__name__}")
+
     stressed_margin = float(total_margin)
     maintenance = 0.0
     closing_fees = 0.0
+    slippage = 0.0
 
     for row in open_rows:
         kc_symbol = str(row.get("symbol", "") or "")
@@ -274,6 +310,7 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
             stressed_mmr = max(stressed_mmr, current_mmr)
         maintenance += stressed_value * stressed_mmr
         closing_fees += stressed_value * float(TAKER_FEE)
+        slippage += stressed_value * slippage_rate
 
     candidate_kc = _kucoin_symbol(engine, str(getattr(sig, "symbol", "")))
     if not candidate_kc:
@@ -291,20 +328,23 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
     candidate_mmr = candidate_requirement["mmr"]
     maintenance += candidate["value_stop"] * candidate_mmr
     closing_fees += candidate["value_stop"] * float(TAKER_FEE)
+    slippage += candidate["value_stop"] * slippage_rate
     opening_fee = candidate["value_entry"] * float(TAKER_FEE)
 
-    denominator = stressed_margin - opening_fee
+    # Stop fills are market fills: slippage is realized loss on top of the
+    # stop distance and reduces the stressed margin balance.
+    denominator = stressed_margin - opening_fee - slippage
     if not math.isfinite(denominator) or denominator <= 0:
         return StressResult(
             False, "nonpositive_stressed_margin", 1.0, stressed_margin,
-            maintenance, closing_fees, opening_fee, len(open_rows)
+            maintenance, closing_fees, opening_fee, len(open_rows), slippage, limit,
         )
 
     risk_rate = (maintenance + closing_fees) / denominator
     if not math.isfinite(risk_rate) or risk_rate < 0:
         return StressResult(False, "invalid_projected_risk_rate")
 
-    allowed = risk_rate < MAX_STOP_STRESS_RISK_RATE
+    allowed = risk_rate < limit
     return StressResult(
         allowed=allowed,
         reason="stop_stress_headroom_ok" if allowed else "stop_stress_risk_rate_too_high",
@@ -314,6 +354,8 @@ async def evaluate(engine, sig, qty: float) -> StressResult:
         closing_fees=closing_fees,
         opening_fee=opening_fee,
         existing_positions=len(open_rows),
+        slippage=slippage,
+        limit=limit,
     )
 
 
@@ -356,7 +398,7 @@ def install(TradingEngine, log) -> None:
                 "existing_positions=%d stage=FINAL_PREDISPATCH "
                 "execution_effect=BLOCK_NEW_LIVE_ENTRY",
                 getattr(sig, "symbol", "?"), result.reason,
-                result.risk_rate * 100.0, MAX_STOP_STRESS_RISK_RATE * 100.0,
+                result.risk_rate * 100.0, result.limit * 100.0,
                 result.stressed_margin, result.maintenance, result.closing_fees,
                 result.opening_fee, result.existing_positions,
             )
@@ -369,7 +411,7 @@ def install(TradingEngine, log) -> None:
             "existing_positions=%d simultaneous_stop_stress=true "
             "leverage_unchanged=%sx sizing_unchanged=true execution_effect=NONE",
             getattr(sig, "symbol", "?"), result.reason,
-            result.risk_rate * 100.0, MAX_STOP_STRESS_RISK_RATE * 100.0,
+            result.risk_rate * 100.0, result.limit * 100.0,
             result.stressed_margin, result.maintenance, result.closing_fees,
             result.opening_fee, result.existing_positions, int(cfg.LEVERAGE),
         )
@@ -381,7 +423,8 @@ def install(TradingEngine, log) -> None:
     TradingEngine._cross_portfolio_stress_capable = True
     TradingEngine._cross_portfolio_stress_installed = True
     log.warning(
-        "[CROSS_PORTFOLIO_STRESS] installed=true max_stop_stress_risk_rate=90pct "
+        "[CROSS_PORTFOLIO_STRESS] installed=true max_stop_stress_risk_rate=policy(default_50pct,ceiling_90pct) "
+        "slippage_included=true "
         "scenario=all_existing_and_candidate_positions_at_protective_stops "
         "active_nonreduce_orders=BLOCK exact_cross_requirements=true "
         "missing_or_inconsistent_state=BLOCK leverage_unchanged=true "
