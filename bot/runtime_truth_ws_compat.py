@@ -42,9 +42,9 @@ def install() -> bool:
     if hasattr(WebSocketCommonProtocol, "__anext__"):
         return False
 
-    async def _runtime_truth_anext(self):
+    async def _runtime_truth_anext(protocol):
         try:
-            return await self.recv()
+            return await WebSocketCommonProtocol.recv(protocol)
         except ConnectionClosedOK as exc:
             raise StopAsyncIteration from exc
 
