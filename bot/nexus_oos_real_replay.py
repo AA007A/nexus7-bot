@@ -209,6 +209,10 @@ def _simulate_net_r(
             gross_r=gross / risk_fraction,
             fees_r=-fees / risk_fraction,
             funding_r=funding / risk_fraction,
+            entry_fill=entry_fill,
+            stop=float(signal_sl) + delta,
+            risk_fraction=risk_fraction,
+            exit_ts=int(exit_ts),
         )
     return (gross - fees + funding) / risk_fraction
 
@@ -501,9 +505,17 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool)
             "approved": is_approved,
             "gates_passed": gates_passed,
             "nexus_score": float(nexus_score) if gates_passed and nexus_score is not None else None,
-            "nexus_regime": getattr(open_nx, "market_regime", None),
+            "nexus_regime": getattr(open_nx, "market_regime", None),  # threshold CHOPPY bump
             "nexus_confidence": float(getattr(nx, "confidence", 0.0) or 0.0),
-            "regime": feats["regime"],
+            "production_regime": getattr(open_nx, "market_regime", None) or "UNKNOWN",
+            "research_regime": feats["regime"],
+            "outcome_end_ts": int(detail["exit_ts"]),
+            "entry_fill": float(detail["entry_fill"]),
+            "stop": float(detail["stop"]),
+            "risk_fraction": float(detail["risk_fraction"]),
+            "_path": [(_ts_ms(k15[j]) + 15 * 60 * 1000, float(k15[j]["c"]))
+                      for j in range(i, len(k15))
+                      if _ts_ms(k15[j]) + 15 * 60 * 1000 <= int(detail["exit_ts"])],
             "utc_hour_bucket": res.bucket(hour.hour, (6, 12, 18), ("00-05", "06-11", "12-17", "18-23")),
             "score_bucket": res.bucket(float(nexus_score) if gates_passed and nexus_score is not None else None,
                                        (55, 60, 65, 70, 75, 80, 85, 90)),
@@ -544,11 +556,14 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool)
 
 
 def _research_sections(all_rich: list[dict], threshold: float) -> dict:
+    """CANDIDATE_RESEARCH: does the signal-selection layer have edge?"""
     from bot import nexus_oos_research as res
+    from bot import nexus_oos_inference as inf
     from bot.nexus_probability import heuristic_win_probability
 
     approved = [r for r in all_rich if r["approved"]]
-    out: dict = {}
+    is_approved = lambda r: bool(r.get("approved"))  # noqa: E731
+    out: dict = {"layer": "CANDIDATE_RESEARCH"}
     out["performance"] = {
         "baseline": res.performance(all_rich),
         "approved": res.performance(approved),
@@ -556,12 +571,27 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         "approval_rate": (len(approved) / len(all_rich)) if all_rich else None,
         "rejection_rate": (1 - len(approved) / len(all_rich)) if all_rich else None,
     }
+    out["inference"] = {
+        "approved_expectancy": inf.dependence_aware_mean(all_rich, is_approved),
+        "baseline_expectancy": inf.dependence_aware_mean(all_rich),
+        "uplift_vs_baseline": inf.dependence_aware_diff(all_rich, is_approved, lambda r: True),
+        "block_autocorrelation_24h": inf.lag1_block_autocorrelation(approved, inf.DEFAULT_BLOCK_MS),
+        "block_ms": inf.DEFAULT_BLOCK_MS,
+        "sensitivity_block_ms": inf.SENSITIVITY_BLOCK_MS,
+        "max_outcome_horizon_ms": max((r["outcome_end_ts"] - r["ts"] for r in all_rich), default=None),
+    }
+    out["effective_sample"] = {
+        "raw_candidates": len(all_rich),
+        "raw_approved": len(approved),
+        "baseline": inf.effective_sample(all_rich),
+        "approved": inf.effective_sample(all_rich, is_approved),
+    }
     out["segments_approved"] = res.segments(approved)
     out["segments_baseline"] = res.segments(all_rich)
     out["concentration"] = {
         "approved_by_symbol": res.concentration(approved, "symbol"),
         "approved_by_month": res.concentration(approved, "month"),
-        "approved_by_regime": res.concentration(approved, "regime"),
+        "approved_by_production_regime": res.concentration(approved, "production_regime"),
     }
     out["cost_stress_approved"] = res.cost_stress(approved)
     out["cost_stress_baseline"] = res.cost_stress(all_rich)
@@ -598,7 +628,24 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
     out["threshold_research"] = res.threshold_research(
         all_rich, (55, 60, 65, 70, 75, 80, 85, 90), threshold)
     out["probability_calibration"] = res.calibration_report(all_rich, heuristic_win_probability)
+    out["regime_parity"] = {
+        "production_regime": "nexus_ai decision market_regime at each decision (primary)",
+        "research_regime": "nexus_oos_research.classify_regime on closed 1h candles (diagnostic only)",
+    }
     return out
+
+
+def portfolio_policy():
+    """Risk policy for the portfolio replay: canonical code defaults with the
+    production-reported leverage (50x) and MAX_DRAWDOWN (50%). MAX_RISK_PCT,
+    MAX_MARGIN_PCT, MAX_POSITIONS and daily stop use the canonical config."""
+    import os as _os
+    from bot import risk_policy as rp
+    base = rp.load_policy(cfg)
+    lev = float(_os.environ.get("OOS_PORTFOLIO_LEVERAGE", "50"))
+    mdd = float(_os.environ.get("OOS_PORTFOLIO_MAX_DRAWDOWN", "0.50"))
+    return rp.RiskPolicy(**{**base.__dict__, "leverage": lev, "max_drawdown": mdd,
+                            "ignored_overrides": ()})
 
 
 async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
@@ -613,7 +660,13 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
     symbol_reports = []
     all_rows: list[CandidateOutcome] = []
     all_rich: list[dict] = []
+    contracts = None
     async with PublicKuCoinFuturesClient() as client:
+        if research:
+            try:
+                contracts = await client._get("/api/v1/contracts/active")
+            except Exception:  # reported via contract_metadata=FINE_LOT_FALLBACK
+                contracts = None
         for symbol in symbols:
             rep = await replay_symbol(client, symbol, limit_15m=limit_15m, research=research)
             symbol_reports.append(rep)
@@ -668,7 +721,26 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         },
     }
     if research and all_rich:
-        artifact.update(_research_sections(all_rich, runtime_nexus_threshold(nexus_ai)))
+        from bot import nexus_oos_portfolio_replay as pr
+        artifact["candidate_research"] = _research_sections(all_rich, runtime_nexus_threshold(nexus_ai))
+        rules, mmr = pr.contract_rules_from_public(contracts or [], list(symbols))
+        artifact["portfolio_replay"] = pr.run_portfolio(
+            all_rich, portfolio_policy(), contract_rules=rules or None, mmr=mmr or None)
+        artifact["portfolio_replay"]["contract_metadata_symbols"] = sorted(rules)
+        infer = artifact["candidate_research"]["inference"]
+        extra = []
+        lo = infer["approved_expectancy"].get("authority_ci_low")
+        if lo is None or lo <= 0:
+            extra.append("APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE")
+        ulo = infer["uplift_vs_baseline"].get("authority_ci_low")
+        if ulo is None or ulo <= 0:
+            extra.append("UPLIFT_BLOCK_CI_NOT_POSITIVE")
+        if extra:
+            artifact["blockers"] = sorted(set(artifact["blockers"]) | set(extra))
+            artifact["status"] = "AI_EDGE_NOT_PROVEN"
+    elif research:
+        artifact["blockers"] = sorted(set(artifact["blockers"]) | {"NO_CANDIDATES"})
+        artifact["status"] = "AI_EDGE_NOT_PROVEN"
     return artifact
 
 

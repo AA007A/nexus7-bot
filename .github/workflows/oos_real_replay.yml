@@ -109,6 +109,7 @@ jobs:
           python -m unittest tests.test_nexus_oos_robustness -v
           python -m unittest tests.test_nexus_oos_promotion_gate -v
           python -m unittest tests.test_nexus_oos_research_pipeline -v
+          python -m unittest tests.test_nexus_oos_dependence_and_portfolio -v
 
       - name: Run real public-market OOS replay (research result)
         run: |
@@ -128,35 +129,37 @@ jobs:
               print('nexus_oos_real_replay.json: MISSING')
               raise SystemExit(0)
           p = json.loads(path.read_text())
+          c = p.get('candidate_research') or {}
+          pf = p.get('portfolio_replay') or {}
+          dep = lambda d: {k: (d or {}).get(k) for k in ('delta_expectancy_r', 'delta_iid_ci', 'delta_block24h_ci', 'delta_block48h_ci', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
           view = {
               'status': p.get('status'),
               'blockers': p.get('blockers'),
               'nexus_threshold_used': p.get('nexus_threshold_used'),
               'unavailable_symbols': p.get('unavailable_symbols'),
-              'report': p.get('report'),
+              'report_iid_edge_gate': p.get('report'),
               'symbols': [{k: s.get(k) for k in ('symbol', 'error', 'candles_15m', 'history_days',
                            'history_start_utc', 'history_end_utc', 'approved', 'rejected',
                            'candidate_count')} for s in p.get('symbols') or []],
-              'performance': p.get('performance'),
-              'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
-                                for k, v in (p.get('concentration') or {}).items()},
               'robustness_summary': (p.get('robustness') or {}).get('summary'),
-              'cost_stress_approved': p.get('cost_stress_approved'),
-              'cost_stress_baseline': p.get('cost_stress_baseline'),
-              'break_even_cost_multiplier': p.get('break_even_cost_multiplier'),
-              'exit_variants_approved': p.get('exit_variants_approved'),
-              'ablation': {k: {kk: v.get(kk) for kk in ('delta_expectancy_r', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
-                           for k, v in (p.get('ablation') or {}).items()},
-              'context_ablation': {k: {kk: v.get(kk) for kk in ('delta_expectancy_r', 'delta_ci_low_r', 'delta_ci_high_r', 'delta_approvals', 'verdict')}
-                                   for k, v in (p.get('context_ablation') or {}).items()},
-              'threshold_research': {k: v for k, v in (p.get('threshold_research') or {}).items() if k != 'table'},
-              'threshold_table': [{'threshold': e['threshold'], **{s: {m: e[s].get(m) for m in ('trades', 'net_expectancy_r', 'expectancy_ci_low_r', 'profit_factor', 'max_drawdown_r')}
-                                   for s in ('train', 'validation', 'test')}} for e in (p.get('threshold_research') or {}).get('table', [])],
-              'probability_calibration': {k: v for k, v in (p.get('probability_calibration') or {}).items()
-                                          if k not in ('heuristic_on_test',)} | {
-                  'heuristic_on_test': {k: v for k, v in ((p.get('probability_calibration') or {}).get('heuristic_on_test') or {}).items() if k != 'reliability'}},
-              'segments_approved': {k: {b: {m: s.get(m) for m in ('trades', 'net_expectancy_r', 'expectancy_ci_low_r')} for b, s in v.items()}
-                                    for k, v in (p.get('segments_approved') or {}).items()},
+              'candidate_research': {
+                  'performance': c.get('performance'),
+                  'inference': c.get('inference'),
+                  'effective_sample': c.get('effective_sample'),
+                  'concentration': {k: {kk: v.get(kk) for kk in ('groups', 'groups_positive', 'top_group', 'top_share_of_positive_r')}
+                                    for k, v in (c.get('concentration') or {}).items()},
+                  'cost_stress_approved': c.get('cost_stress_approved'),
+                  'cost_stress_baseline': c.get('cost_stress_baseline'),
+                  'break_even_cost_multiplier': c.get('break_even_cost_multiplier'),
+                  'exit_variants_approved': c.get('exit_variants_approved'),
+                  'ablation': {k: dep(v) for k, v in (c.get('ablation') or {}).items()},
+                  'context_ablation': {k: dep(v) for k, v in (c.get('context_ablation') or {}).items()},
+                  'threshold_research': c.get('threshold_research'),
+                  'probability_calibration': {k: v for k, v in (c.get('probability_calibration') or {}).items() if k not in ('split',)},
+                  'segments_approved': {k: {b: {m: s.get(m) for m in ('trades', 'net_expectancy_r', 'expectancy_ci_low_r')} for b, s in v.items()}
+                                        for k, v in (c.get('segments_approved') or {}).items()},
+              },
+              'portfolio_replay': pf,
           }
           print('```json')
           print(json.dumps(view, indent=2, sort_keys=True, default=str))
