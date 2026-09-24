@@ -679,16 +679,15 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
         # Canonical AI features: the SAME call used by SHADOW / PAPER / LIVE.
         try:
             from bot.ai import features as ai_fx
-            from bot.ai import regime as ai_rg
-            fv = ai_fx.compute_features(
+            fv, ai_regime = ai_fx.candidate_features(
                 w15, w1h, w4h, decision_ts=int(decision_ts), direction=direction,
                 strategy_score=float(getattr(sig, "score", 0) or 0), entry=float(sig.entry),
                 stop=float(final_sl), rr=float(sig.rr), cost_fraction=float(cost_fraction),
                 nexus_confidence=float(getattr(nx, "confidence", 0.0) or 0.0))
-            row["ai_features"] = [None if fv.values.get(n) is None else round(float(fv.values[n]), 10)
-                                  for n in ai_fx.MODEL_FEATURES]
+            row["ai_features"] = [round(float(x), 10) for x in fv.model_input()]
             row["ai_features_missing"] = list(fv.missing)
-            row["ai_regime"] = ai_rg.classify(w1h)
+            row["ai_feature_hash"] = fv.feature_hash()
+            row["ai_regime"] = ai_regime
         except Exception as exc:
             row["ai_features"] = None
             row["ai_features_error"] = type(exc).__name__
@@ -767,7 +766,9 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
                     "slippage_r": ((float(final["r"]) - _realized(no_slip_o))
                                    if variants_ok and _realized(no_slip_o) is not None else None),
                 })
-                if row["approved"]:
+                # Kept for EVERY executable row (not only NEXUS-approved): the AI
+                # test-fold portfolio replay needs the same production paths.
+                if True:
                     row["legs"] = [list(l) for l in sim["legs"]]
                     row["_marks"] = sim["marks"]
                     row["censor_ts"] = sim["censor_ts"]
@@ -1394,6 +1395,7 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
         port["contract_spec_sensitivity"] = pe.contract_spec_sensitivity(
             rows, manifest, instruments=instruments, mmr_proxy=mmr_proxy)
         artifact["portfolio_replay"] = port
+        _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy)
         lrules, lmmr = legacy_pr.contract_rules_from_public(contracts or [], symbols)
         legacy_port = legacy_pr.run_portfolio_legacy(
             _legacy_portfolio_rows(all_rich), portfolio_policy(), contract_rules=lrules or None,
@@ -1436,6 +1438,61 @@ async def run_real_replay(symbols: Iterable[str], *, limit_15m: int = 3000,
     artifact["blockers"] = sorted(set(blockers))
     artifact["status"] = "AI_EDGE_PROVEN" if not artifact["blockers"] else "AI_EDGE_NOT_PROVEN"
     return artifact
+
+
+def _ai_portfolio_and_gate(artifact, all_rich, manifest, instruments, mmr_proxy):
+    """AI walk-forward TEST folds -> production-parity portfolio (each fold from
+    the same starting equity; never TRAIN/VALIDATION), then the independent
+    AI_RESEARCH_PROMOTION_GATE, then a SHADOW_CHALLENGER only on PASS + stable."""
+    from bot import nexus_oos_portfolio_engine as pe
+    from bot.ai import ai_gate
+    from bot.ai import training as ai_train
+    import os as _os
+    from datetime import datetime, timezone
+    ai = (artifact.get("candidate_research") or {}).get("ai_meta_model") or {}
+    if ai.get("status") != "OK":
+        return
+    by_key = {(int(r["ts"]), str(r.get("symbol")), str(r.get("direction"))): r for r in all_rich
+              if r.get("executable") and r.get("outcome_status")}
+
+    def rows_for(keys):
+        out = []
+        for k in keys:
+            r = by_key.get((int(k[0]), k[1], k[2]))
+            if r is None:
+                continue
+            row = dict(r, approved=True)
+            row["marks"] = r.get("_marks") or []
+            row["funding"] = r.get("_funding") or []
+            out.append(row)
+        return out
+    folds, pooled_keys = [], []
+    for s in ai.get("steps") or []:
+        keys = s.get("_approved_keys") or []
+        pooled_keys += keys
+        rep = pe.run_portfolio(rows_for(keys), manifest, instruments=instruments, mmr_proxy=mmr_proxy)
+        folds.append({"test_fold": s["test_fold"], **_ai_port_summary(rep)})
+    ai["portfolio_by_test_fold"] = folds
+    ai["portfolio_pooled_test"] = _ai_port_summary(pe.run_portfolio(
+        rows_for(pooled_keys), manifest, instruments=instruments, mmr_proxy=mmr_proxy))
+    gate = ai_gate.evaluate(artifact)
+    ai["research_promotion_gate"] = gate
+    stable = (ai.get("selection_stability") or {}).get("status") == "MODEL_SELECTION_STABLE"
+    if gate["verdict"] == "PASS" and stable:
+        ai["shadow_challenger"] = ai_train.build_shadow_challenger(
+            all_rich, ai, training_code_sha=_os.environ.get("GITHUB_SHA"),
+            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    else:
+        ai["shadow_challenger"] = {"created": False,
+                                   "reason": ("AI_RESEARCH_GATE_BLOCK" if gate["verdict"] != "PASS"
+                                              else "MODEL_SELECTION_UNSTABLE")}
+
+
+def _ai_port_summary(rep: dict) -> dict:
+    keys = ("starting_equity", "ending_equity", "realized_return", "net_return", "portfolio_max_drawdown",
+            "research_max_drawdown_limit", "total_trades", "net_expectancy_r", "profit_factor",
+            "win_rate", "contributing_symbols", "skipped", "end_state")
+    return {k: rep.get(k) for k in keys}
 
 
 def _strip_private(obj):

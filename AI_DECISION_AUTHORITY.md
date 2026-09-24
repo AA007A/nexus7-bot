@@ -105,8 +105,103 @@ Production signals carry `tp1 == tp2`, because `Signal.__post_init__` sets both 
 
 Decisions whose information exceeds `max_data_age_ms`, or whose latency exceeds the budget, abstain.
 
-## 10. What is not done
-- **Wiring:** the AI is not wired into `engine.py` for SHADOW on live feeds. That changes a production process and is left for the rollout phase.
-- **Model:** no model is promoted or pinned for LIVE.
+## 10. Phase 7B: production integration and model trust
+
+### 10.1 Runtime hierarchy (`bot/ai/runtime.py`, `TradingEngine._open`)
+
+    MARKET DATA → CANONICAL FEATURES → REGIME → AI TRADE/ABSTAIN → DETERMINISTIC GEOMETRY
+    → HALT/KILL SWITCH → DRAWDOWN/DAILY STOP → CANONICAL RISK SIZING
+    → EXISTING PRODUCTION EXECUTION ENGINE → NATIVE TPSL → POSITION MGMT → RECONCILIATION → JOURNAL
+
+The AI gate runs inside `_open` after the NEXUS approval and before the balance refresh, sizing and dispatch. There is no second execution engine and no new order sender.
+
+When the AI is authoritative, its `decision_id` becomes the engine's idempotency key. `build_client_oid` therefore derives the client order ID from the decision ID. Before `place_order`, the decision-to-client_oid binding is persisted strictly as INTENT_CREATED; after dispatch it moves to SUBMITTED or PENDING_UNKNOWN.
+
+| `AI_EXECUTION_MODE` | Behaviour |
+|---|---|
+| `OFF` (default) | AI not loaded. Production behaviour is unchanged. |
+| `SHADOW` | Full decisions, durably journaled. No authority: never blocks, never authorizes, never mutates the exchange. |
+| `PAPER` | Additional mandatory authorization. Requires the PAPER_TRADE engine and a bundle in lifecycle PAPER_CHALLENGER or later. Otherwise HALT. |
+| `LIVE` | As PAPER, plus a passing Stage-C gate whose `AI_IDENTITY` stage PASSED (lifecycle LIVE_CHAMPION). Otherwise HALT. No in-candidate Stage-C provider exists, so LIVE always halts here. |
+
+Any other value HALTs.
+
+### 10.2 Model bundle and identity
+`AI_MODEL_BUNDLE_V1` is `bundle_sha256` over the following:
+- the classifier and regressor artifact sha256;
+- calibration;
+- the decision policy and its sha256;
+- the feature schema version and sha256;
+- the AI version;
+- the training code SHA;
+- the training dataset manifest sha256;
+- the training period;
+- selection evidence;
+- created_at;
+- the lifecycle state.
+
+`ModelBundle.load` verifies all of the above against the pinned `AI_BUNDLE_SHA256` (files in `AI_BUNDLE_DIR`). Any mismatch at startup raises HALT `MODEL_ARTIFACT_MISMATCH` before any entry.
+
+`decision_id = f(symbol, 15m event ts, direction, feature hash, feature schema sha, bundle sha, policy sha, candidate code sha)`.
+
+### 10.3 Canonical cost contract
+
+    predicted_net_r = predicted_gross_r − fees_r − CONSERVATIVE_SLIPPAGE_BUFFER_r − funding_r − decision_uncertainty_buffer_r
+
+At runtime the training cost (`cost_fraction / stop_distance`) is split into `fees_r` (2 × taker ÷ stop distance) and `CONSERVATIVE_SLIPPAGE_BUFFER_r` (the remainder). The sum is identical to training. Funding is 0 at decision time in both.
+
+### 10.4 Fail-closed selection and calibration
+- Thresholds are chosen on VALIDATION.
+- Each direction and regime is then re-evaluated at those final thresholds and marked ENABLED, DISABLED_NEGATIVE (mean ≤ 0) or DISABLED_INSUFFICIENT_EVIDENCE (n < 30).
+- There is no LONG fallback. If nothing is enabled, the policy is ABSTAIN_ALL. UNKNOWN and EXTREME are never tradable.
+- If the calibrated probability does not beat the base-rate Brier score, `probability_authorizes = false`, and every decision carries the veto `CALIBRATION_NOT_AUTHORIZED`.
+- Every test fold reports Brier, base-rate Brier, log loss, ECE and a reliability curve.
+
+### 10.5 `AI_RESEARCH_PROMOTION_GATE` (`bot/ai/ai_gate.py`)
+The gate is an independent verifier. It never trusts stored status, stored CIs or a stored ACF. It re-derives the required block length and recomputes AI-approved expectancy and AI uplift authority from the retained influence aggregates, using the frozen methodology.
+
+It fails closed on each of the following:
+- status and data label;
+- purged-window ordering;
+- fewer than 100 approved samples;
+- CI lower bound ≤ 0;
+- invalid residual dependence;
+- calibration that does not beat the base rate on every TEST fold;
+- symbol or period dominance, or too few symbols;
+- cost stress (FEES_PLUS_50PCT, SLIPPAGE_X2, COMBINED ≤ 0);
+- the per-TEST-fold portfolio: each fold starts from the same equity, and every fold must end above its start with realized return > 0, MDD within the limit and immaterial censoring.
+
+TRAIN and VALIDATION are never promotion evidence.
+
+### 10.6 Lifecycle (`bot/ai/lifecycle.py`)
+
+| Step | Requires |
+|---|---|
+| RESEARCH_CANDIDATE → SHADOW_CHALLENGER | gate PASS + MODEL_SELECTION_STABLE |
+| SHADOW_CHALLENGER → PAPER_CHALLENGER | FORWARD_SHADOW_EVIDENCE |
+| PAPER_CHALLENGER → LIVE_CHAMPION | FORWARD_PAPER_EVIDENCE + Stage-C code + AI identity + human approval |
+
+The replay can create at most a SHADOW_CHALLENGER, and only when the gate passes and selection is stable. Forward contracts are predeclared in `bot/ai/forward_evidence.py` and hashed, so a change restarts the window.
+
+### 10.7 Stage-C AI identity (`bot/ai/identity.py`)
+At startup, when the mode is not OFF, the runtime logs `[AI_IDENTITY_OBSERVATION_V1]`. The line carries the code sha, deployment, mode, AI version, bundle sha, policy sha, feature schema sha and an integrity digest. It contains no weights, thresholds or secrets.
+
+`verify_ai_identity` requires three things to agree on code, bundle, policy, schema and AI version:
+- the envelope `ai_identity` claim;
+- the latest observation in that deployment's logs (mode LIVE, fresh);
+- the identity approved by the protected environment (`approved_ai_identity`, lifecycle LIVE_CHAMPION).
+
+A missing, unknown, changed, stale or unapproved identity is a BLOCK. `evaluate_live` reports the result as `stages.AI_IDENTITY`. The NEXUS-only Stage-C verdict is unchanged.
+
+### 10.8 Halt authority, journal and restart
+- `AutonomousStateMachine` enters HALT only through `halt()`, which always registers a `HaltController` condition. An illegal transition halts with `ILLEGAL_STATE_TRANSITION`.
+- HALT is left only by `operator_recover(actor=OPERATOR, reason, checks)`. The checks exchange_reconciled, positions_protected, model_verified and clock_ok must all be true. The recovery is journaled.
+- Durable journal: the `ai_decisions` table in the existing database layer (PostgreSQL, with SQLite fallback). There is one row per decision_id, with a unique client_oid, the status, the bundle and policy sha, and the sanitized record: decision, costs, feature snapshot and record sha256. Authoritative modes never trade on an unjournaled decision.
+- Restart: every INTENT_CREATED, SUBMITTED or PENDING_UNKNOWN decision is reconciled by client_oid before any new AI-authorized entry. An unknown result halts with RECONCILIATION_UNCERTAIN. Nothing is resubmitted, and the same 15m market event is never re-decided into a new order (`DUPLICATE_MARKET_EVENT`).
+- Parity: a golden test pins replay-versus-runtime model input, feature hash and regime, with the forming candle removed by `closed_only`.
+
+## 11. What is not done
+- **Deployment:** nothing is deployed, and no Railway variable has changed. `AI_EXECUTION_MODE` stays unset (OFF) in production.
+- **LIVE:** no LIVE_CHAMPION exists, and no trusted Stage-C or AI-identity provider is implemented in-candidate.
 - **Forward evidence:** no forward SHADOW or PAPER evidence exists yet.
 - **Dashboards:** dashboard metrics are defined (§9) but are not exported to a UI.

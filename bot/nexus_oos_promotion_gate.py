@@ -535,7 +535,11 @@ def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, n
               "LIVE_RELEASE_PRECONDITIONS": "PASS" if (live_ok and not b) else "BLOCK",
               "evidence_components": comp,
               "release_verifier_version": ev["release_verifier_version"],
-              "release_verifier_sha": ev["release_verifier_sha"]}
+              "release_verifier_sha": ev["release_verifier_sha"],
+              # AI_EXECUTION_MODE=LIVE additionally requires this == PASS
+              # (bot.ai.runtime.authorize_ai_live); NEXUS-only LIVE ignores it.
+              "AI_IDENTITY": (ev.get("ai_identity") or {}).get("verdict", "BLOCK"),
+              "ai_identity": ev.get("ai_identity")}
     return GateResult(bool(live_ok and not b), b, code, gate=LIVE_GATE,
                       policy_content=(trusted or {}).get("policy_parity"),
                       stages=stages, source_authenticated=ev["source_authenticated"])

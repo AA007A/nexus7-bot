@@ -92,11 +92,16 @@ class TrustedSources(Protocol):
     def ci_job(self, job_id: str) -> dict: ...                         # {id, run_id, name, head_sha, conclusion}
     def ci_artifact(self, run_id: str, name: str) -> dict: ...         # {name, sha256, content: bytes}
     def approval(self, reference: str) -> dict: ...
+    # AI LIVE only: identity approved by the protected release environment
+    # {candidate_sha, ai_version, bundle_sha256, policy_sha256,
+    #  feature_schema_sha256, lifecycle_state}
+    def approved_ai_identity(self, candidate_sha: str) -> dict: ...
 
 
 # Read methods a provider may expose. The verifier calls nothing else.
 READ_METHODS = ("pinned_production", "release_verifier", "railway_deployment",
-                "railway_deployment_logs", "ci_run", "ci_job", "ci_artifact", "approval")
+                "railway_deployment_logs", "ci_run", "ci_job", "ci_artifact", "approval",
+                "approved_ai_identity")
 
 
 def _ts(value) -> _dt.datetime:
@@ -450,6 +455,10 @@ def verify(envelope, *, local_artifact: dict | None = None, sources: TrustedSour
         comp["HUMAN_APPROVAL_EVIDENCE"] = "PASS"
     else:
         b.append("HUMAN_APPROVAL_NOT_PROVEN")
+
+    # ── AI identity (required only for AI_EXECUTION_MODE=LIVE; reported always) ──
+    from bot.ai import identity as ai_identity
+    out["ai_identity"] = ai_identity.verify_ai_identity(envelope, sources=sources, now=now)
 
     out["source_authenticated"] = (comp["LIVE_PROVENANCE_AUTHENTICATED"] == "PASS"
                                    and comp["RESEARCH_ARTIFACT_AUTHENTICATED"] == "PASS"

@@ -18,7 +18,7 @@ import json
 import math
 from dataclasses import dataclass, field
 
-FEATURE_SCHEMA_VERSION = "NEXUS7_AI_FEATURES_V1"
+FEATURE_SCHEMA_VERSION = "NEXUS7_AI_FEATURES_V2"   # V2: explicit __missing flag inputs
 
 TF_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
 
@@ -75,13 +75,18 @@ FEATURE_SPECS: tuple[FeatureSpec, ...] = (
     _s("open_interest_delta", "kucoin_oi", "1h", "EXCLUDED", LIVE_ONLY),
     _s("orderbook_imbalance", "kucoin_orderbook", "live", "EXCLUDED", LIVE_ONLY),
 )
-MODEL_FEATURES: tuple[str, ...] = tuple(s.name for s in FEATURE_SPECS if s.model_input)
+BASE_MODEL_FEATURES: tuple[str, ...] = tuple(s.name for s in FEATURE_SPECS if s.model_input)
+# ZERO_WITH_FLAG: the value is imputed as 0 AND a deterministic companion
+# input "<name>__missing" (1 = missing, 0 = present) is supplied to the model.
+FLAGGED_FEATURES: tuple[str, ...] = tuple(s.name for s in FEATURE_SPECS
+                                          if s.model_input and s.missing_policy == "ZERO_WITH_FLAG")
+MODEL_FEATURES: tuple[str, ...] = BASE_MODEL_FEATURES + tuple(f"{n}__missing" for n in FLAGGED_FEATURES)
 
 
 def schema_hash() -> str:
     body = [[s.name, s.version, s.source, s.timeframe, s.missing_policy, s.causality]
             for s in FEATURE_SPECS]
-    return hashlib.sha256(json.dumps([FEATURE_SCHEMA_VERSION, body]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([FEATURE_SCHEMA_VERSION, body, list(MODEL_FEATURES)]).encode()).hexdigest()
 
 
 class FeatureCausalityError(ValueError):
@@ -107,7 +112,9 @@ class FeatureVector:
         return any(spec[m].missing_policy == "ABSTAIN" for m in self.missing)
 
     def model_input(self) -> list[float]:
-        return [float(self.values.get(n) or 0.0) for n in MODEL_FEATURES]
+        base = [float(self.values.get(n) or 0.0) for n in BASE_MODEL_FEATURES]
+        flags = [1.0 if n in self.missing else 0.0 for n in FLAGGED_FEATURES]
+        return base + flags
 
     def feature_hash(self) -> str:
         body = {"schema": self.schema_sha256, "ts": self.decision_ts,
@@ -209,8 +216,28 @@ def compute_features(k15, k1h, k4h, *, decision_ts: int, direction: str, strateg
         "hour_sin": math.sin(2 * math.pi * ((decision_ts // 3_600_000) % 24) / 24),
         "hour_cos": math.cos(2 * math.pi * ((decision_ts // 3_600_000) % 24) / 24),
     }
-    missing = tuple(n for n in MODEL_FEATURES
+    missing = tuple(n for n in BASE_MODEL_FEATURES
                     if vals.get(n) is None or not math.isfinite(float(vals[n])))
     for n in missing:
         vals[n] = None
     return FeatureVector(vals, missing, int(decision_ts), int(newest))
+
+
+def closed_only(window, tf: str, decision_ts: int) -> list:
+    """Drop any candle not closed at decision time (live caches include the
+    forming candle). The ONLY way runtime code prepares windows."""
+    return [c for c in (window or ()) if _ts(c) + TF_MS[tf] <= int(decision_ts)]
+
+
+def candidate_features(k15, k1h, k4h, *, decision_ts: int, direction: str, strategy_score: float,
+                       entry: float, stop: float, rr: float, cost_fraction: float,
+                       nexus_confidence: float | None):
+    """Canonical entry point used by BOTH the replay and the live engine gate:
+    closed windows -> FeatureVector + regime. Returns (FeatureVector, regime)."""
+    from bot.ai import regime as rg
+    w15, w1h, w4h = (closed_only(k15, "15m", decision_ts), closed_only(k1h, "1h", decision_ts),
+                     closed_only(k4h, "4h", decision_ts))
+    fv = compute_features(w15, w1h, w4h, decision_ts=decision_ts, direction=direction,
+                          strategy_score=strategy_score, entry=entry, stop=stop, rr=rr,
+                          cost_fraction=cost_fraction, nexus_confidence=nexus_confidence)
+    return fv, rg.classify(w1h)

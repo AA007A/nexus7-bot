@@ -56,7 +56,11 @@ def feature_vector(direction="LONG", **over):
     return fx.compute_features(k15, k1h, k4h, **kw)
 
 
-def constant_bundle(p=0.62, gross_r=0.5):
+POLICY = dec.DecisionPolicy(min_p_profitable=0.55, min_expected_net_r=0.05, allowed_directions=("LONG",),
+                            supported_regimes=dec.TRADABLE_REGIMES)
+
+
+def constant_bundle(p=0.62, gross_r=0.5, policy=POLICY, lifecycle="SHADOW_CHALLENGER"):
     d = len(fx.MODEL_FEATURES)
     clf = mdl.LogisticL2.from_params({"l2": 1.0, "iters": 1, "std": {"mean": [0.0] * d, "scale": [1.0] * d},
                                       "w": [0.0] * d, "b": math.log(p / (1 - p))})
@@ -67,18 +71,19 @@ def constant_bundle(p=0.62, gross_r=0.5):
                   created_at="2026-09-24T00:00:00Z", training_period={})
     ca = mdl.artifact(clf, role="A", calibration={"kind": "IDENTITY"}, **common)
     ra = mdl.artifact(reg, role="B", **common)
-    b = dec.ModelBundle.load(json.dumps(ca), json.dumps(ra), pinned_classifier_sha=ca["sha256"],
-                             pinned_regressor_sha=ra["sha256"], version="TEST_V1")
-    return b, ca, ra
-
-
-POLICY = dec.DecisionPolicy(min_p_profitable=0.55, min_expected_net_r=0.05)
+    man = dec.bundle_manifest(classifier_artifact=ca, regressor_artifact=ra, calibration={"kind": "IDENTITY"},
+                              policy=policy, training_code_sha="t" * 40, dataset_manifest_sha256="d" * 64,
+                              training_period={}, selection_evidence={}, created_at="2026-09-24T00:00:00Z",
+                              lifecycle_state=lifecycle)
+    b = dec.ModelBundle.load(json.dumps(man), json.dumps(ca), json.dumps(ra),
+                             pinned_bundle_sha=man["bundle_sha256"])
+    return b, ca, ra, man
 
 
 def authority(p=0.62, gross_r=0.5, policy=POLICY, pinned=True, clock=None):
-    b, _, _ = constant_bundle(p, gross_r)
+    b, _, _, _ = constant_bundle(p, gross_r, policy)
     kw = {"clock": clock} if clock else {}
-    return dec.AIDecisionAuthority(b, policy, pinned_bundle_sha=b.sha256 if pinned else "0" * 64,
+    return dec.AIDecisionAuthority(b, pinned_bundle_sha=b.sha256 if pinned else "0" * 64,
                                    candidate_sha="c" * 40, **kw)
 
 
@@ -126,7 +131,8 @@ class Decisions(unittest.TestCase):
         d = decide(authority(), direction="SHORT")
         self.assertEqual(d.side, dec.ABSTAIN)
         self.assertIn("DIRECTION_NOT_ENABLED_SHORT", d.vetoes)
-        pol = dec.DecisionPolicy(0.55, 0.05, allowed_directions=("LONG", "SHORT"))
+        pol = dec.DecisionPolicy(0.55, 0.05, allowed_directions=("LONG", "SHORT"),
+                                 supported_regimes=dec.TRADABLE_REGIMES)
         self.assertEqual(decide(authority(policy=pol), direction="SHORT").side, dec.SHORT)
 
     def test_stale_data_abstains(self):
@@ -139,10 +145,9 @@ class Decisions(unittest.TestCase):
 
     def test_model_hash_mismatch(self):
         self.assertIn("MODEL_HASH_MISMATCH", decide(authority(pinned=False)).vetoes)
-        _, ca, ra = constant_bundle()
+        _, ca, ra, man = constant_bundle()
         with self.assertRaises(mdl.ModelIntegrityError):
-            dec.ModelBundle.load(json.dumps(ca), json.dumps(ra), pinned_classifier_sha="0" * 64,
-                                 pinned_regressor_sha=ra["sha256"], version="x")
+            dec.ModelBundle.load(json.dumps(man), json.dumps(ca), json.dumps(ra), pinned_bundle_sha="0" * 64)
         tampered = copy.deepcopy(ca)
         tampered["params"]["b"] = 5.0
         with self.assertRaises(mdl.ModelIntegrityError):
@@ -155,7 +160,7 @@ class Decisions(unittest.TestCase):
         d = authority().decide(symbol="BTCUSDT", direction="LONG", features=fv, regime="TREND_UP",
                                fees_r=0.1, slippage_r=0.05)
         self.assertIn("FEATURE_SCHEMA_MISMATCH", d.vetoes)
-        _, ca, _ = constant_bundle()
+        _, ca, _, _ = constant_bundle()
         with self.assertRaises(mdl.ModelIntegrityError):
             mdl.load_artifact(json.dumps(ca), expected_sha256=ca["sha256"], expected_feature_schema="x")
 
@@ -373,11 +378,12 @@ class ExecutionModes(unittest.TestCase):
         self.assertEqual(em.resolve_mode({}), "SHADOW")
 
     def test_unknown_model_cannot_trade(self):
-        auth = dec.AIDecisionAuthority(None, POLICY, pinned_bundle_sha=None)
+        auth = dec.AIDecisionAuthority(None, pinned_bundle_sha=None)
         d = decide(auth)
         self.assertIn("MODEL_UNAVAILABLE", d.vetoes)
+        self.assertIn("POLICY_ABSTAIN_ALL", d.vetoes)
         self.assertFalse(ac.run(d, GEOM, ctx(), halted=False).approved)
-        self.assertIsNone(rd.build(None, candidate_sha="c" * 40)["model"]["model_sha256"])
+        self.assertFalse(rd.build(None, candidate_sha="c" * 40)["shadow_challenger"]["created"])
 
     def test_ai_exits_are_shadow_only(self):
         rec = dec.exit_recommendation(symbol="BTCUSDT", unrealized_r=-0.4, model_hint=-0.9)
@@ -475,7 +481,11 @@ class TrainingDiscipline(unittest.TestCase):
         for bad in ("API_KEY", "API_SECRET", "PASSWORD", "TOKEN", "DATABASE_URL", "POSTGRES://"):
             self.assertNotIn(bad, values)
         self.assertEqual(out["live_status"], "BLOCK")
-        self.assertIn("AI_EDGE_NOT_PROVEN_OOS", out["known_blockers"])
+        self.assertIn("AI_RESEARCH_PROMOTION_BLOCK", out["known_blockers"])
+        self.assertEqual(set(out["components"]), {
+            "AI_RESEARCH_ARTIFACT_AUTHENTICATED", "AI_EXPECTANCY_AUTHORITY", "AI_UPLIFT_AUTHORITY",
+            "AI_CALIBRATION", "AI_COST_STRESS", "AI_PORTFOLIO_ROBUSTNESS", "AI_RESEARCH_PROMOTION"})
+        self.assertTrue(all(v == "BLOCK" for v in out["components"].values()))
         self.assertFalse(out["secrets_included"])
 
 

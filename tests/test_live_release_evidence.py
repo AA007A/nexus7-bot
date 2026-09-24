@@ -150,6 +150,10 @@ class FakeSources:
         self._rec("approval")
         return copy.deepcopy(self.approvals.get(reference, {}))
 
+    def approved_ai_identity(self, candidate_sha):
+        self._rec("approved_ai_identity")
+        return {}                                   # no AI identity approved for LIVE
+
 
 def seal(ev, src, *, approved_at=None, deployment_id=None, covered=None):
     """(Re)compute the approval binding and register the provider-native record."""

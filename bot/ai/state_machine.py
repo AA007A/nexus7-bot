@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from bot.ai.halt import OPERATOR, HaltClearRefused, HaltController
+
 STATES = ("BOOT", "SYNC_EXCHANGE", "WAIT_FOR_DATA", "BUILD_FEATURES", "AI_DECISION", "VALIDATE",
           "RISK_CHECK", "PLACE_ORDER", "CONFIRM_ORDER", "INSTALL_PROTECTION", "MANAGE_POSITION",
           "RECONCILE", "CLOSE", "JOURNAL", "RECOVER", "HALT")
@@ -30,8 +32,12 @@ ALLOWED = {
     "CLOSE": {"JOURNAL", "RECONCILE", "HALT"},
     "JOURNAL": {"WAIT_FOR_DATA", "HALT"},
     "RECOVER": {"SYNC_EXCHANGE", "HALT"},
-    "HALT": {"RECOVER"},
+    "HALT": {"RECOVER"},           # ONLY via operator_recover()
 }
+
+
+class RecoveryRefused(PermissionError):
+    pass
 
 
 class IllegalTransition(RuntimeError):
@@ -43,16 +49,53 @@ class AutonomousStateMachine:
     state: str = "BOOT"
     transitions: list = field(default_factory=list)
     intents: dict = field(default_factory=dict)       # client_oid -> status
+    halts: HaltController = field(default_factory=HaltController)
+    journal: object = None
+
+    def halt(self, condition: str, *, source: str, detail: str = "") -> str:
+        """The ONLY way into HALT: always registers a HaltController condition."""
+        self.halts.raise_halt(condition, source=source, detail=detail)
+        if self.state != "HALT":
+            self.transitions.append({"from": self.state, "to": "HALT", "reason": condition})
+            self.state = "HALT"
+        return self.state
 
     def go(self, new: str, *, reason: str = "") -> str:
+        if new == "HALT":
+            return self.halt(reason or "UNSPECIFIED_HALT", source="STATE_MACHINE")
+        if self.state == "HALT":
+            raise RecoveryRefused("HALT can only be left through operator_recover()")
         if new not in ALLOWED.get(self.state, set()):
-            self.transitions.append({"from": self.state, "to": "HALT",
-                                     "reason": f"ILLEGAL_TRANSITION:{self.state}->{new}"})
-            self.state = "HALT"
-            raise IllegalTransition(f"{self.transitions[-1]['reason']}")
+            bad = f"{self.state}->{new}"
+            self.halt("ILLEGAL_STATE_TRANSITION", source="STATE_MACHINE", detail=bad)
+            raise IllegalTransition(f"ILLEGAL_TRANSITION:{bad}")
         self.transitions.append({"from": self.state, "to": new, "reason": reason})
         self.state = new
         return new
+
+    def operator_recover(self, *, actor: str, reason: str, checks: dict) -> str:
+        """Leave HALT: operator + non-empty reason + every required
+        reconciliation/protection check satisfied; clears every active halt
+        condition (journaled) and moves HALT -> RECOVER. The AI can never pass."""
+        if self.state != "HALT":
+            raise RecoveryRefused("not halted")
+        if actor != OPERATOR or not str(reason or "").strip():
+            self.halts.log.append({"event": "RECOVER_REFUSED", "actor": actor})
+            raise HaltClearRefused("only an operator with a stated reason may recover")
+        required = ("exchange_reconciled", "positions_protected", "model_verified", "clock_ok")
+        missing = [k for k in required if checks.get(k) is not True]
+        if missing:
+            raise RecoveryRefused(f"recovery checks not satisfied: {missing}")
+        for cond in sorted(self.halts.active):
+            self.halts.clear(cond, actor=actor, reason=reason)
+        if self.halts.halted:
+            raise RecoveryRefused("halt conditions remain active")
+        if self.journal is not None:
+            self.journal.append(decision={"event": "OPERATOR_RECOVER", "actor": actor, "reason": reason},
+                                feature_snapshot={}, chain={"checks": dict(checks)})
+        self.transitions.append({"from": "HALT", "to": "RECOVER", "reason": f"OPERATOR:{reason}"})
+        self.state = "RECOVER"
+        return self.state
 
     # ── order submission with reconcile-before-retry ─────────────────────
     def submit(self, intent, send, lookup) -> str:
@@ -82,8 +125,7 @@ class AutonomousStateMachine:
             found = lookup(oid)
         except Exception:
             self.intents[oid] = "PENDING_UNKNOWN"
-            if self.state != "HALT":
-                self.go("HALT", reason="RECONCILIATION_UNCERTAIN")
+            self.halt("RECONCILIATION_UNCERTAIN", source="RECONCILER", detail=str(oid))
             return "PENDING_UNKNOWN"
         self.intents[oid] = "FOUND" if found == "FOUND" else "NOT_FOUND"
         if found == "FOUND" and self.state == "RECONCILE":
@@ -105,5 +147,5 @@ class AutonomousStateMachine:
             self.go("MANAGE_POSITION", reason="PROTECTED")
             return True
         fail_safe()
-        self.go("HALT", reason="UNPROTECTED_POSITION")
+        self.halt("UNPROTECTED_POSITION", source="PROTECTION")
         return False

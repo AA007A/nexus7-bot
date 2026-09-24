@@ -12,22 +12,38 @@ import json
 from pathlib import Path
 
 from bot.ai import decision as dec
-from bot.ai import execution_mode as em
 from bot.ai import features as fx
 
-SCHEMA = "NEXUS7_AI_OPERATION_READINESS_V1"
+SCHEMA = "NEXUS7_AI_OPERATION_READINESS_V2"
+
+
+def _authenticated(artifact, candidate_sha) -> bool:
+    """The artifact here is a CI-produced file for THIS sha; authentication
+    against a trusted provider is Stage C. Research-level: same candidate sha
+    and a successful replay status."""
+    return bool(isinstance(artifact, dict) and candidate_sha
+                and artifact.get("candidate_sha") == candidate_sha)
 
 
 def build(artifact: dict | None, *, candidate_sha: str | None) -> dict:
+    from bot.ai import ai_gate, forward_evidence
     cand = (artifact or {}).get("candidate_research") or {}
     ai = cand.get("ai_meta_model") or {}
     pooled = ai.get("pooled_test") or {}
-    auth = (ai.get("authority") or {})
-    ai_auth = (auth.get("ai_approved_expectancy") or {}).get("authority_status")
-    ai_lo = (auth.get("ai_approved_expectancy") or {}).get("authority_ci_low")
-    up_lo = (auth.get("ai_uplift_vs_baseline") or {}).get("authority_ci_low")
-    oos_positive = bool(ai_auth == "VALID" and ai_lo is not None and ai_lo > 0
-                        and up_lo is not None and up_lo > 0)
+    gate = ai_gate.evaluate(artifact or {})
+    comp = gate["components"]
+    sc = ai.get("shadow_challenger") or {}
+    fwd_s = forward_evidence.status(None, "SHADOW")
+    fwd_p = forward_evidence.status(None, "PAPER")
+    components = {
+        "AI_RESEARCH_ARTIFACT_AUTHENTICATED": "PASS" if _authenticated(artifact, candidate_sha) else "BLOCK",
+        "AI_EXPECTANCY_AUTHORITY": comp["AI_EXPECTANCY_AUTHORITY"],
+        "AI_UPLIFT_AUTHORITY": comp["AI_UPLIFT_AUTHORITY"],
+        "AI_CALIBRATION": comp["AI_CALIBRATION"],
+        "AI_COST_STRESS": comp["AI_COST_STRESS"],
+        "AI_PORTFOLIO_ROBUSTNESS": comp["AI_PORTFOLIO_ROBUSTNESS"],
+        "AI_RESEARCH_PROMOTION": gate["verdict"],
+    }
     return {
         "schema": SCHEMA,
         "candidate_sha": candidate_sha,
@@ -36,27 +52,35 @@ def build(artifact: dict | None, *, candidate_sha: str | None) -> dict:
         "feature_schema": {"version": fx.FEATURE_SCHEMA_VERSION, "sha256": fx.schema_hash(),
                            "model_features": list(fx.MODEL_FEATURES),
                            "live_only_excluded": [s.name for s in fx.FEATURE_SPECS if not s.model_input]},
-        "model": {"status": "NO_PROMOTED_MODEL", "model_sha256": None,
-                  "note": "research models are retrained per replay; none is pinned for LIVE"},
-        "execution_mode_support": {m: ("SUPPORTED" if m != "LIVE" else "FAIL_CLOSED_WITHOUT_STAGE_C")
-                                   for m in em.MODES},
+        "components": components,
+        "ai_research_promotion_gate": {"verdict": gate["verdict"], "blockers": gate["blockers"],
+                                       "components": comp, "recomputed": gate["recomputed"]},
+        "model_selection_stability": (ai.get("selection_stability") or {}).get("status"),
+        "shadow_challenger": {"created": bool(sc.get("created")),
+                              "bundle_sha256": sc.get("bundle_sha256"),
+                              "decision_policy_sha256": sc.get("decision_policy_sha256"),
+                              "lifecycle_state": sc.get("lifecycle_state"),
+                              "reason": sc.get("reason")},
+        "execution_mode_support": {"OFF": "DEFAULT_NO_OP", "SHADOW": "CODE_READY",
+                                   "PAPER": "CODE_READY_REQUIRES_PAPER_TRADE_ENGINE",
+                                   "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C_AND_AI_IDENTITY"},
         "oos_status": {"ai_meta_model_status": ai.get("status", "NOT_RUN"),
                        "data_label": ai.get("data_label"),
                        "pooled_test_ai_approved": pooled.get("ai_approved"),
-                       "pooled_test_baseline": pooled.get("baseline"),
-                       "ai_authority_status": ai_auth, "ai_authority_ci_low": ai_lo,
-                       "ai_uplift_authority_ci_low": up_lo,
-                       "positive_edge_proven": oos_positive},
-        "shadow_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS",
-        "paper_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS",
+                       "pooled_test_baseline": pooled.get("baseline")},
+        "forward_shadow_evidence": fwd_s,
+        "forward_paper_evidence": fwd_p,
+        "engine_integration": "WIRED_PRE_TRADE_AFTER_NEXUS_DEFAULT_OFF",
+        "durable_ai_journal": "DATABASE_AI_DECISIONS_TABLE",
+        "restart_ai_reconciliation": "CLIENT_OID_RECONCILE_BEFORE_NEW_ENTRY",
+        "halt_authority": "UNIFIED_HALT_CONTROLLER_OPERATOR_RECOVER_ONLY",
         "risk_invariant_status": "ENFORCED_BY_AUTHORITY_CHAIN_TESTED",
-        "execution_invariant_status": "IDEMPOTENT_RECONCILE_BEFORE_RETRY_TESTED",
         "live_status": "BLOCK",
-        "known_blockers": [b for b in (
-            None if oos_positive else "AI_EDGE_NOT_PROVEN_OOS",
-            "NO_FORWARD_SHADOW_EVIDENCE", "NO_FORWARD_PAPER_EVIDENCE", "NO_PROMOTED_MODEL_ARTIFACT",
-            "AI_NOT_WIRED_INTO_PRODUCTION_ENGINE", "STAGE_C_EVIDENCE_NOT_AVAILABLE",
-            "REPLAY_PARITY_INCOMPLETE") if b],
+        "known_blockers": sorted(set(
+            [f"AI_{k}_BLOCK" if not k.startswith("AI_") else f"{k}_BLOCK"
+             for k, v in components.items() if v != "PASS"]
+            + ["NO_FORWARD_SHADOW_EVIDENCE", "NO_FORWARD_PAPER_EVIDENCE", "NO_LIVE_CHAMPION",
+               "STAGE_C_EVIDENCE_NOT_AVAILABLE"])),
         "secrets_included": False,
     }
 

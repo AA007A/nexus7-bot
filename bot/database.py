@@ -183,6 +183,14 @@ _DDL = [
         id SERIAL PRIMARY KEY,
         timestamp TEXT, symbol TEXT, type TEXT, score INTEGER, reason TEXT
     )""",
+    # Durable AI decision journal (Phase 7B). One row per decision_id; the
+    # full sanitized record (no secrets) is JSON; status tracks the order.
+    """CREATE TABLE IF NOT EXISTS ai_decisions (
+        decision_id TEXT PRIMARY KEY,
+        client_oid TEXT UNIQUE,
+        ts BIGINT, symbol TEXT, side TEXT, status TEXT,
+        bundle_sha256 TEXT, policy_sha256 TEXT, record TEXT, updated_at TEXT
+    )""",
 ]
 
 _DDL_SQLITE = [
@@ -769,3 +777,88 @@ async def close():
         log.warning(f"Erro ao fechar banco: {e}")
     finally:
         _conn = None
+
+
+# ── AI decision journal (durable; restart-safe) ────────────────────────────
+AI_OPEN_STATUSES = ("INTENT_CREATED", "SUBMITTED", "PENDING_UNKNOWN")
+
+
+@_serialized_io
+async def save_ai_decision(decision_id: str, client_oid: str | None, ts: int, symbol: str, side: str,
+                           status: str, bundle_sha256: str | None, policy_sha256: str | None,
+                           record_json: str, *, strict: bool = True) -> bool:
+    """Upsert one AI decision. strict=True: a write that cannot be confirmed
+    raises PersistenceError (the caller must not trade on an unjournaled decision)."""
+    if not _conn:
+        if strict:
+            raise PersistenceError("save_ai_decision: database unavailable")
+        return False
+    ts_now = datetime.now(timezone.utc).isoformat()
+    try:
+        if _is_pg:
+            await _conn.execute(
+                "INSERT INTO ai_decisions (decision_id, client_oid, ts, symbol, side, status, "
+                "bundle_sha256, policy_sha256, record, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
+                "ON CONFLICT (decision_id) DO UPDATE SET status=$6, record=$9, updated_at=$10, "
+                "client_oid=COALESCE($2, ai_decisions.client_oid)",
+                decision_id, client_oid, int(ts), symbol, side, status, bundle_sha256, policy_sha256,
+                record_json, ts_now)
+        else:
+            await _conn.execute(
+                "INSERT INTO ai_decisions (decision_id, client_oid, ts, symbol, side, status, "
+                "bundle_sha256, policy_sha256, record, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(decision_id) DO UPDATE SET status=excluded.status, "
+                "record=excluded.record, updated_at=excluded.updated_at, "
+                "client_oid=COALESCE(excluded.client_oid, ai_decisions.client_oid)",
+                (decision_id, client_oid, int(ts), symbol, side, status, bundle_sha256, policy_sha256,
+                 record_json, ts_now))
+            await _conn.commit()
+        return True
+    except Exception as exc:
+        log.warning("save_ai_decision failed: %s", type(exc).__name__)
+        if strict:
+            raise PersistenceError("save_ai_decision failed") from exc
+        return False
+
+
+@_serialized_io
+async def load_ai_decision(decision_id: str, *, strict: bool = True):
+    if not _conn:
+        if strict:
+            raise PersistenceError("load_ai_decision: database unavailable")
+        return None
+    try:
+        if _is_pg:
+            row = await _conn.fetchrow("SELECT status, record FROM ai_decisions WHERE decision_id=$1",
+                                       decision_id)
+        else:
+            async with _conn.execute("SELECT status, record FROM ai_decisions WHERE decision_id=?",
+                                     (decision_id,)) as cur:
+                row = await cur.fetchone()
+        return (row[0], json.loads(row[1])) if row else None
+    except Exception as exc:
+        if strict:
+            raise PersistenceError("load_ai_decision failed") from exc
+        return None
+
+
+@_serialized_io
+async def load_open_ai_decisions(*, strict: bool = True) -> list:
+    """Decisions whose order state is not final (restart reconciliation)."""
+    if not _conn:
+        if strict:
+            raise PersistenceError("load_open_ai_decisions: database unavailable")
+        return []
+    try:
+        q = "SELECT decision_id, client_oid, status, record FROM ai_decisions WHERE status IN (?,?,?)"
+        if _is_pg:
+            rows = await _conn.fetch(_pg_sql(q), *AI_OPEN_STATUSES)
+        else:
+            async with _conn.execute(q, AI_OPEN_STATUSES) as cur:
+                rows = await cur.fetchall()
+        return [{"decision_id": r[0], "client_oid": r[1], "status": r[2], "record": json.loads(r[3])}
+                for r in rows]
+    except Exception as exc:
+        if strict:
+            raise PersistenceError("load_open_ai_decisions failed") from exc
+        return []

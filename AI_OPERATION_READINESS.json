@@ -1,13 +1,39 @@
 {
-  "ai_version": "NEXUS7_AI_DECISION_AUTHORITY_V1",
+  "ai_research_promotion_gate": {
+    "blockers": [
+      "AI_META_MODEL_STATUS_MISSING"
+    ],
+    "components": {
+      "AI_CALIBRATION": "BLOCK",
+      "AI_CONCENTRATION": "BLOCK",
+      "AI_COST_STRESS": "BLOCK",
+      "AI_EXPECTANCY_AUTHORITY": "BLOCK",
+      "AI_PORTFOLIO_ROBUSTNESS": "BLOCK",
+      "AI_UPLIFT_AUTHORITY": "BLOCK",
+      "AI_WINDOWS": "BLOCK"
+    },
+    "recomputed": {},
+    "verdict": "BLOCK"
+  },
+  "ai_version": "NEXUS7_AI_DECISION_AUTHORITY_V2",
   "candidate_sha": null,
-  "decision_policy_version": "NEXUS7_AI_DECISION_POLICY_V1",
-  "execution_invariant_status": "IDEMPOTENT_RECONCILE_BEFORE_RETRY_TESTED",
+  "components": {
+    "AI_CALIBRATION": "BLOCK",
+    "AI_COST_STRESS": "BLOCK",
+    "AI_EXPECTANCY_AUTHORITY": "BLOCK",
+    "AI_PORTFOLIO_ROBUSTNESS": "BLOCK",
+    "AI_RESEARCH_ARTIFACT_AUTHENTICATED": "BLOCK",
+    "AI_RESEARCH_PROMOTION": "BLOCK",
+    "AI_UPLIFT_AUTHORITY": "BLOCK"
+  },
+  "decision_policy_version": "NEXUS7_AI_DECISION_POLICY_V2",
+  "durable_ai_journal": "DATABASE_AI_DECISIONS_TABLE",
+  "engine_integration": "WIRED_PRE_TRADE_AFTER_NEXUS_DEFAULT_OFF",
   "execution_mode_support": {
-    "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C",
-    "PAPER": "SUPPORTED",
-    "RESEARCH": "SUPPORTED",
-    "SHADOW": "SUPPORTED"
+    "LIVE": "FAIL_CLOSED_WITHOUT_STAGE_C_AND_AI_IDENTITY",
+    "OFF": "DEFAULT_NO_OP",
+    "PAPER": "CODE_READY_REQUIRES_PAPER_TRADE_ENGINE",
+    "SHADOW": "CODE_READY"
   },
   "feature_schema": {
     "live_only_excluded": [
@@ -38,39 +64,69 @@
       "cost_fraction",
       "nexus_confidence",
       "hour_sin",
-      "hour_cos"
+      "hour_cos",
+      "adx_14__missing",
+      "volume_multiple_20__missing",
+      "body_ratio__missing",
+      "range_position_32__missing",
+      "h1_trend_slope_12__missing",
+      "h4_trend_slope_6__missing",
+      "h1_realized_vol_24__missing",
+      "direction_long__missing",
+      "strategy_score__missing",
+      "planned_rr__missing",
+      "stop_distance_pct__missing",
+      "cost_fraction__missing",
+      "nexus_confidence__missing",
+      "hour_sin__missing",
+      "hour_cos__missing"
     ],
-    "sha256": "928fe825236d69e7892816360d2efe7c2339ccd2b6ab383f457a45b4100415e9",
-    "version": "NEXUS7_AI_FEATURES_V1"
+    "sha256": "0e8cb451a8c1ec5739bbf1c6504d742305b802aaf6f03ed4f79609059c7e68f4",
+    "version": "NEXUS7_AI_FEATURES_V2"
   },
+  "forward_paper_evidence": {
+    "contract": "FORWARD_PAPER_EVIDENCE_V1",
+    "contract_sha256": "9aff274e5049d3c591f6f658d597dc6fb846529832379b721ead26fb6ef1af54",
+    "reason": "no forward window observed yet",
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "forward_shadow_evidence": {
+    "contract": "FORWARD_SHADOW_EVIDENCE_V1",
+    "contract_sha256": "4cb055f188ac5f7d905225bcc94b5870f3b48413480d5c915ffadda3cc994d9b",
+    "reason": "no forward window observed yet",
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "halt_authority": "UNIFIED_HALT_CONTROLLER_OPERATOR_RECOVER_ONLY",
   "known_blockers": [
-    "AI_EDGE_NOT_PROVEN_OOS",
-    "NO_FORWARD_SHADOW_EVIDENCE",
+    "AI_CALIBRATION_BLOCK",
+    "AI_COST_STRESS_BLOCK",
+    "AI_EXPECTANCY_AUTHORITY_BLOCK",
+    "AI_PORTFOLIO_ROBUSTNESS_BLOCK",
+    "AI_RESEARCH_ARTIFACT_AUTHENTICATED_BLOCK",
+    "AI_RESEARCH_PROMOTION_BLOCK",
+    "AI_UPLIFT_AUTHORITY_BLOCK",
     "NO_FORWARD_PAPER_EVIDENCE",
-    "NO_PROMOTED_MODEL_ARTIFACT",
-    "AI_NOT_WIRED_INTO_PRODUCTION_ENGINE",
-    "STAGE_C_EVIDENCE_NOT_AVAILABLE",
-    "REPLAY_PARITY_INCOMPLETE"
+    "NO_FORWARD_SHADOW_EVIDENCE",
+    "NO_LIVE_CHAMPION",
+    "STAGE_C_EVIDENCE_NOT_AVAILABLE"
   ],
   "live_status": "BLOCK",
-  "model": {
-    "model_sha256": null,
-    "note": "research models are retrained per replay; none is pinned for LIVE",
-    "status": "NO_PROMOTED_MODEL"
-  },
+  "model_selection_stability": null,
   "oos_status": {
-    "ai_authority_ci_low": null,
-    "ai_authority_status": null,
     "ai_meta_model_status": "NOT_RUN",
-    "ai_uplift_authority_ci_low": null,
     "data_label": null,
     "pooled_test_ai_approved": null,
-    "pooled_test_baseline": null,
-    "positive_edge_proven": false
+    "pooled_test_baseline": null
   },
-  "paper_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS",
+  "restart_ai_reconciliation": "CLIENT_OID_RECONCILE_BEFORE_NEW_ENTRY",
   "risk_invariant_status": "ENFORCED_BY_AUTHORITY_CHAIN_TESTED",
-  "schema": "NEXUS7_AI_OPERATION_READINESS_V1",
+  "schema": "NEXUS7_AI_OPERATION_READINESS_V2",
   "secrets_included": false,
-  "shadow_status": "CODE_READY_NOT_RUN_ON_LIVE_FEEDS"
+  "shadow_challenger": {
+    "bundle_sha256": null,
+    "created": false,
+    "decision_policy_sha256": null,
+    "lifecycle_state": null,
+    "reason": null
+  }
 }

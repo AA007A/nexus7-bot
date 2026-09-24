@@ -231,13 +231,43 @@ class ResearchPipelineWithApprovals(unittest.TestCase):
                     for t in range(start_ms - start_ms % (8 * 3_600_000), end_ms, 8 * 3_600_000)]
 
         from bot.strategy import Analyzer
+        cls.ai_inputs = []
+        original_ai = replay._ai_portfolio_and_gate
+
+        def capture(*args):
+            cls.ai_inputs.append(args)
+            return original_ai(*args)
         with patch.object(replay, "fetch_history", fake_history), \
              patch.object(replay, "fetch_public_funding_history", fake_funding), \
              patch.object(replay, "PublicKuCoinFuturesClient", _Client), \
              patch.object(replay, "_decide", _fake_decide), \
+             patch.object(replay, "_ai_portfolio_and_gate", capture), \
              patch.object(Analyzer, "analyze_mtf", _fake_analyze):
             cls.artifact = asyncio.run(replay.run_real_replay(["AAAUSDT", "BBBUSDT"], limit_15m=620,
                                                               manifest_path=_short_tail_manifest()))
+
+    def test_phase7b_ai_test_fold_portfolio_and_gate_path(self):
+        """AI status OK path: per-TEST-fold portfolio from the same start, pooled
+        portfolio, independent AI gate, and no challenger unless PASS + stable."""
+        self.assertEqual(len(self.ai_inputs), 1)
+        _, all_rich, manifest, instruments, mmr = self.ai_inputs[0]
+        execs = [r for r in all_rich if r.get("executable") and r.get("outcome_status") and r.get("legs")]
+        self.assertGreater(len(execs), 4)
+        keys = [[int(r["ts"]), r["symbol"], r["direction"]] for r in execs]
+        half = len(keys) // 2
+        art = {"candidate_research": {"ai_meta_model": {
+            "status": "OK", "data_label": "HISTORICAL_OOS_PREVIOUSLY_INSPECTED",
+            "selection_stability": {"status": "MODEL_SELECTION_UNSTABLE"},
+            "steps": [{"test_fold": 3, "_approved_keys": keys[:half]},
+                      {"test_fold": 4, "_approved_keys": keys[half:]}]}}}
+        replay.__dict__["_ai_portfolio_and_gate"](art, all_rich, manifest, instruments, mmr)
+        ai = art["candidate_research"]["ai_meta_model"]
+        folds = ai["portfolio_by_test_fold"]
+        self.assertEqual([f["test_fold"] for f in folds], [3, 4])
+        self.assertEqual(folds[0]["starting_equity"], folds[1]["starting_equity"])
+        self.assertGreater(ai["portfolio_pooled_test"]["total_trades"], 0)
+        self.assertEqual(ai["research_promotion_gate"]["verdict"], "BLOCK")
+        self.assertEqual(ai["shadow_challenger"], {"created": False, "reason": "AI_RESEARCH_GATE_BLOCK"})
 
     def test_portfolio_trades_single_position_and_invariants(self):
         p = self.artifact["portfolio_replay"]
