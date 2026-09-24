@@ -185,34 +185,30 @@ def block_only_authority(section: dict, *, required_ms: int | None,
 
 
 def residual_dependence_recompute(iv: dict) -> str | None:
-    """Recompute lag-1..3 ACF and the 2/sqrt(n) band from the block-mean series.
+    """Recompute the CALENDAR residual ACF from block_ids / means / counts.
 
-    Returns None when there is no significant residual dependence, otherwise a
-    fail-closed status. The series also re-derives the resampling-block count.
+    Validates the series (equal lengths, integer strictly increasing unique
+    block ids, positive integer counts, length == resampling_blocks), then
+    recomputes lag-1..3 ACF pairing only blocks whose ids differ by exactly k.
+    Stored ACF values are cross-checked, never trusted. Returns None when
+    there is no significant residual dependence; otherwise a fail-closed code.
     """
     from bot import nexus_oos_inference as inf
     rd = iv.get("residual_dependence")
     series = rd.get("series") if isinstance(rd, dict) else None
-    means = series.get("means") if isinstance(series, dict) else None
-    counts = series.get("counts") if isinstance(series, dict) else None
-    if not isinstance(means, list) or not isinstance(counts, list) or len(means) != len(counts):
-        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
-    vals = [_num(m) for m in means]
-    if any(v is None for v in vals) or any(not isinstance(c, int) or c < 1 for c in counts):
-        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
-    n = len(vals)
-    if n < 10 or n != _num(iv.get("resampling_blocks")):
-        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
-    band = 2 / math.sqrt(n)
-    acf = inf.acf_from_series(vals)
-    if any(v is None for v in acf.values()):
-        return "RESIDUAL_DEPENDENCE_NOT_ESTIMABLE"
+    n_blk = _num(iv.get("resampling_blocks"))
+    err = inf.validate_block_series(series, int(n_blk) if n_blk is not None else -1)
+    if err is not None:
+        return err
+    res = inf.acf_from_block_series(series["block_ids"], [float(m) for m in series["means"]])
     reported = rd.get("acf") or {}
-    for k, v in acf.items():
-        r = _num(reported.get(k))
-        if r is None or abs(r - v) > 1e-9:
+    for k, v in res["acf"].items():
+        r = reported.get(k)
+        if (v is None) != (r is None) or (v is not None and (_num(r) is None or abs(_num(r) - v) > 1e-9)):
             return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
-    if any(abs(v) > band for v in acf.values()):
+    if res["insufficient_pairs"]:
+        return inf.RESIDUAL_NOT_ESTIMABLE
+    if res["significant"]:
         return "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
     return None
 
@@ -444,37 +440,44 @@ def evaluate(artifact: dict, policy: GatePolicy = GatePolicy()) -> GateResult:
                       gate=RESEARCH_GATE, policy_content=parity_state)
 
 
-def evaluate_live(artifact: dict, evidence=None, *, sources=None, now=None,
+def evaluate_live(local_artifact: dict | None, evidence=None, *, sources=None, now=None,
                   policy: GatePolicy = GatePolicy()) -> GateResult:
     """LIVE_RELEASE_GATE (stage C). Never deploys, never mutates anything.
 
-    Requires the research gate (with full context parity) AND a
-    BGX_LIVE_RELEASE_EVIDENCE_V1 envelope whose every claim is confirmed by
-    trusted read-only sources (``bot.live_release_evidence``): Railway
-    deployment metadata, the runtime policy observation from that deployment's
-    logs, exact-SHA CI runs, structured protection evidence and a structured
-    human approval record. Without trusted sources the verdict is BLOCK.
+    The research gate is evaluated ONLY on the OOS artifact fetched from the
+    trusted CI provider (exact-SHA, successful "NEXUS Real OOS Replay" run,
+    digest-verified). ``local_artifact`` is a caller-supplied copy used for
+    comparison/display only; it never decides anything. All other Stage-C
+    claims are confirmed by ``bot.live_release_evidence.verify``. Without
+    trusted sources the verdict is BLOCK. This function is a reference
+    implementation; the authoritative Stage-C verifier runs from the protected
+    release environment (RELEASE_EVIDENCE.md §7), never from the candidate.
     """
     from dataclasses import replace as _replace
     from bot import live_release_evidence as lre
-    res = evaluate(artifact, _replace(policy, require_context_parity=True))
-    ev = lre.verify(evidence, artifact=artifact if isinstance(artifact, dict) else None,
+    ev = lre.verify(evidence, local_artifact=local_artifact if isinstance(local_artifact, dict) else None,
                     sources=sources, now=now)
     comp = ev["components"]
+    trusted = ev["trusted_artifact"]
+    if trusted is not None:
+        res = evaluate(trusted, _replace(policy, require_context_parity=True))
+    else:
+        res = GateResult(False, ["TRUSTED_RESEARCH_ARTIFACT_UNAVAILABLE"], EXIT_BLOCKED)
     b = list(res.blockers) + list(ev["blockers"])
-    prelive = all(comp[k] == "PASS" for k in ("POLICY_CONTENT_MATCH", "LIVE_PROVENANCE_AUTHENTICATED",
-                                              "EXACT_DEPLOYMENT_SHA_MATCH", "CI_EVIDENCE"))
+    prelive = all(comp[k] == "PASS" for k in (
+        "RESEARCH_ARTIFACT_AUTHENTICATED", "POLICY_CONTENT_MATCH", "LIVE_PROVENANCE_AUTHENTICATED",
+        "EXACT_DEPLOYMENT_SHA_MATCH", "CI_EVIDENCE", "RELEASE_VERIFIER_TRUSTED"))
     live_ok = prelive and res.promote and all(v == "PASS" for v in comp.values())
     b = sorted(set(b))
-    code = res.exit_code if res.exit_code in (EXIT_MISSING, EXIT_CORRUPT) else (
-        EXIT_PROMOTE if (live_ok and not b) else EXIT_BLOCKED)
+    code = EXIT_PROMOTE if (live_ok and not b) else EXIT_BLOCKED
     stages = {"RESEARCH_PROMOTION": "PASS" if res.promote else "BLOCK",
               "PRELIVE_EVIDENCE": "PASS" if prelive else "BLOCK",
               "LIVE_RELEASE_PRECONDITIONS": "PASS" if (live_ok and not b) else "BLOCK",
-              "evidence_components": comp}
+              "evidence_components": comp,
+              "release_verifier_version": ev["release_verifier_version"],
+              "release_verifier_sha": ev["release_verifier_sha"]}
     return GateResult(bool(live_ok and not b), b, code, gate=LIVE_GATE,
-                      policy_content=(artifact or {}).get("policy_parity")
-                      if isinstance(artifact, dict) else None,
+                      policy_content=(trusted or {}).get("policy_parity"),
                       stages=stages, source_authenticated=ev["source_authenticated"])
 
 

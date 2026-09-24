@@ -50,7 +50,7 @@ The final head (the docs commit after `a9a919a`) gets its own complete CI run. I
 |---|---|---|---|
 | A | Research / code merge | `RESEARCH_PROMOTION_GATE` (strict in CI). `LIVE_POLICY_OBSERVATION_PENDING` allowed; independent of LIVE provenance. Never means PRODUCTION_READY = YES | Runs on every PR head |
 | B | Pre-live evidence (`PRELIVE_EVIDENCE`): policy content match + source-authenticated provenance + exact deployment SHA + exact-SHA CI | verifier (`bot/live_release_evidence.py`) | **Blocked**: no trusted source provider exists yet |
-| C | Live release (`LIVE_RELEASE_PRECONDITIONS`) | `LIVE_RELEASE_GATE`: a `BGX_LIVE_RELEASE_EVIDENCE_V1` envelope whose claims are all confirmed from trusted read-only sources, plus structured protection evidence and a structured human approval (RELEASE_EVIDENCE.md). `REAL_ORDER_ENABLEMENT = HUMAN_ACTION_REQUIRED` | Blocked |
+| C | Live release (`LIVE_RELEASE_PRECONDITIONS`; trusted CI-fetched research artifact, per-job or certificate protection identity, release-instance-bound approval, protected pinned verifier) | `LIVE_RELEASE_GATE`: a `BGX_LIVE_RELEASE_EVIDENCE_V1` envelope whose claims are all confirmed from trusted read-only sources, plus structured protection evidence and a structured human approval (RELEASE_EVIDENCE.md). `REAL_ORDER_ENABLEMENT = HUMAN_ACTION_REQUIRED` | Blocked |
 
 ## Verdict
 The engineering and risk-control hardening is done and tested offline. The trading strategy has measured negative expectancy, and its NEXUS filter has no statistically established edge. Deploying it would expose capital to a strategy with negative expected value.

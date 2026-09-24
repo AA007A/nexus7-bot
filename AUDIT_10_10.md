@@ -138,6 +138,12 @@ Wrappers that still decide a risk concept after this pass:
 | P0-39 | P0 | human authorization | Any non-empty string | No bound approval | Structured approval record | `human_approval` verified via the approval provider (same SHA, APPROVED, 24 h) | `HumanApprovalMustBeStructured` (2) | No approval provider yet |
 | P0-40 | P0 | `production_ready` | The live gate could be satisfied by CLI arguments | Readiness claimed without provenance | Only on source-authenticated evidence | Stages `RESEARCH_PROMOTION` / `PRELIVE_EVIDENCE` / `LIVE_RELEASE_PRECONDITIONS`, `REAL_ORDER_ENABLEMENT = HUMAN_ACTION_REQUIRED`; CLI has no trusted source; `--candidate-sha` removed | `CliShaIsNotIdentity` (3), `StagedGates` (4) | none |
 | P1-24 | P1 | residual-dependence "recomputation" | The gate re-read stored ACF values | Consistency check presented as recomputation | Real recomputation | Per-block series in the artifact; the gate recomputes ACF, band and block count; mismatch ⇒ `RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT` | `ResidualDependenceFailsClosed` (4) | none |
+| P0-41 | P0 | Stage-C research artifact | The live gate evaluated the caller-supplied artifact | Edited metrics with the right SHA could pass | Trusted artifact only | The OOS run and artifact are fetched from the CI provider; `conclusion = success`; digest verified; research gate recomputed on it; local copy used for comparison only | `TrustedResearchArtifact` (5) | none |
+| P0-42 | P0 | protection check identity | `run_ok(run_id)` for every check | One generic run could satisfy all checks | Provider-authenticated identity | PER_JOB (named job per check, one job per check) or a CERTIFICATE artifact from `BGX Protection Evidence` | `ProtectionIdentity` (3) | The protection workflow does not exist yet |
+| P0-43 | P0 | verifier root of trust | The verifier lives in the candidate | A PR could weaken its own release rules | Protected, pinned verifier | `RELEASE_VERIFIER_TRUSTED` (pinned SHA ≠ candidate); RELEASE_EVIDENCE.md §7 (Options A/B/C) | `VerifierTrustBoundary` (1) | Protected release environment not built |
+| P0-44 | P0 | provider trust | `source_kind` string | Any object can claim it | Documented boundary | Trust comes from the protected environment's credentials; `source_kind` is an interface marker only | doc test | none |
+| P0-45 | P0 | human approval | Bound to candidate SHA only | An old approval could authorize a new deployment | Bound to the release instance | Deployment ID (or explicit coverage), research-artifact digest, release-evidence digest; approved after pre-live evidence | `ApprovalBindsReleaseInstance` (2) | none |
+| P1-25 | P1 | residual ACF | Positional adjacency | A gap was treated as lag 1 | Calendar lags | `acf_from_block_series`; per-lag pairs/band; ≥ 20 pairs per lag, else INSUFFICIENT_EVIDENCE; gate validates and recomputes the series | `CalendarResidualACF` (4) | Earlier runs' ACF non-authoritative |
 | P2-01 | P2 | `pilot_live_runtime`, `pilot_risk_cap_hardening` sizing hooks | Superseded inner sizing wrappers | Dead in the LIVE path; still installed | One authority | Kept (contract/tests depend on them). Scheduled for removal | — | Maintenance only |
 | P2-02 | P2 | Remaining 9 silent handlers | 5 justified best-effort, 4 REVIEW_MEDIUM (runtime_truth ×3, pullback telemetry) | — | classify all | 2 REVIEW_HIGH fixed | selfcheck | REVIEW_MEDIUM remain |
 | P2-03 | P2 | `engine.py` (3992 lines) | Monolith | — | Extract stateful authorities with parity tests | Not attempted in this pass (zero-semantic-change refactor requires its own PR) | — | — |
@@ -163,7 +169,7 @@ Wrappers that still decide a risk concept after this pass:
 |---|---|
 | Baseline offline suite at 77ae453 | 1607/1607 pass |
 | New P0 tests against baseline code | 14 fail (reproduced), 29 pass |
-| Full offline suite (`python -m tests.run_offline`), final code | 1850/1850 pass (1726 before the parity phase) |
+| Full offline suite (`python -m tests.run_offline`), final code | 1863/1863 pass (1726 before the parity phase) |
 | `compileall`, `ruff --select E9,F63,F7,F82`, pyflakes undefined names | pass / pass / 0 |
 | `python -m bot.selfcheck` | 0 critical; silent handlers 12 → 9 |
 | `python -m bot.release_proof` | `RELEASE_PROOF=PASS` (161/161) |

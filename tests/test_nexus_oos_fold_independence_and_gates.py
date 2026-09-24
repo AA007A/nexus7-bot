@@ -220,7 +220,9 @@ class StagedGates(unittest.TestCase):
             self.assertIn("LIVE_PROVENANCE_SOURCE_UNAVAILABLE", r.blockers)
             d = r.to_dict()
             self.assertFalse(d["production_ready"])
-            self.assertEqual(d["stages"]["RESEARCH_PROMOTION"], "PASS")
+            # Stage C never evaluates a caller-supplied artifact.
+            self.assertEqual(d["stages"]["RESEARCH_PROMOTION"], "BLOCK")
+            self.assertIn("TRUSTED_RESEARCH_ARTIFACT_UNAVAILABLE", r.blockers)
             self.assertEqual(d["stages"]["LIVE_RELEASE_PRECONDITIONS"], "BLOCK")
             self.assertEqual(d["stages"]["REAL_ORDER_ENABLEMENT"], "HUMAN_ACTION_REQUIRED")
 
@@ -323,9 +325,76 @@ class ResidualDependenceFailsClosed(unittest.TestCase):
             if rd is None:
                 continue
             self.assertEqual(rd["n_blocks"], iv["resampling_blocks"])
-            if rd["n_blocks"] >= 10:          # below 10 blocks no ACF is reported
-                self.assertEqual(inf.acf_from_series(rd["series"]["means"]), rd["acf"])
+            again = inf.acf_from_block_series(rd["series"]["block_ids"], rd["series"]["means"])
+            self.assertEqual(again["acf"], rd["acf"])
             self.assertEqual(len(rd["series"]["counts"]), rd["n_blocks"])
+
+
+class CalendarResidualACF(unittest.TestCase):
+    """11-14: residual ACF uses CALENDAR block ids; the gate recomputes from the series."""
+
+    def _gate_with_series(self, block_ids, means, counts=None, n_override=None):
+        from tests.test_nexus_oos_promotion_gate import residual
+        a = _passing_artifact()
+        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
+        longest["residual_dependence"] = residual(means, block_ids=block_ids, counts=counts)
+        longest["resampling_blocks"] = n_override if n_override is not None else len(means)
+        return gate.evaluate(a).blockers
+
+    def test_11_missing_block_ids_break_authority(self):
+        from tests.test_nexus_oos_promotion_gate import clean_series
+        m = clean_series(45)
+        a = _passing_artifact()
+        sec = a["candidate_research"]["inference"]["uplift_vs_baseline"]
+        longest = max(sec["block_intervals"], key=lambda iv: iv["block_ms"])
+        del longest["residual_dependence"]["series"]["block_ids"]
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_MISSING", gate.evaluate(a).blockers)
+        # Arrays of different length also fail closed.
+        blockers = self._gate_with_series(list(range(44)), m)
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT", blockers)
+        self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", blockers)
+
+    def test_12_duplicate_or_out_of_order_ids_break_authority(self):
+        from tests.test_nexus_oos_promotion_gate import clean_series
+        m = clean_series(45)
+        ids = list(range(100, 145))
+        dup = ids[:10] + [ids[9]] + ids[11:]
+        swapped = ids[:5] + [ids[6], ids[5]] + ids[7:]
+        for bad in (dup, swapped, [float(i) for i in ids], [True] + ids[1:]):
+            self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT", self._gate_with_series(bad, m))
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT",
+                      self._gate_with_series(ids, m, counts=[3] * 44 + [0]))
+        self.assertIn("RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT",
+                      self._gate_with_series(ids, m, n_override=46))
+
+    def test_13_missing_calendar_blocks_are_not_lag1_pairs(self):
+        res = inf.acf_from_block_series([100, 101, 105], [0.1, 0.2, 0.3], min_pairs=1)
+        self.assertEqual(res["lags"]["1"]["eligible_pairs"], 1)          # 100->101 only
+        self.assertEqual(res["lags"]["3"]["eligible_pairs"], 0)
+        self.assertEqual(res["lags"]["2"]["eligible_pairs"], 0)
+        # Every other calendar block missing: no lag-1 or lag-3 pairs at all.
+        ids = list(range(0, 120, 2))
+        vals = [math.sin(i / 3.0) for i in range(60)]
+        res = inf.acf_from_block_series(ids, vals)
+        self.assertEqual(res["lags"]["1"]["eligible_pairs"], 0)
+        self.assertEqual(res["lags"]["2"]["eligible_pairs"], 59)
+        self.assertIsNone(res["lags"]["1"]["acf"])
+        # Positional (wrong) ACF would have used 59 lag-1 pairs.
+        for k, v in res["lags"].items():
+            self.assertEqual(set(v), {"eligible_pairs", "acf", "reference_band", "significant"})
+
+    def test_14_too_few_calendar_pairs_is_insufficient_evidence(self):
+        from tests.test_nexus_oos_promotion_gate import clean_series
+        m = clean_series(45)
+        sparse = list(range(0, 90, 2))                 # 45 blocks, no lag-1 / lag-3 neighbours
+        blockers = self._gate_with_series(sparse, m)
+        self.assertIn(inf.RESIDUAL_NOT_ESTIMABLE, blockers)
+        self.assertIn("UPLIFT_BLOCK_CI_NOT_POSITIVE", blockers)
+        res = inf.acf_from_block_series(sparse, m)
+        self.assertTrue(res["insufficient_pairs"])
+        self.assertIsNone(res["significant"])
+        self.assertLess(res["lags"]["1"]["eligible_pairs"], inf.MIN_RESIDUAL_ACF_PAIRS)
 
 
 if __name__ == "__main__":

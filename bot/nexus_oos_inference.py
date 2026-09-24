@@ -70,6 +70,11 @@ RESIDUAL_DEPENDENCE = "RESIDUAL_DEPENDENCE_AT_LONGEST_USABLE_BLOCK"
 # conservative usable length: no authority (INSUFFICIENT_EVIDENCE). A shorter
 # block is never substituted.
 RESIDUAL_ACF_LAGS = (1, 2, 3)
+# Lags are CALENDAR lags between block ids (a missing block breaks adjacency).
+# Each lag needs >= this many calendar-valid pairs, otherwise the rule cannot
+# be evaluated and authority is withheld (INSUFFICIENT_EVIDENCE). Predeclared.
+MIN_RESIDUAL_ACF_PAIRS = 20
+RESIDUAL_NOT_ESTIMABLE = "RESIDUAL_DEPENDENCE_INSUFFICIENT_CALENDAR_PAIRS"
 BOOTSTRAP_SAMPLES = 2000
 SEED = 11
 
@@ -273,40 +278,82 @@ AUTHORITY_RULE = ("block length >= required dependence horizon (ceil max resolve
 
 
 def block_acf(rows, selector, block_ms: int, lags=RESIDUAL_ACF_LAGS) -> dict:
-    """ACF of consecutive block-mean R (selected rows) with a 2/sqrt(n) band."""
+    """CALENDAR-correct residual ACF of block-mean R (selected rows).
+
+    Emits the compact series (block ids, means, counts; no individual trades)
+    so the promotion gate can recompute everything independently.
+    """
     groups: dict = defaultdict(list)
     for r in rows:
         if selector(r):
             groups[block_id(r["ts"], block_ms)].append(float(r["r"]))
     ordered = sorted(groups.items())
-    means = [sum(v) / len(v) for _, v in ordered]
-    n = len(means)
-    # Compact aggregate series (no individual trades) so the promotion gate can
-    # recompute the ACF independently instead of trusting the stored values.
-    out = {"n_blocks": n, "band": (2 / math.sqrt(n)) if n >= 10 else None,
-           "acf": {str(k): None for k in lags}, "significant": None,
-           "series": {"block_ids": [int(b) for b, _ in ordered],
-                      "means": [round(m, 12) for m in means],
-                      "counts": [len(v) for _, v in ordered]}}
-    if n < 10:
-        return out
-    out["acf"] = acf_from_series(out["series"]["means"], lags)
-    out["significant"] = any(v is not None and abs(v) > out["band"] for v in out["acf"].values())
-    return out
+    series = {"block_ids": [int(b) for b, _ in ordered],
+              "means": [round(sum(v) / len(v), 12) for _, v in ordered],
+              "counts": [len(v) for _, v in ordered]}
+    res = acf_from_block_series(series["block_ids"], series["means"], lags)
+    return {"n_blocks": len(ordered), "series": series, **res}
 
 
-def acf_from_series(means, lags=RESIDUAL_ACF_LAGS) -> dict:
-    """Lag-k autocorrelation of consecutive block means (shared with the gate)."""
+def validate_block_series(series, expected_blocks=None) -> str | None:
+    """Structural checks on a compact block series. None when valid."""
+    if not isinstance(series, dict):
+        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+    ids, means, counts = series.get("block_ids"), series.get("means"), series.get("counts")
+    if not all(isinstance(x, list) for x in (ids, means, counts)):
+        return "RESIDUAL_DEPENDENCE_SERIES_MISSING"
+    if not (len(ids) == len(means) == len(counts)):
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    if any(isinstance(b, bool) or not isinstance(b, int) for b in ids):
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    if any(b2 <= b1 for b1, b2 in zip(ids, ids[1:])):          # strictly increasing => unique
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    if any(isinstance(c, bool) or not isinstance(c, int) or c < 1 for c in counts):
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    for m in means:
+        if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m):
+            return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    if expected_blocks is not None and len(ids) != expected_blocks:
+        return "RESIDUAL_DEPENDENCE_SERIES_INCONSISTENT"
+    return None
+
+
+def acf_from_block_series(block_ids, means, lags=RESIDUAL_ACF_LAGS,
+                          min_pairs: int = MIN_RESIDUAL_ACF_PAIRS) -> dict:
+    """Lag-k ACF using CALENDAR adjacency: pair block means only when
+    ``block_id_j - block_id_i == k``. Missing blocks break adjacency.
+
+    r_k = [mean over the N_k eligible pairs of (x_i - mu)(x_j - mu)] / var,
+    reference band 2/sqrt(N_k). Fewer than ``min_pairs`` eligible pairs at any
+    lag => not estimable (fail closed: INSUFFICIENT_EVIDENCE).
+    """
     n = len(means)
-    acf = {str(k): None for k in lags}
-    if n < 2:
-        return acf
-    mu = sum(means) / n
-    den = sum((m - mu) ** 2 for m in means)
+    per = {}
+    by_id = dict(zip(block_ids, means))
+    mu = (sum(means) / n) if n else 0.0
+    var = (sum((m - mu) ** 2 for m in means) / n) if n else 0.0
+    insufficient = False
     for k in lags:
-        if k < n and den > 0:
-            acf[str(k)] = sum((means[i] - mu) * (means[i - k] - mu) for i in range(k, n)) / den
-    return acf
+        pairs = [(by_id[b], by_id[b + k]) for b in block_ids if b + k in by_id]
+        npairs = len(pairs)
+        if npairs < min_pairs:
+            per[str(k)] = {"eligible_pairs": npairs, "acf": None, "reference_band": None,
+                           "significant": None}
+            insufficient = True
+            continue
+        if var <= 0:
+            # Constant block means: no variation, so no dependence to spill over.
+            per[str(k)] = {"eligible_pairs": npairs, "acf": None, "zero_variance": True,
+                           "reference_band": 2 / math.sqrt(npairs), "significant": False}
+            continue
+        acf = (sum((a - mu) * (b - mu) for a, b in pairs) / npairs) / var
+        band = 2 / math.sqrt(npairs)
+        per[str(k)] = {"eligible_pairs": npairs, "acf": acf, "reference_band": band,
+                       "significant": abs(acf) > band}
+    return {"lags": per, "acf": {k: v["acf"] for k, v in per.items()},
+            "min_calendar_pairs": int(min_pairs), "insufficient_pairs": insufficient,
+            "significant": (None if insufficient
+                            else any(v["significant"] for v in per.values()))}
 
 
 def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: int) -> dict:
@@ -332,16 +379,19 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
         longest = max(usable, key=lambda iv: iv["block_ms"])
         residual = {"longest_usable_block_days": longest["block_days"],
                     **(longest["residual_dependence"] or {})}
-        if residual.get("significant"):
+        if residual.get("significant") or residual.get("insufficient_pairs") is not False:
+            reason = (RESIDUAL_DEPENDENCE if residual.get("significant") else RESIDUAL_NOT_ESTIMABLE)
             for iv in usable:
                 iv["authoritative"] = False
-                iv["invalid_reason"] = RESIDUAL_DEPENDENCE
+                iv["invalid_reason"] = reason
     valid = [iv for iv in intervals if iv["authoritative"]]
     auth = conservative_interval(*[tuple(iv["ci"]) for iv in valid])
     if valid:
         status = AUTHORITY_VALID
     elif residual is not None and residual.get("significant"):
         status = RESIDUAL_DEPENDENCE
+    elif residual is not None:
+        status = RESIDUAL_NOT_ESTIMABLE
     elif any(iv["invalid_reason"] == INSUFFICIENT_RESAMPLING_BLOCKS for iv in intervals
              if iv["block_ms"] >= req_ms):
         status = INSUFFICIENT_RESAMPLING_BLOCKS
@@ -352,7 +402,9 @@ def _pack(rows, selector_for_blocks, iid, cis: dict, req_ms: int, min_blocks: in
     out = {"iid_ci": list(iid), "iid_role": IID_ROLE, "block_intervals": intervals,
            "required_block_ms": int(req_ms), "required_block_days": req_ms / DAY_MS,
            "min_resampling_blocks": int(min_blocks),
-           "residual_dependence_rule": ("any |ACF| (lags 1-3) of block means above 2/sqrt(n) at the "
+           "residual_dependence_rule": ("CALENDAR lags 1-3 of block means (pairs only when block ids "
+                                        "differ by exactly k); any |ACF| above 2/sqrt(pairs), or fewer "
+                                        "than %d pairs at any lag, at the " % MIN_RESIDUAL_ACF_PAIRS +
                                         "longest usable block length => no authority"),
            "residual_dependence_at_longest_usable": residual}
     for ms in AUTHORITY_BLOCKS_MS:          # legacy display keys (diagnostic)

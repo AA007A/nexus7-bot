@@ -17,14 +17,13 @@ DAY = 86_400_000
 D0 = 1_735_689_600_000   # 2025-01-01T00:00Z
 
 
-def residual(means):
+def residual(means, block_ids=None, counts=None):
     """Residual-dependence report exactly as inference emits it (from a series)."""
-    n = len(means)
-    acf = inf.acf_from_series(means)
-    band = 2 / n ** 0.5
-    return {"n_blocks": n, "band": band, "acf": acf,
-            "significant": any(abs(v) > band for v in acf.values()),
-            "series": {"block_ids": list(range(n)), "means": list(means), "counts": [3] * n}}
+    ids = list(range(100, 100 + len(means))) if block_ids is None else list(block_ids)
+    series = {"block_ids": ids, "means": list(means),
+              "counts": [3] * len(means) if counts is None else list(counts)}
+    return {"n_blocks": len(means), "series": series,
+            **inf.acf_from_block_series(ids, list(means))}
 
 
 def clean_series(n):

@@ -465,6 +465,20 @@ In the `07a5a6a` run the candidate temporal folds and the portfolio walk-forward
    - The rule itself is unchanged: significant dependence at the longest usable block ⇒ INSUFFICIENT_EVIDENCE, with no shorter substitute.
 7. The fold implementation of §C.9 is unchanged.
 
+### C.11 Stage-C trust chain and calendar residual ACF (after `5f5757f`)
+1. **The research artifact is authenticated.** A Stage-C envelope names the exact-SHA `NEXUS Real OOS Replay` run and the digest of its uploaded `nexus_oos_real_replay.json`.
+   - The verifier fetches that run and those bytes from the trusted CI provider. It requires `conclusion = success` (the strict research gate is the final step) and a matching digest and candidate SHA.
+   - The research gate is **recomputed on that trusted artifact**. A caller-supplied artifact is used for comparison only.
+2. **Protection identity.** Each check is proven either by its own named job on the exact SHA (one job per check) or by a `PROTECTION_EVIDENCE_V1` certificate artifact from the `BGX Protection Evidence` workflow that lists every required check as PASS. One generic successful run can no longer satisfy several checks.
+3. **Approval binds the release instance:** candidate SHA, deployment ID (or an explicit provider-native list of covered deployments), research-artifact digest and release-evidence digest. It must also be issued after the pre-live evidence completed. The 24 h limit still applies.
+4. **The verifier is not candidate-controlled.** The authoritative verifier runs from a protected, pinned location (RELEASE_EVIDENCE.md §7). The Stage-C result reports `release_verifier_version` and `release_verifier_sha`. Provider trust comes from the protected environment's credentials, not from `source_kind`.
+5. **Calendar-correct residual ACF.**
+   - Lag-k pairs are formed only when block IDs differ by exactly k, so missing blocks break adjacency.
+   - Each lag reports `eligible_pairs`, `acf`, `reference_band` (2/√pairs) and `significant`.
+   - Fewer than 20 calendar-valid pairs at any lag gives `RESIDUAL_DEPENDENCE_INSUFFICIENT_CALENDAR_PAIRS` (INSUFFICIENT_EVIDENCE).
+   - The gate validates the series (equal lengths; integer, strictly increasing, unique IDs; positive integer counts; length = resampling blocks) and recomputes the ACF from it.
+   - Runs up to and including `5f5757f` used positional adjacency. Their residual-ACF values are therefore **non-authoritative**. In `5f5757f` the block IDs at the longest usable length were contiguous, so the value is unaffected there, but it is not re-certified.
+
 ### C.7 Results
 The new numbers (A0 through A4, new vs old portfolio, path bootstrap, parity blockers) are reported per exact SHA in the PR comment. The strategy was not changed. Any difference from the historical evidence above is attributed by `parity_attribution` and `portfolio_replay.gate_attribution`.
 
