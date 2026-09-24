@@ -55,7 +55,7 @@ def test_persistent_override_is_explicit_true_only():
         assert engine.daily_stopped is True
 
 
-def test_legacy_exact_day_override_remains_backward_compatible():
+def test_exact_day_override_is_telemetry_only():
     engine = _Engine()
     now = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
     with patch.dict(
@@ -68,8 +68,9 @@ def test_legacy_exact_day_override_remains_backward_compatible():
     ):
         assert daily_stop._operator_override_active(
             engine, "2026-09-15", state=_state()
-        ) is True
+        ) is False
         assert telemetry.override_mode_now(now=now) == "date_scoped"
+    assert engine.daily_stopped is True
 
 
 def test_retired_persistent_telemetry_keeps_blocked_daily_stop_message():

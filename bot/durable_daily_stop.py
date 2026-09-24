@@ -5,15 +5,18 @@ flag could be persisted as ``STOP`` without recording what PnL breached which
 limit. A fresh stop requires confirmed durable daily-PnL state plus current
 realized+unrealized PnL at or below the configured loss limit.
 
-A proven LIVE daily-stop breach may be bypassed only with the exact-day
-``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD`` break-glass control. The historical
-``DAILY_STOP_OPERATOR_OVERRIDE=true`` persistent bypass is intentionally
-retired: when present it is logged as rejected and cannot authorize entries.
+A proven LIVE daily-stop breach blocks NEW and INCREASING exposure for the
+rest of the UTC day, always. Operator overrides may never authorize new
+directional exposure (``risk_policy.override_may_authorize``):
 
-The stop evidence and PnL ledger are never deleted or rewritten. The date-scoped
-override applies only to a valid daily-stop breach; persistence/storage integrity
-failures remain fail-closed. All unrelated risk and execution protections stay
-active.
+* ``DAILY_STOP_OVERRIDE_UTC_DAY=YYYY-MM-DD`` (formerly a break-glass bypass)
+  is now telemetry only: it is logged with ``override_effect=NONE``.
+* ``DAILY_STOP_OPERATOR_OVERRIDE=true`` (retired persistent bypass) likewise.
+
+Risk-reducing work (close, reduce, cancel exposure-increasing orders, repair
+protection, reconcile) is not gated here and continues while entries are
+blocked. The stop evidence and PnL ledger are never deleted or rewritten;
+persistence/storage integrity failures remain fail-closed.
 """
 from __future__ import annotations
 
@@ -105,27 +108,29 @@ def _warn_rejected_persistent_override(engine, day):
 
 
 def _operator_override_active(engine, day, *, state=None, combined=None, stop_limit=None):
+    """Report any requested override; it NEVER authorizes new entries.
+
+    Always returns False and never clears ``daily_stopped``. Kept under its
+    historical name so every call site and log consumer stays compatible.
+    """
     mode = _operator_override_mode(day)
     if mode is None:
         _warn_rejected_persistent_override(engine, day)
         return False
 
-    # Only the daily stop flag is bypassed. The durable evidence and PnL ledger
-    # remain intact, and any unrelated storage/integrity failure is handled
-    # earlier by entries_blocked() and therefore stays fail-closed.
-    _clear_unproven_flag(engine)
-    marker = f'{mode}:{day}'
+    marker = f'ignored:{mode}:{day}'
     if getattr(engine, '_daily_stop_override_logged', None) != marker:
         trigger_pnl = state.get('trigger_pnl') if isinstance(state, dict) else combined
         effective_limit = state.get('stop_limit') if isinstance(state, dict) else stop_limit
         log.critical(
-            '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s mode=%s active=true entries_blocked=false '
-            'trigger_pnl=%s stop_limit=%s evidence_preserved=true pnl_preserved=true '
-            'auto_expires_utc=true leverage_unchanged=true sizing_unchanged=true',
+            '[DAILY_STOP_OPERATOR_OVERRIDE] day=%s mode=%s requested=true active=false '
+            'override_effect=NONE entries_blocked=true trigger_pnl=%s stop_limit=%s '
+            'allowed_actions=CLOSE,REDUCE,CANCEL_EXPOSURE_INCREASING,REPAIR_PROTECTION,RECONCILE '
+            'evidence_preserved=true pnl_preserved=true',
             day, mode, trigger_pnl, effective_limit,
         )
         engine._daily_stop_override_logged = marker
-    return True
+    return False
 
 
 def _decode_state(raw, day):
@@ -200,8 +205,8 @@ async def entries_blocked(engine, now=None):
                     'trigger_pnl=%s stop_limit=%s evidence=v3 protection_unchanged=true',
                     day, state['trigger_pnl'], state['stop_limit'])
                 engine._daily_stop_restored_key = key
-            if _operator_override_active(engine, day, state=state):
-                return False
+            # Telemetry only: an override can never re-enable entries.
+            _operator_override_active(engine, day, state=state)
             return True
 
         if not getattr(engine, 'daily_stopped', False):
@@ -250,14 +255,12 @@ async def entries_blocked(engine, now=None):
         log.warning(
             '[DURABLE_DAILY_STOP] day=%s state=PERSISTED entries_blocked=true '
             'trigger_pnl=%s stop_limit=%s evidence=v3', day, combined, stop_limit)
-        if _operator_override_active(
+        _operator_override_active(
             engine, day, state=json.loads(encoded), combined=combined, stop_limit=stop_limit
-        ):
-            return False
+        )
         return True
     except Exception as exc:
         # Storage or state-integrity failure remains fail-closed. It does not
-        # fabricate a loss event or mutate the durable stop record. The operator
-        # override deliberately cannot bypass this branch.
+        # fabricate a loss event or mutate the durable stop record.
         log.error('[DURABLE_DAILY_STOP] state=UNCONFIRMED entries_blocked=true error=%s', type(exc).__name__)
         return True
