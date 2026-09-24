@@ -1,49 +1,46 @@
 # RELEASE_READINESS
 
-- Candidate branch: `claude/nexus7-production-hardening-5aq2sc` (base `77ae453`)
-- Deployment performed: **none**. Railway variables read or changed: **none**. Orders sent: **none**.
+- PR: #415 (draft; **do not merge**). Branch: `claude/nexus7-production-hardening-5aq2sc`.
+- Starting SHA of this phase: `a1a5ea0d7e840b42d70060d3a80fba4ccd3e9af2`. Original baseline: `77ae453e3d01dc269c3b1ee3a4225900c22d9634`.
+- Deployments: **none**. Railway variables read or changed: **none**. Exchange orders: **none**. Merges: **none**.
 
-## Release process status
+## Exact-SHA CI record
 
-| # | Step | Status |
+| SHA | Quality | Security | Runtime Truth | Diagnostics | Real OOS Replay |
+|---|---|---|---|---|---|
+| `b777cbb` (90 d, IID era) | 35946377950 ✅ | 35946378044 ✅ | 35946378031 ✅ | 35946378034 ✅ | 35946377972 ❌ strict gate (evidence), replay OK |
+| `2932572` (180 d, dependence-aware + portfolio) | 35951346252 ✅ | 35951346254 ✅ | 35951346256 ✅ | 35951346297 ✅ | 35951346282 ❌ strict gate (evidence), replay OK |
+| `a9a919a` (docs only on top of `2932572`) | 35951515753 ✅ | 35951515761 ✅ | 35951515772 ✅ | 35951515778 ✅ | 35951515777 (see final report) |
+
+The final head (the docs commit after `a9a919a`) gets its own complete CI run. Its run IDs are recorded in the final report. No green check from an earlier SHA is cited as proof for a later one.
+
+## Status by layer
+
+| Layer | Status | Evidence |
 |---|---|---|
-| 1 | Baseline audit | Done: AUDIT_10_10.md. Baseline suite 1607/1607 |
-| 2 | Regression tests first | Done: 14 of the new P0 tests failed on baseline code (commit `7c1bca9`) |
-| 3 | P0 risk fixes | Done: drawdown, sizing, loss budget, daily stop, min-lot, CROSS stress, config contract |
-| 4 | Full offline suite | **1669/1669 pass** (`python -m tests.run_offline`) |
-| 5 | Static analysis | compileall ok; ruff critical ok; pyflakes undefined names 0; selfcheck critical 0 |
-| 6 | Release proof | `RELEASE_PROOF=PASS` |
-| 7 | OOS real replay | **Not run on this branch** (sandbox network blocked). Latest CI evidence: `AI_EDGE_NOT_PROVEN`, negative net expectancy |
-| 8 | Paired bootstrap robustness | Latest CI evidence: CI [−0.043, +0.418] R, not strictly positive |
-| 9 | PAPER validation | Not performed |
-| 10 | SHADOW validation | Not performed (offline bootstrap only) |
-| 11 | Candidate vs production comparison | Sizing comparison is analytic only (RISK_INVARIANTS.md) |
-| 12 | Release report | This document |
-| 13 | Human approval | **Pending** |
-| 14 | Controlled pilot | Not authorized |
-
-## What deploying this branch would do in production
-
-Production is at drawdown 59.40% against a 50% limit. With this branch, **no new positions will open**, whatever `LIVE_RISK_OVERRIDE_APPROVED` is set to. Existing positions stay managed, protected and reconciled. This is the intended fail-closed outcome. Entries resume only if equity recovers below the limit, or after an operator-reviewed, reconciled HWM rebase (`rebase_peak_equity`) or `MAX_DRAWDOWN` change. Either of those is a human decision and outside this change.
-
-If `MAX_RISK_PCT` in Railway exceeds 0.02, or contradicts `DAILY_STOP_LOSS_PCT`/`MAX_DRAWDOWN`, new entries are blocked with `[RISK_POLICY_INVALID]`. Check the startup log line `[OPERATOR_RUNTIME_POLICY] ... policy_valid=` after any deploy.
+| **ENGINEERING_SAFETY** | **Met (offline)** | Non-overridable drawdown gate; daily-stop override removed (P1-03); conservative daily-stop precision; stop-risk-authoritative sizing; strict CI promotion gate. 1,726/1,726 offline tests pass; `RELEASE_PROOF=PASS`; the runtime contract passes in the controlled-LIVE bootstrap. Not validated in PAPER or SHADOW. |
+| **SIGNAL_EDGE** | **Failed: NEGATIVE EXPECTANCY** | NEXUS-approved −0.324 R per candidate, authority CI [−0.496, −0.175]; every symbol, month and regime negative. |
+| **STATISTICAL_CONFIDENCE** | **Failed** | Uplift +0.051 R, authority CI [−0.043, +0.143]. IID looked significant; dependence-aware inference does not. Effective n about 1,283 over 171 unique days. |
+| **PORTFOLIO_EDGE** | **Failed** | Portfolio replay −49.4%, max drawdown 50.3%, halted by the drawdown hard gate; −0.788 R per trade. |
+| **CONTEXT_PARITY** | **Incomplete** | No historical OI or order book. Replayable optional context shows no measurable effect (ablation). Exit parity gap: partial TP never exercised; trailing, CHoCH and invalidation not modeled. The pre-trade score gate is not modeled. |
+| **RELEASE_READINESS** | **Not ready** | See blockers. |
 
 ## Remaining blockers
-
-1. **Negative net expectancy.** The latest OOS replay shows −0.53 R per NEXUS-approved trade and −0.70 R baseline, net of costs. Capital should not be exposed to a strategy with negative measured expectancy.
-2. **NEXUS edge not proven.** `AI_EDGE_NOT_PROVEN`: the uplift CI includes 0, and historical-context parity is incomplete (no historical OI or order book).
-3. **OOS replay not re-run on this candidate SHA** (network-restricted sandbox). It must run on the PR.
-4. **Daily-stop date-scoped override (P1-03).** `DAILY_STOP_OVERRIDE_UTC_DAY` can still re-enable new entries after a proven daily-stop breach. This violates the "override may only reduce risk" invariant.
-5. **KuCoin CROSS risk-rate semantics not verified on a live account.** The stress formula and the default 0.50 threshold are conservative assumptions, not measured exchange behavior.
-6. **Probability is an uncalibrated heuristic.** There is not enough data to calibrate. Downstream EV uses it.
-7. **PAPER and SHADOW validation of this candidate not performed.**
-8. **Regime/symbol segmentation and threshold sweep not available** (INSUFFICIENT EVIDENCE).
-9. **Branch protection.** Whether `NEXUS Real OOS Replay` and `Quality Check` are *required* checks is a repository setting. It cannot be verified or changed from code.
-10. **CoinGlass entitlement.** The 401 is now reported truthfully as FAILED with the Binance fallback active. Fixing the key/plan is an operator action.
-11. Architecture debt: superseded inner sizing wrappers (P2-01), 4 REVIEW_MEDIUM silent handlers, and the 3,992-line `engine.py`. None of these blocks safety, but they raise review cost.
+1. **Negative net expectancy** in both the candidate and the portfolio replay, over 180 days and 12 symbols.
+2. **The NEXUS edge is not statistically established.** Uplift over a losing baseline is not significant under block bootstrap, and it would not be edge even if it were.
+3. **Portfolio replay loses 49%** and hits the 50% drawdown hard gate.
+4. **No cost-stress survival.** Break-even requires about 86% lower costs.
+5. **Historical context parity is incomplete** (OI, order book). The production gate is not relaxed for this.
+6. **The replay exit model is not at parity** with the production exit engine (P1-13 and the unmodeled discretionary exits).
+7. **Horizon.** 180 days (7 months) is covered; 365 days or more needs sharding. Multi-year durability: INSUFFICIENT EVIDENCE.
+8. **The probability heuristic is miscalibrated**, and confidence is anti-predictive. It stays telemetry/veto only.
+9. **Strategy-level gates are not ablated** (refactor required).
+10. **PAPER and SHADOW validation** of this candidate have not been performed.
+11. **Production state.** Live drawdown is 59.40%, above the 50% limit. Once deployed, this code blocks all new entries until an operator performs a reviewed HWM rebase or equity recovers. That is the intended outcome.
+12. **Branch protection** (required checks) is a repository setting and cannot be verified from code.
+13. **Human approval** has not been given.
 
 ## Verdict
-
-The risk-control P0s are fixed and tested. The system is **not** ready for capital, because blockers 1–7 are unresolved. Passing tests do not change that.
+The engineering and risk-control hardening is done and tested offline. The trading strategy has measured negative expectancy, and its NEXUS filter has no statistically established edge. Deploying it would expose capital to a strategy with negative expected value.
 
 PRODUCTION_READY = NO

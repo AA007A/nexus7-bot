@@ -90,7 +90,7 @@ Wrappers that still decide a risk concept after this pass:
 | P1-06 | P1 | `final_loss_budget.emit_telemetry` | Generic `except Exception: pass` | Silent | Visible | Narrow except, logs `telemetry_error` | `test_observability_only_hardening` | A logging failure now propagates and fails the entry closed (intended). |
 | P1-07 | P1 | `.github/workflows/oos_real_replay.yml` | Path filter covered only OOS modules | strategy/NEXUS/config/sizing changes did not trigger replay | Decision-affecting PRs trigger OOS evidence | `bot/decision_affecting_paths.py` + drift test | `test_decision_affecting_paths` (3) | Whether the check is **required** is a branch-protection setting outside the repo. |
 | P1-08 | P1 | `nexus_probability.heuristic_win_probability` | Linear map `0.30 + c×0.45` capped at 0.75 | Docstring already says "not an empirically calibrated probability" | Probability calibrated OOS or labelled heuristic | Option A (`cf8afe5`): `nexus_probability_semantics` declares HEURISTIC / uncalibrated / VETO_ONLY; operator text reads "EV heur. … (p não calibrado)". Byte-pinned `nexus_ai.py`/`nexus_probability.py` untouched. Exact-SHA evidence: heuristic Brier 0.261 vs base-rate 0.214, ECE 0.205; fitted slope negative (see OOS_REPORT) | `test_audit_remaining_regressions::HeuristicProbabilityIsLabelled` | EV veto kept (removing it would raise trade frequency without evidence). |
-| P1-09 | P1 | Strategy edge | — | OOS replay (b777cbb, 12 symbols × 90 d): baseline −0.360R, NEXUS-approved −0.239R net | Positive net expectancy before capital exposure | None. No threshold changes without evidence | — | **Open blocker. See OOS_REPORT.** |
+| P1-09 | P1 | Strategy edge | — | OOS replay (2932572, 12 symbols × 180 d): baseline −0.375R, NEXUS-approved −0.324R net (authority CI [−0.496, −0.175]); portfolio replay −49.4% | Positive net expectancy before capital exposure | None. No threshold changes without evidence | — | **Open blocker. See OOS_REPORT.** |
 | P1-10 | P1 | `risk_policy.effective_daily_stop_limit` | `round(balance * pct, 2)` display rounding used as the risk value | 25.9007 × 3% = 0.777021 became 0.78 (looser) | internal limit ≤ exact configured limit | Decimal, quantize DOWN to 1e-8, largest float not above; separate floored `display_limit` (`5fabb4f`) | `DailyStopPrecisionIsConservative` (cent-boundary balances 25.9007, 10.01, 1.01, 0.99, 100.005, 1000.005, …) | none |
 | P0-09 | P0 | `.github/workflows/oos_real_replay.yml`, `nexus_oos_real_replay.main` | Replay `main()` always returns 0; the "verdict" step only printed | `AI_EDGE_NOT_PROVEN` never failed CI | Decision-affecting PRs fail unless promotion evidence is met | Separate strict gate `python -m bot.nexus_oos_promotion_gate` run as final workflow step (`1af2d5a`); research replay still exits 0 | `test_nexus_oos_promotion_gate` (15), `PromotionGateWorkflowContract` | Branch protection (required checks) is a repository setting outside code. |
 | P1-11 | P1 | `nexus_oos_real_replay.replay_symbol` | `getattr(cfg, "NEXUS_MIN_SCORE", 55)` — `cfg` has no such attribute | Replay approved at threshold 55; production uses 60 | Replay uses production threshold | `runtime_nexus_threshold()` = `nexus_ai.MIN_SCORE` (`d548084`) | `test_uses_production_threshold` | none |
@@ -125,11 +125,22 @@ Wrappers that still decide a risk concept after this pass:
 |---|---|
 | Baseline offline suite at 77ae453 | 1607/1607 pass |
 | New P0 tests against baseline code | 14 fail (reproduced), 29 pass |
-| Full offline suite after fixes (`python -m tests.run_offline`) | 1669/1669 pass |
+| Full offline suite (`python -m tests.run_offline`), final code | 1726/1726 pass |
 | `compileall`, `ruff --select E9,F63,F7,F82`, pyflakes undefined names | pass / pass / 0 |
 | `python -m bot.selfcheck` | 0 critical; silent handlers 12 → 9 |
 | `python -m bot.release_proof` | `RELEASE_PROOF=PASS` (161/161) |
 | CI named safety packs (durable, chaos, TPSL, fill, PAPER/SHADOW E2E) | pass |
 | Hardened entrypoint score-drift fail-closed | pass |
 | Full bootstrap under controlled-LIVE env (offline) | `RUNTIME_CONTRACT status=PASS` |
-| Real OOS replay | **not runnable here** (exchange hosts blocked by sandbox proxy). Latest CI evidence cited in OOS_REPORT.md |
+| Real OOS replay | Runs in CI only (the sandbox proxy blocks exchange hosts). Exact-SHA runs: `b777cbb` 35946377972 and `2932572` 35951346282. The replay succeeded both times and the strict gate blocked on evidence both times (OOS_REPORT.md) |
+
+## 7. Status by layer (see RELEASE_READINESS.md)
+
+| Layer | Status |
+|---|---|
+| ENGINEERING_SAFETY | Met offline: P0/P1 risk fixes, strict CI gate, 1726/1726 tests. PAPER/SHADOW not done. |
+| SIGNAL_EDGE | NEGATIVE EXPECTANCY (−0.324 R approved, authority CI < 0). |
+| STATISTICAL_CONFIDENCE | NEXUS uplift not significant under dependence-aware inference. |
+| PORTFOLIO_EDGE | Negative (−49.4% equity, drawdown-gate halt). |
+| CONTEXT_PARITY | Incomplete (OI, order book, exit model). |
+| RELEASE_READINESS | PRODUCTION_READY = NO. |

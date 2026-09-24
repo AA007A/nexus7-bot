@@ -131,14 +131,197 @@ These verdicts are **recomputed with block-bootstrap authority** on `2932572`; t
 
 ## B. Exact-SHA evidence — `29325728481f2a9aa5e64d5228174c44a0e30c9b` (180 days)
 
-Run **35951346282**. PENDING: filled from the run once it completes.
+Workflow `NEXUS Real OOS Replay` run **35951346282**, job 107480363889, 2026-09-24.
+- The replay step took 87 min and succeeded. The evidence summary and upload also succeeded.
+- **The strict promotion gate failed with exit 1.** That failure is the gate working as designed; the run itself had no engineering error.
+- From this SHA onward, **promotion authority rests on dependence-aware intervals**. IID intervals are shown for comparison only.
+
+### Universe and data integrity
+- 12/12 symbols with **no unavailable symbols**.
+- 17,280 15m candles each: **180 days, 2026-03-28 → 2026-09-24**, with pagination integrity checks passing.
+- Seven calendar months, covering production regimes TRENDING_BULL, TRENDING_BEAR, RANGE, BREAKOUT, BREAKDOWN, ACCUMULATION and HIGH_VOLATILITY.
+- Threshold 60.0. Context parity incomplete, since there is no historical OI or order book.
+- 365 days was not attempted: 180 days takes 87 min, so a full year would exceed a single job and needs sharding. **INSUFFICIENT EVIDENCE of multi-year durability.**
+
+### Effective sample size
+
+| | Raw rows | Unique UTC days / 24 h blocks | Symbols | Intra-block correlation | Design effect | Effective n |
+|---|---|---|---|---|---|---|
+| Baseline candidates | 17,617 | 179 | 12 | 0.129 | 13.5 | **1,301** |
+| NEXUS-approved | 4,077 | 171 | 12 | 0.095 | 3.18 | **1,283** |
+
+- Lag-1 autocorrelation of daily block mean R is **0.21**, above the 0.153 significance band. Dependence reaches past 24 h, which is why the 48 h block interval is also computed and the authority interval takes the more conservative of the two.
+- The maximum observed outcome horizon is 10.5 h.
+
+### CANDIDATE_RESEARCH — signal edge
+
+| | Baseline | NEXUS-approved |
+|---|---|---|
+| Candidates | 17,617 | 4,077 (23.1%) |
+| Net expectancy | **−0.375 R** | **−0.324 R** |
+| IID CI (diagnostic) | [−0.395, −0.352] | [−0.373, −0.271] |
+| 24 h block CI | [−0.489, −0.269] | [−0.463, −0.199] |
+| 48 h block CI | [−0.515, −0.241] | [−0.496, −0.175] |
+| **Authority CI** | **[−0.515, −0.241]** | **[−0.496, −0.175]** |
+| Gross expectancy | −0.193 R | −0.171 R |
+| Win / loss / breakeven | 30.0% / 69.9% / 0.1% | 26.6% / 73.3% / 0.1% |
+| Avg winner / loser | 1.764 / −1.294 R | 2.254 / −1.259 R |
+| Median R | −1.215 | −1.187 |
+| Payoff / profit factor | 1.36 / 0.585 | 1.79 / 0.649 |
+| p05 / p01 / CVaR 5% | −1.56 / −1.78 / −1.70 | −1.48 / −1.52 / −1.51 |
+| Fees / slippage / funding (sum R) | −3208 / −4362 / −4.5 | −621 / −902 / −1.6 |
+| Longest losing / winning streak | 89 / 36 | 72 / 20 |
+| `candidate_sequence_drawdown_r` (overlapping candidates, **not** account DD) | 6,740 | 1,338 |
+| Per-trade Sharpe / Sortino (not annualized) | −0.26 / −0.34 | −0.20 / −0.30 |
+
+**NEXUS uplift over baseline: +0.051 R.**
+
+| Interval | Uplift CI |
+|---|---|
+| IID (diagnostic) | [**+0.009**, +0.096] |
+| 24 h block | [−0.040, +0.135] |
+| 48 h block | [−0.043, +0.143] |
+| **Authority** | **[−0.043, +0.143], not significant** |
+
+An IID reading would have wrongly called this uplift statistically significant. Once cross-symbol, same-day dependence is respected, it is not.
+
+### Concentration and robustness (approved set)
+- **0 of 12 symbols**, **0 of 7 months** and **0 of 7 production regimes** have positive total R.
+- Temporal folds with positive uplift: 3 of 4; with a strictly positive IID CI: 1 of 4.
+- Leave-one-symbol-out: 12 of 12 positive uplift.
+- Every one of these is uplift over a losing baseline, not profit.
+
+### Cost stress (net expectancy R)
+
+| Set | current | fees +25% | fees +50% | slippage ×1.5 | slippage ×2 | combined |
+|---|---|---|---|---|---|---|
+| Approved | −0.324 | −0.362 | −0.400 | −0.443 | −0.568 | −0.644 |
+| Baseline | −0.375 | −0.421 | −0.466 | −0.504 | −0.635 | −0.726 |
+
+**Break-even cost multiplier:** 0.138× current costs for approved and 0.130× for baseline. The approved set would break even only if modeled fees and slippage were about 86% lower.
+
+### Exit variants (approved, one change at a time)
+- current −0.324
+- no partial TP −0.324
+- partial without break-even −0.324
+- 4 h stagnation exit −0.357
+- 20-bar time exit −0.347
+- 80-bar time exit −0.319
+
+Partial-TP and break-even variants are no-ops because signals carry tp1 == tp2 (parity gap P1-13). Trailing, CHoCH exit, regime/signal invalidation and min-hold are not modeled. No exit change is supported.
+
+### Segments (approved; production regime is primary)
+- **Production regime:** every regime is negative.
+  - BREAKOUT −0.001 (495), HIGH_VOLATILITY −0.124 (108), TRENDING_BULL −0.243 (1,483).
+  - BREAKDOWN −0.438 (225), TRENDING_BEAR −0.467 (967), ACCUMULATION −0.482 (149), RANGE −0.499 (650).
+- **Research regime (diagnostic):** LOW_VOLATILITY +0.912 (32); every other research regime is negative.
+- **Direction:** LONG −0.199 (2,436); SHORT −0.509 (1,641).
+- **Entry type:** PULLBACK +0.132 (447); MOMENTUM −0.084 (509); BOS_BREAK −0.428 (3,121).
+- **Symbol:** all 12 negative, from −0.183 (AVAX) to −0.607 (LTC).
+- **NEXUS confidence:** no monotone improvement; ≥80 gives −0.632 (89).
+- **15m volume multiple:** expectancy falls as volume rises (<0.5× +0.030, ≥2.5× −0.430).
+
+These are diagnostics. The positive slices (PULLBACK, the LOW_VOLATILITY research regime) were found after the fact and are untested out of sample. They are **not** a basis for trading.
+
+### Threshold research (purged and embargoed)
+- Split: TRAIN 8,648 rows, then a 10.5 h embargo, VALIDATION 3,439, then another 10.5 h embargo, FINAL TEST 5,460.
+- Purged rows: 1 from TRAIN and 3 from VALIDATION.
+- Every threshold is negative on both TRAIN and VALIDATION (authority lower bounds between −0.58 and −0.86).
+- TRAIN selected 55 (not a stable plateau). VALIDATION did not confirm it (−0.604 R), so **FINAL TEST was never consulted**.
+- Status: `NOT_CONFIRMED_ON_VALIDATION`. The runtime threshold stays at 60 (unchanged).
+
+### NEXUS ablation (Δ = full − ablated; verdict uses the authority interval)
+
+| Variant | Δ approvals | Δ exp R | IID CI | 24 h block CI | Verdict |
+|---|---|---|---|---|---|
+| minus MULTI_TIMEFRAME | +336 | +0.032 | [+0.017, +0.048] | [+0.013, +0.050] | ADDS |
+| minus TREND_ALIGNMENT | −103 | +0.018 | [+0.004, +0.031] | [+0.001, +0.032] | ADDS |
+| minus VOLATILITY | +161 | +0.012 | [+0.001, +0.023] | [+0.000, +0.024] | ADDS |
+| no regime-compat gate | −34 | +0.005 | [+0.002, +0.009] | [+0.002, +0.009] | ADDS |
+| minus MOMENTUM | +24 | −0.017 | [−0.029, −0.005] | [−0.028, −0.003] | HURTS |
+| minus RISK_REWARD | +261 | +0.011 | [−0.001, +0.025] | [−0.002, +0.025] | no robust difference |
+| no net-R:R gate | −4,428 | +0.040 | [**+0.008**, +0.075] | [−0.017, +0.097] | no robust difference (IID alone would have said ADDS) |
+| missing optional → 0 credit | +1,876 | +0.047 | [**+0.003**, +0.092] | [−0.016, +0.105] | no robust difference (IID alone would have said ADDS) |
+| no EV veto | −31 | +0.001 | [−0.003, +0.005] | [−0.003, +0.005] | no robust difference |
+| minus VOLUME / MARKET_STRUCTURE | −156 / +20 | −0.011 / −0.009 | CI ∋ 0 | CI ∋ 0 | no robust difference |
+| minus DERIVATIVES / MICROSTRUCTURE | 0 | 0 | — | — | no effect (no historical data) |
+| context A candle-only | +45 | +0.004 | [−0.003, +0.011] | [−0.003, +0.010] | no robust difference |
+| context B +funding / D full available | 0 | 0 | — | — | no effect |
+
+**Interpretation.**
+- Some NEXUS components improve on the baseline by 0.005–0.03 R. MOMENTUM makes it worse.
+- These are small effects on a strategy that loses about 0.32 R per trade.
+- The EV veto has no measurable value.
+- The unavailable context has no measurable effect on these replayable inputs.
+
+No production gate was removed.
+
+### Probability calibration (purged TRAIN 1,644 / CALIBRATION 878 / FINAL TEST 1,553)
+
+| Predictor on FINAL TEST | Brier | Log-loss | ECE |
+|---|---|---|---|
+| Heuristic p | 0.263 | 0.719 | 0.201 |
+| Base rate (0.237) | **0.222** | **0.639** | — |
+| Platt fitted on CALIBRATION | 0.223 | 0.643 | 0.089 |
+
+- The Platt slope is **negative (−0.53)**: higher NEXUS confidence goes with *lower* realized win rates.
+- The 24 h block CI of the Brier improvement is [−0.0027, +0.0001].
+- Status: `CALIBRATION_NOT_PROMOTABLE_HEURISTIC_REMAINS_TELEMETRY`.
+
+### PORTFOLIO_EXECUTION_REPLAY — executable edge
+Policy:
+- Production-reported leverage 50x and MAX_DRAWDOWN 50%.
+- Canonical MAX_RISK_PCT 1%, MAX_MARGIN_PCT 10%, operator margin cap 50%, MAX_POSITIONS 2, daily stop 3%.
+- Starting equity 1,000.
+- Contract metadata from current public KuCoin data for all 12 symbols.
+
+| Metric | Value |
+|---|---|
+| Starting → ending equity | 1,000.00 → **505.69** |
+| Net return | **−49.4%** |
+| Portfolio max drawdown | **50.3%**; the drawdown hard gate then blocked all later entries (duration 4,288 h) |
+| Trades executed | 123 of 4,077 approved candidates |
+| Skipped: drawdown gate / position limit / same symbol open / daily stop / capital-risk | 3,736 / 121 / 26 / 71 / 0 |
+| Net expectancy | −0.788 R per trade; authority CI [−1.076, −0.468] |
+| Win rate / avg winner / avg loser | 15.5% / 2.51 R / −1.39 R |
+| Profit factor | 0.34 |
+| Fees / slippage / funding (quote) | −145.0 / −121.6 / 0.0 |
+| Longest losing streak | 18 |
+| Exposure time / avg capital utilization | 23.4% / 0.75% |
+| Max concurrent positions | 2 (= MAX_POSITIONS) |
+| By month | 2026-03: 11 trades, −74.3; 2026-04: 112 trades, −420.0; no trades after the drawdown gate |
+| By symbol / direction / production regime | every group negative |
+
+The executable strategy would have reached the 50% drawdown hard gate within about 5 weeks of the replay start, and would then have been blocked for the rest of the window.
+
+### Strict gate blockers (`2932572`)
+- `APPROVED_EXPECTANCY_BLOCK_CI_NOT_POSITIVE`
+- `APPROVED_EXPECTANCY_NOT_POSITIVE`
+- `COST_STRESS_FAILS_FEES_PLUS_50PCT`
+- `COST_STRESS_FAILS_SLIPPAGE_X2`
+- `HISTORICAL_CONTEXT_PARITY_INCOMPLETE`
+- `PORTFOLIO_DRAWDOWN_EXCEEDS_RESEARCH_LIMIT`
+- `PORTFOLIO_EXPECTANCY_NOT_POSITIVE`
+- `PORTFOLIO_FINAL_EQUITY_NOT_ABOVE_START`
+- `PORTFOLIO_ROBUSTNESS_CI_NOT_POSITIVE`
+- `SINGLE_PERIOD_DOMINATES`
+- `SINGLE_SYMBOL_DOMINATES`
+- `STATUS_NOT_AI_EDGE_PROVEN`
+- `TOO_FEW_PORTFOLIO_SYMBOLS_CONTRIBUTING`
+- `TOO_FEW_SYMBOLS_CONTRIBUTING`
+- `UPLIFT_BLOCK_CI_NOT_POSITIVE`
 
 ---
 
-## Verdict (as of b777cbb)
+## Verdict
 
-**NEGATIVE EXPECTANCY.**
-- The NEXUS-approved candidates lose −0.239 R per trade net of modeled costs.
-- Losses persist under every cost scenario, and break-even requires costs about 63% lower.
-- NEXUS filters the baseline to a less-bad set. Uplift over a losing baseline is not edge.
-- `AI_EDGE_NOT_PROVEN`.
+**NEGATIVE EXPECTANCY** in both the candidate layer and the portfolio layer, on 12 symbols over 180 days.
+
+| Layer | Result |
+|---|---|
+| SIGNAL_EDGE | NEXUS-approved −0.324 R per candidate; authority CI [−0.496, −0.175] |
+| STATISTICAL_CONFIDENCE | NEXUS uplift +0.051 R is **not significant** under dependence-aware inference (authority CI [−0.043, +0.143]) |
+| PORTFOLIO_EDGE | −49.4% equity, 50.3% drawdown, then halted by the drawdown hard gate |
+| CONTEXT_PARITY | Incomplete: no historical OI or order book. Ablation shows no measurable effect of the replayable optional context |
+
+Status: `AI_EDGE_NOT_PROVEN`.
