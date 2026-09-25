@@ -1,0 +1,45 @@
+{
+  "snapshot_version": "RAILWAY_EXIT_SNAPSHOT_V1",
+  "created_date": "2026-09-25",
+  "repository": "AA007A/nexus7-bot",
+  "archive_branch": "archive/railway-exit-20260925",
+  "archive_base_sha": "02298d29990fe16b091bbb3d2f64fff55db910ed",
+  "safety": {
+    "t0_defined": false,
+    "prospective_epoch_started": false,
+    "collector_mode": "PREFLIGHT_ONLY",
+    "prospective_storage_ready": false,
+    "secrets_committed": false
+  },
+  "code_refs": {
+    "production_last_verified_sha": "77ae453e3d01dc269c3b1ee3a4225900c22d9634",
+    "frozen_shadow_sha": "df64030bfe230e4d3e26ad187717e92b624b4661",
+    "phase8h_engineering_sha": "87b83c1f828efb64e371010cbba799626942e369",
+    "phase8h_final_hardening_sha": "02298d29990fe16b091bbb3d2f64fff55db910ed"
+  },
+  "phase8h_hashes": {
+    "prospective_alpha_data_contract_sha256": "d28ad750e49dc183650cb4e65460d7632666022e38e2f2cfef89aca1dc9a46a7",
+    "canonical_schema_sha256": "faeaf6578d46db1b1453a38d9dd01a016008f50274720d73d9016cf8aca13f2a",
+    "collection_epoch_schema_sha256": "ddadad07457fec8ecdbcdfeed8f2946d87c8d42b7e207b722809dbcf6d39c69e",
+    "database_schema_sha256": "a0d7695a5f62e10f3bf45f4ee2e55852897c7ad9989089a64860f317dbd55e96"
+  },
+  "phase8i": {
+    "spec_path": "research/phase8i_prospective_alpha_spec_v1.json",
+    "spec_sha256": "452fd34013ca5c67bc653dfa49dc70159c915a92e7a9442fb0c8083a18d42425"
+  },
+  "required_new_host_resources": {
+    "dedicated_research_database": true,
+    "minimum_persistent_storage_gb": 100,
+    "preferred_initial_storage_gb": 150,
+    "collector_runtime": "Python 3.11",
+    "first_mode": "PREFLIGHT"
+  },
+  "historical_railway_refs": {
+    "bgx_research_project_id": "6951ecba-a5b4-4bf3-b3de-8a6b5ab02730",
+    "bgx_research_environment_id": "660f1592-a914-48f7-98e3-76948789fffb",
+    "collector_service_id": "ed294893-9171-4236-aaa0-40993a11aba8",
+    "research_postgres_service_id": "deb92729-adc4-46f6-9d7f-51c1151fe6da",
+    "bgx_capital_project_id": "c3ffa9f5-8c64-4859-a722-a07105ba5e84",
+    "production_service_id": "751b41ee-2aef-4487-b19a-f305f15c64fe"
+  }
+}
