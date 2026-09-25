@@ -1,0 +1,100 @@
+name: Phase 8C Challenger Research
+
+# Research only. Runs the SAME real public-market replay as the OOS workflow
+# (pre-forward-window history), dumps exactly the AI hook population training
+# uses, then runs the predeclared nested challenger search
+# (bot/ai/challenger_research.py). No secrets, no exchange credentials, no
+# orders, no deployment. Results are PREVIOUSLY_INSPECTED_RESEARCH_SUPPORT.
+on:
+  push:
+    branches: ["research/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  challenger-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+      OOS_SYMBOLS: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT ADAUSDT DOGEUSDT LINKUSDT AVAXUSDT DOTUSDT LTCUSDT NEARUSDT ATOMUSDT"
+      OOS_LIMIT_15M: "17280"
+      OOS_HOOK_ROWS_OUT: artifacts/challenger/hook_rows.jsonl.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact candidate SHA
+        run: echo "candidate_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Challenger research unit tests
+        run: python -m unittest tests.test_ai_phase8c -v
+
+      - name: Real public-market replay (hook rows)
+        run: |
+          python -m bot.nexus_oos_real_replay_corrected \
+            --symbols $OOS_SYMBOLS \
+            --limit-15m "$OOS_LIMIT_15M" \
+            --policy-manifest research/replay_policy_manifest.json \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --output artifacts/challenger/nexus_oos_real_replay.json
+          ls -la artifacts/challenger/
+
+      - name: Predeclared challenger search
+        run: |
+          python -m bot.ai.challenger_research \
+            --rows artifacts/challenger/hook_rows.jsonl.gz \
+            --out artifacts/challenger/research \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compact research summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path('artifacts/challenger/research/challenger_summary.json')
+          if not p.exists():
+              print('challenger_summary.json: MISSING'); raise SystemExit(0)
+          s = json.loads(p.read_text())
+          view = {k: s.get(k) for k in ('result', 'status', 'rows', 'candidates_evaluated', 'search_spec_sha256',
+                                        'max_outer_posthoc_mean_r', 'estimate', 'replay_policy_manifest_sha256',
+                                        'candidate_code_sha')}
+          view['dataset_manifest'] = {k: (s.get('dataset_manifest') or {}).get(k)
+                                      for k in ('training_dataset_rows', 'training_dataset_sha256', 'first_ts', 'last_ts')}
+          sup = s.get('support') or {}
+          view['support'] = {k: sup.get(k) for k in ('failures', 'all_pass', 'stability', 'pooled_hook_baseline',
+                                                     'pooled_approved', 'expectancy', 'uplift')}
+          view['cost_stress'] = {k: (v or {}).get('net_expectancy_r') for k, v in (sup.get('cost_stress') or {}).items()}
+          view['concentration'] = {k: {kk: (v or {}).get(kk) for kk in ('groups', 'top_group', 'top_share_of_positive_r')}
+                                   for k, v in (sup.get('concentration') or {}).items()}
+          view['calibration'] = [{kk: c.get(kk) for kk in ('n', 'brier', 'brier_base_rate', 'ece', 'beats_base_rate')}
+                                 for c in (sup.get('calibration') or [])]
+          view['steps'] = [{'step': st.get('step'), 'selected': st.get('selected'), 'outer_eval': st.get('outer_eval'),
+                            'reason': st.get('reason')} for st in s.get('steps') or []]
+          view['frozen'] = s.get('frozen')
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload challenger research
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-research
+          path: |
+            artifacts/challenger/research/
+            artifacts/challenger/hook_rows.jsonl.gz
+          if-no-files-found: warn

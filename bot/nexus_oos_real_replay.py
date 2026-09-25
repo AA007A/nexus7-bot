@@ -1148,6 +1148,7 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         # dataset_manifest is computed inside walk_forward from EXACTLY the rows
         # passed to training.dataset() (the hook population), never exe_all.
         out["ai_meta_model"].setdefault("dataset_manifest", ai_train.dataset_manifest(all_rich))
+        _dump_hook_rows(all_rich, req_ms)
     except Exception as exc:          # reported, never silently dropped
         out["ai_meta_model"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:300]}
     out["research_status"] = research_status(
@@ -1155,6 +1156,29 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
         censoring_material=out["censoring"]["censoring_material"],
         sample_adequate=out["sample_adequacy"]["adequate"])
     return out
+
+
+HOOK_ROW_KEYS = ("ts", "symbol", "direction", "ai_features", "ai_feature_hash", "ai_regime", "r", "gross_r",
+                 "outcome_status", "outcome_end_ts", "ai_hook_eligible", "approved", "cost_r", "month")
+
+
+def _dump_hook_rows(all_rich, req_ms) -> None:
+    """Research-only (Phase 8C): when OOS_HOOK_ROWS_OUT is set, write exactly
+    the rows training.dataset() uses (gzip JSONL; no secrets) so the challenger
+    research runs on the same pre-window hook population."""
+    import gzip
+    import os as _os
+    path = _os.environ.get("OOS_HOOK_ROWS_OUT")
+    if not path:
+        return
+    from bot.ai import training as ai_train
+    data = ai_train.dataset(all_rich)
+    _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"header": {"required_ms": int(req_ms), "rows": len(data),
+                                        "dataset_manifest": ai_train.dataset_manifest(all_rich)}}) + "\n")
+        for r in data:
+            fh.write(json.dumps({k: r.get(k) for k in HOOK_ROW_KEYS}, default=float) + "\n")
 
 
 def _mean_n(vals) -> dict:
