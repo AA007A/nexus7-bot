@@ -7,7 +7,7 @@ name: Phase 8C Challenger Research
 # orders, no deployment. Results are PREVIOUSLY_INSPECTED_RESEARCH_SUPPORT.
 on:
   push:
-    branches: ["research/**"]
+    branches: ["research/phase8c-**"]
   workflow_dispatch:
 
 permissions:

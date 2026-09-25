@@ -701,6 +701,17 @@ async def _replay_symbol(client, symbol: str, *, limit_15m: int, research: bool,
                 row["ai_regime"] = ai_regime
             except Exception as exc:
                 row["ai_features_error"] = type(exc).__name__
+            # Phase 8D research-only: forward 15m path (decision bar + 16 bars = 4h,
+            # outcome side only, never a feature) and decision-time research features.
+            row["_fwd"] = [[_ts_ms(b), float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])]
+                           for b in k15[i:i + 17]]
+            try:
+                from bot.ai import research_features as rfx
+                row["rf"] = rfx.compute(w15, w1h, w4h, direction=direction, entry=float(obs.entry),
+                                        stop=float(obs.stop), rr=float(obs.rr),
+                                        cost_fraction=float(cost_fraction))
+            except Exception as exc:
+                row["rf_error"] = type(exc).__name__
         row.update({
             "session": funnel["session"], "session_penalty": funnel["session_penalty"],
             "score_adjusted": funnel["adjusted_score"],
@@ -1159,7 +1170,13 @@ def _research_sections(all_rich: list[dict], threshold: float) -> dict:
 
 
 HOOK_ROW_KEYS = ("ts", "symbol", "direction", "ai_features", "ai_feature_hash", "ai_regime", "r", "gross_r",
-                 "outcome_status", "outcome_end_ts", "ai_hook_eligible", "approved", "cost_r", "month")
+                 "outcome_status", "outcome_end_ts", "ai_hook_eligible", "approved", "cost_r", "month",
+                 # Phase 8D diagnostics (research only)
+                 "fees_r", "funding_r", "slippage_r", "entry_fill", "stop", "tp", "sl_original", "tp_original",
+                 "rr", "strategy_score", "nexus_confidence", "nexus_score", "entry_type", "session",
+                 "production_regime", "research_regime", "exit_reason", "outcome_horizon_ms", "exit_r",
+                 "cost_grid_r", "geometry_status", "geometry_retained_fraction", "drift_bps", "risk_fraction",
+                 "fee_rate", "cost_fraction", "legs", "_fwd", "rf", "utc_hour_bucket")
 
 
 def _dump_hook_rows(all_rich, req_ms) -> None:

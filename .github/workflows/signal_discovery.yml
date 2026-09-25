@@ -1,0 +1,112 @@
+name: Phase 8D Signal Discovery
+
+# Research only (SIGNAL_DISCOVERY_SPEC_V1). Same real public-market replay of
+# pre-forward-window history as Phase 8C, dumps the exact AI hook population
+# (plus research-only forward path / diagnostics), then runs diagnostics and
+# the predeclared nested search (bot/ai/signal_discovery.py). A bundle is
+# exported ONLY if every predeclared supporting gate passes. No secrets, no
+# exchange credentials, no orders, no deployment.
+# Results are PREVIOUSLY_INSPECTED_RESEARCH_SUPPORT.
+on:
+  push:
+    branches: ["research/phase8d-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signal-discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+      OOS_SYMBOLS: "BTCUSDT ETHUSDT SOLUSDT XRPUSDT ADAUSDT DOGEUSDT LINKUSDT AVAXUSDT DOTUSDT LTCUSDT NEARUSDT ATOMUSDT"
+      OOS_LIMIT_15M: "17280"
+      OOS_HOOK_ROWS_OUT: artifacts/signal/hook_rows.jsonl.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact candidate SHA
+        run: echo "candidate_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Signal discovery unit tests
+        run: python -m unittest tests.test_ai_phase8d tests.test_ai_phase8c -v
+
+      - name: Real public-market replay (hook rows)
+        run: |
+          python -m bot.nexus_oos_real_replay_corrected \
+            --symbols $OOS_SYMBOLS \
+            --limit-15m "$OOS_LIMIT_15M" \
+            --policy-manifest research/replay_policy_manifest.json \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --output artifacts/signal/nexus_oos_real_replay.json
+          ls -la artifacts/signal/
+
+      - name: Diagnostics + predeclared search (freeze only if gated)
+        run: |
+          python -m bot.ai.signal_discovery \
+            --rows artifacts/signal/hook_rows.jsonl.gz \
+            --out artifacts/signal/research \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compact research summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/signal/research')
+          p = d / 'challenger_summary.json'
+          if not p.exists():
+              print('challenger_summary.json: MISSING'); raise SystemExit(0)
+          s = json.loads(p.read_text())
+          view = {k: s.get(k) for k in ('result', 'status', 'rows', 'candidates_evaluated', 'spec_sha256',
+                                        'target_spec_sha256', 'cost_policy_sha256', 'attribution_verdict',
+                                        'baseline', 'best_posthoc_outer', 'estimate',
+                                        'replay_policy_manifest_sha256', 'candidate_code_sha', 'frozen')}
+          view['dataset_manifest'] = {k: (s.get('dataset_manifest') or {}).get(k)
+                                      for k in ('training_dataset_rows', 'training_dataset_sha256', 'sha256',
+                                                'first_ts', 'last_ts')}
+          g = s.get('gate') or {}
+          view['gate'] = {k: g.get(k) for k in ('failures', 'all_pass', 'stability', 'pooled_hook_baseline',
+                                                'pooled_approved', 'expectancy', 'uplift', 'cost_stress',
+                                                'calibration')}
+          view['gate']['concentration'] = {k: {kk: (v or {}).get(kk) for kk in ('groups', 'top_group',
+                                                                                'top_share_of_positive_r')}
+                                           for k, v in (g.get('concentration') or {}).items()}
+          view['steps'] = s.get('steps')
+          att = json.loads((d / 'loss_attribution.json').read_text()) if (d / 'loss_attribution.json').exists() else {}
+          view['attribution'] = {k: v for k, v in att.items() if not k.startswith('by_')}
+          hz = json.loads((d / 'horizon_analysis.json').read_text()) if (d / 'horizon_analysis.json').exists() else {}
+          view['horizons'] = {k: ({'net_mean': v['net_r'].get('mean_r'), 'gross_mean': v['gross_r'].get('mean_r'),
+                                   'hit': v.get('direction_hit_rate'), 'mfe': v.get('mfe_r_mean'),
+                                   'mae': v.get('mae_r_mean')} if isinstance(v, dict) and 'net_r' in v else v)
+                              for k, v in hz.items()}
+          ex = json.loads((d / 'exit_research.json').read_text()) if (d / 'exit_research.json').exists() else {}
+          view['exits'] = {k: ({'n': v.get('n'), 'mean_r': v.get('mean_r'), 'delta': v.get('paired_delta_vs_current')}
+                               if isinstance(v, dict) else v) for k, v in ex.items()}
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload signal discovery artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-discovery
+          path: |
+            artifacts/signal/research/
+            artifacts/signal/hook_rows.jsonl.gz
+          if-no-files-found: warn
