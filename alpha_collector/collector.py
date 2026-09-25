@@ -3,8 +3,8 @@
 Modes
   PREFLIGHT : verify DB authority/schema/contract, public reachability, symbol mapping, a short WebSocket
               session, timestamp validation, and write PREFLIGHT_ONLY records; then stay idle (never collects).
-  COLLECT   : requires PROSPECTIVE_T0_AUTHORIZATION == T0_AUTH_PHRASE; registers / resumes PHASE8H_EPOCH_V1
-              (T0 never moves backward) and collects prospectively.
+  COLLECT   : requires both explicit T0 authorization and an explicit storage-readiness gate; registers / resumes
+              PHASE8H_EPOCH_V1 (T0 never moves backward) and collects prospectively.
 No trading imports, no credentials, no order capability.
 """
 from __future__ import annotations
@@ -41,8 +41,11 @@ def env_guard(env) -> dict:
     mode = env.get("COLLECTOR_MODE", "PREFLIGHT")
     if mode not in ("PREFLIGHT", "COLLECT"):
         raise D.Refused("COLLECTOR_MODE must be PREFLIGHT or COLLECT")
-    if mode == "COLLECT" and env.get("PROSPECTIVE_T0_AUTHORIZATION") != T0_AUTH_PHRASE:
-        raise D.Refused("COLLECT mode requires explicit T0 authorization")
+    if mode == "COLLECT":
+        if env.get("PROSPECTIVE_T0_AUTHORIZATION") != T0_AUTH_PHRASE:
+            raise D.Refused("COLLECT mode requires explicit T0 authorization")
+        if str(env.get("PROSPECTIVE_STORAGE_READY", "false")).lower() != "true":
+            raise D.Refused("COLLECT mode requires PROSPECTIVE_STORAGE_READY=true")
     return {"mode": mode}
 
 
