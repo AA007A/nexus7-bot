@@ -198,7 +198,16 @@ def install_transport_and_cache(KuCoinClient):
             return self
 
         async def __anext__(self):
-            raw = await self._ws.__anext__()
+            # websockets==12 WebSocketClientProtocol is an async iterable whose
+            # __aiter__ implementation reads with recv(); the protocol object
+            # itself does not expose __anext__. Calling self._ws.__anext__()
+            # therefore broke both public and private KuCoin WS connections when
+            # truth capture was enabled. Delegate to recv() without changing the
+            # protocol object or subscription semantics.
+            try:
+                raw = await self._ws.recv()
+            except websockets.exceptions.ConnectionClosedOK as exc:
+                raise StopAsyncIteration from exc
             if self._capture:
                 try:
                     event_id = truth.capture_ws_application_payload(raw, self._session_id)
