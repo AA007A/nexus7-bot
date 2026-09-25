@@ -1,0 +1,124 @@
+name: Phase 8E Signal Architecture
+
+# Research only (SIGNAL_ARCHITECTURE_SPEC_V1). Fetches the pinned public
+# KuCoin 15m/1h/4h window (same decision span as the Phase 8D dataset), checks
+# research/runtime feature parity, generates the predeclared architecture
+# population, runs diagnostics + the nested search, and exports a bundle ONLY
+# if every supporting gate passes. The Phase 8D hook rows (run 36150955148)
+# are downloaded read-only for the stopped-then-+1R analysis.
+# No secrets, no exchange credentials, no orders, no deployment.
+# Results are PREVIOUSLY_INSPECTED_RESEARCH_SUPPORT.
+on:
+  push:
+    branches: ["research/phase8e-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  signal-architecture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact candidate SHA
+        run: echo "candidate_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Signal architecture unit tests
+        run: python -m unittest tests.test_ai_phase8e -v
+
+      - name: Fetch pinned public candle window
+        run: python -m bot.ai.signal_architecture fetch --out artifacts/arch/candles.json.gz | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Phase 8D hook rows (read-only, for the stopped-then-+1R analysis)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: signal-discovery
+          run-id: 36150955148
+          github-token: ${{ github.token }}
+          path: artifacts/p8d
+
+      - name: Architecture research (freeze only if gated)
+        run: |
+          python -m bot.ai.signal_architecture run \
+            --dataset artifacts/arch/candles.json.gz \
+            --out artifacts/arch/research \
+            --nexus-rows artifacts/p8d/hook_rows.jsonl.gz \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compact research summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/arch/research')
+          def load(n):
+              p = d / n
+              return json.loads(p.read_text()) if p.exists() else {}
+          s = load('phase8e_summary.json')
+          if not s:
+              print('phase8e_summary.json: MISSING'); raise SystemExit(0)
+          view = {k: s.get(k) for k in ('result', 'status', 'spec_sha256', 'dataset_sha256', 'trades_sha256',
+                                        'trades', 'units', 'ledger_entries', 'parity', 'folds', 'estimate',
+                                        'best_posthoc_outer', 'pregate_pass_counts', 'cost_policy_sha256',
+                                        'exit_policy_sha256', 'feature_schema_sha256', 'frozen')}
+          g = s.get('gate') or {}
+          view['gate'] = {k: g.get(k) for k in ('failures', 'all_pass', 'stability', 'architecture_baseline',
+                                                'pooled_approved', 'expectancy', 'uplift', 'cost_stress',
+                                                'max_drawdown_r', 'calibration')}
+          view['gate']['concentration'] = {k: {kk: (v or {}).get(kk) for kk in ('groups', 'top_group',
+                                                                                'top_share_of_positive_r')}
+                                           for k, v in (g.get('concentration') or {}).items()}
+          view['steps'] = [{k: st.get(k) for k in ('step', 'reason', 'outer_eval')} | {
+              'selected': {k: (st.get('selected') or {}).get(k) for k in ('candidate_id', 'validation_mean_r',
+                                                                           'validation_trades')}}
+              for st in s.get('steps') or []]
+          b = load('architecture_baselines.json')
+          view['by_setup_side'] = {k: {kk: v.get(kk) for kk in ('n', 'mean_r', 'gross_mean_r', 'win_rate', 'profit_factor')}
+                                   for k, v in (b.get('by_setup_side') or {}).items()}
+          units = b.get('units') or {}
+          top = sorted(units.items(), key=lambda kv: -(kv[1].get('mean_r') or -9))[:12]
+          view['top_units_full_sample_diagnostic'] = {k: {kk: v.get(kk) for kk in ('n', 'mean_r', 'win_rate')}
+                                                      | {'gross': (v.get('gross') or {}).get('mean_r'),
+                                                         'combined_adverse': (v.get('cost_stress') or {}).get('combined_adverse'),
+                                                         'by_fold': {f: (x or {}).get('mean_r') for f, x in (v.get('by_fold') or {}).items()}}
+                                                      for k, v in top}
+          view['direction'] = load('direction_analysis.json').get('setups')
+          e = load('entry_timing_analysis.json')
+          view['by_entry'] = {k: {kk: v.get(kk) for kk in ('n', 'mean_r', 'win_rate')} for k, v in (e.get('by_entry') or {}).items()}
+          st = load('stop_geometry_analysis.json')
+          view['by_stop'] = st.get('by_stop')
+          view['nexus_phase8d'] = load('mfe_mae_analysis.json').get('nexus_phase8d')
+          pr = load('feature_parity_report.json')
+          view['parity'] = {'parity': pr.get('parity'), 'per_symbol': {k: {kk: v.get(kk) for kk in ('decisions', 'values_checked', 'max_rel_diff', 'mismatches')} for k, v in (pr.get('per_symbol') or {}).items()}}
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload signal architecture artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-architecture
+          path: |
+            artifacts/arch/research/
+            artifacts/arch/candles.json.gz
+          if-no-files-found: warn
