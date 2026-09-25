@@ -1,0 +1,164 @@
+{
+  "version": "PHASE8I_PROSPECTIVE_ALPHA_RESEARCH_SPEC_V1",
+  "status": "PREDECLARED_BEFORE_T0",
+  "purpose": "Test whether prospectively collected same-venue KuCoin open-interest, executed-trade-flow, and order-book features add matched out-of-sample net value beyond price-only controls.",
+  "data_authority": {
+    "required_epoch": "PHASE8H_EPOCH_V1",
+    "required_contract": "PROSPECTIVE_ALPHA_DATA_CONTRACT_V1",
+    "prefight_records_allowed": false,
+    "historical_backfill_for_primary_evidence": false,
+    "same_venue_only": true
+  },
+  "eligibility": {
+    "minimum_calendar_days_after_t0": 60,
+    "minimum_complete_utc_days": 55,
+    "minimum_source_coverage": 0.99,
+    "maximum_unresolved_gap_minutes_per_day": 5,
+    "minimum_symbols": 10,
+    "engineering_burn_in_hours": 24,
+    "note": "If eligibility is not met, return INSUFFICIENT_PROSPECTIVE_EVIDENCE and do not lower requirements."
+  },
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "LINKUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "LTCUSDT",
+    "NEARUSDT",
+    "ATOMUSDT"
+  ],
+  "decision_cadence": "15m",
+  "feature_families": {
+    "PRICE_CONTROL": [
+      "ret_15m",
+      "ret_1h",
+      "ret_4h",
+      "atr_4h_frac",
+      "trend_4h",
+      "btc_regime"
+    ],
+    "OPEN_INTEREST": [
+      "oi_change_5m",
+      "oi_change_15m",
+      "oi_change_1h",
+      "oi_velocity_15m",
+      "oi_price_divergence_1h"
+    ],
+    "TRADE_FLOW": [
+      "signed_notional_5m",
+      "signed_notional_15m",
+      "imbalance_5m",
+      "imbalance_15m",
+      "trade_count_z_1h"
+    ],
+    "ORDER_BOOK": [
+      "spread_bps_median_5m",
+      "depth_imbalance_5m",
+      "depth_imbalance_15m",
+      "microprice_mid_deviation_bps_5m",
+      "book_invalid_fraction_15m"
+    ],
+    "MARK_FUNDING_CONTEXT": [
+      "predicted_funding_latest",
+      "mark_index_basis_latest"
+    ]
+  },
+  "ablation_sets": [
+    "PRICE_ONLY",
+    "PRICE_OI",
+    "PRICE_FLOW",
+    "PRICE_BOOK",
+    "PRICE_OI_FLOW",
+    "PRICE_OI_BOOK",
+    "PRICE_FLOW_BOOK",
+    "PRICE_OI_FLOW_BOOK"
+  ],
+  "targets": {
+    "primary": [
+      "NET_R_1H",
+      "NET_R_4H",
+      "NET_R_12H"
+    ],
+    "binary": [
+      "NET_R_4H_GT_0",
+      "NET_R_12H_GT_0"
+    ],
+    "realized_costs": [
+      "fees",
+      "slippage",
+      "actual_funding_by_side"
+    ],
+    "stop": "1.5x_4h_ATR_fixed_risk_1R"
+  },
+  "models": [
+    {
+      "family": "RIDGE_NET_R",
+      "l2": [
+        10,
+        100
+      ],
+      "thresholds": [
+        0,
+        0.05,
+        0.1
+      ]
+    },
+    {
+      "family": "LOGISTIC_POSITIVE_NET",
+      "l2": [
+        1,
+        10
+      ],
+      "thresholds": [
+        0.5,
+        0.55,
+        0.6
+      ],
+      "probability_authority_requires_calibration": true
+    }
+  ],
+  "search_budget": {
+    "promotable_configuration_limit": 500,
+    "diagnostic_configuration_limit": 200
+  },
+  "walk_forward": {
+    "chronological": true,
+    "outer_folds": 4,
+    "purge_hours": 24,
+    "selection_uses_outer": false,
+    "paired_matched_control": true
+  },
+  "incremental_gate": {
+    "pooled_outer_trades_min": 60,
+    "outer_net_expectancy_gt": 0,
+    "expectancy_ci_low_gt": 0,
+    "paired_uplift_vs_price_control_gt": 0,
+    "paired_uplift_ci_low_gt": 0,
+    "incremental_sign_positive_in_each_outer_fold": true,
+    "fees_stress_multiplier": 1.5,
+    "slippage_stress_multiplier": 2,
+    "funding_stress_multiplier": 2,
+    "combined_adverse_expectancy_gt": 0,
+    "max_symbol_positive_r_share": 0.5,
+    "max_month_positive_r_share": 0.5,
+    "no_single_week_positive_r_share_gt": 0.35
+  },
+  "prohibitions": [
+    "No outcome-informed feature additions after T0",
+    "No threshold changes after T0",
+    "No historical proxy substitution for prospective primary evidence",
+    "No promotion from post-hoc best candidate",
+    "No T0 backdating",
+    "No use of PREFLIGHT_ONLY records"
+  ],
+  "result_classes": [
+    "CANDIDATE_SUPPORTED",
+    "NO_INCREMENTAL_ALPHA",
+    "INSUFFICIENT_PROSPECTIVE_EVIDENCE"
+  ]
+}
