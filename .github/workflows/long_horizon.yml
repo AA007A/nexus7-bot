@@ -1,0 +1,129 @@
+name: Phase 8F Long-Horizon Architecture
+
+# Research only (LONG_HORIZON_ARCHITECTURE_SPEC_V1). Fetches public KuCoin 1h
+# klines (<=150 per request, every timestamp verified), selects the longest
+# predeclared window with exact coverage, checks research/runtime feature and
+# architecture parity, runs the streaming architecture population + nested
+# walk-forward, and exports a bundle ONLY if every supporting gate passes.
+# No secrets, no exchange credentials, no orders, no deployment.
+# Results are PREVIOUSLY_INSPECTED_RESEARCH_SUPPORT.
+on:
+  push:
+    branches: ["research/phase8f-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  long-horizon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact candidate SHA
+        run: echo "candidate_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Long-horizon unit tests
+        run: python -m unittest tests.test_ai_phase8f -v
+
+      - name: Fetch public 1h klines
+        run: python -m bot.ai.long_horizon fetch --out artifacts/lh/candles_1h.json.gz
+
+      - name: Long-horizon research (freeze only if gated)
+        run: |
+          python -m bot.ai.long_horizon run \
+            --dataset artifacts/lh/candles_1h.json.gz \
+            --out artifacts/lh/research \
+            --candidate-sha "$(git rev-parse HEAD)" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Compact research summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/lh/research')
+          def load(n):
+              p = d / n
+              return json.loads(p.read_text()) if p.exists() else {}
+          s = load('phase8f_summary.json')
+          if not s:
+              print('phase8f_summary.json: MISSING'); raise SystemExit(0)
+          view = {k: s.get(k) for k in ('result', 'classification_reason', 'status', 'spec_sha256', 'dataset_sha256',
+                                        'raw_dataset_sha256', 'trades', 'trades_sha256', 'architectures',
+                                        'tuples_with_trades', 'ledger_entries', 'feature_parity', 'architecture_parity',
+                                        'pregate_pass_counts', 'pregate_only_sample_failures',
+                                        'testable_training_fraction', 'estimate', 'best_posthoc_outer',
+                                        'cost_policy_sha256', 'exit_policy_sha256', 'portfolio_policy_sha256',
+                                        'feature_schema_sha256', 'window', 'frozen', 'portfolio')}
+          g = s.get('gate') or {}
+          view['gate'] = {k: g.get(k) for k in ('failures', 'all_pass', 'stability', 'architecture_baseline',
+                                                'pooled_approved', 'expectancy', 'uplift', 'cost_stress',
+                                                'concentration', 'max_drawdown_r', 'avg_holding_h', 'calibration')}
+          view['steps'] = [{k: st.get(k) for k in ('step', 'reason', 'outer_eval')} | {
+              'selected': {k: (st.get('selected') or {}).get(k) for k in ('candidate_id', 'validation_mean_r',
+                                                                           'validation_trades')}}
+              for st in s.get('steps') or []]
+          view['layout'] = s.get('layout')
+          cov = load('dataset_coverage.json')
+          view['coverage'] = {'window': cov.get('window'), 'counts': cov.get('counts'),
+                              'data_days': cov.get('data_days'),
+                              'candidates': [{'days': c['days'], 'passing': len(c['passing_symbols']),
+                                              'per_symbol': {k: {kk: v.get(kk) for kk in ('fraction', 'max_gap_bars', 'bars', 'expected')}
+                                                             for k, v in c['coverage'].items()}} for c in cov.get('candidates', [])],
+                              'pagination': {k: v for k, v in (cov.get('pagination') or {}).items()}}
+          pr = load('feature_parity_report.json')
+          view['parity'] = {'feature': pr.get('feature_parity'), 'architecture': pr.get('architecture_parity'),
+                            'features': {k: {'decisions': v.get('decisions'), 'values_checked': v.get('values_checked'),
+                                             'max_rel_diff': v.get('max_rel_diff'), 'mismatches': v.get('mismatches'),
+                                             'per_tf': v.get('per_timeframe')} for k, v in (pr.get('per_symbol_features') or {}).items()},
+                            'architecture': {k: {kk: v.get(kk) for kk in ('events_checked', 'event_mismatches', 'stops_checked', 'stop_mismatches')}
+                                             for k, v in (pr.get('per_symbol_architecture') or {}).items()}}
+          keys = ('n_trades_across_tuples', 'mean_net_r', 'mean_gross_r', 'win_rate', 'profit_factor', 'mean_combined_adverse_r',
+                  'fee_r', 'slippage_r', 'funding_r', 'total_cost_r', 'gross_edge_to_cost', 'abs_move_to_cost',
+                  'mean_stop_pct', 'mean_holding_h', 'mean_mfe_r', 'mean_mae_r', 'stop_first_rate', 'mean_settlements',
+                  'abs_move_12h_to_cost', 'abs_move_24h_to_cost', 'abs_move_48h_to_cost')
+          def cut(rep):
+              return {k: {kk: v.get(kk) for kk in keys} for k, v in (rep or {}).items()}
+          tf = load('timeframe_analysis.json')
+          view['by_trigger'] = cut(tf.get('by_trigger')); view['by_family'] = cut(tf.get('by_family')); view['by_side'] = cut(tf.get('by_side'))
+          view['by_entry'] = cut(load('entry_analysis.json').get('by_entry'))
+          view['by_stop'] = cut(load('stop_analysis.json').get('by_stop'))
+          view['by_exit'] = cut(load('exit_analysis.json').get('by_exit'))
+          view['by_time_exit'] = cut(load('holding_horizon_analysis.json').get('by_time_exit'))
+          b = (load('raw_architecture_baselines.json').get('tuples') or {})
+          top = sorted(b.items(), key=lambda kv: -(kv[1].get('mean_r') if kv[1].get('n', 0) >= 60 else -9))[:15]
+          view['top_raw_tuples_full_sample_min60'] = {k: {kk: v.get(kk) for kk in ('n', 'mean_r', 'win_rate', 'profit_factor',
+                                                                                  'combined_adverse_mean_r', 'total_cost_r',
+                                                                                  'mean_stop_frac', 'mean_holding_h', 'by_fold')}
+                                                      | {'gross': (v.get('gross') or {}).get('mean_r')} for k, v in top}
+          view['tuples_positive_full_sample_min60'] = sum(1 for v in b.values() if v.get('n', 0) >= 60 and v.get('mean_r', -1) > 0)
+          view['tuples_min60'] = sum(1 for v in b.values() if v.get('n', 0) >= 60)
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload long-horizon artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: long-horizon
+          path: |
+            artifacts/lh/research/
+            artifacts/lh/candles_1h.json.gz
+          if-no-files-found: warn
