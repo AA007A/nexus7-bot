@@ -142,7 +142,7 @@ class Collector:
         d = msg.get("data") or {}
         try:
             price, side, size = str(d["change"]).split(",")
-        except Exception:
+        except (KeyError, ValueError, TypeError):
             self.health["ws_book"].inc("parse_failures")
             return
         res = self.books[sym].on_delta(int(d["sequence"]), price, side, size, d.get("timestamp"))

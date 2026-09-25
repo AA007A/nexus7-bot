@@ -172,7 +172,8 @@ def main(argv=None) -> int:
         try:
             rep = asyncio.run(live_preflight(a.db_url, a.seconds))
             budget = storage_budget(rep)
-        except Exception as exc:
+        except (D.Refused, S.SourceUnavailable, OSError, asyncio.TimeoutError, RuntimeError, ValueError, KeyError,
+                TypeError) as exc:
             errors.append(f"{type(exc).__name__}: {str(exc)[:200]}")
     (out / "preflight_report.json").write_text(json.dumps({"report": rep, "errors": errors}, indent=1, sort_keys=True,
                                                           default=str) + "\n")

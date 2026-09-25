@@ -6,9 +6,13 @@ functions are injectable for deterministic tests.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
 import time
+
+import aiohttp
+import websockets.exceptions
 
 from alpha_collector import contract as C
 
@@ -80,13 +84,13 @@ class RestClient:
             self.health.inc("requests")
             try:
                 status, body, hdr = await (self.transport or self._default_transport)(method, path, params)
-            except Exception as exc:
+            except (OSError, asyncio.TimeoutError, aiohttp.ClientError, RuntimeError, ValueError) as exc:
                 last = type(exc).__name__
                 status, body, hdr = None, None, {}
             if status == 200:
                 try:
                     js = json.loads(body)
-                except Exception:
+                except (TypeError, ValueError):
                     self.health.inc("parse_failures")
                     last = "PARSE"
                     js = None
@@ -237,7 +241,7 @@ class WsSession:
                     obs = now_ms()
                     try:
                         msg = json.loads(raw)
-                    except Exception:
+                    except (TypeError, ValueError):
                         self.health.inc("parse_failures")
                         continue
                     if msg.get("type") == "message":
@@ -248,14 +252,15 @@ class WsSession:
                         last_ping = time.time()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except (OSError, asyncio.TimeoutError, aiohttp.ClientError, SourceUnavailable, RuntimeError, ValueError,
+                    KeyError, IndexError, ConnectionError, websockets.exceptions.WebSocketException) as exc:
+                self.health.inc("session_errors")
+                self.health.c["last_session_error"] = type(exc).__name__
             finally:
                 if ws is not None:
-                    try:
+                    with contextlib.suppress(OSError, RuntimeError, asyncio.TimeoutError,
+                                             websockets.exceptions.WebSocketException):
                         await ws.close()
-                    except Exception:
-                        pass
             if self.stop:
                 break
             self.health.inc("ws_reconnects")

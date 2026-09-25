@@ -76,8 +76,8 @@ class Contract(unittest.TestCase):
         self.assertEqual(C.sha(copy.deepcopy(C.CONTRACT)), a)
 
     def test_02_epoch_manifest_deterministic(self):
-        kw = dict(code_sha="c" * 40, db_schema_sha256=D.DB_SCHEMA_SHA256, multipliers={"BTCUSDT": "0.001"}, t0_ms=5,
-                  created_at_ms=0)
+        kw = {"code_sha": "c" * 40, "db_schema_sha256": D.DB_SCHEMA_SHA256, "multipliers": {"BTCUSDT": "0.001"},
+              "t0_ms": 5, "created_at_ms": 0}
         self.assertEqual(C.epoch_manifest(**kw)["manifest_sha256"], C.epoch_manifest(**kw)["manifest_sha256"])
         self.assertNotEqual(C.epoch_manifest(**kw)["manifest_sha256"], C.epoch_manifest(**dict(kw, t0_ms=6))["manifest_sha256"])
 
@@ -337,9 +337,10 @@ class Postgres(unittest.TestCase):
             await st.init_authority()
             self.assertEqual(await st.insert("oi_snapshots", [rec(), rec()]), 1)
             self.assertEqual(await st.insert("oi_snapshots", [rec()]), 0)
-            with self.assertRaises(Exception):
+            import asyncpg
+            with self.assertRaises(asyncpg.exceptions.RaiseError):
                 await st.c.execute(f"UPDATE {C.DB_SCHEMA}.oi_snapshots SET value = 0")
-            with self.assertRaises(Exception):
+            with self.assertRaises(asyncpg.exceptions.RaiseError):
                 await st.c.execute(f"DELETE FROM {C.DB_SCHEMA}.oi_snapshots")
             m = await st.seal_day("oi_snapshots", D.utc_day(1_790_000_000_000), C.EPOCH_ID)
             self.assertEqual(m["rows"], 1)

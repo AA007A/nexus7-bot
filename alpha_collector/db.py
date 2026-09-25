@@ -7,6 +7,7 @@ production database: startup refuses unless the authority row matches.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
@@ -233,7 +234,7 @@ class PgStore:
         check_not_production(url, production_fingerprint)
         try:
             conn = await asyncpg.connect(url, timeout=20)
-        except Exception as exc:
+        except (OSError, asyncio.TimeoutError, asyncpg.PostgresError, asyncpg.InterfaceError, ValueError) as exc:
             raise Refused(f"database connection failed: {type(exc).__name__}") from None
         return cls(conn)
 
@@ -241,10 +242,11 @@ class PgStore:
         await self.c.close()
 
     async def migrate(self):
+        import asyncpg
         try:
             async with self.c.transaction():
                 await self.c.execute(DDL)
-        except Exception as exc:
+        except (asyncpg.PostgresError, asyncpg.InterfaceError) as exc:
             raise Refused(f"migration failed: {type(exc).__name__}") from None
         return {"schema_sha256": DB_SCHEMA_SHA256}
 
@@ -254,9 +256,10 @@ class PgStore:
         return await self.verify_authority(authority_id)
 
     async def verify_authority(self, expected=C.DB_AUTHORITY):
+        import asyncpg
         try:
             r = await self.c.fetchrow(f"SELECT * FROM {self.s}.authority WHERE id = 1")
-        except Exception:
+        except asyncpg.PostgresError:
             r = None
         if not r or r["authority_id"] != expected:
             raise Refused("database authority missing or wrong")
@@ -296,7 +299,7 @@ class PgStore:
                     row[extra] = r[extra]
                     st = await self.c.execute(sql, *[row[c] for c in cols])
                     n += int(st.split()[-1])
-        except Exception as exc:
+        except __import__("asyncpg").exceptions.RaiseError as exc:
             if "SEALED" in str(exc):
                 raise Refused(f"SEALED: {table}") from None
             raise
