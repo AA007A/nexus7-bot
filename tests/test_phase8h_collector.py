@@ -272,6 +272,12 @@ class Authority(unittest.TestCase):
             K.env_guard(self._env(KUCOIN_API_KEY="x"))
         with self.assertRaises(D.Refused):
             K.env_guard(self._env(COLLECTOR_MODE="COLLECT"))            # no T0 authorization
+        with self.assertRaises(D.Refused):
+            K.env_guard(self._env(COLLECTOR_MODE="COLLECT",
+                                  PROSPECTIVE_T0_AUTHORIZATION=K.T0_AUTH_PHRASE))  # storage not approved
+        self.assertEqual(K.env_guard(self._env(COLLECTOR_MODE="COLLECT",
+                                               PROSPECTIVE_T0_AUTHORIZATION=K.T0_AUTH_PHRASE,
+                                               PROSPECTIVE_STORAGE_READY="true"))["mode"], "COLLECT")
         self.assertEqual(K.env_guard(self._env())["mode"], "PREFLIGHT")
 
     def test_22_no_production_db_reference(self):
