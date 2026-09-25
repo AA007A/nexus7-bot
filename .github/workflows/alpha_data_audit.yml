@@ -1,0 +1,92 @@
+name: Phase 8G-A Alpha Data Audit
+
+# DATA FEASIBILITY AUDIT ONLY (no models, no outcomes, no PnL). Probes public,
+# key-free market-data endpoints (KuCoin Futures first; Binance public archive,
+# Bybit and OKX public REST for comparison), downloads what is downloadable,
+# and measures provenance, depth, coverage, timestamp semantics and parity.
+# No secrets, no private endpoints, no order endpoints, no deployment.
+on:
+  push:
+    branches: ["research/phase8g-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  alpha-data-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact code SHA
+        run: echo "code_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Audit unit tests
+        run: python -m unittest tests.test_ai_phase8g_a -v
+
+      - name: Phase 8F exact 1h price dataset (read-only)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: long-horizon
+          run-id: 36173261635
+          github-token: ${{ github.token }}
+          path: artifacts/p8f
+
+      - name: Data feasibility audit
+        run: |
+          ARGS=""
+          if [ -f artifacts/p8f/candles_1h.json.gz ]; then ARGS="--price-dataset artifacts/p8f/candles_1h.json.gz"; fi
+          python -m bot.ai.alpha_audit_report --out artifacts/audit --code-sha "$(git rev-parse HEAD)" $ARGS
+
+      - name: Compact audit summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/audit')
+          def load(n):
+              p = d / n
+              return json.loads(p.read_text()) if p.exists() else None
+          s = load('phase8g_a_summary.json')
+          if not s:
+              print('phase8g_a_summary.json: MISSING'); raise SystemExit(0)
+          view = {'summary': s, 'inventory': load('alpha_source_inventory.json'),
+                  'coverage_summary': (load('coverage_report.json') or {}).get('summary'),
+                  'cross_source': load('cross_source_consistency.json'),
+                  'depth': {k: v for k, v in (load('historical_depth_report.json') or {}).items() if k != 'per_source'},
+                  'storage': load('storage_estimates.json'), 'manifests': load('dataset_manifests.json'),
+                  'xsec': {k: v for k, v in ((load('cross_sectional_feature_contract.json') or {}).get('audit') or {}).items() if k != 'quality'},
+                  'lookahead': load('lookahead_risk_report.json')}
+          prov = load('source_provenance.json') or {}
+          view['provenance'] = {'http': prov.get('http'), 'third_party_rest': prov.get('third_party_rest'),
+                                'kucoin_candidate_paths': prov.get('kucoin_candidate_paths'),
+                                'kucoin_live': prov.get('kucoin_live'),
+                                'kucoin_contract_fields': (prov.get('kucoin_contracts') or {}).get('symbols')}
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-data-audit
+          path: artifacts/audit/
+          if-no-files-found: warn
