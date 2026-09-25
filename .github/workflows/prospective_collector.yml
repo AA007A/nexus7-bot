@@ -1,0 +1,96 @@
+name: Phase 8H Prospective Collector
+
+# Collector engineering CI only: unit tests (incl. a disposable Postgres),
+# lint, deterministic schemas, and a short PUBLIC KuCoin preflight writing
+# PREFLIGHT_ONLY rows into the disposable database. No secrets, no trading
+# keys, no Railway, no deployment, no prospective epoch.
+on:
+  push:
+    branches: ["research/phase8h-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: disposable
+          POSTGRES_DB: research_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_PG_DSN: postgresql://postgres:disposable@localhost:5432/research_test
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact code SHA
+        run: echo "code_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt ruff
+
+      - name: Lint
+        run: ruff check alpha_collector tests/test_phase8h_collector.py
+
+      - name: Unit tests (in-memory + disposable Postgres)
+        id: tests
+        run: |
+          python -m unittest tests.test_phase8h_collector -v
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Deterministic schema hashes (two fresh interpreters)
+        run: |
+          a=$(python -c "from alpha_collector import contract as C, db as D; print(C.CONTRACT_SHA256, D.DB_SCHEMA_SHA256)")
+          b=$(python -c "from alpha_collector import contract as C, db as D; print(C.CONTRACT_SHA256, D.DB_SCHEMA_SHA256)")
+          echo "$a" | tee -a "$GITHUB_STEP_SUMMARY"; test "$a" = "$b"
+
+      - name: Public preflight (PREFLIGHT_ONLY rows, disposable DB)
+        run: |
+          python - <<'PY'
+          import asyncio, asyncpg, os
+          async def reset():
+              c = await asyncpg.connect(os.environ["TEST_PG_DSN"])
+              await c.execute("DROP SCHEMA IF EXISTS alpha_prospective CASCADE")
+              await c.close()
+          asyncio.run(reset())
+          PY
+          python -m alpha_collector.preflight --out artifacts/phase8h --code-sha "$(git rev-parse HEAD)" \
+            --db-url "$TEST_PG_DSN" --seconds 180 --tests-passed "${{ steps.tests.outputs.passed }}"
+
+      - name: Compact summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/phase8h')
+          def load(n):
+              p = d / n
+              return json.loads(p.read_text()) if p.exists() else None
+          view = {'summary': load('phase8h_summary.json'), 'preflight': load('preflight_report.json'),
+                  'storage': load('storage_budget.json')}
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase8h-collector
+          path: artifacts/phase8h/
+          if-no-files-found: warn

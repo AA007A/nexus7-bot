@@ -1,0 +1,16 @@
+# PHASE 8H PROSPECTIVE ALPHA COLLECTOR - deploy-ready, NOT deployed.
+# BGX-RESEARCH project ONLY; never BGX CAPITAL. Public market data only:
+# no exchange credentials, no order endpoints, no execution lease.
+# Required variables: PROSPECTIVE_DB_URL (dedicated research Postgres),
+# EXPECTED_CONTRACT_SHA256, COLLECTOR_MODE=PREFLIGHT, PAPER_TRADE=true,
+# LIVE_TRADING_CONFIRMED="". DATABASE_URL must NOT be set (refused).
+# COLLECT additionally needs PROSPECTIVE_T0_AUTHORIZATION and PROSPECTIVE_T0_MS,
+# which are a separate, explicit authorization.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m alpha_collector.collector"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
