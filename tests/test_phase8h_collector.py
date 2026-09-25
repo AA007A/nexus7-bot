@@ -1,7 +1,10 @@
 """Phase 8H: prospective alpha data collector (no trading capability, no outcomes)."""
 import asyncio
+import contextlib
 import copy
 import importlib
+import io
+import json
 import os
 import pathlib
 import random
@@ -390,6 +393,24 @@ class RestartMemory(unittest.TestCase):
         hb = run(col.heartbeat())
         self.assertEqual(st.heartbeats[-1]["ts"], hb["ts"])
         self.assertEqual(hb["epoch"], C.PREFLIGHT_EPOCH_ID)
+
+    def test_19b_sanitized_heartbeat_log(self):
+        st = D.MemoryStore()
+        col = K.Collector(st, FakeRest(), mode="PREFLIGHT", sleep=nosleep, symbols=("BTCUSDT",),
+                          instance_id="test-instance")
+        col.health["rest"].c.update({"requests": 7, "successes": 7, "rate_limited": 0})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run(col.heartbeat("PREFLIGHT_IDLE"))
+        line = out.getvalue().strip().splitlines()[-1]
+        payload = json.loads(line)
+        self.assertEqual(payload["event"], "ALPHA_COLLECTOR_HEARTBEAT")
+        self.assertEqual(payload["mode"], "PREFLIGHT")
+        self.assertEqual(payload["epoch"], C.PREFLIGHT_EPOCH_ID)
+        self.assertEqual(payload["source_health"]["rest"]["requests"], 7)
+        self.assertNotIn("DATABASE_URL", line)
+        self.assertNotIn("PROSPECTIVE_DB_URL", line)
+        self.assertNotIn("PUBLIC_TOKEN", line)
 
 
 class FlowAcrossFlushes(unittest.TestCase):
