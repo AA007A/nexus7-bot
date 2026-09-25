@@ -10,6 +10,7 @@ No trading imports, no credentials, no order capability.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -241,6 +242,25 @@ class Collector:
               "epoch": self.epoch_id, "detail": {"mode": self.mode, "persisted": self.persisted,
                                                 "book_states": {s: b.state for s, b in self.books.items()}}}
         await self.store.heartbeat(hb)
+        # Sanitized operational observability only. Never include URLs, tokens,
+        # credentials, raw payloads, DB connection strings, or authorization values.
+        safe_keys = ("requests", "successes", "rate_limited", "retries", "parse_failures",
+                     "ws_reconnects", "sequence_gaps", "resyncs", "last_event_ts",
+                     "max_lag_ms", "clock_skew_ms", "session_errors")
+        source_health = {name: {k: h.c.get(k) for k in safe_keys if k in h.c}
+                         for name, h in self.health.items()}
+        book_state_counts = {}
+        for b in self.books.values():
+            book_state_counts[b.state] = book_state_counts.get(b.state, 0) + 1
+        log_record = {"event": "ALPHA_COLLECTOR_HEARTBEAT", "collector": C.COLLECTOR_VERSION,
+                      "instance_id": self.instance_id, "ts": hb["ts"], "health": health,
+                      "mode": self.mode, "epoch": self.epoch_id,
+                      "last_source_event_ts": hb["last_source_event_ts"],
+                      "last_persisted_ts": hb["last_persisted_ts"],
+                      "reconnects": hb["reconnects"], "gaps": hb["gaps"],
+                      "persisted": dict(self.persisted), "book_state_counts": book_state_counts,
+                      "source_health": source_health}
+        print(json.dumps(log_record, sort_keys=True, separators=(",", ":")), flush=True)
         return hb
 
     async def seal_completed_days(self, days):
