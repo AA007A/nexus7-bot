@@ -54,7 +54,13 @@ class Collector:
         self.epoch_id = C.PREFLIGHT_EPOCH_ID if mode == "PREFLIGHT" else C.EPOCH_ID
         self.books = {s: B.OrderBook(s) for s in self.symbols}
         self.health = {ch: S.Health() for ch in ("rest", "ws_trades", "ws_book")}
+        if isinstance(getattr(rest, "health", None), S.Health):
+            self.health["rest"] = rest.health                 # count what the REST client actually does
         self.trade_buffer: list = []
+        self.flow_pending: dict = {}                          # (symbol, trade_id) -> record, until its minute closes
+        self.flow_emitted_before = 0                          # buckets < this were aggregated (never re-emitted)
+        self.trade_uncovered: list = []                       # [start, end) intervals without a live trade stream
+        self.trade_connected = False
         self.gaps = 0
         self.last_persisted = None
         self.last_ok = {}
@@ -123,16 +129,35 @@ class Collector:
         self.trade_buffer.append(rec)
 
     async def flush_trades(self, *, final_before_ms=None):
-        if not self.trade_buffer:
-            return 0
+        """Persist raw trades; aggregate a 1m bucket only once it has closed (exactly once, from the full minute).
+
+        Trades whose minute was already aggregated are persisted raw but excluded from flow and counted as
+        ``late_trades``; buckets overlapping a period without a live trade stream are flagged INCOMPLETE_BUCKET.
+        """
         buf, self.trade_buffer = self.trade_buffer, []
-        n = await self._persist("trade_events", buf)
-        if final_before_ms is not None:
-            rows = [r for r in buf if r["event_ts"] < final_before_ms]
-            agg = F.aggregate(rows, self.multipliers)
+        n = await self._persist("trade_events", buf) if buf else 0
+        for r in buf:
+            if r["event_ts"] is None or r["payload"].get("taker_side_venue") is None:
+                continue
+            if r["event_ts"] < self.flow_emitted_before:
+                self.health["ws_trades"].inc("late_trades")
+                continue
+            self.flow_pending.setdefault((r["symbol"], r["venue_trade_id"]), r)
+        if final_before_ms is not None and final_before_ms > self.flow_emitted_before:
+            ready = [r for r in self.flow_pending.values() if r["event_ts"] < final_before_ms]
+            for r in ready:
+                del self.flow_pending[(r["symbol"], r["venue_trade_id"])]
+            agg = F.aggregate(ready, self.multipliers)
+            incomplete = {k for k in agg if self._bucket_uncovered(k[1])}
             await self._persist("trade_flow_1m", F.flow_records(agg, observed_ts=self.clock(), instance_id=self.instance_id,
-                                                                epoch_id=self.epoch_id))
+                                                                epoch_id=self.epoch_id, incomplete=incomplete))
+            self.flow_emitted_before = final_before_ms
         return n
+
+    def _bucket_uncovered(self, b):
+        end = b + F.BUCKET_MS
+        open_down = [(self.down_at["ws:execution"], end)] if "ws:execution" in self.down_at else []
+        return any(s < end and e > b for s, e in self.trade_uncovered + open_down)
 
     async def on_book(self, msg, obs):
         vs = msg.get("topic", "").split(":")[-1]
@@ -193,6 +218,12 @@ class Collector:
 
     async def on_ws_up(self, channel):
         t = self.clock()
+        if channel == "ws:execution":
+            if not self.trade_connected:
+                self.trade_uncovered.append((0, t))           # the minute in which the stream first joined is partial
+                self.trade_connected = True
+            elif channel in self.down_at:
+                self.trade_uncovered.append((self.down_at[channel], t))
         if channel in self.down_at:
             for s in self.symbols:
                 await self._gap(channel, s, self.down_at[channel], t, "WS_DISCONNECT")

@@ -392,5 +392,66 @@ class RestartMemory(unittest.TestCase):
         self.assertEqual(hb["epoch"], C.PREFLIGHT_EPOCH_ID)
 
 
+class FlowAcrossFlushes(unittest.TestCase):
+    """Regression: a minute's trades arrive over many 5 s flushes; the bucket must be aggregated once, after it closes."""
+
+    def _col(self, now):
+        col = K.Collector(D.MemoryStore(), FakeRest(), mode="PREFLIGHT", sleep=nosleep, symbols=("BTCUSDT",),
+                          clock=lambda: now[0])
+        col.multipliers = {"BTCUSDT": "0.001"}
+        return col
+
+    def test_bucket_emitted_once_after_close(self):
+        m0 = 1_790_000_040_000 // 60000 * 60000
+        now = [m0 - 30_000]
+        col = self._col(now)
+        run(col.on_ws_up("ws:execution"))                          # joined mid-way through the minute before m0
+        for i, off in enumerate([1_000, 20_000, 40_000, 59_000]):
+            now[0] = m0 + off
+            run(col.on_trade(trade(i, m0 + off, side="buy" if i % 2 else "sell"), now[0]))
+            run(col.on_trade(trade(i, m0 + off), now[0]))           # duplicate delivery of the same tradeId
+            run(col.flush_trades(final_before_ms=(now[0] - 5_000) // 60000 * 60000))
+        self.assertEqual(col.persisted["trade_flow_1m"], 0)        # minute m0 still open
+        now[0] = m0 + 66_000
+        run(col.flush_trades(final_before_ms=(now[0] - 5_000) // 60000 * 60000))
+        flows = list(col.store.tables["trade_flow_1m"].values())
+        self.assertEqual(len(flows), 1)
+        f = flows[0]
+        self.assertEqual(f["bucket_ts"], m0)
+        self.assertEqual(f["payload"]["total_count"], 4)          # 4 distinct trades, duplicates ignored
+        self.assertEqual(f["payload"]["buy_count"], 2)
+        self.assertNotIn("INCOMPLETE_BUCKET", f["quality_flags"])  # stream covered the whole minute
+        # a trade for an already-aggregated minute is kept raw but never re-aggregated
+        run(col.on_trade(trade(99, m0 + 10_000), now[0]))
+        run(col.flush_trades(final_before_ms=m0 + 60_000))
+        self.assertEqual(len(list(col.store.tables["trade_flow_1m"].values())), 1)
+        self.assertEqual(col.health["ws_trades"].c["late_trades"], 1)
+
+    def test_partial_minute_flagged_incomplete(self):
+        m0 = 1_790_000_040_000 // 60000 * 60000
+        now = [m0 + 30_000]
+        col = self._col(now)
+        run(col.on_ws_up("ws:execution"))                          # joined at m0+30s -> minute m0 is partial
+        run(col.on_trade(trade(1, m0 + 31_000), now[0]))
+        now[0] = m0 + 61_000
+        run(col.on_trade(trade(2, m0 + 60_500), now[0]))
+        now[0] = m0 + 126_000
+        run(col.flush_trades(final_before_ms=(now[0] - 5_000) // 60000 * 60000))
+        flags = {r["bucket_ts"]: r["quality_flags"] for r in list(col.store.tables["trade_flow_1m"].values())}
+        self.assertIn("INCOMPLETE_BUCKET", flags[m0])
+        self.assertNotIn("INCOMPLETE_BUCKET", flags[m0 + 60_000])
+
+    def test_rest_health_wired(self):
+        rest = S.RestClient(transport=lambda *a: _ok(), sleep=nosleep)
+        col = K.Collector(D.MemoryStore(), rest, mode="PREFLIGHT", sleep=nosleep, symbols=("BTCUSDT",))
+        run(rest.call("/api/v1/timestamp"))
+        self.assertIs(col.health["rest"], rest.health)
+        self.assertEqual(col.health["rest"].c["successes"], 1)
+
+
+async def _ok():
+    return 200, '{"code": "200000", "data": 1}', {}
+
+
 if __name__ == "__main__":
     unittest.main()
