@@ -1,0 +1,100 @@
+name: Phase 8G-B Incremental Alpha
+
+# Research only (INCREMENTAL_ALPHA_SPEC_V1). Uses ONLY: KuCoin settled funding,
+# KuCoin perp/index-close basis, CROSS_SECTIONAL_FEATURES_V1 and the Phase 8F
+# price dataset. Refetches funding/index with the exact 8G-A code and refuses
+# to run if their SHA256 differ from the 8G-A audited identities.
+# No secrets, no private or order endpoints, no deployment.
+on:
+  push:
+    branches: ["research/phase8g-b-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  incremental-alpha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PAPER_TRADE: "true"
+      LIVE_TRADING_CONFIRMED: ""
+      NEXUS_PILOT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact code SHA
+        run: echo "code_sha=$(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Incremental alpha unit tests
+        run: python -m unittest tests.test_ai_phase8g_b -v
+
+      - name: Phase 8F exact 1h price dataset (read-only)
+        uses: actions/download-artifact@v4
+        with:
+          name: long-horizon
+          run-id: 36173261635
+          github-token: ${{ github.token }}
+          path: artifacts/p8f
+
+      - name: Phase 8G-A audited dataset manifests (read-only)
+        uses: actions/download-artifact@v4
+        with:
+          name: alpha-data-audit
+          run-id: 36176392214
+          github-token: ${{ github.token }}
+          path: artifacts/p8ga
+
+      - name: Incremental alpha research (freeze only if gated)
+        run: |
+          python -m bot.ai.incremental_alpha \
+            --price-dataset artifacts/p8f/candles_1h.json.gz \
+            --audit-manifests artifacts/p8ga/dataset_manifests.json \
+            --out artifacts/gb \
+            --code-sha "$(git rev-parse HEAD)" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>&1 | grep -v " | " | tail -80
+
+      - name: Compact research summary
+        if: always()
+        run: |
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          d = Path('artifacts/gb')
+          def load(n):
+              p = d / n
+              return json.loads(p.read_text()) if p.exists() else None
+          s = load('phase8g_b_summary.json')
+          if not s:
+              print('phase8g_b_summary.json: MISSING'); raise SystemExit(0)
+          view = {'summary': s, 'ablation': load('ablation_matrix.json'), 'uplift': load('incremental_uplift.json'),
+                  'stress': load('cost_stress.json'), 'concentration': load('concentration_report.json'),
+                  'folds': load('fold_results.json'), 'portfolio': load('portfolio_analysis.json'),
+                  'dataset': load('alpha_dataset_manifest.json'), 'funding_manifest': load('funding_dataset_manifest.json'),
+                  'index_manifest': load('index_dataset_manifest.json')}
+          par = load('feature_parity_report.json') or {}
+          view['parity'] = {'parity': par.get('parity'), 'xsec': par.get('xsec'),
+                            'funding': {k: {kk: v.get(kk) for kk in ('values_checked', 'mismatches', 'max_rel_diff')} for k, v in (par.get('funding') or {}).items()},
+                            'basis': {k: {kk: v.get(kk) for kk in ('values_checked', 'mismatches', 'max_rel_diff')} for k, v in (par.get('basis') or {}).items()},
+                            'price': {k: {kk: v.get(kk) for kk in ('values_checked', 'mismatches', 'max_rel_diff')} for k, v in (par.get('price') or {}).items()}}
+          print('```json'); print(json.dumps(view, indent=1, sort_keys=True, default=str)); print('```')
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incremental-alpha
+          path: artifacts/gb/
+          if-no-files-found: warn
