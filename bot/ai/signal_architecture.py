@@ -180,6 +180,22 @@ def check_no_forward_evidence(data: dict):
                 raise ForwardEvidenceRefused(f"{s} {tf}: candles at/after the forward-evidence cutoff")
 
 
+FETCH_PAGE_BARS = 150            # KuCoin returns at most 200 klines per request; stay well below
+MIN_COVERAGE = 0.99
+
+
+def coverage(bars, start: int, end: int, step: int) -> dict:
+    """Fail closed on silently missing history (pagination or exchange gaps)."""
+    expected = max(1, (end - start) // step)
+    ts = [int(b["ts"]) for b in bars]
+    max_gap = max((b - a for a, b in zip(ts, ts[1:])), default=0) // step
+    frac = len(ts) / expected
+    return {"bars": len(ts), "expected": expected, "fraction": frac, "max_gap_bars": int(max_gap),
+            "first_ts": ts[0] if ts else None, "last_ts": ts[-1] if ts else None,
+            "ok": bool(ts) and frac >= MIN_COVERAGE and max_gap <= 8
+            and ts[0] - start <= 8 * step and end - ts[-1] <= 9 * step}
+
+
 async def fetch_dataset(symbols=SYMBOLS) -> dict:
     """Public KuCoin klines for the pinned window (+warm-up, +exit tail)."""
     from bot.backtest import _historical_integrity, _kucoin_page
@@ -196,7 +212,7 @@ async def fetch_dataset(symbols=SYMBOLS) -> dict:
                 start = DECISION_START_MS - warm[tf] * step[tf] - step[tf]
                 cur, by = start, {}
                 while cur < end:
-                    to = min(end, cur + 400 * step[tf])
+                    to = min(end, cur + FETCH_PAGE_BARS * step[tf])
                     page = await _kucoin_page(client, s, tf, cur, to)
                     for b in page:
                         by[int(b["ts"])] = b
@@ -204,8 +220,9 @@ async def fetch_dataset(symbols=SYMBOLS) -> dict:
                     await asyncio.sleep(0.05)
                 bars = [by[t] for t in sorted(by) if start <= t and t + step[tf] <= end]
                 integ = _historical_integrity(bars, tf)
-                if not integ["ok"]:
-                    raise RuntimeError(f"{s} {tf} integrity failed: {integ}")
+                cov = coverage(bars, start, end, step[tf])
+                if not integ["ok"] or not cov["ok"]:
+                    raise RuntimeError(f"{s} {tf} integrity/coverage failed: {integ} {cov}")
                 out[s][tf] = [{k: (int(b[k]) if k == "ts" else float(b[k])) for k in ("ts", "o", "h", "l", "c", "v")}
                               for b in bars]
     return out

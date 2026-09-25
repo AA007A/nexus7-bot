@@ -337,6 +337,16 @@ class Freeze(unittest.TestCase):
             sa.check_no_forward_evidence(d)
 
 
+class Coverage(unittest.TestCase):
+    def test_incomplete_history_fails_closed(self):
+        c = walk(n=1000)
+        start, end = c[0]["ts"], c[-1]["ts"] + sa.BAR_MS
+        self.assertTrue(sa.coverage(c, start, end, sa.BAR_MS)["ok"])
+        holey = [b for i, b in enumerate(c) if (i // 200) % 2 == 0]        # every other 200-bar page lost
+        self.assertFalse(sa.coverage(holey, start, end, sa.BAR_MS)["ok"])
+        self.assertFalse(sa.coverage(c[500:], start, end, sa.BAR_MS)["ok"])
+
+
 class NexusStops(unittest.TestCase):
     def test_nexus_stop_classification_runs(self):
         from tests.test_ai_phase8d import rows as p8d_rows
