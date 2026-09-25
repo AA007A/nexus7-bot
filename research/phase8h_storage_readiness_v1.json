@@ -1,0 +1,27 @@
+{
+  "version": "PHASE8H_STORAGE_READINESS_V1",
+  "status": "PRE_T0_BLOCKING_GATE",
+  "prospective_storage_ready": false,
+  "requirements": {
+    "dedicated_from_shadow_evidence_db": true,
+    "minimum_persistent_volume_gb": 100,
+    "preferred_initial_volume_gb": 150,
+    "minimum_free_space_at_t0_gb": 90,
+    "alert_usage_fraction": 0.7,
+    "hard_stop_usage_fraction": 0.85,
+    "backup_or_export_path_required_before_t0": true
+  },
+  "basis": {
+    "measured_estimated_mb_per_day": 828.5,
+    "estimated_gb_per_year": 302.4,
+    "phase8i_minimum_calendar_days": 60,
+    "approx_60_day_storage_gb_before_headroom": 49.7,
+    "reason": "The existing 5 GB shadow-evidence volume is suitable for PREFLIGHT only and is not eligible for PHASE8H_EPOCH_V1."
+  },
+  "t0_gate": {
+    "env": "PROSPECTIVE_STORAGE_READY",
+    "required_value": "true",
+    "default": "false",
+    "must_be_verified_after_provisioning": true
+  }
+}
