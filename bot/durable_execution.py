@@ -265,6 +265,13 @@ async def restore_engine_state(engine) -> bool:
             if not isinstance(state, dict) or state.get("version") != 1:
                 raise ValueError("unsupported order registry schema")
             engine.orders.restore(state.get("orders"))
+            identity_hook = getattr(
+                getattr(engine, "client", None),
+                "rehydrate_order_identity_maps",
+                None,
+            )
+            if callable(identity_hook):
+                identity_hook(engine.orders.snapshot())
             log.info(
                 "[DURABLE_ORDER] restored orders=%s pending=%s",
                 len(engine.orders), len(engine.orders.pending_orders()),
