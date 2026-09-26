@@ -18,6 +18,7 @@ def install() -> None:
         return
 
     from bot import pilot_release_control as _pilot_release_control
+    from bot import exchange as _exchange
     from bot import shadow_startup_logging as _shadow_startup_logging
     _shadow_startup_logging.install_preimport()
 
@@ -107,14 +108,22 @@ def install() -> None:
     # Must precede restart ownership guard installation: that guard captures the
     # current startup loader and validates its reconstructed local quantity.
     _startup_position_unit_hardening.install(TradingEngine, _log)
-    _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
-    _pilot_external_position_guard.install(TradingEngine, _log)
-    _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
-    _kucoin_cross_margin_order.install(_kucoin.KuCoinClient, _log)
-    _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
-    _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
-    _pilot_submission_counter.install(_kucoin.KuCoinClient, _log)
-    _live_execution_fence.install(_kucoin.KuCoinClient, _kucoin, _log)
+    if _exchange.is_kucoin():
+        _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
+        _pilot_external_position_guard.install(TradingEngine, _log)
+        _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
+        _kucoin_cross_margin_order.install(_kucoin.KuCoinClient, _log)
+        _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
+        _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
+    else:
+        _log.warning(
+            "[BINANCE_MIGRATION] kucoin_specific_execution_overlays=SKIPPED "
+            "binance_live_release=false paper_parity=true"
+        )
+    _pilot_submission_counter.install(_exchange.ExchangeClient, _log)
+    _live_execution_fence.install(
+        _exchange.ExchangeClient, _exchange, _log
+    )
     _durable_reconcile_hardening.install(_durable_execution, _order_state, _log)
 
     if _pilot_release_control.live_pilot_release_authorized():
@@ -135,9 +144,15 @@ def install() -> None:
         )
 
     _liquidation_override_guard.install(_log)
-    _kucoin_contract_risk_hardening.install(
-        _kucoin.KuCoinClient, TradingEngine, _score, _liquidation, _log
-    )
+    if _exchange.is_kucoin():
+        _kucoin_contract_risk_hardening.install(
+            _kucoin.KuCoinClient, TradingEngine, _score, _liquidation, _log
+        )
+    else:
+        _log.warning(
+            "[BINANCE_MIGRATION] kucoin_cross_mmr_model=SKIPPED "
+            "binance_live_release=false execution_effect=BLOCK_LIVE_RELEASE"
+        )
     _instrument_readiness_guard.install(_log)
     _viability_fail_closed_hardening.install(TradingEngine, _log)
     _news_context_hardening.install(_log)
@@ -172,7 +187,15 @@ def install() -> None:
     # This wrapper must be immediately inside market_data_integrity so it sees
     # the exact timestamp-prepared series delegated by that outer authority.
     _runtime_truth_hooks.install_analysis_authority_inner(_strategy.Analyzer)
-    _market_data_integrity.install(_kucoin.KuCoinClient, _strategy.Analyzer, _log)
+    if _exchange.is_kucoin():
+        _market_data_integrity.install(
+            _kucoin.KuCoinClient, _strategy.Analyzer, _log
+        )
+    else:
+        _log.info(
+            "[BINANCE_MARKET_DATA] native_kline_parser=true "
+            "kucoin_volume_rewrite=false execution_effect=NONE"
+        )
 
     if _pilot_release_control.live_pilot_release_authorized():
         _legacy_pretrade_advisory.install(TradingEngine, _score, _log)
@@ -183,10 +206,16 @@ def install() -> None:
     # cache observer sees the original parsed KuCoin payload before the
     # integrity wrapper rewrites its activity field, while cache hashes are
     # sampled only after the existing mutation path has completed.
-    _runtime_truth_hooks.install_transport_and_cache(_kucoin.KuCoinClient)
+    if _exchange.is_kucoin():
+        _runtime_truth_hooks.install_transport_and_cache(_kucoin.KuCoinClient)
+    else:
+        _log.info(
+            "[BINANCE_RUNTIME_TRUTH] transport_hook=DEFERRED "
+            "core_stage_truth_preserved=true"
+        )
     _runtime_truth_hooks.install_marketdata_outer(_strategy.Analyzer, TradingEngine)
     _runtime_truth_hooks.install_engine_and_downstream(
-        TradingEngine, _kucoin.KuCoinClient, _score, _nexus_ai
+        TradingEngine, _exchange.ExchangeClient, _score, _nexus_ai
     )
 
     builtins._nexus_runtime_bootstrap_installed = True
