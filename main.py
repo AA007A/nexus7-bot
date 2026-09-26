@@ -166,21 +166,11 @@ async def lifespan(app: FastAPI):
                 # from key/IP/environment problems without logging account data.
                 if "code=-2015" in _auth_error:
                     try:
-                        import hashlib as _hashlib, hmac as _hmac
-                        from urllib.parse import urlencode as _urlencode
                         import aiohttp as _aiohttp
 
                         from bot import binance as _binance_module
                         _key = _binance_module.API_KEY
-                        _secret = _binance_module.API_SECRET
-                        _params = {
-                            "timestamp": int(time.time() * 1000),
-                            "recvWindow": int(os.environ.get("BINANCE_RECV_WINDOW", "5000")),
-                        }
-                        _query = _urlencode(_params)
-                        _params["signature"] = _hmac.new(
-                            _secret.encode(), _query.encode(), _hashlib.sha256
-                        ).hexdigest()
+                        _params = client._signed_params({})
                         _timeout = _aiohttp.ClientTimeout(total=8)
                         async with _aiohttp.ClientSession(timeout=_timeout) as _session:
                             async with _session.get(

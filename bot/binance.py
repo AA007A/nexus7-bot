@@ -14,6 +14,7 @@ Safety:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -28,6 +29,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 import websockets
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from bot.execution_capability import assert_exchange_mutation_allowed
 from bot.logger import log
@@ -46,8 +49,68 @@ def _clean_credential_env(name: str) -> str:
     return cleaned
 
 
+def _read_pem_env(name: str) -> str:
+    raw = os.environ.get(name, "").strip()
+    # Railway variables are often pasted as a single line with literal \\n.
+    if "\\n" in raw and "\n" not in raw:
+        raw = raw.replace("\\n", "\n")
+    return raw
+
+
 API_KEY = _clean_credential_env("BINANCE_API_KEY")
 API_SECRET = _clean_credential_env("BINANCE_API_SECRET")
+SIGNING_METHOD = os.environ.get("BINANCE_SIGNING_METHOD", "hmac").strip().lower()
+ED25519_PRIVATE_KEY_B64 = _clean_credential_env("BINANCE_ED25519_PRIVATE_KEY_B64")
+ED25519_PRIVATE_KEY_PEM = _read_pem_env("BINANCE_ED25519_PRIVATE_KEY")
+_ED25519_PRIVATE_KEY_CACHE: Ed25519PrivateKey | None = None
+
+
+def _load_ed25519_private_key() -> Ed25519PrivateKey:
+    global _ED25519_PRIVATE_KEY_CACHE
+    if _ED25519_PRIVATE_KEY_CACHE is not None:
+        return _ED25519_PRIVATE_KEY_CACHE
+
+    if ED25519_PRIVATE_KEY_B64:
+        try:
+            key_bytes = base64.b64decode(
+                ED25519_PRIVATE_KEY_B64.encode("ascii"), validate=True
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "BINANCE_ED25519_PRIVATE_KEY_INVALID_BASE64"
+            ) from exc
+    elif ED25519_PRIVATE_KEY_PEM:
+        key_bytes = ED25519_PRIVATE_KEY_PEM.encode("utf-8")
+    else:
+        raise RuntimeError("BINANCE_ED25519_PRIVATE_KEY_UNAVAILABLE")
+
+    try:
+        key = load_pem_private_key(key_bytes, password=None)
+    except Exception as exc:
+        raise RuntimeError("BINANCE_ED25519_PRIVATE_KEY_INVALID") from exc
+
+    if not isinstance(key, Ed25519PrivateKey):
+        raise RuntimeError("BINANCE_ED25519_PRIVATE_KEY_NOT_ED25519")
+
+    _ED25519_PRIVATE_KEY_CACHE = key
+    return key
+
+
+def _sign_payload(payload: str) -> str:
+    if SIGNING_METHOD == "hmac":
+        if not API_SECRET:
+            raise RuntimeError("BINANCE_API_SECRET_UNAVAILABLE")
+        return hmac.new(
+            API_SECRET.encode(), payload.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+
+    if SIGNING_METHOD == "ed25519":
+        private_key = _load_ed25519_private_key()
+        signature = private_key.sign(payload.encode("ascii"))
+        return base64.b64encode(signature).decode("ascii")
+
+    raise RuntimeError("BINANCE_SIGNING_METHOD_INVALID")
+
 
 _paper_env = os.environ.get("PAPER_TRADE", "").strip().lower()
 _live_ack = os.environ.get("LIVE_TRADING_CONFIRMED", "").strip()
@@ -176,8 +239,25 @@ class BinanceClient:
             log.info("🔑 Binance API Key configurada (valor redigido)")
         else:
             log.warning("⚠️ BINANCE_API_KEY não configurado")
-        if API_KEY and not API_SECRET:
-            log.error("❌ BINANCE_API_SECRET vazio")
+
+        log.info(
+            "[BINANCE_AUTH] signing_method=%s key_material_redacted=true "
+            "execution_effect=NONE",
+            SIGNING_METHOD,
+        )
+        if SIGNING_METHOD == "hmac" and API_KEY and not API_SECRET:
+            log.error("❌ BINANCE_API_SECRET vazio para signing_method=hmac")
+        elif SIGNING_METHOD == "ed25519" and API_KEY and not (
+            ED25519_PRIVATE_KEY_B64 or ED25519_PRIVATE_KEY_PEM
+        ):
+            log.error(
+                "❌ Binance Ed25519 selecionado sem private key configurada"
+            )
+        elif SIGNING_METHOD not in {"hmac", "ed25519"}:
+            log.error(
+                "❌ BINANCE_SIGNING_METHOD inválido: %s (esperado hmac|ed25519)",
+                SIGNING_METHOD,
+            )
 
     async def _ensure_session(self):
         if self._session is None or self._session.closed:
@@ -193,17 +273,15 @@ class BinanceClient:
             self._last_request_ts = time.monotonic()
 
     def _signed_params(self, params: dict | None = None) -> dict:
-        if not API_KEY or not API_SECRET:
-            raise RuntimeError("BINANCE_CREDENTIALS_UNAVAILABLE")
+        if not API_KEY:
+            raise RuntimeError("BINANCE_API_KEY_UNAVAILABLE")
         out = dict(params or {})
         out.setdefault(
             "recvWindow", int(os.environ.get("BINANCE_RECV_WINDOW", "5000"))
         )
         out["timestamp"] = self._now_ms()
         query = urlencode(out, doseq=True)
-        out["signature"] = hmac.new(
-            API_SECRET.encode(), query.encode(), hashlib.sha256
-        ).hexdigest()
+        out["signature"] = _sign_payload(query)
         return out
 
     async def _request(
