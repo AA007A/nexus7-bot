@@ -157,11 +157,64 @@ async def lifespan(app: FastAPI):
                 # BinanceClient RuntimeError messages contain only HTTP/code/msg;
                 # credential/signature material is never included by _request.
                 _auth_error = str(_e).replace("\n", " ")[:240]
+                _classification = "FUTURES_PRIVATE_REJECTED"
+                _spot_http = None
+                _spot_code = None
+
+                # If Futures returns -2015, run one additional signed READ-ONLY
+                # Spot account probe. This separates a Futures-scope problem
+                # from key/IP/environment problems without logging account data.
+                if "code=-2015" in _auth_error:
+                    try:
+                        import hashlib as _hashlib, hmac as _hmac
+                        from urllib.parse import urlencode as _urlencode
+                        import aiohttp as _aiohttp
+
+                        _key = os.environ.get("BINANCE_API_KEY", "").strip()
+                        _secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+                        _params = {
+                            "timestamp": int(time.time() * 1000),
+                            "recvWindow": int(os.environ.get("BINANCE_RECV_WINDOW", "5000")),
+                        }
+                        _query = _urlencode(_params)
+                        _params["signature"] = _hmac.new(
+                            _secret.encode(), _query.encode(), _hashlib.sha256
+                        ).hexdigest()
+                        _timeout = _aiohttp.ClientTimeout(total=8)
+                        async with _aiohttp.ClientSession(timeout=_timeout) as _session:
+                            async with _session.get(
+                                "https://api.binance.com/api/v3/account",
+                                params=_params,
+                                headers={"X-MBX-APIKEY": _key},
+                            ) as _resp:
+                                _spot_http = _resp.status
+                                try:
+                                    _payload = await _resp.json(content_type=None)
+                                except Exception:
+                                    _payload = {}
+                                if isinstance(_payload, dict):
+                                    _spot_code = _payload.get("code")
+
+                        if _spot_http == 200:
+                            _classification = "FUTURES_PERMISSION_OR_ACCOUNT_SCOPE"
+                        elif _spot_code == -2015:
+                            _classification = "API_KEY_IP_OR_ENVIRONMENT"
+                        elif _spot_code == -1022:
+                            _classification = "API_SECRET_OR_SIGNATURE"
+                        elif _spot_code == -1021:
+                            _classification = "TIMESTAMP_OR_RECV_WINDOW"
+                        else:
+                            _classification = "SPOT_DIAGNOSTIC_INCONCLUSIVE"
+                    except Exception:
+                        _classification = "SPOT_DIAGNOSTIC_FAILED"
+
                 log.warning(
                     "[BINANCE_PRIVATE_AUTH] status=FAIL "
                     "endpoint=/fapi/v3/balance error_type=%s detail=%s "
+                    "classification=%s spot_http=%s spot_code=%s "
                     "values_redacted=true execution_effect=NONE",
-                    type(_e).__name__, _auth_error,
+                    type(_e).__name__, _auth_error, _classification,
+                    _spot_http, _spot_code,
                 )
 
         app.state.ready = True
