@@ -28,7 +28,7 @@ from typing import Dict, Optional, List
 import numpy as np
 
 # Cliente selecionado em bot.exchange; o engine não depende da venue.
-from bot.exchange import ExchangeClient
+from bot.exchange import ExchangeClient, is_binance
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
@@ -554,7 +554,10 @@ class TradingEngine:
                         self._update_daily_pnl()
                         from bot.durable_daily_stop import entries_blocked
                         daily_state_blocked = await entries_blocked(self)
-                        from bot.exchange_accounting_evidence import schedule as schedule_accounting
+                        if is_binance():
+                            from bot.binance_accounting_evidence import schedule as schedule_accounting
+                        else:
+                            from bot.exchange_accounting_evidence import schedule as schedule_accounting
                         schedule_accounting(self)
                     
                         if not self.active or getattr(self, 'entries_paused', False) or self.daily_stopped or daily_state_blocked or not daily_pnl_ok:
