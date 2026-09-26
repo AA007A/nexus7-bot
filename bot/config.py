@@ -86,8 +86,17 @@ class Config:
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
     PORT:      int = int(os.environ.get("PORT", "8000"))
 
-    TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", "")
-    TELEGRAM_CHAT:  str = os.environ.get("TELEGRAM_CHAT", "")
+    # Telegram credential aliases. Keep the canonical names first so
+    # existing deployments are unchanged, while accepting the Railway names
+    # already used by this project.
+    TELEGRAM_TOKEN: str = (
+        os.environ.get("TELEGRAM_TOKEN", "").strip()
+        or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    )
+    TELEGRAM_CHAT: str = (
+        os.environ.get("TELEGRAM_CHAT", "").strip()
+        or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    )
 
     ALLOWED_ORIGINS: list = [
         o.strip()
