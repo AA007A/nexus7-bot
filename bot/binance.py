@@ -241,6 +241,7 @@ class BinanceClient:
         self._order_registry = None
         self._order_id_symbol: dict[str, str] = {}
         self._client_oid_symbol: dict[str, str] = {}
+        self._leverage_bracket_cache: dict[str, tuple[float, dict]] = {}
         self.entries_paused = False
 
         if PAPER_TRADE:
@@ -510,7 +511,86 @@ class BinanceClient:
             "positionMargin": finite("totalPositionInitialMargin", 0),
             "orderMargin": finite("totalOpenOrderInitialMargin", 0),
             "frozenFunds": finite("totalOpenOrderInitialMargin", 0),
+            "maintenanceMargin": finite("totalMaintMargin", 0),
+            "crossWalletBalance": finite(
+                "totalCrossWalletBalance", data.get("totalWalletBalance", 0)
+            ),
+            "crossUnrealisedPNL": finite("totalCrossUnPnl", 0),
+            "walletBalance": finite("totalWalletBalance", 0),
+            "multiAssetsMargin": bool(data.get("multiAssetsMargin", False)),
+            "canTrade": bool(data.get("canTrade", False)),
         }
+
+    async def get_leverage_brackets(self, symbol: str) -> dict:
+        """Return validated user-specific USD-M leverage brackets, cached read-only."""
+        symbol = to_binance(symbol)
+        if not symbol:
+            raise RuntimeError("BINANCE_BRACKET_SYMBOL_INVALID")
+
+        now = time.monotonic()
+        cached = self._leverage_bracket_cache.get(symbol)
+        if cached and now - cached[0] < 300.0:
+            return cached[1]
+
+        data = await self._get(
+            "/fapi/v1/leverageBracket",
+            {"symbol": symbol},
+            auth=True,
+        )
+        row = data[0] if isinstance(data, list) and data else data
+        if not isinstance(row, dict) or str(row.get("symbol", "")).upper() != symbol:
+            raise RuntimeError("BINANCE_LEVERAGE_BRACKET_UNAVAILABLE")
+
+        raw_brackets = row.get("brackets")
+        if not isinstance(raw_brackets, list) or not raw_brackets:
+            raise RuntimeError("BINANCE_LEVERAGE_BRACKET_EMPTY")
+
+        normalized = []
+        previous_floor = -1.0
+        for raw in raw_brackets:
+            if not isinstance(raw, dict):
+                raise RuntimeError("BINANCE_LEVERAGE_BRACKET_INVALID")
+            try:
+                bracket = int(raw.get("bracket"))
+                initial_leverage = int(raw.get("initialLeverage"))
+                floor = float(raw.get("notionalFloor"))
+                cap = float(raw.get("notionalCap"))
+                mmr = float(raw.get("maintMarginRatio"))
+                cum = float(raw.get("cum", 0))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("BINANCE_LEVERAGE_BRACKET_INVALID") from exc
+            values = (floor, cap, mmr, cum)
+            if (
+                bracket <= 0
+                or initial_leverage <= 0
+                or any(not math.isfinite(value) for value in values)
+                or floor < 0
+                or cap <= floor
+                or not 0 < mmr < 1
+                or cum < 0
+                or floor < previous_floor
+            ):
+                raise RuntimeError("BINANCE_LEVERAGE_BRACKET_INVALID")
+            normalized.append(
+                {
+                    "bracket": bracket,
+                    "initialLeverage": initial_leverage,
+                    "notionalFloor": floor,
+                    "notionalCap": cap,
+                    "maintMarginRatio": mmr,
+                    "cum": cum,
+                }
+            )
+            previous_floor = floor
+
+        result = {
+            "symbol": symbol,
+            "notionalCoef": row.get("notionalCoef"),
+            "brackets": normalized,
+            "source": "BINANCE_FAPI_LEVERAGE_BRACKET",
+        }
+        self._leverage_bracket_cache[symbol] = (now, result)
+        return result
 
     async def load_instruments(self):
         if not self._time_synced:
