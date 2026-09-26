@@ -465,6 +465,30 @@ class BinanceMigrationTests(unittest.TestCase):
         self.assertEqual(result["orderId"], "12345")
         self.assertTrue(result["recoveredByClientOid"])
 
+    def test_duplicate_client_order_id_reconciles_instead_of_failing_clean(self):
+        """Audit P1-4: -4116 proves an order with this id exists (restart/retry race)."""
+        client = FakeBinance()
+        body = {
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": "0.01",
+            "newClientOrderId": "bgx7-duplicate-id",
+        }
+        existing = {"orderId": "777", "clientOid": "bgx7-duplicate-id",
+                    "symbol": "BTCUSDT", "status": "FILLED"}
+        error = RuntimeError(
+            "Binance POST /fapi/v1/order HTTP 400 code=-4116 msg=ClientOrderId is duplicated."
+        )
+        self.assertTrue(client._ambiguous_order_submission_error(error))
+        with patch.object(client, "_request", AsyncMock(side_effect=error)) as request, \
+                patch.object(client, "_recover_ambiguous_order",
+                             AsyncMock(return_value=existing)) as recover:
+            result = run(client._post("/fapi/v1/order", body, single_attempt=True))
+        request.assert_awaited_once()
+        recover.assert_awaited_once_with("/fapi/v1/order", body)
+        self.assertEqual(result["orderId"], "777")
+
     def test_unresolved_ambiguous_entry_never_requests_blind_resubmission(self):
         client = FakeBinance()
         body = {

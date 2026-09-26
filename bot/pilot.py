@@ -35,6 +35,32 @@ class PilotState:
     blocked_reasons: List[str] = field(default_factory=list)
 
 
+def _venue_credential_blockers() -> List[str]:
+    """Presence/parse check of the ACTIVE venue's credentials; never logs values.
+
+    Previously this always read KuCoin key/secret/passphrase, which on
+    EXCHANGE=binance either blocked every entry or passed on unrelated
+    leftover KuCoin secrets without proving Binance signing material.
+    """
+    from bot import exchange
+
+    if exchange.is_binance():
+        from bot import binance
+
+        try:
+            binance._assert_signing_credentials_available()
+        except Exception as exc:  # noqa: BLE001 - any failure is a fail-closed blocker
+            code = str(exc) if str(exc).startswith("BINANCE_") else type(exc).__name__
+            return [f"1_AUTH: credenciais Binance indisponíveis ({code})"]
+        return []
+
+    from bot.kucoin import API_KEY, API_SECRET, API_PASSPHRASE
+
+    if not (API_KEY and API_SECRET and API_PASSPHRASE):
+        return ["1_AUTH: credenciais KuCoin ausentes"]
+    return []
+
+
 class PilotGuard:
     """Additional fail-closed gates for real pilot execution."""
 
@@ -81,9 +107,7 @@ class PilotGuard:
         """Return pilot blockers; an empty list means the pilot gate passes."""
         r: List[str] = []
         try:
-            from bot.kucoin import API_KEY, API_SECRET, API_PASSPHRASE
-            if not (API_KEY and API_SECRET and API_PASSPHRASE):
-                r.append("1_AUTH: credenciais KuCoin ausentes")
+            r.extend(_venue_credential_blockers())
 
             if os.environ.get("PILOT_ACCOUNT_CONFIRMED", "").strip().lower() != "true":
                 r.append(

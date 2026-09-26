@@ -1,10 +1,12 @@
 """Operator LIVE sizing and explicit risk-override policy.
 
-The controlled LIVE pilot keeps the operator-requested execution geometry:
+The controlled LIVE pilot keeps the operator-requested margin ceiling:
 
-* target initial margin = 50% of freshly authenticated available collateral;
+* operator cap: initial margin <= 50% of freshly authenticated available collateral;
 * leverage is read from the existing configuration (production currently uses 50x);
-* stop-risk sizing remains telemetry under this operator margin policy.
+* the executed quantity is decided by ``final_sizing_invariants``:
+  ``min(stop_risk_qty, operator_margin_cap_qty)`` with RiskManagerV3 as risk
+  authority. The hook installed here is shadowed in a pilot context.
 
 A drawdown breach is fail-closed by default. It may be bypassed only when the
 operator explicitly enables LIVE_RISK_OVERRIDE_APPROVED=true. The override
@@ -300,7 +302,8 @@ def _install_margin_sizing(log) -> None:
             "[PILOT_MARGIN_SIZING] symbol=%s result=PASS available=%.6f "
             "margin_pct=%.2f%% target_margin=%.6f leverage=%.0fx "
             "target_notional=%.6f qty=%.12g actual_margin=%.6f "
-            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy",
+            "stop_risk_qty_advisory=%.12g authority=operator_margin_policy "
+            "superseded_by=final_sizing_invariants",
             symbol,
             available,
             MARGIN_FRACTION * 100.0,
@@ -322,7 +325,8 @@ def install(TradingEngine, log) -> None:
     _install_drawdown_advisory(TradingEngine, log)
     _install_margin_sizing(log)
     log.critical(
-        "[OPERATOR_RUNTIME_POLICY] installed margin_target=50pct_available "
+        "[OPERATOR_RUNTIME_POLICY] installed margin_cap=50pct_available "
+        "sizing_authority=final_sizing_invariants "
         "leverage=%sx drawdown_default=hard_gate explicit_override_supported=true "
         "override_enabled=%s railway_variables_unchanged=true",
         cfg.LEVERAGE,

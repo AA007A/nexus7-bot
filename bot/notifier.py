@@ -137,6 +137,16 @@ async def online_msg(saldo: float, poder: float, pares: int, max_pos: int) -> st
     )
 
 
+def _venue_label() -> str:
+    """Human label of the active execution venue (never a hard-coded exchange)."""
+    try:
+        from bot import exchange
+
+        return f"{exchange.EXCHANGE_NAME.capitalize()} {exchange.EXCHANGE_PRODUCT}"
+    except Exception:  # noqa: BLE001 - notification text must not raise
+        return "exchange"
+
+
 # ── SINAL DE ENTRADA ──────────────────────────────────────────────
 async def signal_msg(sig) -> str:
     icon = "🟢🚀" if sig.direction == "LONG" else "🔴🩸"
@@ -152,7 +162,7 @@ async def signal_msg(sig) -> str:
         f"🧠 Score:        `{sig.score}/100`\n"
         f"💡 _{sig.reason}_\n"
         f"`{'━'*28}`\n"
-        f"⚡ _Ordem enviada para a KuCoin_"
+        f"⚡ _Ordem enviada para a {_venue_label()}_"
     )
 
 

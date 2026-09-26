@@ -39,6 +39,24 @@ else:
     )
 
 
+def _announce_live_venue() -> None:
+    """Venue-correct LIVE banner for Binance (bot.kucoin prints its own only
+    when KuCoin is the active venue, so each venue is announced exactly once)."""
+    if PAPER_TRADE or EXCHANGE_NAME != "binance":
+        return
+    from bot.logger import log
+
+    log.critical("=" * 62)
+    log.critical(
+        "🔴 OPERAÇÃO REAL ATIVA — ordens serão enviadas à %s %s",
+        EXCHANGE_NAME.capitalize(), EXCHANGE_PRODUCT,
+    )
+    log.critical("=" * 62)
+
+
+_announce_live_venue()
+
+
 def is_binance() -> bool:
     return EXCHANGE_NAME == "binance"
 

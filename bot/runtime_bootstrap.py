@@ -138,22 +138,18 @@ def install() -> None:
     )
     _durable_reconcile_hardening.install(_durable_execution, _order_state, _log)
 
-    if _pilot_release_control.live_pilot_release_authorized():
+    # One contract renders both the release line and the Binance accounting
+    # line, so they can never contradict each other (audit P0-5).
+    from bot import runtime_release_contract as _release_contract
+    _contract = _release_contract.current()
+    if _contract.release_authorized:
         _pilot_live_runtime.install(TradingEngine, _log)
         _pilot_risk_cap_hardening.install(TradingEngine, _log)
         _operational_incident_recovery.install(TradingEngine, _log)
-        _log.critical(
-            "[CONTROLLED_PILOT_RELEASE] authorized=true validation_lock=false "
-            "scope=pilot_only max_positions=2 external_positions=count_and_read_only"
-        )
+        _log.critical(_contract.release_log())
     else:
         _validation_safety_lock.install(_log)
-        _missing = ",".join(_pilot_release_control.missing_release_checks()) or "unknown"
-        _log.warning(
-            "[CONTROLLED_PILOT_RELEASE] authorized=false validation_lock=true "
-            "missing=%s execution_effect=NONE",
-            _missing,
-        )
+        _log.warning(_contract.release_log())
 
     _liquidation_override_guard.install(_log)
     if _exchange.is_kucoin():

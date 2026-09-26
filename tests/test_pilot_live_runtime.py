@@ -239,7 +239,10 @@ class PilotLiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             ok = await engine._refresh_entry_balance()
 
-        self.assertTrue(ok)
+        # The fixture's durable drawdown is 66.3% (>= MAX_DRAWDOWN), so the
+        # pre-dispatch hard gate added by audit P0-7 blocks the entry. The
+        # equity/available semantics under test are unchanged.
+        self.assertFalse(ok)
         self.assertAlmostEqual(engine.risk.balance, 21.5075351411)
         self.assertAlmostEqual(engine._pilot_available_balance, 11.9815151411)
         validate_financial_state(
