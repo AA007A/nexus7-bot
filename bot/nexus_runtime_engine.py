@@ -142,11 +142,14 @@ class TradingEngine(CoreTradingEngine):
             return
 
         risk_pct = float(self._effective_risk_pct())
+        from bot.execution_cost import reusable_snapshot
+
         self.risk.set_plan(
             symbol=sig.symbol,
             entry=float(sig.entry),
             stop=float(sig.sl),
             risk_pct=risk_pct,
+            cost_snapshot=reusable_snapshot(sig),
         )
 
         if getattr(self, "paper_trade", False):

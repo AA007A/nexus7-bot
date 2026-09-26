@@ -107,10 +107,8 @@ class SizingTruthInvariantTests(unittest.TestCase):
         )
 
     def _effective_loss_per_unit(self, adapter, entry, stop):
-        from bot.professional_risk_adapter import TAKER_FEE
-        import os
-        slip = float(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
-        return abs(entry - stop) + entry * float(TAKER_FEE) * 2 + entry * slip
+        plan = adapter._plans[SYMBOL]
+        return abs(entry - stop) + entry * plan.fee_rate() * 2 + entry * plan.slippage()
 
     def test_invariants_across_leverage_matrix(self):
         for leverage in LEVERAGES:

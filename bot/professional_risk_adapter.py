@@ -15,7 +15,7 @@ import os
 from typing import Any
 
 from bot.config import cfg
-from bot.kucoin import TAKER_FEE
+from bot import execution_cost
 from bot.logger import log
 from bot.professional_risk import CapitalState
 from bot.risk_manager_v3 import RiskManagerV3
@@ -26,6 +26,10 @@ class PlannedRisk:
     entry: float
     stop: float
     risk_pct: float
+    # From the candidate's execution_cost snapshot when available.
+    taker_fee: float | None = None
+    slippage_allowance: float | None = None
+    cost_snapshot_id: str = "none"
 
     def validate(self) -> "PlannedRisk":
         values = (self.entry, self.stop, self.risk_pct)
@@ -35,7 +39,19 @@ class PlannedRisk:
             raise ValueError("planned entry/stop geometry is invalid")
         if not 0 < self.risk_pct <= 1:
             raise ValueError("planned risk_pct must be in (0,1]")
+        for cost in (self.taker_fee, self.slippage_allowance):
+            if cost is not None and (not math.isfinite(float(cost)) or not 0 <= cost < 0.05):
+                raise ValueError("planned cost outside [0,0.05)")
         return self
+
+    def fee_rate(self) -> float:
+        """Snapshot fee, else the conservative exchange-aware fallback."""
+        return float(self.taker_fee) if self.taker_fee is not None else execution_cost.fallback_taker_fee()
+
+    def slippage(self) -> float:
+        """Never below the configured stress allowance NEXUS_EXPECTED_SLIPPAGE_PCT."""
+        configured = float(os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001"))
+        return max(configured, float(self.slippage_allowance or 0.0))
 
 
 class ProfessionalRiskAdapter:
@@ -92,11 +108,23 @@ class ProfessionalRiskAdapter:
     def professional_snapshot(self):
         return self._v3.snapshot()
 
-    def set_plan(self, *, symbol: str, entry: float, stop: float, risk_pct: float) -> PlannedRisk:
+    def set_plan(self, *, symbol: str, entry: float, stop: float, risk_pct: float,
+                 cost_snapshot=None) -> PlannedRisk:
         key = str(symbol)
         if not key:
             raise ValueError("symbol is required")
-        plan = PlannedRisk(float(entry), float(stop), float(risk_pct)).validate()
+        if cost_snapshot is not None and getattr(cost_snapshot, "symbol", key) != key:
+            raise ValueError("cost snapshot symbol mismatch")
+        plan = PlannedRisk(
+            float(entry), float(stop), float(risk_pct),
+            taker_fee=None if cost_snapshot is None else float(cost_snapshot.taker_fee),
+            slippage_allowance=(
+                None if cost_snapshot is None else float(cost_snapshot.slippage_allowance)
+            ),
+            cost_snapshot_id=(
+                "none" if cost_snapshot is None else str(cost_snapshot.snapshot_id)
+            ),
+        ).validate()
         self._plans[key] = plan
         return plan
 
@@ -172,9 +200,8 @@ class ProfessionalRiskAdapter:
             if not self._v3.confirmed:
                 raise RuntimeError("capital state invalidated during reconciliation")
 
-            expected_slippage = float(
-                os.environ.get("NEXUS_EXPECTED_SLIPPAGE_PCT", "0.001")
-            )
+            expected_slippage = plan.slippage()
+            fee_rate = plan.fee_rate()
             sizing = self._v3.size_for_stop(
                 symbol=key,
                 entry=float(entry),
@@ -182,16 +209,18 @@ class ProfessionalRiskAdapter:
                 instruments=instruments,
                 risk_pct=effective_risk_pct,
                 leverage=float(cfg.LEVERAGE),
-                fee_rate_per_side=float(TAKER_FEE),
+                fee_rate_per_side=fee_rate,
                 expected_slippage_pct=expected_slippage,
             )
             log.info(
                 "[RISK_V3_CORE] symbol=%s qty=%.12g risk_budget=%.6f "
                 "projected_stop_loss=%.6f stop_distance_pct=%.6f "
-                "required_margin=%.6f binding=%s decision_effect=NONE",
+                "required_margin=%.6f binding=%s taker_bps=%.3f slippage_allowance_bps=%.3f "
+                "cost_snapshot_id=%s cost_purpose=RISK_BUDGET_STRESS decision_effect=NONE",
                 key, sizing.qty, sizing.risk_budget,
                 sizing.projected_stop_loss, sizing.stop_distance_pct,
                 sizing.required_margin, sizing.binding_constraint,
+                fee_rate * 1e4, expected_slippage * 1e4, plan.cost_snapshot_id,
             )
             return float(sizing.qty)
         except Exception as exc:

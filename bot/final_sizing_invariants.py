@@ -153,9 +153,10 @@ def install(engine_module, pilot_cap, log) -> None:
         setup_id = "UNKNOWN"
         try:
             from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            from bot.execution_cost import stress_cost_fraction
             signal = pilot_cap._PILOT_SIGNAL.get()
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            # Conservative ceiling input: max(candidate snapshot, static fallback).
+            cost_fraction, _cost_ref = stress_cost_fraction(signal, symbol)
             setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
             validate(
                 final_qty, price_f, signal.sl, signal.direction, leverage,
