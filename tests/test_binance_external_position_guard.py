@@ -2,10 +2,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from bot import binance_protection_failclosed as protection
 from bot import pilot_external_position_guard as guard
 
 
 class DummyBinanceEngine:
+    async def _open(self, sig, *args, **kwargs):
+        return "open-original"
+
     async def _load_existing_positions(self):
         rows = await self.client.get_positions()
         for row in rows:
@@ -30,6 +34,7 @@ class DummyBinanceEngine:
 class BinanceExternalPositionGuardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.log = Mock()
+        protection.install(DummyBinanceEngine, self.log)
         guard.install(
             DummyBinanceEngine,
             self.log,
