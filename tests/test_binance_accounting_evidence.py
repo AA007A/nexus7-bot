@@ -1,6 +1,6 @@
 import asyncio
 
-import pytest
+import unittest
 
 from bot import binance_accounting_evidence as accounting
 
@@ -70,7 +70,7 @@ def test_collect_user_trades_refuses_unproven_full_page():
         for i in range(1000)
     ]
     client = FakeClient({"/fapi/v1/userTrades": rows})
-    with pytest.raises(ValueError, match="coverage"):
+    with unittest.TestCase().assertRaisesRegex(ValueError, "coverage"):
         run(accounting.collect_user_trades(client, "BTCUSDT", 1000, 2000))
 
 
@@ -126,7 +126,7 @@ def test_durable_order_with_non_bgx_client_id_fails_closed():
 
 def test_invalid_window_over_seven_days_fails_closed():
     client = FakeClient({"/fapi/v1/userTrades": []})
-    with pytest.raises(ValueError, match="window"):
+    with unittest.TestCase().assertRaisesRegex(ValueError, "window"):
         run(accounting.collect_user_trades(
             client, "BTCUSDT", 1000, 1000 + 7 * 86400000 + 1
         ))
