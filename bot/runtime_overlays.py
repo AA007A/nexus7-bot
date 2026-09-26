@@ -108,7 +108,8 @@ def install(TradingEngine, log) -> None:
         log.warning(
             "[BINANCE_ACCOUNTING] adapter=OBSERVATION_ONLY source=BINANCE_USDM "
             "user_trades=true income=true order_identity=true "
-            "lifecycle_reconstruction=false live_accounting_authority=false "
+            "lifecycle_reconstruction=true live_accounting_authority=false "
+            "release_state=AWAITING_CONTROLLED_LIVE_EVIDENCE "
             "paper_decisions_unchanged=true execution_effect=BLOCK_LIVE_RELEASE"
         )
     regime_transition.install(nexus_ai, log)
