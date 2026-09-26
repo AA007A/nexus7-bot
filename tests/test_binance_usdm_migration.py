@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -198,6 +200,30 @@ class BinanceMigrationTests(unittest.TestCase):
                     run(client.set_leverage("BTCUSDT", 10))
         finally:
             bn.PAPER_TRADE = old
+
+    def test_binance_hardened_entrypoint_imports_in_paper(self):
+        env = os.environ.copy()
+        env.update({
+            "EXCHANGE": "binance",
+            "PAPER_TRADE": "true",
+            "PAPER_INITIAL_BALANCE": "1000",
+            "BINANCE_LIVE_MIGRATION_READY": "false",
+            "LIVE_TRADING_CONFIRMED": "",
+            "REAL_TRADING_PILOT": "false",
+            "LOG_LEVEL": "ERROR",
+        })
+        proc = subprocess.run(
+            [sys.executable, "-c", "import main_hardened; print('binance-paper-import-ok')"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            msg=(proc.stdout + "\n" + proc.stderr)[-5000:],
+        )
+        self.assertIn("binance-paper-import-ok", proc.stdout)
 
     def test_funding_open_interest_and_ticker_normalization(self):
         client = FakeBinance({
