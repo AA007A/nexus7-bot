@@ -110,15 +110,22 @@ def install() -> None:
     _startup_position_unit_hardening.install(TradingEngine, _log)
     if _exchange.is_kucoin():
         _prelive_protection_failclosed.install(TradingEngine, _kucoin, _log)
-        _pilot_external_position_guard.install(TradingEngine, _log)
+        _pilot_external_position_guard.install(
+            TradingEngine, _log, exchange_name="kucoin"
+        )
         _kucoin_price_tick_hardening.install(_kucoin.KuCoinClient, _log)
         _kucoin_cross_margin_order.install(_kucoin.KuCoinClient, _log)
         _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
         _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
     else:
-        _log.warning(
-            "[BINANCE_MIGRATION] kucoin_specific_execution_overlays=SKIPPED "
-            "binance_live_release=false paper_parity=true"
+        _pilot_external_position_guard.install(
+            TradingEngine, _log, exchange_name="binance"
+        )
+        _log.info(
+            "[BINANCE_MIGRATION] kucoin_price_tick=NOT_NEEDED_NATIVE_DECIMAL "
+            "kucoin_fill_normalization=NOT_NEEDED_BASE_ASSET_NATIVE "
+            "external_position_guard=INSTALLED "
+            "execution_effect=NONE"
         )
     _pilot_submission_counter.install(_exchange.ExchangeClient, _log)
     _live_execution_fence.install(
