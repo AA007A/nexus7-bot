@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import time
+from decimal import Decimal, InvalidOperation
 
 from bot import database as db
 from bot.logger import log
@@ -36,6 +37,12 @@ _ORDER_FIELDS = (
     "symbol", "orderId", "clientOrderId", "status", "side", "positionSide",
     "type", "origType", "reduceOnly", "closePosition", "executedQty",
     "avgPrice", "time", "updateTime",
+)
+_ALGO_FIELDS = (
+    "symbol", "algoId", "clientAlgoId", "algoType", "orderType", "side",
+    "positionSide", "quantity", "algoStatus", "actualOrderId", "actualPrice",
+    "triggerPrice", "closePosition", "reduceOnly", "createTime", "updateTime",
+    "triggerTime",
 )
 
 
@@ -129,6 +136,44 @@ async def collect_orders(client, symbol: str, start_ms: int, end_ms: int) -> lis
         token = str(raw["orderId"])
         if token in rows and rows[token] != safe:
             raise ValueError("conflicting duplicate order")
+        rows[token] = safe
+    return list(rows.values())
+
+
+async def collect_algo_orders(client, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+    """Collect Binance conditional-order history for a <=7d symbol window."""
+    start_ms, end_ms = _bounded_window(start_ms, end_ms, 7 * 86400000)
+    symbol = str(symbol or "").upper()
+    if not symbol:
+        raise ValueError("symbol required")
+
+    data = await client._get(
+        "/fapi/v1/allAlgoOrders",
+        params={
+            "symbol": symbol,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": 1000,
+        },
+        auth=True,
+    )
+    if not isinstance(data, list):
+        raise ValueError("allAlgoOrders response unconfirmed")
+    if len(data) >= 1000:
+        raise ValueError("allAlgoOrders coverage exceeds single-window budget")
+
+    rows: dict[str, dict] = {}
+    for raw in data:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid allAlgoOrders row")
+        if str(raw.get("symbol") or "").upper() != symbol:
+            raise ValueError("allAlgoOrders symbol mismatch")
+        if raw.get("algoId") is None:
+            raise ValueError("allAlgoOrders identity missing")
+        safe = _safe_row(raw, _ALGO_FIELDS)
+        token = str(raw["algoId"])
+        if token in rows and rows[token] != safe:
+            raise ValueError("conflicting duplicate algo order")
         rows[token] = safe
     return list(rows.values())
 
@@ -247,6 +292,315 @@ async def _classify_origin(client, receipt, registry, row):
     return "UNKNOWN_UNATTRIBUTED", "BINANCE_POSITION_LIFECYCLE_NOT_YET_RECONSTRUCTED"
 
 
+def _decimal(value, field: str) -> Decimal:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid {field}") from exc
+    if not number.is_finite():
+        raise ValueError(f"nonfinite {field}")
+    return number
+
+
+def _registry_map(registry) -> dict[str, dict]:
+    result = {}
+    for row in registry if isinstance(registry, list) else []:
+        if not isinstance(row, dict) or not row.get("order_id"):
+            continue
+        token = str(row["order_id"])
+        if token in result and result[token] != row:
+            raise ValueError("conflicting durable order identity")
+        result[token] = row
+    return result
+
+
+def _algo_actual_order_map(algo_orders) -> dict[str, dict]:
+    result = {}
+    for row in algo_orders if isinstance(algo_orders, list) else []:
+        if not isinstance(row, dict):
+            raise ValueError("invalid algo order evidence")
+        actual = str(row.get("actualOrderId") or "")
+        if not actual:
+            continue
+        if actual in result and result[actual] != row:
+            raise ValueError("conflicting algo actualOrderId")
+        result[actual] = row
+    return result
+
+
+def _lineage_valid(lineage: dict | None, opening: dict, symbol: str, side: str, first_fill_ms: int) -> bool:
+    if not isinstance(lineage, dict) or lineage.get("version") != 2:
+        return False
+    order_id = str(opening.get("order_id") or "")
+    if str(lineage.get("order_id") or "") != order_id:
+        return False
+    if str(lineage.get("symbol") or "").upper().removesuffix("M") != symbol.upper().removesuffix("M"):
+        return False
+    wanted_direction = "LONG" if side == "BUY" else "SHORT"
+    if str(lineage.get("direction") or "").upper() != wanted_direction:
+        return False
+    try:
+        created_ms = int(lineage.get("order_created_at_ms", 0) or 0)
+        captured_ms = int(lineage.get("captured_at_ms", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if created_ms <= 0 or captured_ms <= 0 or captured_ms < created_ms:
+        return False
+    return abs(first_fill_ms - created_ms) <= 120000
+
+
+def _bgx_close_identity(
+    order_id: str,
+    side: str,
+    symbol: str,
+    order_map: dict[str, dict],
+    algo_actual_map: dict[str, dict],
+    registry_map: dict[str, dict],
+) -> tuple[bool, str]:
+    order = order_map.get(order_id)
+    if isinstance(order, dict):
+        if str(order.get("symbol") or "").upper() != symbol:
+            return False, "CLOSE_ORDER_SYMBOL_MISMATCH"
+        if str(order.get("side") or "").upper() != side:
+            return False, "CLOSE_ORDER_SIDE_MISMATCH"
+        client_oid = str(order.get("clientOrderId") or "")
+        durable = registry_map.get(order_id)
+        if client_oid.startswith("bgx7-") and isinstance(durable, dict):
+            intent = str(durable.get("exposure_intent") or "").upper()
+            reduce_only = bool(durable.get("reduce_only", False))
+            if intent == "REDUCE" or reduce_only:
+                return True, "BGX_DURABLE_REDUCE_ORDER"
+
+    algo = algo_actual_map.get(order_id)
+    if isinstance(algo, dict):
+        if str(algo.get("symbol") or "").upper() != symbol:
+            return False, "ALGO_CLOSE_SYMBOL_MISMATCH"
+        if str(algo.get("side") or "").upper() != side:
+            return False, "ALGO_CLOSE_SIDE_MISMATCH"
+        if str(algo.get("positionSide") or "BOTH").upper() != "BOTH":
+            return False, "ALGO_HEDGE_MODE_UNSUPPORTED"
+        client_algo_id = str(algo.get("clientAlgoId") or "")
+        if client_algo_id.startswith("bgx7-"):
+            return True, "BGX_ALGO_CLOSE_ORDER"
+
+    return False, "CLOSE_ORDER_OWNERSHIP_UNCONFIRMED"
+
+
+def reconstruct_bgx_lifecycles(
+    trades: list[dict],
+    orders: list[dict],
+    algo_orders: list[dict],
+    registry: list[dict],
+    lineage_by_order_id: dict[str, dict],
+) -> list[dict]:
+    """Reconstruct only provably flat->BGX->flat one-way lifecycles.
+
+    The function is intentionally strict. It rejects mixed ownership, a
+    non-zero pre-entry exposure, hedge-mode fills, reversals through zero,
+    non-USDT commissions, missing durable lineage, or incomplete closes.
+    """
+    order_map = {
+        str(row.get("orderId")): row
+        for row in orders if isinstance(row, dict) and row.get("orderId") is not None
+    }
+    durable = _registry_map(registry)
+    algo_actual = _algo_actual_order_map(algo_orders)
+    ordered = sorted(
+        [row for row in trades if isinstance(row, dict)],
+        key=lambda row: (int(row.get("time", 0) or 0), int(row.get("id", 0) or 0)),
+    )
+    result = []
+    consumed_trade_ids: set[str] = set()
+
+    for opening_id, opening in durable.items():
+        if str(opening.get("exposure_intent") or "").upper() != "INCREASE":
+            continue
+        if bool(opening.get("reduce_only", False)):
+            continue
+        if str(opening.get("client_oid") or "").startswith("bgx7-") is False:
+            continue
+        try:
+            previous_qty = _decimal(opening.get("previous_position_qty"), "previous_position_qty")
+        except ValueError:
+            continue
+        if previous_qty != 0:
+            continue
+
+        open_order = order_map.get(opening_id)
+        if not isinstance(open_order, dict):
+            continue
+        symbol = str(open_order.get("symbol") or "").upper()
+        side = str(open_order.get("side") or "").upper()
+        if not symbol or side not in {"BUY", "SELL"}:
+            continue
+        if str(open_order.get("clientOrderId") or "") != str(opening.get("client_oid") or ""):
+            continue
+        if str(open_order.get("positionSide") or "BOTH").upper() != "BOTH":
+            continue
+
+        anchor_fills = [
+            row for row in ordered
+            if str(row.get("orderId") or "") == opening_id
+            and str(row.get("symbol") or "").upper() == symbol
+        ]
+        if not anchor_fills:
+            continue
+        first_fill_ms = int(anchor_fills[0].get("time", 0) or 0)
+        lineage = lineage_by_order_id.get(opening_id)
+        if not _lineage_valid(lineage, opening, symbol, side, first_fill_ms):
+            continue
+
+        balance = Decimal("0")
+        opening_fills = []
+        closing_fills = []
+        close_reasons = set()
+        failed = False
+        started = False
+
+        for fill in ordered:
+            trade_id = str(fill.get("id") or "")
+            if not trade_id or trade_id in consumed_trade_ids:
+                continue
+            if str(fill.get("symbol") or "").upper() != symbol:
+                continue
+            fill_time = int(fill.get("time", 0) or 0)
+            if fill_time < first_fill_ms:
+                continue
+            if str(fill.get("positionSide") or "BOTH").upper() != "BOTH":
+                failed = True
+                break
+
+            fill_side = str(fill.get("side") or "").upper()
+            if fill_side not in {"BUY", "SELL"}:
+                failed = True
+                break
+            try:
+                qty = _decimal(fill.get("qty"), "fill qty")
+                price = _decimal(fill.get("price"), "fill price")
+                realized = _decimal(fill.get("realizedPnl", "0"), "realizedPnl")
+                commission = _decimal(fill.get("commission", "0"), "commission")
+            except ValueError:
+                failed = True
+                break
+            if qty <= 0 or price <= 0 or commission < 0:
+                failed = True
+                break
+            if str(fill.get("commissionAsset") or "USDT").upper() != "USDT":
+                failed = True
+                break
+
+            fill_order_id = str(fill.get("orderId") or "")
+            if fill_side == side:
+                if fill_order_id != opening_id:
+                    if started:
+                        failed = True
+                        break
+                    continue
+                if realized != 0:
+                    failed = True
+                    break
+                started = True
+                balance += qty
+                opening_fills.append(fill)
+                continue
+
+            if not started:
+                continue
+            owned_close, close_reason = _bgx_close_identity(
+                fill_order_id, fill_side, symbol, order_map, algo_actual, durable
+            )
+            if not owned_close:
+                failed = True
+                break
+            close_reasons.add(close_reason)
+            balance -= qty
+            closing_fills.append(fill)
+            if balance < 0:
+                failed = True
+                break
+            if balance == 0:
+                break
+
+        if failed or not opening_fills or not closing_fills or balance != 0:
+            continue
+
+        open_qty = sum((_decimal(x["qty"], "open qty") for x in opening_fills), Decimal("0"))
+        close_qty = sum((_decimal(x["qty"], "close qty") for x in closing_fills), Decimal("0"))
+        if open_qty <= 0 or open_qty != close_qty:
+            continue
+        open_vwap = sum(
+            (_decimal(x["qty"], "open qty") * _decimal(x["price"], "open price") for x in opening_fills),
+            Decimal("0"),
+        ) / open_qty
+        close_vwap = sum(
+            (_decimal(x["qty"], "close qty") * _decimal(x["price"], "close price") for x in closing_fills),
+            Decimal("0"),
+        ) / close_qty
+        commission_total = sum(
+            (_decimal(x.get("commission", "0"), "commission") for x in opening_fills + closing_fills),
+            Decimal("0"),
+        )
+        realized_total = sum(
+            (_decimal(x.get("realizedPnl", "0"), "realizedPnl") for x in opening_fills + closing_fills),
+            Decimal("0"),
+        )
+        confirmed_net = realized_total - commission_total
+        last_trade_id = str(closing_fills[-1].get("id"))
+        close_id = f"BINANCE:{symbol}:{opening_id}:{last_trade_id}"
+        row = {
+            "closeId": close_id,
+            "symbol": symbol,
+            "settleCurrency": "USDT",
+            "side": "LONG" if side == "BUY" else "SHORT",
+            "pnl": str(confirmed_net),
+            "realizedPnl": str(realized_total),
+            "tradeFee": str(commission_total),
+            "openTime": int(opening_fills[0]["time"]),
+            "closeTime": int(closing_fills[-1]["time"]),
+            "openPrice": str(open_vwap),
+            "closePrice": str(close_vwap),
+        }
+        receipt = {
+            "source": "BINANCE_USDM_LIFECYCLE",
+            "ownership": "BGX_ORDER_IDS",
+            "fills_reconciled": True,
+            "lineage_reconciled": True,
+            "opening_order_ids": [opening_id],
+            "closing_order_ids": sorted({str(x["orderId"]) for x in closing_fills}),
+            "fills": opening_fills + closing_fills,
+            "lineage": lineage,
+            "close_identity": sorted(close_reasons),
+            "funding_included": False,
+            "accounting_authority": False,
+        }
+        consumed_trade_ids.update(str(x["id"]) for x in opening_fills + closing_fills)
+        result.append({"row": row, "receipt": receipt})
+
+    return sorted(result, key=lambda item: int(item["row"]["closeTime"]))
+
+
+async def _load_lineage_map(registry: list[dict]) -> dict[str, dict]:
+    from bot.post_trade_forensics import _lineage_key
+
+    result = {}
+    for row in registry:
+        if not isinstance(row, dict) or not row.get("order_id"):
+            continue
+        if str(row.get("exposure_intent") or "").upper() != "INCREASE":
+            continue
+        order_id = str(row["order_id"])
+        raw = await db.load_key_value(_lineage_key(order_id), strict=True)
+        if not raw:
+            continue
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            result[order_id] = value
+    return result
+
+
 async def _load_registry() -> list[dict]:
     from bot.durable_execution import _ORDER_KEY
     raw = await db.load_key_value(_ORDER_KEY, strict=True)
@@ -295,11 +649,31 @@ async def audit(engine):
             "manual_external": 0,
             "unknown": 0,
         }
+        lineage_map = await _load_lineage_map(registry)
+        lifecycle_candidates = {
+            str(row.get("symbol") or "").upper().removesuffix("M")
+            for row in registry
+            if isinstance(row, dict)
+            and str(row.get("client_oid") or "").startswith("bgx7-")
+            and str(row.get("order_id") or "").isdigit()
+            and str(row.get("exposure_intent") or "").upper() == "INCREASE"
+            and row.get("previous_position_qty") is not None
+        }
+        authoritative_cycles = 0
         for symbol in sorted(symbols)[:20]:
-            trades, orders = await asyncio.gather(
-                collect_user_trades(engine.client, symbol, start_ms, end_ms),
-                collect_orders(engine.client, symbol, start_ms, end_ms),
-            )
+            need_lifecycle = symbol in lifecycle_candidates
+            if need_lifecycle:
+                trades, orders, algo_orders = await asyncio.gather(
+                    collect_user_trades(engine.client, symbol, start_ms, end_ms),
+                    collect_orders(engine.client, symbol, start_ms, end_ms),
+                    collect_algo_orders(engine.client, symbol, start_ms, end_ms),
+                )
+            else:
+                trades, orders = await asyncio.gather(
+                    collect_user_trades(engine.client, symbol, start_ms, end_ms),
+                    collect_orders(engine.client, symbol, start_ms, end_ms),
+                )
+                algo_orders = []
             order_map = {str(row["orderId"]): row for row in orders}
             for trade in trades:
                 order = order_map.get(str(trade["orderId"]))
@@ -326,12 +700,38 @@ async def audit(engine):
                 else:
                     counts["unknown"] += 1
 
+            if need_lifecycle:
+                lifecycles = reconstruct_bgx_lifecycles(
+                    trades, orders, algo_orders, registry, lineage_map
+                )
+                for item in lifecycles:
+                    row = item["row"]
+                    receipt = item["receipt"]
+                    token = str(row["closeId"])
+                    key = "binance:accounting:lifecycle:" + hashlib.sha256(
+                        token.encode()
+                    ).hexdigest()[:32]
+                    encoded = json.dumps(
+                        {"row": row, "receipt": receipt},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    previous = await db.load_key_value(key, strict=True)
+                    if previous != encoded:
+                        if await db.save_key_value(key, encoded, strict=True) is not True:
+                            raise db.PersistenceError(
+                                "Binance lifecycle evidence persistence unconfirmed"
+                            )
+                    authoritative_cycles += 1
+
         log.warning(
             "[BINANCE_ACCOUNTING_EVIDENCE] status=PASS symbols=%s trades=%s "
             "bgx_order_evidence=%s manual_external=%s unknown=%s "
-            "authority=false lifecycle_reconstruction=false execution_effect=NONE",
+            "authority=false lifecycle_reconstruction=true authoritative_cycles=%s "
+            "release_state=AWAITING_CONTROLLED_LIVE_EVIDENCE execution_effect=NONE",
             len(symbols), counts["trades"], counts["bgx_order_evidence"],
-            counts["manual_external"], counts["unknown"],
+            counts["manual_external"], counts["unknown"], authoritative_cycles,
         )
         return counts
     except Exception as exc:
