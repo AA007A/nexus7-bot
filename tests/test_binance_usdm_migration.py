@@ -327,6 +327,29 @@ class BinanceMigrationTests(unittest.TestCase):
             bn.API_SECRET = old_secret
             bn.SIGNING_METHOD = old_method
 
+    def test_durable_order_identity_maps_rehydrate_after_restart(self):
+        client = FakeBinance()
+        client._instruments = {
+            "BTCUSDT": {
+                "multiplier": 1.0,
+                "minQty": 0.001,
+                "qtyStep": 0.001,
+                "tickSize": 0.1,
+            }
+        }
+        restored = client.rehydrate_order_identity_maps([
+            {
+                "symbol": "BTCUSDT",
+                "client_oid": "bgx7-entry-restart",
+                "order_id": "12345",
+            }
+        ])
+        self.assertEqual(restored, 1)
+        self.assertEqual(
+            client._client_oid_symbol["bgx7-entry-restart"], "BTCUSDT"
+        )
+        self.assertEqual(client._order_id_symbol["12345"], "BTCUSDT")
+
     def test_binance_hardened_entrypoint_imports_in_paper(self):
         env = os.environ.copy()
         env.update({
