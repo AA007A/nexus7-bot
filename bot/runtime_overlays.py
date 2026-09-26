@@ -30,6 +30,7 @@ def install(TradingEngine, log) -> None:
     from bot import exchange as exchange_runtime
     from bot import cross_geometry_target_policy as cross_target_policy
     from bot import cross_portfolio_stress
+    from bot import binance_cross_portfolio_stress
     from bot import operator_runtime_policy
     from bot import final_sizing_invariants
     from bot import pilot_risk_cap_hardening as pilot_cap
@@ -111,7 +112,10 @@ def install(TradingEngine, log) -> None:
             "paper_decisions_unchanged=true execution_effect=BLOCK_LIVE_RELEASE"
         )
     regime_transition.install(nexus_ai, log)
-    cross_portfolio_stress.install(TradingEngine, log)
+    if exchange_runtime.is_binance():
+        binance_cross_portfolio_stress.install(TradingEngine, log)
+    else:
+        cross_portfolio_stress.install(TradingEngine, log)
 
     runtime_contract_guard.install(
         TradingEngine, PilotGuard, nexus_ai, core_engine, log
