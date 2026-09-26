@@ -57,6 +57,7 @@ def install(TradingEngine, log) -> None:
     from bot import market_risk_runtime
     from bot import market_risk_coverage_observability
     from bot import entry_latency_observability
+    from bot import market_radar
     from bot import runtime_contract_guard
     from bot.pilot import PilotGuard
     ExchangeClient = exchange_runtime.ExchangeClient
@@ -91,6 +92,7 @@ def install(TradingEngine, log) -> None:
     daily_stop_override_telemetry.install(core_engine, log)
     market_risk_coverage_observability.install(market_risk_runtime, log)
     entry_latency_observability.install(log)
+    market_radar.install(log)
     restart_opening_order_lineage.install(TradingEngine, log)
     post_trade_forensics.install(
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log

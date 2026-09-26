@@ -22,3 +22,4 @@ one that actually executes. Anything not listed as the owner is diagnostics.
 | Protection | `binance_protection_failclosed` + `conditional_stop_*` | unconfirmed protection → repair+read-back → emergency close after fill/flat confirmation; external positions never touched. |
 | Accounting | `binance_accounting_evidence` | evidence only, no execution effect. |
 | Notifications | `notifier` / `nexus_terminal_notifications` (fire-and-forget, dedupe/cooldown) | never alters trading state. |
+| Market Radar (Telegram panel) | `market_radar` (passive log observer; started/cancelled by the `TradingEngine.run` owner) | observability only: never changes score, NEXUS, risk, sizing or orders; stale entries expire to SCANNING; configurable via `MARKET_RADAR_ENABLED`, `MARKET_RADAR_INTERVAL_S` (default 1800, min 300), `MARKET_RADAR_STALE_S` (default 900), `MARKET_RADAR_FIRST_DELAY_S` (default 300). |
