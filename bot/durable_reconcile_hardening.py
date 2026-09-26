@@ -35,7 +35,11 @@ async def _prove_absent_and_flat(engine, order, log) -> bool:
             return False
         if any(abs(float((p or {}).get("size", 0) or 0)) > 0 for p in positions if isinstance(p, dict)):
             return False
-        active = await engine.client._get("/api/v1/orders", {"status": "active"}, auth=True)
+        open_orders = getattr(engine.client, "get_open_orders", None)
+        if callable(open_orders):
+            active = await open_orders()
+        else:
+            active = await engine.client._get("/api/v1/orders", {"status": "active"}, auth=True)
         items = _active_items(active)
         if items is None or items:
             return False

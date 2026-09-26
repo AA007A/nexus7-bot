@@ -745,9 +745,14 @@ async def dashboard():
 # ── Backtest manual ───────────────────────────────────────────────
 @app.post("/api/backtest", dependencies=[Depends(_require_auth)])
 async def trigger_backtest():
+    # weekly_backtest_loop never returns; each call used to start another
+    # permanent loop task. Keep at most one alive per process.
+    running = getattr(app.state, "backtest_task", None)
+    if running is not None and not running.done():
+        return {"message": "Backtest já em execução", "started": False}
     from bot import backtest as bt
-    asyncio.create_task(bt.weekly_backtest_loop(app.state.client))
-    return {"message": "Backtest iniciado"}
+    app.state.backtest_task = asyncio.create_task(bt.weekly_backtest_loop(app.state.client))
+    return {"message": "Backtest iniciado", "started": True}
 
 
 if __name__ == "__main__":

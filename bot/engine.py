@@ -787,14 +787,14 @@ class TradingEngine:
     def _effective_score(self) -> int:
         """Score mínimo efetivo — aumenta após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_SCORE  # mais seletivo (88)
-        return cfg.MIN_ENTRY_SCORE        # padrão (60)
+            return cfg.POST_TARGET_SCORE  # mais seletivo (default 72)
+        return cfg.MIN_ENTRY_SCORE        # padrão (default 60)
 
     def _effective_risk_pct(self) -> float:
         """Risco por trade — reduz após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_RISK   # conservador (15%)
-        return cfg.MAX_RISK_PCT           # padrão (30%)
+            return cfg.POST_TARGET_RISK   # conservador (default 0.5%)
+        return cfg.MAX_RISK_PCT           # padrão (default 1%)
 
     # ── Connect ────────────────────────────────────────────────
     async def _startup_risk_balance(self) -> float:
