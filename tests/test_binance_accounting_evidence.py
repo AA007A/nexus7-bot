@@ -130,3 +130,183 @@ def test_invalid_window_over_seven_days_fails_closed():
         run(accounting.collect_user_trades(
             client, "BTCUSDT", 1000, 1000 + 7 * 86400000 + 1
         ))
+
+def _entry_registry(order_id=11):
+    return {
+        "order_id": str(order_id),
+        "client_oid": "bgx7-entry",
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "state": "FILLED",
+        "reduce_only": False,
+        "exposure_intent": "INCREASE",
+        "previous_position_qty": 0.0,
+    }
+
+
+def _close_registry(order_id=22):
+    return {
+        "order_id": str(order_id),
+        "client_oid": "bgx7-close",
+        "symbol": "BTCUSDT",
+        "side": "Sell",
+        "state": "FILLED",
+        "reduce_only": True,
+        "exposure_intent": "REDUCE",
+        "previous_position_qty": 1.0,
+    }
+
+
+def _lineage(order_id=11):
+    return {
+        "version": 2,
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "order_id": str(order_id),
+        "client_oid": "bgx7-entry",
+        "order_created_at_ms": 900,
+        "captured_at_ms": 1100,
+    }
+
+
+def _orders():
+    return [
+        {
+            "symbol": "BTCUSDT", "orderId": 11,
+            "clientOrderId": "bgx7-entry", "side": "BUY",
+            "positionSide": "BOTH", "status": "FILLED",
+        },
+        {
+            "symbol": "BTCUSDT", "orderId": 22,
+            "clientOrderId": "bgx7-close", "side": "SELL",
+            "positionSide": "BOTH", "status": "FILLED",
+            "reduceOnly": True,
+        },
+    ]
+
+
+def _open_fills():
+    return [
+        {
+            "symbol": "BTCUSDT", "id": 1, "orderId": 11, "side": "BUY",
+            "price": "100", "qty": "0.4", "realizedPnl": "0",
+            "commission": "0.02", "commissionAsset": "USDT",
+            "time": 1000, "positionSide": "BOTH",
+        },
+        {
+            "symbol": "BTCUSDT", "id": 2, "orderId": 11, "side": "BUY",
+            "price": "101", "qty": "0.6", "realizedPnl": "0",
+            "commission": "0.03", "commissionAsset": "USDT",
+            "time": 1001, "positionSide": "BOTH",
+        },
+    ]
+
+
+def test_collect_algo_orders_requires_identity_and_preserves_actual_order_link():
+    client = FakeClient({
+        "/fapi/v1/allAlgoOrders": [{
+            "symbol": "BTCUSDT", "algoId": 9, "clientAlgoId": "bgx7-stop",
+            "algoType": "CONDITIONAL", "orderType": "STOP_MARKET",
+            "side": "SELL", "positionSide": "BOTH", "quantity": "0",
+            "algoStatus": "FINISHED", "actualOrderId": "33",
+            "actualPrice": "95", "triggerPrice": "95", "closePosition": True,
+            "reduceOnly": False, "createTime": 1200, "updateTime": 1500,
+            "triggerTime": 1490,
+        }]
+    })
+    rows = run(accounting.collect_algo_orders(client, "BTCUSDT", 1000, 2000))
+    assert rows[0]["clientAlgoId"] == "bgx7-stop"
+    assert rows[0]["actualOrderId"] == "33"
+    assert client.calls[0][0] == "/fapi/v1/allAlgoOrders"
+    assert client.calls[0][2] is True
+
+
+def test_reconstruct_complete_bgx_lifecycle_from_flat_to_flat():
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()],
+        {"11": _lineage()},
+    )
+    assert len(cycles) == 1
+    row = cycles[0]["row"]
+    receipt = cycles[0]["receipt"]
+    assert row["side"] == "LONG"
+    assert row["openPrice"] == "100.6"
+    assert row["closePrice"] == "110"
+    assert row["tradeFee"] == "0.10"
+    assert row["pnl"] == "9.30"
+    assert receipt["ownership"] == "BGX_ORDER_IDS"
+    assert receipt["fills_reconciled"] is True
+    assert receipt["lineage_reconciled"] is True
+    assert receipt["accounting_authority"] is False
+
+
+def test_reconstruct_partial_close_remains_unconfirmed():
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "0.5", "realizedPnl": "4.7",
+        "commission": "0.025", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_reversal_through_zero_fails_closed():
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.2", "realizedPnl": "9.4",
+        "commission": "0.06", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_requires_zero_pre_entry_exposure_proof():
+    entry = _entry_registry()
+    entry["previous_position_qty"] = None
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [entry, _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_accepts_bgx_algo_close_via_actual_order_id():
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 33, "side": "SELL",
+        "price": "95", "qty": "1.0", "realizedPnl": "-5.6",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    algo = [{
+        "symbol": "BTCUSDT", "algoId": 90, "clientAlgoId": "bgx7-stop",
+        "side": "SELL", "positionSide": "BOTH", "actualOrderId": "33",
+        "algoStatus": "FINISHED", "closePosition": True,
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, [_orders()[0]], algo, [_entry_registry()],
+        {"11": _lineage()},
+    )
+    assert len(cycles) == 1
+    assert cycles[0]["row"]["pnl"] == "-5.70"
+    assert cycles[0]["receipt"]["close_identity"] == ["BGX_ALGO_CLOSE_ORDER"]
+
