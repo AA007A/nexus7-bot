@@ -123,21 +123,23 @@ class RuntimeContractGuardTests(unittest.TestCase):
             encoding="utf-8"
         )
         expected = (
-            "KuCoinClient.place_order",
+            "ExchangeClient.place_order",
             "live_execution_fence.py",
-            "KuCoinClient._post",
+            "ExchangeClient._post",
             "partial_tp_execution_hardening.py",
-            "KuCoinClient.wait_for_fill",
+            "ExchangeClient.wait_for_fill",
             "order_visibility_race_hardening.py",
-            "KuCoinClient.get_order_status",
-            "KuCoinClient.set_position_stops",
+            "ExchangeClient.get_order_status",
+            "ExchangeClient.set_position_stops",
             "durable_execution.reconcile_orders",
             "durable_reconcile_hardening.py",
-            "_native_tpsl_entry_installed",
-            "_fill_normalization_installed",
             "_pilot_durable_submission_counter_installed",
             "_live_execution_fence_installed",
-            "execution_chain=idempotency>distributed_fence>dispatch>fill>tpsl>reconcile",
+            "exchange_runtime.is_kucoin()",
+            "_native_tpsl_entry_installed",
+            "_fill_normalization_installed",
+            "binance.paper_parity_client",
+            "execution_chain=idempotency>distributed_fence>dispatch>fill>protection>reconcile",
         )
         for text in expected:
             self.assertIn(text, source)
