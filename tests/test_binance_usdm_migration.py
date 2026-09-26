@@ -201,6 +201,41 @@ class BinanceMigrationTests(unittest.TestCase):
         finally:
             bn.PAPER_TRADE = old
 
+    def test_signing_credential_gate_accepts_ed25519_without_hmac_secret(self):
+        old_key = bn.API_KEY
+        old_secret = bn.API_SECRET
+        old_method = bn.SIGNING_METHOD
+        try:
+            bn.API_KEY = "public-api-key"
+            bn.API_SECRET = ""
+            bn.SIGNING_METHOD = "ed25519"
+            with patch.object(
+                bn, "_load_ed25519_private_key", return_value=object()
+            ) as loader:
+                bn._assert_signing_credentials_available()
+                loader.assert_called_once_with()
+        finally:
+            bn.API_KEY = old_key
+            bn.API_SECRET = old_secret
+            bn.SIGNING_METHOD = old_method
+
+    def test_signing_credential_gate_still_requires_hmac_secret(self):
+        old_key = bn.API_KEY
+        old_secret = bn.API_SECRET
+        old_method = bn.SIGNING_METHOD
+        try:
+            bn.API_KEY = "public-api-key"
+            bn.API_SECRET = ""
+            bn.SIGNING_METHOD = "hmac"
+            with self.assertRaisesRegex(
+                RuntimeError, "BINANCE_API_SECRET_UNAVAILABLE"
+            ):
+                bn._assert_signing_credentials_available()
+        finally:
+            bn.API_KEY = old_key
+            bn.API_SECRET = old_secret
+            bn.SIGNING_METHOD = old_method
+
     def test_binance_hardened_entrypoint_imports_in_paper(self):
         env = os.environ.copy()
         env.update({
