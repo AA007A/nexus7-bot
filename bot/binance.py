@@ -903,6 +903,30 @@ class BinanceClient:
             **data,
         }
 
+    def rehydrate_order_identity_maps(self, records) -> int:
+        """Restore read-only order lookup indexes from validated durable records."""
+        restored = 0
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            symbol = to_standard(record.get("symbol"))
+            client_oid = str(record.get("client_oid") or "")
+            order_id = str(record.get("order_id") or "")
+            if not symbol or symbol not in self._instruments:
+                continue
+            if client_oid:
+                self._client_oid_symbol[client_oid] = symbol
+            if order_id:
+                self._order_id_symbol[order_id] = symbol
+            if client_oid or order_id:
+                restored += 1
+        log.info(
+            "[BINANCE_DURABLE_IDENTITY] restored=%s values_redacted=true "
+            "execution_effect=NONE",
+            restored,
+        )
+        return restored
+
     async def get_order_by_client_oid(self, client_oid: str) -> dict:
         symbol = self._client_oid_symbol.get(str(client_oid), "")
         if not symbol:
