@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass
 
 from bot.config import cfg
-from bot.exchange import TAKER_FEE
+from bot.binance import TAKER_FEE
 
 
 MAX_STOP_STRESS_RISK_RATE = 0.90
