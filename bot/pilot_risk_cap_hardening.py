@@ -116,7 +116,8 @@ def install(TradingEngine, log) -> None:
 
         log.warning(
             "[PILOT_RISK_CAP] symbol=%s target_qty=%.12g risk_qty=%.12g "
-            "final_qty=%.12g authority=RiskManagerV3 target_policy=50pct_available_notional",
+            "final_qty=%.12g authority=RiskManagerV3 target_policy=legacy_50pct_available_notional "
+            "superseded_by=final_sizing_invariants",
             symbol,
             target_qty,
             risk_qty,
@@ -286,8 +287,8 @@ def install(TradingEngine, log) -> None:
     TradingEngine._pilot_risk_cap_hardening_installed = True
 
     log.critical(
-        "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
-        "notional target; RiskManagerV3 is the maximum quantity authority; "
+        "[PILOT_RISK_CAP] installed: final sizing is owned by final_sizing_invariants "
+        "(final_qty=min(stop_risk_qty,operator_margin_cap_qty), risk_authority=RiskManagerV3); "
         "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing; "
         "directional_drift_telemetry=true authorization_unchanged=true"
     )
