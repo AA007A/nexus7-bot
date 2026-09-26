@@ -2889,25 +2889,83 @@ class TradingEngine:
             # margem de manutenção depende da conta inteira — informa
             # isso ao módulo para que ele se declare não-confiável
             # nesse cenário, em vez de dar um número falsamente preciso.
-            _liq = liq.analyze(
-                entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
-                is_long=(sig.direction == "LONG"), symbol=sig.symbol,
-                n_open_positions=len(self.positions) + 1,   # +1 = esta que abriria
-            )
-            # Fase 5C: se o notional puder ter saído do Tier 1 (MMR
-            # maior que o assumido), a liquidação real fica MAIS PERTO
-            # do que calculamos. Log de auditoria, não bloqueio — não
-            # temos a tabela exata de tiers.
-            _notional_est = qty * sig.entry
-            if _notional_est and liq.notional_exceeds_tier1(_notional_est):
-                log.warning(
-                    f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
-                    f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
-                    f"MMR real pode ser maior, liquidação mais próxima "
-                    f"do que calculado"
+            if is_binance():
+                from bot import binance_cross_portfolio_stress as binance_cross_stress
+
+                _binance_stress = await binance_cross_stress.evaluate(
+                    self, sig, qty
                 )
-            _liq_pct = _liq.liq_move_pct
-            _sl_pct  = _liq.stop_move_pct
+                _sl_pct = (
+                    abs(sig.entry - sig.sl) / sig.entry * 100
+                    if sig.entry > 0 and sig.sl > 0
+                    else 0.0
+                )
+                _liq_pct = 0.0
+                _sl_inseguro = False
+
+                if not _binance_stress.allowed:
+                    log.warning(
+                        "[BINANCE_CROSS_STRESS] symbol=%s result=BLOCK reason=%s "
+                        "mode=%s risk_rate=%.4f limit=%.4f stressed_margin=%.8f "
+                        "maintenance=%.8f closing_fees=%.8f opening_fee=%.8f "
+                        "existing_positions=%d stage=PRE_ORDER "
+                        "execution_effect=BLOCK_NEW_ENTRY",
+                        sig.symbol,
+                        _binance_stress.reason,
+                        _binance_stress.mode,
+                        _binance_stress.risk_rate,
+                        binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                        _binance_stress.stressed_margin,
+                        _binance_stress.maintenance,
+                        _binance_stress.closing_fees,
+                        _binance_stress.opening_fee,
+                        _binance_stress.existing_positions,
+                    )
+                    try:
+                        await db.save_signal(
+                            sig.symbol,
+                            sig.direction,
+                            {"total": int(sig.score)},
+                            entrou=False,
+                            motivo=(
+                                "binance cross stress: "
+                                f"{_binance_stress.reason}"
+                            ),
+                        )
+                    except Exception as _e:
+                        log.debug(f"save_signal binance_cross_stress: {_e}")
+                    return
+
+                log.info(
+                    "[BINANCE_CROSS_STRESS] symbol=%s result=PASS reason=%s "
+                    "mode=%s risk_rate=%.4f limit=%.4f existing_positions=%d "
+                    "stage=PRE_ORDER kucoin_liquidation_formula_used=false "
+                    "execution_effect=NONE",
+                    sig.symbol,
+                    _binance_stress.reason,
+                    _binance_stress.mode,
+                    _binance_stress.risk_rate,
+                    binance_cross_stress.MAX_STOP_STRESS_RISK_RATE,
+                    _binance_stress.existing_positions,
+                )
+            else:
+                _liq = liq.analyze(
+                    entry=sig.entry, stop=sig.sl, leverage=cfg.LEVERAGE,
+                    is_long=(sig.direction == "LONG"), symbol=sig.symbol,
+                    n_open_positions=len(self.positions) + 1,
+                )
+                # KuCoin-only legacy tier audit. Binance uses user-specific
+                # leverage brackets in binance_cross_portfolio_stress.
+                _notional_est = qty * sig.entry
+                if _notional_est and liq.notional_exceeds_tier1(_notional_est):
+                    log.warning(
+                        f"⚠️ [{sig.symbol}] notional ${_notional_est:,.0f} pode "
+                        f"exceder o Tier 1 assumido (MMR={_liq.mmr:.3%}) — "
+                        f"MMR real pode ser maior, liquidação mais próxima "
+                        f"do que calculado"
+                    )
+                _liq_pct = _liq.liq_move_pct
+                _sl_pct = _liq.stop_move_pct
 
             # ══════════════════════════════════════════════════════════
             # OVERRIDE EXPLÍCITO — ALLOW_SL_BEYOND_LIQUIDATION
@@ -2927,8 +2985,10 @@ class TradingEngine:
                 "ALLOW_SL_BEYOND_LIQUIDATION", "false"
             ).lower() == "true"
 
-            # stop_effective já considera a folga mínima exigida
-            _sl_inseguro = not _liq.stop_effective
+            # Binance uses account-level CROSS stop stress above. KuCoin keeps
+            # the legacy liquidation-price effectiveness check.
+            if not is_binance():
+                _sl_inseguro = not _liq.stop_effective
 
             if _sl_inseguro and _allow_beyond:
                 # Não bloqueia, mas registra e avisa — o operador precisa
