@@ -3585,9 +3585,9 @@ class TradingEngine:
                 self.pilot.register_position_opened(sig.symbol)
             # Persiste no banco
             # ITEM 2: grava os COMPONENTES do score, não só o total.
-            # Permite que score_weights.calibrate_from_history() descubra
-            # estatisticamente quais sinais realmente preveem trades
-            # vencedores — em vez de manter os pesos manuais (+10/+5/+3).
+            # Mantém os dados necessários para uma futura calibração offline
+            # dos pesos (+10/+5/+3), hoje definidos manualmente. O antigo
+            # calibrador bot/score_weights.py nunca foi conectado e foi removido.
             _feats = {}
             try:
                 for _k, _v in (pre_score or {}).items():
