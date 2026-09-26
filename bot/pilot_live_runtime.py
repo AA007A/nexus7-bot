@@ -142,6 +142,54 @@ async def _refresh_account(engine, log, *, for_entry: bool = False) -> dict:
     return state
 
 
+def _entry_drawdown_allows(engine, log) -> bool:
+    """Hard drawdown gate on the equity read that was just refreshed.
+
+    ``_refresh_entry_balance`` is called again immediately before the order
+    registry/durable intent/dispatch. Earlier drawdown gates (scan ``can_open``
+    and RiskManagerV3 ``can_open`` in the sizing plan) ran on older reads, so a
+    candidate approved before equity deteriorated must be re-checked here.
+    Threshold and the explicit ``LIVE_RISK_OVERRIDE_APPROVED`` semantics are the
+    same as every other drawdown gate. Unreadable drawdown fails closed.
+    """
+    from bot.config import cfg
+    from bot.operator_runtime_policy import _risk_override_enabled
+
+    risk = getattr(engine, "risk", None)
+    legacy = getattr(risk, "_legacy", risk)
+    candidates = [getattr(legacy, "drawdown", None)]
+    v3 = getattr(risk, "_v3", None)
+    if v3 is not None and getattr(v3, "confirmed", False):
+        candidates.append(getattr(v3, "drawdown", None))
+    try:
+        values = [float(v) for v in candidates if v is not None]
+    except (TypeError, ValueError):
+        values = []
+    limit = float(cfg.MAX_DRAWDOWN)
+    if not values or any(v != v or v < 0 or v == float("inf") for v in values):
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=BLOCK reason=drawdown_unreadable "
+            "execution_effect=BLOCK_NEW_ENTRY"
+        )
+        return False
+    drawdown = max(values)
+    if drawdown < limit:
+        return True
+    if _risk_override_enabled():
+        log.critical(
+            "[PILOT_PREDISPATCH_DRAWDOWN] result=OVERRIDE drawdown=%.4f%% limit=%.4f%% "
+            "override=true execution_effect=ALLOW_NEW_ENTRY",
+            drawdown * 100.0, limit * 100.0,
+        )
+        return True
+    log.error(
+        "[PILOT_PREDISPATCH_DRAWDOWN] result=BLOCK drawdown=%.4f%% limit=%.4f%% "
+        "override=false source=fresh_authenticated_equity execution_effect=BLOCK_NEW_ENTRY",
+        drawdown * 100.0, limit * 100.0,
+    )
+    return False
+
+
 async def _run_readonly_preflight(engine, log, *, probe_private_ws: bool) -> bool:
     from bot import private_ws_readonly_observability as prelive
 
@@ -249,7 +297,7 @@ def install(TradingEngine, log) -> None:
             if available <= 0:
                 log.warning("[PILOT_LIVE_BALANCE] entry blocked: available collateral <= 0")
                 return False
-            return True
+            return _entry_drawdown_allows(self, log)
         except Exception as exc:
             self.risk.balance_confirmed = False
             log.critical(
@@ -339,6 +387,6 @@ def install(TradingEngine, log) -> None:
     log.critical(
         "[PILOT_LIVE_RUNTIME] installed: cash-flow-aware durable equity drawdown + "
         "fresh available-collateral publication for final sizing "
-        "(sizing_authority=final_sizing_invariants) + "
+        "(sizing_authority=final_sizing_invariants) + pre-dispatch drawdown hard gate + "
         "read-only exposure/private-WS preflight; external positions immutable"
     )
