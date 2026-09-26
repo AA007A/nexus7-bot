@@ -471,6 +471,14 @@ class BinanceClient:
     async def _post(
         self, endpoint: str, body: dict, *, single_attempt: bool = False
     ) -> dict:
+        # Exchange order submissions are never retried blindly at the HTTP
+        # transport layer. A timeout/5xx may mean Binance accepted the order
+        # even when the response was lost; normal orders are reconciled below
+        # by newClientOrderId and Algo orders fail closed to their caller.
+        order_submission = endpoint in {
+            "/fapi/v1/order",
+            "/fapi/v1/algoOrder",
+        }
         try:
             return await self._request(
                 "POST",
@@ -478,7 +486,7 @@ class BinanceClient:
                 body,
                 auth=True,
                 mutation=True,
-                single_attempt=single_attempt,
+                single_attempt=bool(single_attempt or order_submission),
             )
         except Exception as exc:
             client_oid = str(
