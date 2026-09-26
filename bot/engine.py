@@ -3398,7 +3398,42 @@ class TradingEngine:
                     last_exc = exc
                     err_str  = str(exc)
 
-                    # Extrai retCode e retMsg da mensagem de erro estruturada
+                    # BinanceClient owns transport retries and ambiguous-order
+                    # recovery by newClientOrderId. A second engine-level
+                    # submission would create a second logical dispatch boundary,
+                    # so Binance fails closed here and waits for the next signal.
+                    if is_binance():
+                        import re as _re
+                        _code_match = _re.search(
+                            r"code=(-?\d+)", err_str
+                        )
+                        _msg_match = _re.search(
+                            r"msg=(.*)$", err_str
+                        )
+                        ret_code = (
+                            _code_match.group(1)
+                            if _code_match else "?"
+                        )
+                        ret_msg = (
+                            _msg_match.group(1).strip()
+                            if _msg_match else err_str
+                        )
+                        log.error(
+                            f"❌ _open {sig.symbol} tentativa "
+                            f"{attempt}/{MAX_RETRIES} FALHOU | "
+                            f"exchange=binance code={ret_code} "
+                            f"msg='{ret_msg}' | "
+                            f"outer_retry=false "
+                            f"client_transport_recovery=authoritative"
+                        )
+                        log.error(
+                            f"🚫 _open {sig.symbol}: Binance não fará "
+                            f"nova submissão lógica após falha do "
+                            f"dispatcher; aguardando reconciliação/novo sinal"
+                        )
+                        break
+
+                    # KuCoin legacy classification remains venue-specific.
                     import re as _re
                     rc_match  = _re.search(r"KuCoin\s+(\d+):\s*(.*)|code['\"]?\s*[:=]\s*['\"]?(\d+)", err_str)
                     ret_code  = rc_match.group(1) if rc_match else "?"
