@@ -27,9 +27,8 @@ import os
 from typing import Dict, Optional, List
 import numpy as np
 
-# Migrado para KuCoin. O type hint usa o cliente ativo; o import do
-# BybitClient foi removido para não depender de bot/bybit.py.
-from bot.kucoin import KuCoinClient
+# Cliente selecionado em bot.exchange; o engine não depende da venue.
+from bot.exchange import ExchangeClient
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
@@ -59,9 +58,9 @@ _NEXUS_TIMEOUT_S = 10.0
 # ─── Trade (histórico fechado) ─────────────────────────────────────────────────
 # Taxa Bybit: 0.055% por lado (maker) ou 0.055% taker — usamos 0.055% x2 = 0.11% total
 # CORRIGIDO (auditoria #8): 0.00055 era a taxa da Bybit. A exchange agora
-# é a KuCoin (taker 0.06%). Importado do módulo do cliente para manter uma
+# vem da exchange ativa. Importado da boundary para manter uma
 # única fonte de verdade — antes o PnL líquido reportado era subestimado.
-from bot.kucoin import TAKER_FEE
+from bot.exchange import TAKER_FEE
 
 class Trade:
     def __init__(self, symbol, direction, entry, exit_price, qty, pnl_gross, opened_at,
@@ -342,7 +341,7 @@ class Stats:
 from bot.risk import RiskManager
 
 class TradingEngine:
-    def __init__(self, client: KuCoinClient):
+    def __init__(self, client: ExchangeClient):
         self.client       = client
         # KuCoin's final transport fence executes on the exchange client and
         # needs the canonical engine to evaluate the same readiness authority.
@@ -447,7 +446,7 @@ class TradingEngine:
         # BUG CORRIGIDO: self.paper_trade era usado em engine.py e
         # position_manager.py mas NUNCA foi atribuído → AttributeError.
         # A flag vive em bot.kucoin (lida da env var PAPER_TRADE).
-        from bot.kucoin import PAPER_TRADE as _PT
+        from bot.exchange import PAPER_TRADE as _PT
         self.paper_trade: bool = bool(_PT)
         # PnL diário separado: só o REALIZADO conta para a meta.
         # O não realizado oscila muito com 50x e não é lucro de fato.
