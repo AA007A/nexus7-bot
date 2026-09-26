@@ -29,6 +29,19 @@ class _Client:
         return {"items": list(self.active)}
 
 
+class _NativeOrdersClient(_Client):
+    def __init__(self, positions=None, active=None):
+        super().__init__(positions=positions, active=active)
+        self.native_calls = 0
+
+    async def get_open_orders(self):
+        self.native_calls += 1
+        return list(self.active)
+
+    async def _get(self, *args, **kwargs):
+        raise AssertionError("legacy KuCoin active-order endpoint must not be used")
+
+
 class InitialReconciliationAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_durable_state_ready_is_not_reconciliation_complete(self):
         engine = SimpleNamespace(
@@ -96,6 +109,25 @@ class InitialReconciliationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result)
         client._get.assert_not_awaited()
+        self.assertTrue(all(engine._initial_reconciliation_evidence.values()))
+
+    async def test_native_open_orders_path_is_preferred_over_legacy_endpoint(self):
+        client = _NativeOrdersClient(active=[])
+        engine = SimpleNamespace(
+            connected=True,
+            paper_trade=False,
+            client=client,
+            orders=_Orders(),
+            positions={},
+            _recovered_position_symbols=set(),
+            _external_position_symbols=set(),
+            _durable_state_ok=True,
+        )
+        result = await finalize_initial_reconciliation(
+            engine, orders_reconciled=True
+        )
+        self.assertTrue(result)
+        self.assertEqual(client.native_calls, 1)
         self.assertTrue(all(engine._initial_reconciliation_evidence.values()))
 
     async def test_bgx_active_order_without_durable_match_fails_closed(self):
