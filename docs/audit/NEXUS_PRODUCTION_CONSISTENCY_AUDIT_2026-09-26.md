@@ -221,3 +221,56 @@ by `capital_flow_reconciliation` before the HWM update.
   their install logs now state `superseded_by=final_sizing_invariants`.
 * `sizing_semantics_log_hardening` removed (truth-altering normalization).
 * Canonical authority map: `docs/audit/CANONICAL_AUTHORITIES.md`.
+
+---
+
+## Resolution status (end of this PR)
+
+| item | status | commit subject |
+|---|---|---|
+| P0-1 sizing truth | fixed — executed contract `min(stop_risk_qty, operator_margin_cap_qty)`; log rewriter removed | `sizing: RiskManagerV3 is the binding quantity authority; remove log rewriting` |
+| P0-2 cost model | fixed — `bot/execution_cost.py` snapshot; Binance commission endpoint; no KuCoin fee on the Binance risk path | `cost: one exchange-aware execution-cost snapshot per candidate` |
+| P0-3 R:R 1.36 vs 1.54 | root cause reproduced in a test; both layers now agree on the shared snapshot | same |
+| P0-4 KuCoin text/credentials on Binance | fixed | `binance: venue-truthful banners/credentials; one release/accounting contract` |
+| P0-5 release vs accounting | fixed — `runtime_release_contract` | same |
+| P0-6 liquidation 50x | verified existing gate; tests added | `risk: re-check drawdown hard gate on the final pre-dispatch equity read` |
+| P0-7 drawdown race | fixed + race test | same |
+| P1-1 latency 0.0 | fixed (`NA`, `market_data_observed`) | `observability: latency never fabricates 0ms; ...` |
+| P1-2 silent excepts | fixed for `nexus_decision_consistency` and `final_loss_budget` | same |
+| P1-4 `-4116` duplicate clientOrderId | fixed (reconcile by id) | `binance: treat -4116 duplicate clientOrderId ...` |
+| P1-5 OOS / walk-forward | **not run** — exchange hosts denied by this environment's network policy; no thresholds changed, so no before/after is claimed | — |
+| P1-6 replay parity | partial — cost parity only; research/replay modules still use `kucoin_execution_model` (KuCoin data source) | — |
+
+### Execution-scenario coverage map (existing + added tests)
+
+| scenario | test |
+|---|---|
+| HTTP timeout after exchange accepted | `test_binance_usdm_migration::test_ambiguous_entry_response_recovers_by_client_order_id` |
+| ambiguous 5xx / -1007 | `test_binance_usdm_migration::test_unresolved_ambiguous_entry_never_requests_blind_resubmission` |
+| definitive 4xx is not ambiguous | `test_binance_usdm_migration::test_definitive_binance_order_error_is_not_treated_as_ambiguous` |
+| duplicate clientOrderId (-4116) | `test_binance_usdm_migration::test_duplicate_client_order_id_reconciles_instead_of_failing_clean` (new) |
+| restart during OPENING | `test_restart_opening_order_lineage`, `test_durable_execution_restart` |
+| fill before REST response / private WS race | `test_private_ws_race_hardening`, `test_order_state_rest_ack_race` |
+| partial fill | `test_order_visibility_race_hardening::test_partial_then_filled_delays_rest_but_never_synthesizes_fill` |
+| SL/TP creation failure | `test_binance_protection_failclosed`, `test_binance_usdm_migration::test_conditional_protection_retry_reuses_existing_sl_and_only_posts_tp`, `test_live_adapter_chaos::test_open_order_with_failed_protection_is_explicitly_flagged` |
+| ALGO_UPDATE separate from normal orders | `test_binance_usdm_migration::test_private_algo_update_is_cached_without_managed_order_transition` |
+| order invisibility race | `test_order_visibility_race_hardening` |
+| Postgres unavailable | `test_live_adapter_chaos::test_db_failure_immediately_before_entry_post_blocks_exchange_mutation`, `test_live_execution_fence::test_db_outage_allows_only_verified_reduction` |
+| fencing lease lost before dispatch | `test_live_adapter_chaos::test_stale_fence_at_transport_boundary_blocks_dispatch_race`, `test_live_execution_fence::test_second_instance_cannot_dispatch_live_order` |
+| reduce-only while entries blocked | `test_live_adapter_chaos::test_reduce_only_remains_available_when_critical_db_is_down` |
+
+### Residual risks / needs live evidence
+
+* Position size in production will drop to the stop-risk budget (P0-1). Confirm
+  `MAX_RISK_PCT` / `_effective_risk_pct` in Railway is the intended budget
+  before deploying; at ~10 USDT equity many symbols will size to 0 (exchange
+  minimum) and be blocked — that is the requested fail-closed behaviour.
+* `/fapi/v1/commissionRate` read must be observed once in production logs
+  (`fee_source=binance_commission_rate`).
+* Latency SLOs: only the instrumentation was corrected; baseline must be
+  measured in production before any SLO is set.
+* NEXUS OOS/walk-forward and threshold experiments must run where exchange
+  data is reachable (CI `oos_real_replay.yml` or an environment with network
+  access). No threshold was changed in this PR.
+* Replay/backtest still uses KuCoin public data and `kucoin_execution_model`
+  costs; Binance replay parity is open.
