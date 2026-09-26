@@ -15,7 +15,7 @@ def install(log):
     import bot.engine as engine_module
     from bot.engine import TradingEngine, Trade
     from bot.config import cfg
-    from bot.kucoin import TAKER_FEE
+    from bot.exchange import TAKER_FEE
     from bot import database as db
     from bot import durable_execution as durable
     from bot.notifier import notify, close_msg
