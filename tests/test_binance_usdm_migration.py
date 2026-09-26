@@ -9,7 +9,8 @@ import os
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot import binance as bn
 from bot.conditional_stop_protection import conditional_stop_confirmed
@@ -280,6 +281,96 @@ class BinanceMigrationTests(unittest.TestCase):
         }))
         self.assertEqual(client._algo_order_cache, {})
         self.assertNotIn("manual-stop", client._client_oid_symbol)
+
+    def test_conditional_protection_retry_reuses_existing_sl_and_only_posts_tp(self):
+        client = FakeBinance()
+        client._instruments = {
+            "BTCUSDT": {
+                "multiplier": 1.0,
+                "minQty": 0.001,
+                "qtyStep": 0.001,
+                "tickSize": 0.1,
+            }
+        }
+        existing = [{
+            "symbol": "BTCUSDT",
+            "side": "sell",
+            "status": "NEW",
+            "type": "STOP_MARKET",
+            "stopPrice": "59000",
+            "closeOrder": True,
+            "reduceOnly": False,
+            "size": 0,
+            "sizeUnit": "BASE_ASSET",
+            "orderId": "90",
+            "clientOid": "bgx7-existing-stop",
+            "isActive": True,
+        }]
+        with patch.object(bn, "PAPER_TRADE", False), patch.object(
+            bn, "_live_migration_ready", return_value=True
+        ), patch.object(
+            client, "_active_position_for_symbol",
+            AsyncMock(return_value={"symbol": "BTCUSDT", "side": "Buy", "size": 0.01}),
+        ), patch.object(
+            client, "get_stop_orders", AsyncMock(return_value=existing)
+        ), patch.object(
+            client, "_post",
+            AsyncMock(return_value={"algoId": 91, "clientAlgoId": "bgx7-new-tp"}),
+        ) as post:
+            ok = run(client.set_position_stops("BTCUSDT", sl=59000, tp=62000))
+
+        self.assertTrue(ok)
+        post.assert_awaited_once()
+        endpoint, params = post.await_args.args[:2]
+        self.assertEqual(endpoint, "/fapi/v1/algoOrder")
+        self.assertEqual(params["type"], "TAKE_PROFIT_MARKET")
+        self.assertEqual(params["triggerPrice"], "62000")
+
+    def test_live_entry_propagates_unconfirmed_protection_to_engine(self):
+        client = FakeBinance()
+        client._instruments = {
+            "BTCUSDT": {
+                "multiplier": 1.0,
+                "minQty": 0.001,
+                "qtyStep": 0.001,
+                "tickSize": 0.1,
+            }
+        }
+        client._engine = SimpleNamespace(positions={})
+        client._execution_ownership = object()
+
+        with patch.object(bn, "PAPER_TRADE", False), patch.object(
+            bn, "_assert_signing_credentials_available", return_value=None
+        ), patch.object(
+            client, "_assert_live_account_mode", AsyncMock(return_value=None)
+        ), patch.object(
+            client, "_post",
+            AsyncMock(return_value={
+                "orderId": 123,
+                "clientOrderId": "bgx7-entry-protection-test",
+                "status": "FILLED",
+            }),
+        ), patch.object(
+            client, "set_position_stops", AsyncMock(return_value=False)
+        ), patch(
+            "bot.critical_state.critical_state.assert_available_for_new_risk",
+            Mock(return_value=None),
+        ), patch(
+            "bot.execution_ownership.validate_execution_ownership",
+            AsyncMock(return_value=True),
+        ), patch(
+            "bot.execution_ownership.publish_valid_execution_ownership",
+            Mock(return_value=None),
+        ), patch(
+            "bot.runtime_readiness.assert_ready_for_new_entries",
+            Mock(return_value=None),
+        ):
+            result = run(client.place_order(
+                "BTCUSDT", "Buy", 0.01, sl=59000, tp=62000
+            ))
+
+        self.assertEqual(str(result["orderId"]), "123")
+        self.assertTrue(result["sl_tp_failed"])
 
     def test_binance_live_migration_gate_fails_closed(self):
         client = FakeBinance()
