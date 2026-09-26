@@ -216,7 +216,8 @@ class NoTruthAlteringLogNormalizationTests(unittest.TestCase):
         from pathlib import Path
         root = Path(__file__).resolve().parents[1] / "bot"
         stale = ("OPERATOR_50PCT_EQUITY", "risk_manager_role=VALIDATION_GATE",
-                 "NON_AUTHORITATIVE", "final_authority=PILOT_MARGIN_SIZING")
+                 "NON_AUTHORITATIVE", "final_authority=PILOT_MARGIN_SIZING",
+                 "RiskManagerV3_plus_operator_50pct_margin_cap")
         for path in root.glob("*.py"):
             text = path.read_text(encoding="utf-8")
             for label in stale:
