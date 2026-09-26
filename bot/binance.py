@@ -1020,49 +1020,106 @@ class BinanceClient:
         }
         submitted = 0
         expected = int(sl > 0) + int(tp > 0)
+
+        # A partial protection attempt can succeed for SL and fail for TP.
+        # On retry, reuse an exact active BGX Algo order instead of blindly
+        # creating a duplicate closePosition order.
+        try:
+            existing = await self.get_stop_orders(symbol)
+        except Exception as exc:
+            existing = []
+            log.warning(
+                "[BINANCE_PROTECTION] %s existing_algo_read=UNCONFIRMED "
+                "error_type=%s action=SUBMIT_MISSING_UNKNOWN",
+                symbol,
+                type(exc).__name__,
+            )
+
+        def _already_active(order_type: str, trigger_text: str) -> bool:
+            try:
+                wanted = _d(trigger_text)
+            except (InvalidOperation, ValueError):
+                return False
+            for row in existing if isinstance(existing, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                if not str(row.get("clientOid", "")).startswith("bgx7-"):
+                    continue
+                if row.get("closeOrder") is not True or row.get("isActive") is not True:
+                    continue
+                if str(row.get("side", "")).upper() != close_side:
+                    continue
+                if str(row.get("type", "")).upper() != order_type:
+                    continue
+                try:
+                    observed = _d(row.get("stopPrice", 0))
+                except (InvalidOperation, ValueError):
+                    continue
+                if observed == wanted:
+                    return True
+            return False
+
         if sl > 0:
-            params = dict(common)
-            params.update(
-                {
-                    "type": "STOP_MARKET",
-                    "triggerPrice": self._round_price(sl, symbol),
-                    "clientAlgoId": self.build_client_oid(
-                        symbol,
-                        close_side,
-                        0,
-                        f"sl:{symbol}:{sl}:{time.time_ns()}",
-                    ),
-                }
-            )
-            result = await self._post(
-                "/fapi/v1/algoOrder",
-                params,
-                single_attempt=True,
-            )
-            if result.get("algoId"):
+            sl_text = self._round_price(sl, symbol)
+            if _already_active("STOP_MARKET", sl_text):
                 submitted += 1
+                log.info(
+                    "[BINANCE_PROTECTION] %s type=STOP_MARKET "
+                    "result=REUSED_EXISTING_BGX_ALGO",
+                    symbol,
+                )
+            else:
+                params = dict(common)
+                params.update(
+                    {
+                        "type": "STOP_MARKET",
+                        "triggerPrice": sl_text,
+                        "clientAlgoId": self.build_client_oid(
+                            symbol,
+                            close_side,
+                            0,
+                            f"sl:{symbol}:{sl}:{time.time_ns()}",
+                        ),
+                    }
+                )
+                result = await self._post(
+                    "/fapi/v1/algoOrder",
+                    params,
+                    single_attempt=True,
+                )
+                if result.get("algoId"):
+                    submitted += 1
 
         if tp > 0:
-            params = dict(common)
-            params.update(
-                {
-                    "type": "TAKE_PROFIT_MARKET",
-                    "triggerPrice": self._round_price(tp, symbol),
-                    "clientAlgoId": self.build_client_oid(
-                        symbol,
-                        close_side,
-                        0,
-                        f"tp:{symbol}:{tp}:{time.time_ns()}",
-                    ),
-                }
-            )
-            result = await self._post(
-                "/fapi/v1/algoOrder",
-                params,
-                single_attempt=True,
-            )
-            if result.get("algoId"):
+            tp_text = self._round_price(tp, symbol)
+            if _already_active("TAKE_PROFIT_MARKET", tp_text):
                 submitted += 1
+                log.info(
+                    "[BINANCE_PROTECTION] %s type=TAKE_PROFIT_MARKET "
+                    "result=REUSED_EXISTING_BGX_ALGO",
+                    symbol,
+                )
+            else:
+                params = dict(common)
+                params.update(
+                    {
+                        "type": "TAKE_PROFIT_MARKET",
+                        "triggerPrice": tp_text,
+                        "clientAlgoId": self.build_client_oid(
+                            symbol,
+                            close_side,
+                            0,
+                            f"tp:{symbol}:{tp}:{time.time_ns()}",
+                        ),
+                    }
+                )
+                result = await self._post(
+                    "/fapi/v1/algoOrder",
+                    params,
+                    single_attempt=True,
+                )
+                if result.get("algoId"):
+                    submitted += 1
 
         return expected > 0 and submitted == expected
 
@@ -1088,6 +1145,9 @@ class BinanceClient:
                     "symbol": to_standard(row.get("symbol")),
                     "side": str(row.get("side", "")).lower(),
                     "status": status,
+                    "type": str(
+                        row.get("orderType", row.get("type", ""))
+                    ).upper(),
                     "stopPrice": row.get(
                         "triggerPrice", row.get("stopPrice", 0)
                     ),
