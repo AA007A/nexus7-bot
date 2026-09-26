@@ -58,3 +58,34 @@ def test_ed25519_missing_private_key_fails_closed(monkeypatch):
         assert str(exc) == "BINANCE_ED25519_PRIVATE_KEY_UNAVAILABLE"
     else:
         raise AssertionError("Ed25519 signer must fail closed without a private key")
+
+def test_signing_credential_gate_accepts_ed25519_without_hmac_secret(monkeypatch):
+    private_key = Ed25519PrivateKey.generate()
+    pem = private_key.private_bytes(
+        Encoding.PEM,
+        PrivateFormat.PKCS8,
+        NoEncryption(),
+    )
+
+    monkeypatch.setattr(binance, "API_KEY", "unit-test-api-key")
+    monkeypatch.setattr(binance, "API_SECRET", "")
+    monkeypatch.setattr(binance, "SIGNING_METHOD", "ed25519")
+    monkeypatch.setattr(binance, "ED25519_PRIVATE_KEY_B64", "")
+    monkeypatch.setattr(binance, "ED25519_PRIVATE_KEY_PEM", pem.decode("utf-8"))
+    monkeypatch.setattr(binance, "_ED25519_PRIVATE_KEY_CACHE", None)
+
+    binance._assert_signing_credentials_available()
+
+
+def test_signing_credential_gate_requires_hmac_secret(monkeypatch):
+    monkeypatch.setattr(binance, "API_KEY", "unit-test-api-key")
+    monkeypatch.setattr(binance, "API_SECRET", "")
+    monkeypatch.setattr(binance, "SIGNING_METHOD", "hmac")
+
+    try:
+        binance._assert_signing_credentials_available()
+    except RuntimeError as exc:
+        assert str(exc) == "BINANCE_API_SECRET_UNAVAILABLE"
+    else:
+        raise AssertionError("HMAC signer must fail closed without API secret")
+
