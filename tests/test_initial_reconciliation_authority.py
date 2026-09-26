@@ -76,6 +76,28 @@ class InitialReconciliationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         self.assertFalse(engine._initial_reconciliation_complete)
 
+    async def test_paper_reconciliation_never_requires_private_active_orders(self):
+        client = _Client()
+
+        async def _private_read_must_not_run(*args, **kwargs):
+            raise AssertionError("private exchange active-order read executed in PAPER")
+
+        client._get = AsyncMock(side_effect=_private_read_must_not_run)
+        engine = SimpleNamespace(
+            connected=True,
+            paper_trade=True,
+            client=client,
+            orders=_Orders(),
+            positions={},
+            _durable_state_ok=True,
+        )
+        result = await finalize_initial_reconciliation(
+            engine, orders_reconciled=True
+        )
+        self.assertTrue(result)
+        client._get.assert_not_awaited()
+        self.assertTrue(all(engine._initial_reconciliation_evidence.values()))
+
     async def test_bgx_active_order_without_durable_match_fails_closed(self):
         engine = SimpleNamespace(
             connected=True,
