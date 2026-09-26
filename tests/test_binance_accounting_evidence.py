@@ -310,3 +310,79 @@ def test_reconstruct_accepts_bgx_algo_close_via_actual_order_id():
     assert cycles[0]["row"]["pnl"] == "-5.70"
     assert cycles[0]["receipt"]["close_identity"] == ["BGX_ALGO_CLOSE_ORDER"]
 
+def test_reconstruct_missing_lineage_fails_closed():
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()], {}
+    )
+    assert cycles == []
+
+
+def test_reconstruct_hedge_mode_fill_fails_closed():
+    trades = [dict(row) for row in _open_fills()]
+    trades[0]["positionSide"] = "LONG"
+    trades.append({
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    })
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_non_usdt_commission_fails_closed():
+    trades = [dict(row) for row in _open_fills()]
+    trades[0]["commissionAsset"] = "BNB"
+    trades.append({
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    })
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [_entry_registry(), _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_manual_close_fails_closed():
+    orders = _orders()
+    orders[1] = dict(orders[1], clientOrderId="manual-close")
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, orders, [], [_entry_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
+
+def test_reconstruct_nonzero_pre_entry_exposure_fails_closed():
+    entry = _entry_registry()
+    entry["previous_position_qty"] = 0.25
+    trades = _open_fills() + [{
+        "symbol": "BTCUSDT", "id": 3, "orderId": 22, "side": "SELL",
+        "price": "110", "qty": "1.0", "realizedPnl": "9.4",
+        "commission": "0.05", "commissionAsset": "USDT",
+        "time": 2000, "positionSide": "BOTH",
+    }]
+    cycles = accounting.reconstruct_bgx_lifecycles(
+        trades, _orders(), [], [entry, _close_registry()],
+        {"11": _lineage()},
+    )
+    assert cycles == []
+
