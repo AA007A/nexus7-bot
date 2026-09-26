@@ -170,8 +170,9 @@ async def lifespan(app: FastAPI):
                         from urllib.parse import urlencode as _urlencode
                         import aiohttp as _aiohttp
 
-                        _key = os.environ.get("BINANCE_API_KEY", "").strip()
-                        _secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+                        from bot import binance as _binance_module
+                        _key = _binance_module.API_KEY
+                        _secret = _binance_module.API_SECRET
                         _params = {
                             "timestamp": int(time.time() * 1000),
                             "recvWindow": int(os.environ.get("BINANCE_RECV_WINDOW", "5000")),
