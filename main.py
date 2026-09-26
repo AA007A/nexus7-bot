@@ -154,11 +154,14 @@ async def lifespan(app: FastAPI):
                         "values_redacted=true execution_effect=NONE"
                     )
             except Exception as _e:
+                # BinanceClient RuntimeError messages contain only HTTP/code/msg;
+                # credential/signature material is never included by _request.
+                _auth_error = str(_e).replace("\n", " ")[:240]
                 log.warning(
                     "[BINANCE_PRIVATE_AUTH] status=FAIL "
-                    "endpoint=/fapi/v3/balance error_type=%s "
+                    "endpoint=/fapi/v3/balance error_type=%s detail=%s "
                     "values_redacted=true execution_effect=NONE",
-                    type(_e).__name__,
+                    type(_e).__name__, _auth_error,
                 )
 
         app.state.ready = True
