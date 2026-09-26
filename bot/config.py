@@ -1,5 +1,7 @@
 import os
 
+from bot import telegram_credentials as _telegram_credentials
+
 
 def _pct(value: str, default: float, name: str = "") -> float:
     """Normalize percentage-like values used by bounded percentage controls."""
@@ -93,14 +95,8 @@ class Config:
     # Telegram credential aliases. Keep the canonical names first so
     # existing deployments are unchanged, while accepting the Railway names
     # already used by this project.
-    TELEGRAM_TOKEN: str = (
-        os.environ.get("TELEGRAM_TOKEN", "").strip()
-        or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    )
-    TELEGRAM_CHAT: str = (
-        os.environ.get("TELEGRAM_CHAT", "").strip()
-        or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    )
+    TELEGRAM_TOKEN: str = _telegram_credentials.token()
+    TELEGRAM_CHAT: str = _telegram_credentials.chat()
 
     ALLOWED_ORIGINS: list = [
         o.strip()
