@@ -130,6 +130,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.error(f"❌ load_instruments falhou: {e} — seguindo mesmo assim")
 
+        # Binance private-auth startup probe: signed READ-ONLY request.
+        # This proves API key/secret/signature/timestamp validity without
+        # creating, cancelling, or modifying any exchange order. Failure is
+        # telemetry-only while PAPER is active; LIVE release gates remain
+        # authoritative and unchanged.
+        if EXCHANGE_NAME == "binance":
+            try:
+                await asyncio.wait_for(client.sync_time(), timeout=5)
+                _auth_rows = await asyncio.wait_for(
+                    client._get("/fapi/v3/balance", auth=True), timeout=10
+                )
+                if isinstance(_auth_rows, list):
+                    log.info(
+                        "[BINANCE_PRIVATE_AUTH] status=PASS "
+                        "endpoint=/fapi/v3/balance http=200 response=list "
+                        "values_redacted=true execution_effect=NONE"
+                    )
+                else:
+                    log.warning(
+                        "[BINANCE_PRIVATE_AUTH] status=FAIL "
+                        "endpoint=/fapi/v3/balance reason=unexpected_response "
+                        "values_redacted=true execution_effect=NONE"
+                    )
+            except Exception as _e:
+                log.warning(
+                    "[BINANCE_PRIVATE_AUTH] status=FAIL "
+                    "endpoint=/fapi/v3/balance error_type=%s "
+                    "values_redacted=true execution_effect=NONE",
+                    type(_e).__name__,
+                )
+
         app.state.ready = True
 
         if _blocked_by_selfcheck:
