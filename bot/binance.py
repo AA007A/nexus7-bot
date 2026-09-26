@@ -838,6 +838,15 @@ class BinanceClient:
                 engine, ownership, event="predispatch_validated"
             )
             assert_ready_for_new_entries(engine)
+            if managed is not None:
+                local_position = (getattr(engine, "positions", {}) or {}).get(symbol)
+                if local_position is None:
+                    managed.previous_position_qty = 0.0
+                else:
+                    previous_qty = abs(float(getattr(local_position, "qty", 0.0) or 0.0))
+                    if not math.isfinite(previous_qty):
+                        raise RuntimeError("BINANCE_PREVIOUS_POSITION_QTY_INVALID")
+                    managed.previous_position_qty = previous_qty
 
         data = await self._post(
             "/fapi/v1/order",
