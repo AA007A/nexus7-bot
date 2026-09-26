@@ -27,6 +27,7 @@ def install(TradingEngine, log) -> None:
     from bot import nexus_ai
     from bot import nexus_regime_transition_consistency as regime_transition
     from bot import kucoin_contract_risk_hardening as cross_risk_hardening
+    from bot import exchange as exchange_runtime
     from bot import cross_geometry_target_policy as cross_target_policy
     from bot import cross_portfolio_stress
     from bot import operator_runtime_policy
@@ -56,7 +57,8 @@ def install(TradingEngine, log) -> None:
     from bot import entry_latency_observability
     from bot import runtime_contract_guard
     from bot.pilot import PilotGuard
-    from bot.kucoin import KuCoinClient, TAKER_FEE
+    ExchangeClient = exchange_runtime.ExchangeClient
+    TAKER_FEE = exchange_runtime.TAKER_FEE
 
     # Install before any KuCoinClient instance is created by FastAPI lifespan.
     # This is logging-only and cannot affect exchange request semantics.
@@ -72,9 +74,12 @@ def install(TradingEngine, log) -> None:
     entry_type_shadow_overlay.install(strategy.Analyzer, strategy, log)
     market_viability_fail_closed.install(TradingEngine, strategy.cfg, log)
 
-    order_visibility_race_hardening.install(KuCoinClient, log)
-    partial_tp_execution_hardening.install(TradingEngine, KuCoinClient, TAKER_FEE, log)
-    cross_target_policy.install(cross_risk_hardening, log)
+    order_visibility_race_hardening.install(ExchangeClient, log)
+    partial_tp_execution_hardening.install(
+        TradingEngine, ExchangeClient, TAKER_FEE, log
+    )
+    if exchange_runtime.is_kucoin():
+        cross_target_policy.install(cross_risk_hardening, log)
 
     operator_runtime_policy.install(TradingEngine, policy_log_throttle.wrap(log))
     final_sizing_invariants.install(core_engine, pilot_cap, log)
@@ -89,8 +94,16 @@ def install(TradingEngine, log) -> None:
         TradingEngine, core_engine.Position, strategy.cfg, TAKER_FEE, log
     )
     daily_pnl_estimate_lineage_hardening.install(durable_daily_pnl, log)
-    daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
-    external_origin_runtime.install(TradingEngine, exchange_accounting_evidence, log)
+    if exchange_runtime.is_kucoin():
+        daily_pnl_exchange_reconciliation.install(exchange_accounting_evidence, log)
+        external_origin_runtime.install(
+            TradingEngine, exchange_accounting_evidence, log
+        )
+    else:
+        log.warning(
+            "[BINANCE_MIGRATION] exchange_accounting_adapter=BLOCKED "
+            "live_accounting_authority=false paper_unaffected=true"
+        )
     regime_transition.install(nexus_ai, log)
     cross_portfolio_stress.install(TradingEngine, log)
 
@@ -101,7 +114,7 @@ def install(TradingEngine, log) -> None:
     log.info(
         "[RUNTIME_OVERLAYS] authentication-log redaction, database-authority observability, passive funnel and entry-latency observability, "
         "scoring/trailing safety, entry-type shadow diagnostics, volume-ratio diagnostics, "
-        "fail-closed market viability, KuCoin order-visibility race hardening, fail-closed "
+        "fail-closed market viability, exchange order-visibility race hardening, fail-closed "
         "partial-TP execution, drawdown hard-gate with explicit override, final risk-authoritative "
         "sizing invariants, truthful daily-stop override telemetry, market-risk coverage telemetry, "
         "restart opening-order lineage recovery, post-trade forensics, direct-close daily-PnL "
