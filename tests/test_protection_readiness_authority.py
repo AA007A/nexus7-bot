@@ -16,6 +16,27 @@ class ProtectionReadinessAuthorityTests(unittest.IsolatedAsyncioTestCase):
         engine = SimpleNamespace()
         self.assertFalse(runtime_readiness(engine).protection_system_ready)
 
+    async def test_paper_flat_readiness_never_requires_private_active_orders(self):
+        client = SimpleNamespace(
+            get_positions=AsyncMock(return_value=[]),
+            _get=AsyncMock(
+                side_effect=AssertionError(
+                    "private exchange active-order read executed in PAPER"
+                )
+            ),
+        )
+        engine = SimpleNamespace(
+            connected=True,
+            paper_trade=True,
+            client=client,
+            _unprotected_symbols=set(),
+            orders=_registry(),
+            positions={},
+        )
+        self.assertTrue(await refresh_protection_readiness(engine))
+        client._get.assert_not_awaited()
+        self.assertTrue(engine._protection_system_ready)
+
     async def test_flat_exchange_is_ready_only_with_zero_unprotected(self):
         client = SimpleNamespace(
             get_positions=AsyncMock(return_value=[]),

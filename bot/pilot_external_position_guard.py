@@ -7,7 +7,7 @@ external/manual and therefore read-only.
 
 At startup, a surviving position may be reassociated only through the stronger
 read-only restart proof: one unique durable BGX FILLED order, independently
-confirmed by KuCoin with matching orderId/clientOid/symbol/side/base quantity,
+confirmed by the active exchange with matching orderId/clientOid/symbol/side/base quantity,
 and currently valid native protection. Symbol similarity alone is never enough.
 
 External positions may be observed, protection-checked and counted toward
@@ -20,13 +20,17 @@ from bot.conditional_stop_protection import conditional_stop_confirmed, _to_base
 from bot.restart_ownership_recovery import prove_restart_ownership
 
 
-def install(TradingEngine, log):
+def install(TradingEngine, log, exchange_name: str = "kucoin"):
     if getattr(TradingEngine, "_pilot_external_position_guard_patched", False):
         return
 
-    from bot import kucoin as _kucoin
-    from bot import shadow_position_forensics as _shadow_position_forensics
-    _shadow_position_forensics.install(_kucoin, log)
+    # Shadow position forensics currently contains KuCoin-specific transport
+    # assumptions. The ownership boundary below is exchange-neutral and is
+    # installed for Binance without importing those KuCoin hooks.
+    if str(exchange_name).lower() == "kucoin":
+        from bot import kucoin as _kucoin
+        from bot import shadow_position_forensics as _shadow_position_forensics
+        _shadow_position_forensics.install(_kucoin, log)
 
     original_guard = getattr(TradingEngine, "_guard_naked_positions", None)
     original_sync = getattr(TradingEngine, "_sync_positions", None)
@@ -302,7 +306,9 @@ def install(TradingEngine, log):
 
     TradingEngine._pilot_external_position_guard_patched = True
     log.warning(
-        "[EXTERNAL_POSITION_IMMUTABLE] installed: startup positions default to "
-        "EXTERNAL/read-only; only exact durable+exchange+protection proof may "
-        "recover BGX ownership; no heuristic adoption; unprotected externals block"
+        "[EXTERNAL_POSITION_IMMUTABLE] installed exchange=%s: startup positions "
+        "default to EXTERNAL/read-only; only exact durable+exchange+protection "
+        "proof may recover BGX ownership; no heuristic adoption; unprotected "
+        "externals block",
+        str(exchange_name).lower(),
     )

@@ -111,8 +111,9 @@ def _tg_worker() -> None:
     while True:
         text = _TG_QUEUE.get()
         try:
-            token = os.environ.get("TELEGRAM_TOKEN", "")
-            chat = os.environ.get("TELEGRAM_CHAT", "")
+            from bot import telegram_credentials
+            token = telegram_credentials.token()
+            chat = telegram_credentials.chat()
             if not token or not chat:
                 continue
             data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
@@ -132,7 +133,8 @@ def _enqueue_summary(text: str) -> None:
     global _TG_STARTED
     if not _TELEGRAM_ENABLED:
         return
-    if not os.environ.get("TELEGRAM_TOKEN") or not os.environ.get("TELEGRAM_CHAT"):
+    from bot import telegram_credentials
+    if not telegram_credentials.configured():
         return
     if not _TG_STARTED:
         _TG_STARTED = True

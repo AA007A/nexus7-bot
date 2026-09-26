@@ -1,8 +1,10 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import database as db
 from bot.capital_flow_reconciliation import (
+    BINANCE_LAST_FLOW_CURSOR_KEY,
     LAST_FLOW_OFFSET_KEY,
     reconcile_external_capital_flows,
 )
@@ -14,6 +16,94 @@ class DummyClient:
 
 
 class CapitalFlowReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_binance_bootstrap_checkpoints_without_rebasing(self):
+        client = DummyClient({})
+        client._listen_key_request = AsyncMock(return_value={"listenKey": "lk"})
+        rows = [{
+            "symbol": "",
+            "incomeType": "TRANSFER",
+            "income": "19.68204603",
+            "asset": "USDT",
+            "info": "",
+            "time": 1000,
+            "tranId": 77,
+            "tradeId": "",
+        }]
+
+        with patch(
+            "bot.binance_accounting_evidence.collect_income",
+            AsyncMock(return_value=rows),
+        ), patch(
+            "bot.capital_flow_reconciliation.db.load_key_value",
+            AsyncMock(return_value=None),
+        ), patch(
+            "bot.capital_flow_reconciliation.db.save_key_value",
+            AsyncMock(return_value=True),
+        ) as save, patch(
+            "bot.capital_flow_reconciliation.rebase_real_account_peak_for_external_flow",
+            AsyncMock(),
+        ) as rebase:
+            result = await reconcile_external_capital_flows(
+                client, object(), 20.20, strict=True
+            )
+
+        self.assertEqual(result["applied"], 0)
+        self.assertTrue(result["bootstrap"])
+        self.assertEqual(result["authority"], "checkpoint_only")
+        rebase.assert_not_awaited()
+        self.assertEqual(save.await_args.args[0], BINANCE_LAST_FLOW_CURSOR_KEY)
+        checkpoint = json.loads(save.await_args.args[1])
+        self.assertEqual(checkpoint["version"], 1)
+        self.assertEqual(checkpoint["seen"], ["1000:77"])
+
+    async def test_binance_new_transfer_after_checkpoint_fails_closed(self):
+        client = DummyClient({})
+        client._listen_key_request = AsyncMock(return_value={"listenKey": "lk"})
+        rows = [
+            {
+                "incomeType": "TRANSFER",
+                "income": "19.68204603",
+                "asset": "USDT",
+                "time": 1000,
+                "tranId": 77,
+            },
+            {
+                "incomeType": "TRANSFER",
+                "income": "-2.0",
+                "asset": "USDT",
+                "time": 2000,
+                "tranId": 78,
+            },
+        ]
+        cursor = json.dumps({
+            "version": 1,
+            "seen": ["1000:77"],
+            "observed_at_ms": 1500,
+        })
+
+        with patch(
+            "bot.binance_accounting_evidence.collect_income",
+            AsyncMock(return_value=rows),
+        ), patch(
+            "bot.capital_flow_reconciliation.db.load_key_value",
+            AsyncMock(return_value=cursor),
+        ), patch(
+            "bot.capital_flow_reconciliation.db.save_key_value",
+            AsyncMock(),
+        ) as save, patch(
+            "bot.capital_flow_reconciliation.rebase_real_account_peak_for_external_flow",
+            AsyncMock(),
+        ) as rebase:
+            with self.assertRaisesRegex(
+                RuntimeError, "BINANCE_CAPITAL_FLOW_REBASE_UNCONFIRMED"
+            ):
+                await reconcile_external_capital_flows(
+                    client, object(), 18.20, strict=True
+                )
+
+        save.assert_not_awaited()
+        rebase.assert_not_awaited()
+
     async def test_bootstrap_matching_latest_transferout_rebases_once_and_checkpoints(self):
         client = DummyClient({
             "dataList": [

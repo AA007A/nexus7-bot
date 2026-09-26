@@ -1,9 +1,19 @@
-"""Final LIVE pilot sizing authority.
+"""Final LIVE pilot sizing authority (the last ``minimum_base_quantity`` hook).
 
-Operator policy owns quantity: 50% of freshly authenticated available
-collateral is used as initial margin at configured leverage. RiskManagerV3 is
-mandatory as a fail-closed validation gate, but its numeric recommendation
-cannot silently shrink an otherwise valid operator target.
+Canonical sizing contract, which every sizing log reports verbatim:
+
+* ``risk_authority=RiskManagerV3``: the stop-risk quantity sized from
+  ``equity * effective_risk_pct`` over the planned stop distance plus
+  round-trip fees and slippage. Leverage only changes required collateral.
+* ``target_policy=50pct_available_initial_margin_cap``: the operator ceiling,
+  ``available * 0.50`` of initial margin at configured leverage, floored to
+  exchange lots.
+* ``final_quantity_policy=min(stop_risk_qty,operator_margin_cap_qty)``.
+
+Any invalid/non-positive input on either side yields ``qty=0`` (fail closed).
+The projected-loss ceiling in ``final_loss_budget`` is still applied on top.
+Earlier pilot hooks (``pilot_live_runtime``, ``pilot_risk_cap_hardening``,
+``operator_runtime_policy``) are shadowed by this one in a pilot context.
 """
 from __future__ import annotations
 
@@ -15,13 +25,34 @@ from bot.quantity import quantity_rules
 
 MARGIN_FRACTION = 0.50
 
+TARGET_POLICY = "50pct_available_initial_margin_cap"
+RISK_AUTHORITY = "RiskManagerV3"
+FINAL_QUANTITY_POLICY = "min(stop_risk_qty,operator_margin_cap_qty)"
+SIZING_CONTRACT = (
+    f"target_policy={TARGET_POLICY} risk_authority={RISK_AUTHORITY} "
+    f"final_quantity_policy={FINAL_QUANTITY_POLICY}"
+)
+
 
 def _select_final_quantity(*, target_qty: float, risk_qty: float) -> float:
-    """Return operator target when both target and risk validation are valid."""
-    values = (float(target_qty), float(risk_qty))
+    """Return ``min(stop_risk_qty, operator_margin_cap_qty)`` or fail closed.
+
+    Both inputs are already floored to the exchange lot, so their minimum is a
+    valid exchange quantity. A risk quantity above the cap is clamped; a risk
+    quantity below it binds. Non-finite or non-positive input returns zero.
+    """
+    try:
+        values = (float(target_qty), float(risk_qty))
+    except (TypeError, ValueError):
+        return 0.0
     if any(not math.isfinite(v) or v <= 0 for v in values):
         return 0.0
-    return float(target_qty)
+    return min(values)
+
+
+def binding_constraint(*, target_qty: float, risk_qty: float) -> str:
+    """Name the constraint that produced the final quantity."""
+    return "RISK_BUDGET" if float(risk_qty) <= float(target_qty) else "OPERATOR_MARGIN_CAP"
 
 
 def _operator_target_quantity(info: dict, price: float, available: float, leverage: float) -> float:
@@ -98,8 +129,9 @@ def install(engine_module, pilot_cap, log) -> None:
         final_qty = _select_final_quantity(target_qty=target_qty, risk_qty=risk_qty)
         if final_qty <= 0:
             log.critical(
-                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_quantity target_qty=%.12g risk_validation_qty=%.12g",
-                symbol, target_qty, risk_qty,
+                "[FINAL_SIZING_INVARIANT] symbol=%s result=BLOCK reason=invalid_quantity "
+                "operator_margin_cap_qty=%.12g stop_risk_qty=%.12g %s",
+                symbol, target_qty, risk_qty, SIZING_CONTRACT,
             )
             pilot_cap._PILOT_FINAL_QTY.set(0.0)
             return 0.0
@@ -121,9 +153,10 @@ def install(engine_module, pilot_cap, log) -> None:
         setup_id = "UNKNOWN"
         try:
             from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            from bot.execution_cost import stress_cost_fraction
             signal = pilot_cap._PILOT_SIGNAL.get()
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            # Conservative ceiling input: max(candidate snapshot, static fallback).
+            cost_fraction, _cost_ref = stress_cost_fraction(signal, symbol)
             setup_id = str(getattr(signal, "_bgx_setup_id", "") or "UNKNOWN")
             validate(
                 final_qty, price_f, signal.sl, signal.direction, leverage,
@@ -152,13 +185,21 @@ def install(engine_module, pilot_cap, log) -> None:
 
         pilot_cap._PILOT_FINAL_QTY.set(final_qty)
         log.warning(
-            "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS target_qty=%.12g risk_validation_qty=%.12g final_qty=%.12g target_margin=%.6f target_notional=%.6f final_margin=%.6f margin_pct=50.00%% leverage=%.0fx authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE",
-            symbol, target_qty, risk_qty, final_qty, target_margin, target_notional, final_margin, leverage,
+            "[FINAL_SIZING_INVARIANT] symbol=%s result=PASS operator_margin_cap_qty=%.12g "
+            "stop_risk_qty=%.12g final_qty=%.12g binding=%s cap_margin=%.6f "
+            "cap_notional=%.6f final_notional=%.6f final_margin=%.6f margin_cap_pct=50.00%% "
+            "leverage=%.0fx %s",
+            symbol, target_qty, risk_qty, final_qty,
+            binding_constraint(target_qty=target_qty, risk_qty=risk_qty),
+            target_margin, target_notional, final_qty * price_f, final_margin, leverage,
+            SIZING_CONTRACT,
         )
         return final_qty
 
     engine_module.minimum_base_quantity = _final_operator_authoritative_quantity
     engine_module._final_sizing_invariants_installed = True
     log.critical(
-        "[FINAL_SIZING_INVARIANT] installed=true operator_margin_target=50pct_available sizing_authority=OPERATOR_50PCT_EQUITY risk_manager_role=VALIDATION_GATE configured_leverage_unchanged=true fail_closed=true"
+        "[FINAL_SIZING_INVARIANT] installed=true %s configured_leverage_unchanged=true "
+        "fail_closed=true",
+        SIZING_CONTRACT,
     )

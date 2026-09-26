@@ -63,21 +63,25 @@ class FinalSizingInvariantTests(unittest.TestCase):
             pilot_cap._PILOT_SYMBOL.reset(token_symbol)
             pilot_cap._PILOT_ENGINE.reset(token_engine)
 
-    def test_operator_target_is_derived_from_50pct_margin_not_legacy_quantity(self):
-        module, engine = self._install(risk_size=lambda *a, **k: 0.25, legacy_qty=0.001)
+    # Contract change (2026-09-26 audit P0-1). Previously the operator margin
+    # target was returned even when RiskManagerV3 sized less (qty=5 vs 0.25),
+    # i.e. the stop-risk budget was not enforced. The executed contract is now
+    # final_qty = min(stop_risk_qty, operator_margin_cap_qty).
+    def test_cap_is_derived_from_50pct_margin_not_legacy_quantity(self):
+        module, engine = self._install(risk_size=lambda *a, **k: 10.0, legacy_qty=0.001)
         qty, stored = self._call(module, engine)
-        # available=20, margin=10, leverage=50 => notional=500; price=100 => qty=5.
+        # available=20, margin=10, leverage=50 => notional=500; price=100 => cap qty=5.
         self.assertAlmostEqual(qty, 5.0)
         self.assertAlmostEqual(stored, 5.0)
         self.assertAlmostEqual((qty * 100.0) / cfg.LEVERAGE, 10.0)
 
-    def test_risk_numeric_recommendation_does_not_shrink_valid_operator_target(self):
+    def test_stop_risk_quantity_binds_below_operator_cap(self):
         module, engine = self._install(risk_size=lambda *a, **k: 0.25)
         qty, stored = self._call(module, engine)
-        self.assertAlmostEqual(qty, 5.0)
-        self.assertAlmostEqual(stored, 5.0)
+        self.assertAlmostEqual(qty, 0.25)
+        self.assertAlmostEqual(stored, 0.25)
 
-    def test_operator_target_remains_authoritative_when_risk_allows_more(self):
+    def test_operator_cap_binds_when_risk_allows_more(self):
         module, engine = self._install(risk_size=lambda *a, **k: 10.0)
         qty, stored = self._call(module, engine)
         self.assertAlmostEqual(qty, 5.0)

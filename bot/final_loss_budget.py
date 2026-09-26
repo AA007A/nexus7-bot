@@ -1,7 +1,9 @@
-"""Deterministic projected loss ceiling for the operator margin policy.
+"""Deterministic projected loss ceiling applied on top of final sizing.
 
-Keep 50% available margin and configured leverage. Reject incompatible stops;
-never resize or move a technical stop. This is an estimate, not a guaranteed
+The final quantity is ``min(stop_risk_qty, operator_margin_cap_qty)`` (see
+``final_sizing_invariants``). This module adds a second, independent ceiling:
+projected stop loss <= 50% of the entry's initial margin. Reject incompatible
+stops; never resize or move a technical stop. This is an estimate, not a guaranteed
 maximum realized loss: gaps, funding and execution beyond estimates can exceed it.
 """
 import math
@@ -78,8 +80,8 @@ def emit_telemetry(
         logger = log.info if str(result).upper() == 'PASS' else log.warning
         logger(
             "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
-            "specific_reason=%s qty=%.12g qty_authority=FINAL_OPERATOR_QTY "
-            "risk_v3_advisory_qty=%s risk_v3_qty_authority=NON_AUTHORITATIVE "
+            "specific_reason=%s qty=%.12g qty_authority=FINAL_SIZING_INVARIANT "
+            "stop_risk_qty=%s risk_v3_qty_authority=BINDING_UPPER_BOUND "
             "entry=%.12g stop=%.12g direction=%s leverage=%.12g margin=%.12g "
             "stop_fraction=%.12g cost_fraction=%.12g projected_loss=%.12g "
             "loss_limit=%.12g projected_loss_pct_notional=%.8f "
@@ -95,12 +97,23 @@ def emit_telemetry(
             metrics['headroom_pct'],
         )
     except Exception as exc:
-        try:
-            log.warning(
-                "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
-                "telemetry_error=%s decision_effect=NONE execution_effect=NONE",
-                symbol, setup_id or 'UNKNOWN', stage, str(result).upper(),
-                type(exc).__name__,
-            )
-        except Exception:
-            pass
+        _report_telemetry_failure(log, symbol, setup_id, stage, result, exc)
+
+
+def _report_telemetry_failure(log, symbol, setup_id, stage, result, exc):
+    """Report a telemetry failure; a broken logger must never reach trading.
+
+    Returns True when the failure was reported, False when the logger itself
+    failed (then there is nothing else that could safely record it).
+    """
+    try:
+        log.warning(
+            "[FINAL_LOSS_BUDGET] symbol=%s setup_id=%s stage=%s result=%s "
+            "telemetry_error=%s decision_effect=NONE execution_effect=NONE",
+            symbol, setup_id or 'UNKNOWN', stage, str(result).upper(),
+            type(exc).__name__,
+        )
+        return True
+    except Exception as log_exc:  # noqa: BLE001 - logging must not raise into sizing
+        del log_exc
+        return False

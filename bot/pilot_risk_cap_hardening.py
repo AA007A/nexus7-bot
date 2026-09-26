@@ -116,7 +116,8 @@ def install(TradingEngine, log) -> None:
 
         log.warning(
             "[PILOT_RISK_CAP] symbol=%s target_qty=%.12g risk_qty=%.12g "
-            "final_qty=%.12g authority=RiskManagerV3 target_policy=50pct_available_notional",
+            "final_qty=%.12g authority=RiskManagerV3 target_policy=legacy_50pct_available_notional "
+            "superseded_by=final_sizing_invariants",
             symbol,
             target_qty,
             risk_qty,
@@ -241,9 +242,9 @@ def install(TradingEngine, log) -> None:
         setup_id = str(getattr(sig, "_bgx_setup_id", "") or "UNKNOWN")
         try:
             from bot.final_loss_budget import emit_telemetry, reason_from_exception, validate
-            from bot.kucoin_execution_model import estimated_round_trip_cost_pct
+            from bot.execution_cost import stress_cost_fraction
             from bot.config import cfg
-            cost_fraction = estimated_round_trip_cost_pct(symbol) / 100.0
+            cost_fraction, _cost_ref = stress_cost_fraction(sig, symbol)
             validate(
                 qty_f, executable_price, sig.sl, direction,
                 cfg.LEVERAGE, cost_fraction,
@@ -286,8 +287,8 @@ def install(TradingEngine, log) -> None:
     TradingEngine._pilot_risk_cap_hardening_installed = True
 
     log.critical(
-        "[PILOT_RISK_CAP] installed: 50pct available balance remains the position-"
-        "notional target; RiskManagerV3 is the maximum quantity authority; "
+        "[PILOT_RISK_CAP] installed: final sizing is owned by final_sizing_invariants "
+        "(final_qty=min(stop_risk_qty,operator_margin_cap_qty), risk_authority=RiskManagerV3); "
         "LIVE spread/depth/signal-drift rechecked fail-closed only after final sizing; "
         "directional_drift_telemetry=true authorization_unchanged=true"
     )

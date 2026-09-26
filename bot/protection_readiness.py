@@ -247,28 +247,44 @@ async def refresh_protection_readiness(engine) -> bool:
             )
             return False
 
-        raw_get = getattr(client, "_get", None)
-        if not callable(raw_get):
-            engine._protection_readiness_evidence["reason"] = "flat_active_orders_unconfirmed"
-            return False
-        try:
-            payload = await raw_get("/api/v1/orders", {"status": "active"}, auth=True)
-        except Exception as exc:
-            engine._protection_readiness_evidence["reason"] = "flat_active_orders_read_failed"
-            log.critical(
-                "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
-                "reason=active_orders_read_failed error=%s",
-                type(exc).__name__,
-            )
-            return False
-        if isinstance(payload, dict):
-            active = payload.get("items")
-            if active is None and isinstance(payload.get("data"), list):
-                active = payload.get("data")
-        elif isinstance(payload, list):
-            active = payload
+        if getattr(engine, "paper_trade", False):
+            # PAPER orders are durable simulator state and never exist on the
+            # exchange. Private active-order reads would incorrectly make
+            # credentials a prerequisite for PAPER readiness.
+            active = []
         else:
-            active = None
+            open_orders = getattr(client, "get_open_orders", None)
+            try:
+                if callable(open_orders):
+                    payload = await open_orders()
+                else:
+                    raw_get = getattr(client, "_get", None)
+                    if not callable(raw_get):
+                        engine._protection_readiness_evidence["reason"] = (
+                            "flat_active_orders_unconfirmed"
+                        )
+                        return False
+                    payload = await raw_get(
+                        "/api/v1/orders", {"status": "active"}, auth=True
+                    )
+            except Exception as exc:
+                engine._protection_readiness_evidence["reason"] = (
+                    "flat_active_orders_read_failed"
+                )
+                log.critical(
+                    "[PROTECTION_STATE_RECONCILIATION] decision=KEEP_BLOCKED "
+                    "reason=active_orders_read_failed error=%s",
+                    type(exc).__name__,
+                )
+                return False
+            if isinstance(payload, dict):
+                active = payload.get("items")
+                if active is None and isinstance(payload.get("data"), list):
+                    active = payload.get("data")
+            elif isinstance(payload, list):
+                active = payload
+            else:
+                active = None
         if not isinstance(active, list):
             engine._protection_readiness_evidence["reason"] = "flat_active_orders_payload_malformed"
             return False

@@ -253,7 +253,7 @@ def install_paper_execution_fix(log):
     import bot.engine as engine_module
     from bot.engine import TradingEngine
     from bot.config import cfg
-    from bot.kucoin import TAKER_FEE
+    from bot.exchange import TAKER_FEE
 
     if getattr(TradingEngine, "_paper_execution_hardening_patched", False):
         return
