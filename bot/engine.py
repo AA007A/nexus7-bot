@@ -32,7 +32,7 @@ from bot.exchange import ExchangeClient, is_binance
 from bot.strategy import Analyzer, Signal
 from bot.config import cfg
 from bot.logger import log
-from bot.notifier import (notify, notify_nexus, signal_msg, order_opened_msg, close_msg,
+from bot.notifier import (notify, notify_nexus, notify_nexus_score, signal_msg, order_opened_msg, close_msg,
     daily_report_msg, daily_target_msg, daily_stop_msg, drawdown_msg, consecutive_losses_msg, online_msg)
 from bot import database as db
 from bot import score as scoring
@@ -2629,13 +2629,54 @@ class TradingEngine:
             except Exception as _e:
                 log.debug(f"nexus: news sentiment indisponível: {_e}")
 
-            return await asyncio.to_thread(
+            decision = await asyncio.to_thread(
                 nexus_ai.decide, symbol=sig.symbol,
                 k15=k15, k1h=k1h, k4h=k4h,
                 entry=sig.entry, sl=sig.sl, tp=sig.tp,
                 ticker=ticker, funding=funding, oi=oi, oi_delta=oi_delta,
                 news_score=news_score,
             )
+
+            # nexus_ai.decide executes in a worker thread. Telegram scheduling
+            # must happen back on the engine event loop, never inside that
+            # worker thread.
+            raw_decision = getattr(decision, "decision", "UNKNOWN")
+            decision_value = getattr(raw_decision, "value", raw_decision)
+            if str(decision_value).upper() == "WAIT":
+                snapshot = getattr(decision, "_bgx_score_snapshot", {}) or {}
+                reasoning = getattr(decision, "reasoning", None) or []
+                payload = {
+                    "symbol": sig.symbol,
+                    "decision": "WAIT",
+                    "final_score": float(getattr(decision, "setup_quality", 0.0) or 0.0),
+                    "estimated_final": snapshot.get("estimated_final"),
+                    "component_score": snapshot.get("component_score"),
+                    "risk_penalty": snapshot.get("risk_penalty"),
+                    "confidence": snapshot.get(
+                        "fusion_confidence",
+                        getattr(decision, "confidence", None),
+                    ),
+                    "rr_net": snapshot.get(
+                        "rr_net",
+                        getattr(decision, "risk_reward", None),
+                    ),
+                    "ev_pct": snapshot.get(
+                        "ev_pct",
+                        getattr(decision, "expected_value", None),
+                    ),
+                    "data_quality": snapshot.get(
+                        "data_quality",
+                        getattr(decision, "data_quality", None),
+                    ),
+                    "regime": snapshot.get(
+                        "regime",
+                        getattr(decision, "market_regime", "N/A"),
+                    ),
+                    "mtf": snapshot.get("mtf", "N/A"),
+                    "reason": reasoning[-1] if reasoning else "aguardando confirmação",
+                }
+                asyncio.create_task(notify_nexus_score(payload))
+            return decision
         except Exception as e:
             log.error(f"_nexus_validate {sig.symbol}: {type(e).__name__}")
             raise

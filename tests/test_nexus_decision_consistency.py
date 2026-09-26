@@ -1,7 +1,4 @@
-import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
 from bot import nexus_decision_consistency as consistency
 
 
@@ -108,7 +105,7 @@ def test_detect_regime_outside_entry_decision_retains_original_inputs():
     assert observed == [15]
 
 
-def test_wait_score_schedules_telegram_observability_without_execution_change():
+def test_wait_score_snapshot_is_handed_back_without_execution_change():
     def original(symbol, k15, k1h, k4h, *args, **kwargs):
         return SimpleNamespace(
             decision="WAIT",
@@ -121,22 +118,16 @@ def test_wait_score_schedules_telegram_observability_without_execution_change():
         info=lambda *args, **kwargs: None,
         warning=lambda *args, **kwargs: None,
     )
-    fake_notifier = SimpleNamespace(notify_nexus_score=AsyncMock(return_value=True))
 
-    async def scenario():
-        consistency.install(fake_ai, fake_log, fake_notifier)
-        result = fake_ai.decide(
-            "SOLUSDT", _candles(100), _candles(100), _candles(100)
-        )
-        await asyncio.sleep(0)
-        return result
+    consistency.install(fake_ai, fake_log)
+    result = fake_ai.decide(
+        "SOLUSDT", _candles(100), _candles(100), _candles(100)
+    )
 
-    result = asyncio.run(scenario())
     assert result.decision == "WAIT"
-    fake_notifier.notify_nexus_score.assert_awaited_once()
-    payload = fake_notifier.notify_nexus_score.await_args.args[0]
-    assert payload["symbol"] == "SOLUSDT"
-    assert payload["decision"] == "WAIT"
+    snapshot = getattr(result, "_bgx_score_snapshot")
+    assert isinstance(snapshot, dict)
+    assert "ok" in snapshot
 
 
 def test_install_is_idempotent():

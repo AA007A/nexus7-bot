@@ -16,8 +16,6 @@ threshold, risk limit or exchange permission is changed here.
 """
 from __future__ import annotations
 
-import asyncio
-
 from bot.nexus_probability import heuristic_win_probability
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Tuple
@@ -159,7 +157,7 @@ def _score_snapshot(nexus_ai, *, symbol: str, k15: list, k1h: list, k4h: list,
         return {"ok": False, "reason": type(exc).__name__}
 
 
-def install(nexus_ai, log, notifier=None) -> None:
+def install(nexus_ai, log) -> None:
     if getattr(nexus_ai, "_closed_candle_consistency_installed", False):
         return
 
@@ -234,31 +232,13 @@ def install(nexus_ai, log, notifier=None) -> None:
                 len(c15), len(c1h), len(c4h),
             )
 
-            raw_decision = getattr(decision, "decision", "UNKNOWN")
-            decision_value = getattr(raw_decision, "value", raw_decision)
-            if str(decision_value).upper() == "WAIT" and notifier is not None:
-                sender = getattr(notifier, "notify_nexus_score", None)
-                if callable(sender):
-                    reasoning = getattr(decision, "reasoning", None) or []
-                    payload = {
-                        "symbol": symbol,
-                        "decision": "WAIT",
-                        "final_score": _safe_float(getattr(decision, "setup_quality", 0.0)),
-                        "estimated_final": snapshot.get("estimated_final"),
-                        "component_score": snapshot.get("component_score"),
-                        "risk_penalty": snapshot.get("risk_penalty"),
-                        "confidence": snapshot.get("fusion_confidence"),
-                        "rr_net": snapshot.get("rr_net"),
-                        "ev_pct": snapshot.get("ev_pct"),
-                        "data_quality": snapshot.get("data_quality"),
-                        "regime": snapshot.get("regime"),
-                        "mtf": snapshot.get("mtf"),
-                        "reason": reasoning[-1] if reasoning else "aguardando confirmação",
-                    }
-                    try:
-                        asyncio.get_running_loop().create_task(sender(payload))
-                    except RuntimeError:
-                        pass
+            # Preserve read-only score telemetry on the decision so the async
+            # engine can notify Telegram after returning from asyncio.to_thread.
+            # Dynamic metadata is intentionally excluded from NexusDecision.to_dict().
+            try:
+                setattr(decision, "_bgx_score_snapshot", snapshot)
+            except Exception:
+                pass
             return decision
         finally:
             _HTF_REGIME_CONTEXT.reset(token)
