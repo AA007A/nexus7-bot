@@ -446,17 +446,79 @@ class BinanceClient:
         async with self._entry_safe_post(endpoint, body, url, **kwargs) as response:
             yield response
 
+    @staticmethod
+    def _ambiguous_order_submission_error(exc: Exception) -> bool:
+        """Return True only when Binance may have accepted an order.
+
+        These cases must be reconciled by newClientOrderId before the caller is
+        allowed to consider another logical submission.
+        """
+        detail = str(exc)
+        return (
+            "network failure" in detail
+            or "HTTP 5" in detail
+            or any(
+                marker in detail
+                for marker in (
+                    "code=-1000",  # UNKNOWN
+                    "code=-1001",  # DISCONNECTED
+                    "code=-1006",  # UNEXPECTED_RESP / execution unknown
+                    "code=-1007",  # TIMEOUT / execution unknown
+                )
+            )
+        )
+
     async def _post(
         self, endpoint: str, body: dict, *, single_attempt: bool = False
     ) -> dict:
-        return await self._request(
-            "POST",
-            endpoint,
-            body,
-            auth=True,
-            mutation=True,
-            single_attempt=single_attempt,
-        )
+        try:
+            return await self._request(
+                "POST",
+                endpoint,
+                body,
+                auth=True,
+                mutation=True,
+                single_attempt=single_attempt,
+            )
+        except Exception as exc:
+            client_oid = str(
+                (body or {}).get("newClientOrderId", "") or ""
+            )
+            if (
+                endpoint == "/fapi/v1/order"
+                and client_oid
+                and self._ambiguous_order_submission_error(exc)
+            ):
+                recovered = await self._recover_ambiguous_order(
+                    endpoint, body
+                )
+                if recovered:
+                    result = dict(recovered)
+                    result["recoveredByClientOid"] = True
+                    result.setdefault("clientOrderId", client_oid)
+                    result.setdefault("clientOid", client_oid)
+                    log.warning(
+                        "[BINANCE_ORDER_RECOVERY] result=RECOVERED "
+                        "clientOid=%s orderId=%s mutation_retry=false",
+                        client_oid,
+                        result.get("orderId", ""),
+                    )
+                    return result
+
+                # Do not let the engine blindly resubmit a logical entry whose
+                # exchange acceptance is still unknown.
+                log.critical(
+                    "[BINANCE_ORDER_RECOVERY] result=AMBIGUOUS_UNRESOLVED "
+                    "clientOid=%s mutation_retry=false "
+                    "execution_effect=BLOCK_AND_RECONCILE",
+                    client_oid,
+                )
+                return {
+                    "clientOrderId": client_oid,
+                    "clientOid": client_oid,
+                    "_ambiguous": True,
+                }
+            raise
 
     def rate_limit_status(self) -> dict:
         return {"recent_hits": self._rate_limit_hits, "exchange": "binance"}
