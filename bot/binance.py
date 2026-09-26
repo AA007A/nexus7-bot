@@ -192,6 +192,20 @@ def _live_migration_ready() -> bool:
     return _truthy(os.environ.get("BINANCE_LIVE_MIGRATION_READY", "false"))
 
 
+def _assert_signing_credentials_available() -> None:
+    """Validate only local signing material; never performs a network request."""
+    if not API_KEY:
+        raise RuntimeError("BINANCE_API_KEY_UNAVAILABLE")
+    if SIGNING_METHOD == "hmac":
+        if not API_SECRET:
+            raise RuntimeError("BINANCE_API_SECRET_UNAVAILABLE")
+        return
+    if SIGNING_METHOD == "ed25519":
+        _load_ed25519_private_key()
+        return
+    raise RuntimeError("BINANCE_SIGNING_METHOD_INVALID")
+
+
 def _d(value) -> Decimal:
     return Decimal(str(value))
 
@@ -691,8 +705,7 @@ class BinanceClient:
                 "clientOid": oid,
             }
 
-        if not API_KEY or not API_SECRET:
-            raise RuntimeError("BINANCE_CREDENTIALS_UNAVAILABLE")
+        _assert_signing_credentials_available()
         await self._assert_live_account_mode(symbol)
 
         qty_text = self._round_qty(qty, symbol)
