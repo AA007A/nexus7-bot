@@ -887,20 +887,39 @@ class BinanceClient:
                 side_upper,
                 qty_text,
             )
+            protection_failed = False
             if not reduce_only and (sl > 0 or tp > 0):
                 await asyncio.sleep(0.15)
-                if not await self.set_position_stops(
-                    symbol, sl=sl, tp=tp
-                ):
+                try:
+                    protection_confirmed = bool(
+                        await self.set_position_stops(
+                            symbol, sl=sl, tp=tp
+                        )
+                    )
+                except Exception as exc:
+                    protection_confirmed = False
                     log.critical(
                         "[BINANCE_PROTECTION] %s entry accepted but "
-                        "SL/TP not confirmed",
+                        "SL/TP installation raised error_type=%s "
+                        "execution_effect=TRIGGER_ENGINE_FAIL_CLOSED",
+                        symbol,
+                        type(exc).__name__,
+                    )
+                if not protection_confirmed:
+                    protection_failed = True
+                    log.critical(
+                        "[BINANCE_PROTECTION] %s entry accepted but "
+                        "SL/TP not confirmed "
+                        "execution_effect=TRIGGER_ENGINE_FAIL_CLOSED",
                         symbol,
                     )
+        else:
+            protection_failed = False
         return {
             "orderId": order_id,
             "clientOid": client_oid,
             **data,
+            "sl_tp_failed": protection_failed,
         }
 
     def rehydrate_order_identity_maps(self, records) -> int:
