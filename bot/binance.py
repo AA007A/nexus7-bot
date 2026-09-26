@@ -241,6 +241,11 @@ class BinanceClient:
         self._order_registry = None
         self._order_id_symbol: dict[str, str] = {}
         self._client_oid_symbol: dict[str, str] = {}
+        # Conditional orders moved to Binance's Algo service. Keep their
+        # user-data-stream lifecycle separate from normal ManagedOrder state:
+        # an ALGO_UPDATE is not itself a normal exchange order transition.
+        self._algo_order_cache: dict[str, dict] = {}
+        self._algo_actual_order_client: dict[str, str] = {}
         self._leverage_bracket_cache: dict[str, tuple[float, dict]] = {}
         self.entries_paused = False
 
@@ -1712,13 +1717,19 @@ class BinanceClient:
     async def _handle_private_order_event(
         self, message: dict
     ):
-        if (
-            not isinstance(message, dict)
-            or message.get("e")
-            != "ORDER_TRADE_UPDATE"
-        ):
+        if not isinstance(message, dict):
             return
+
+        event = str(message.get("e", "") or "").upper()
+        if event == "ALGO_UPDATE":
+            self._handle_private_algo_event(message)
+            return
+        if event != "ORDER_TRADE_UPDATE":
+            return
+
         order = message.get("o", {})
+        if not isinstance(order, dict):
+            return
         client_oid = str(
             order.get("c", "") or ""
         )
@@ -1737,6 +1748,27 @@ class BinanceClient:
                 client_oid
             ] = symbol
 
+        # Once a conditional Algo order triggers, Binance may expose the
+        # resulting normal order through ORDER_TRADE_UPDATE. Correlate that
+        # execution back to the BGX algo cache, but never manufacture a
+        # ManagedOrder for it: REST/algo history remains the authority.
+        algo_client_oid = self._algo_actual_order_client.get(order_id)
+        if algo_client_oid:
+            cached = self._algo_order_cache.get(algo_client_oid)
+            if isinstance(cached, dict):
+                updated = dict(cached)
+                updated["actualOrderStatus"] = status
+                updated["actualExecutedQty"] = str(
+                    order.get("z", "") or ""
+                )
+                updated["actualAvgPrice"] = str(
+                    order.get("ap", "") or ""
+                )
+                updated["actualEventTime"] = int(
+                    message.get("E", 0) or 0
+                )
+                self._algo_order_cache[algo_client_oid] = updated
+
         registry = self._order_registry
         if (
             registry is None
@@ -1754,7 +1786,14 @@ class BinanceClient:
                 registry.index_order_id(
                     order_id, client_oid
                 )
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE "
+                "symbol=%s result=REGISTRY_UPDATE_SKIPPED "
+                "error_type=%s execution_effect=NONE",
+                symbol or "UNKNOWN",
+                type(exc).__name__,
+            )
             return
 
         target = {
@@ -1777,8 +1816,167 @@ class BinanceClient:
                     order_id=order_id or None,
                     source="WS",
                 )
-            except (InvalidTransition, TypeError):
-                pass
+            except (InvalidTransition, TypeError) as exc:
+                log.warning(
+                    "[BINANCE_PRIVATE_WS] event=ORDER_TRADE_UPDATE "
+                    "symbol=%s status=%s result=STATE_TRANSITION_SKIPPED "
+                    "error_type=%s execution_effect=NONE",
+                    symbol or "UNKNOWN",
+                    status or "UNKNOWN",
+                    type(exc).__name__,
+                )
+
+    def _handle_private_algo_event(self, message: dict) -> None:
+        """Track BGX conditional-order lifecycle without inventing order state.
+
+        Binance USD-M emits ALGO_UPDATE for conditional orders. The payload is
+        intentionally parsed defensively because the Algo service uses compact
+        stream field names while REST uses descriptive names. This cache is
+        observability/correlation only; get_stop_orders()/allAlgoOrders remain
+        authoritative for protection checks and accounting.
+        """
+        payload = message.get("o", {})
+        if not isinstance(payload, dict):
+            return
+
+        client_algo_id = str(
+            payload.get(
+                "caid",
+                payload.get(
+                    "clientAlgoId",
+                    payload.get("c", ""),
+                ),
+            )
+            or ""
+        )
+        if not client_algo_id.startswith("bgx7-"):
+            return
+
+        algo_id = str(
+            payload.get("aid", payload.get("algoId", ""))
+            or ""
+        )
+        actual_order_id = str(
+            payload.get(
+                "ai",
+                payload.get("actualOrderId", ""),
+            )
+            or ""
+        )
+        symbol = to_standard(
+            payload.get("s", payload.get("symbol", ""))
+        )
+        status = str(
+            payload.get(
+                "X",
+                payload.get("algoStatus", payload.get("status", "")),
+            )
+            or ""
+        ).upper()
+        side = str(
+            payload.get("S", payload.get("side", ""))
+            or ""
+        ).upper()
+        position_side = str(
+            payload.get(
+                "ps",
+                payload.get("positionSide", "BOTH"),
+            )
+            or "BOTH"
+        ).upper()
+
+        previous = self._algo_order_cache.get(client_algo_id)
+        row = {
+            "clientAlgoId": client_algo_id,
+            "algoId": algo_id,
+            "actualOrderId": actual_order_id,
+            "symbol": symbol,
+            "side": side,
+            "positionSide": position_side,
+            "algoStatus": status,
+            "orderType": str(
+                payload.get(
+                    "o",
+                    payload.get(
+                        "orderType",
+                        payload.get("type", ""),
+                    ),
+                )
+                or ""
+            ).upper(),
+            "triggerPrice": str(
+                payload.get(
+                    "tp",
+                    payload.get("triggerPrice", ""),
+                )
+                or ""
+            ),
+            "quantity": str(
+                payload.get(
+                    "q",
+                    payload.get("quantity", ""),
+                )
+                or ""
+            ),
+            "executedQty": str(
+                payload.get(
+                    "aq",
+                    payload.get("executedQty", ""),
+                )
+                or ""
+            ),
+            "eventTime": int(message.get("E", 0) or 0),
+            "transactionTime": int(message.get("T", 0) or 0),
+        }
+        self._algo_order_cache[client_algo_id] = row
+
+        if symbol:
+            self._client_oid_symbol[client_algo_id] = symbol
+        if actual_order_id:
+            if symbol:
+                self._order_id_symbol[actual_order_id] = symbol
+            self._algo_actual_order_client[
+                actual_order_id
+            ] = client_algo_id
+
+        # Keep the correlation cache bounded for a 24/7 process.
+        while len(self._algo_order_cache) > 512:
+            oldest_client, oldest = next(
+                iter(self._algo_order_cache.items())
+            )
+            self._algo_order_cache.pop(
+                oldest_client, None
+            )
+            old_actual = str(
+                (oldest or {}).get("actualOrderId", "")
+                if isinstance(oldest, dict)
+                else ""
+            )
+            if (
+                old_actual
+                and self._algo_actual_order_client.get(
+                    old_actual
+                )
+                == oldest_client
+            ):
+                self._algo_actual_order_client.pop(
+                    old_actual, None
+                )
+
+        if (
+            not isinstance(previous, dict)
+            or previous.get("algoStatus") != status
+            or previous.get("actualOrderId")
+            != actual_order_id
+        ):
+            log.info(
+                "[BINANCE_ALGO_WS] symbol=%s status=%s "
+                "actual_order_linked=%s lifecycle_cache=true "
+                "authority=REST_ALGO_HISTORY execution_effect=NONE",
+                symbol or "UNKNOWN",
+                status or "UNKNOWN",
+                str(bool(actual_order_id)).lower(),
+            )
 
     def get_cache_stats(self) -> dict:
         return {
@@ -1791,6 +1989,7 @@ class BinanceClient:
             ),
             "tickers": len(self._ticker_cache),
             "orderbooks": len(self._ob_cache),
+            "algo_orders": len(self._algo_order_cache),
             "exchange": "binance",
         }
 
