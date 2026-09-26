@@ -372,6 +372,58 @@ class BinanceMigrationTests(unittest.TestCase):
         self.assertEqual(str(result["orderId"]), "123")
         self.assertTrue(result["sl_tp_failed"])
 
+    def test_order_endpoints_force_single_transport_dispatch(self):
+        client = FakeBinance()
+
+        for endpoint, body, response in (
+            (
+                "/fapi/v1/order",
+                {
+                    "symbol": "BTCUSDT",
+                    "side": "BUY",
+                    "type": "MARKET",
+                    "quantity": "0.01",
+                    "newClientOrderId": "bgx7-single-entry",
+                },
+                {"orderId": "123", "clientOrderId": "bgx7-single-entry"},
+            ),
+            (
+                "/fapi/v1/algoOrder",
+                {
+                    "algoType": "CONDITIONAL",
+                    "symbol": "BTCUSDT",
+                    "side": "SELL",
+                    "type": "STOP_MARKET",
+                    "triggerPrice": "59000",
+                    "closePosition": "true",
+                    "clientAlgoId": "bgx7-single-stop",
+                },
+                {"algoId": "456", "clientAlgoId": "bgx7-single-stop"},
+            ),
+        ):
+            with self.subTest(endpoint=endpoint), patch.object(
+                client,
+                "_request",
+                AsyncMock(return_value=response),
+            ) as request:
+                result = run(
+                    client._post(
+                        endpoint,
+                        body,
+                        single_attempt=False,
+                    )
+                )
+
+            self.assertEqual(result, response)
+            request.assert_awaited_once_with(
+                "POST",
+                endpoint,
+                body,
+                auth=True,
+                mutation=True,
+                single_attempt=True,
+            )
+
     def test_ambiguous_entry_response_recovers_by_client_order_id(self):
         client = FakeBinance()
         body = {
