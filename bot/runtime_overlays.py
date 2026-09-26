@@ -49,6 +49,7 @@ def install(TradingEngine, log) -> None:
     from bot import policy_log_throttle
     from bot import partial_tp_execution_hardening
     from bot import exchange_accounting_evidence
+    from bot import binance_accounting_evidence
     from bot import daily_pnl_exchange_reconciliation
     from bot import daily_stop_override_telemetry
     from bot import external_origin_runtime
@@ -100,9 +101,14 @@ def install(TradingEngine, log) -> None:
             TradingEngine, exchange_accounting_evidence, log
         )
     else:
+        external_origin_runtime.install(
+            TradingEngine, binance_accounting_evidence, log
+        )
         log.warning(
-            "[BINANCE_MIGRATION] exchange_accounting_adapter=BLOCKED "
-            "live_accounting_authority=false paper_unaffected=true"
+            "[BINANCE_ACCOUNTING] adapter=OBSERVATION_ONLY source=BINANCE_USDM "
+            "user_trades=true income=true order_identity=true "
+            "lifecycle_reconstruction=false live_accounting_authority=false "
+            "paper_decisions_unchanged=true execution_effect=BLOCK_LIVE_RELEASE"
         )
     regime_transition.install(nexus_ai, log)
     cross_portfolio_stress.install(TradingEngine, log)
