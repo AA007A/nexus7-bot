@@ -787,14 +787,14 @@ class TradingEngine:
     def _effective_score(self) -> int:
         """Score mínimo efetivo — aumenta após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_SCORE  # mais seletivo (88)
-        return cfg.MIN_ENTRY_SCORE        # padrão (60)
+            return cfg.POST_TARGET_SCORE  # mais seletivo (default 72)
+        return cfg.MIN_ENTRY_SCORE        # padrão (default 60)
 
     def _effective_risk_pct(self) -> float:
         """Risco por trade — reduz após bater a meta."""
         if self.daily_target_hit:
-            return cfg.POST_TARGET_RISK   # conservador (15%)
-        return cfg.MAX_RISK_PCT           # padrão (30%)
+            return cfg.POST_TARGET_RISK   # conservador (default 0.5%)
+        return cfg.MAX_RISK_PCT           # padrão (default 1%)
 
     # ── Connect ────────────────────────────────────────────────
     async def _startup_risk_balance(self) -> float:
@@ -3585,9 +3585,9 @@ class TradingEngine:
                 self.pilot.register_position_opened(sig.symbol)
             # Persiste no banco
             # ITEM 2: grava os COMPONENTES do score, não só o total.
-            # Permite que score_weights.calibrate_from_history() descubra
-            # estatisticamente quais sinais realmente preveem trades
-            # vencedores — em vez de manter os pesos manuais (+10/+5/+3).
+            # Mantém os dados necessários para uma futura calibração offline
+            # dos pesos (+10/+5/+3), hoje definidos manualmente. O antigo
+            # calibrador bot/score_weights.py nunca foi conectado e foi removido.
             _feats = {}
             try:
                 for _k, _v in (pre_score or {}).items():

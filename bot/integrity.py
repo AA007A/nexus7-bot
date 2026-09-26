@@ -161,7 +161,19 @@ class IntegrityGuard:
             for d in div:
                 add("STATE_DIVERGENCE", Severity.BLOCKED, d)
 
-            for sym, position in self._external_position_map(engine, ex_positions).items():
+            try:
+                external_positions = self._external_position_map_strict(engine, ex_positions)
+            except Exception as exc:
+                # Unreadable external exposure must never be reported as
+                # "no external positions" (previously a silent {} fail-open).
+                external_positions = {}
+                add(
+                    "EXTERNAL_POSITIONS_UNREADABLE",
+                    Severity.BLOCKED,
+                    f"posições externas ilegíveis ({type(exc).__name__}); "
+                    "exposição externa não verificável",
+                )
+            for sym, position in external_positions.items():
                 if has_confirmed_stop(position):
                     evidence = protection.get(sym, (True, "inline_stop"))[1]
                     add(
@@ -265,12 +277,16 @@ class IntegrityGuard:
         """True quando o payload da posição traz stopLoss explícito positivo."""
         return inline_stop_confirmed(position)
 
+    def _external_position_map_strict(self, engine, ex_positions: list) -> dict:
+        """Mapeia posições externas; propaga erro de leitura (fail-closed no assess)."""
+        ex = self._exchange_position_map(ex_positions)
+        local = dict(getattr(engine, "positions", {}) or {})
+        return {sym: ex[sym] for sym in sorted(ex) if sym not in local}
+
     def _external_position_map(self, engine, ex_positions: list) -> dict:
-        """Mapeia posições abertas na exchange que não pertencem ao NEXUS-7."""
+        """Compatibilidade: versão tolerante usada só para listagem de símbolos."""
         try:
-            ex = self._exchange_position_map(ex_positions)
-            local = dict(getattr(engine, "positions", {}) or {})
-            return {sym: ex[sym] for sym in sorted(ex) if sym not in local}
+            return self._external_position_map_strict(engine, ex_positions)
         except Exception:
             return {}
 
