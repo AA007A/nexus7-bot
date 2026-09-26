@@ -149,9 +149,10 @@ def install() -> None:
             _kucoin.KuCoinClient, TradingEngine, _score, _liquidation, _log
         )
     else:
-        _log.warning(
+        _log.info(
             "[BINANCE_MIGRATION] kucoin_cross_mmr_model=SKIPPED "
-            "binance_live_release=false execution_effect=BLOCK_LIVE_RELEASE"
+            "binance_cross_stress_authority=runtime_overlays "
+            "execution_effect=NONE"
         )
     _instrument_readiness_guard.install(_log)
     _viability_fail_closed_hardening.install(TradingEngine, _log)
