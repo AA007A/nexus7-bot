@@ -1,5 +1,5 @@
 """
-BGX Capital — API Server v12.1 (KuCoin)
+BGX Capital — API Server v12.2 (exchange-selectable)
 Única mudança em relação à versão Bybit:
   - Import: KuCoinClient em vez de BybitClient
   - Variável de ambiente: KUCOIN_API_KEY/SECRET/PASSPHRASE
@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # ── ÚNICA LINHA ALTERADA em relação à versão Bybit ───────────────
-from bot.kucoin import KuCoinClient as ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON
+from bot.exchange import ExchangeClient, PAPER_TRADE, TRADING_MODE_REASON, EXCHANGE_NAME, EXCHANGE_PRODUCT
 # ─────────────────────────────────────────────────────────────────
 
 from bot.nexus_runtime_engine import TradingEngine
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     O carregamento de instrumentos vai para uma task de background com
     timeout, e o engine só inicia depois que ela conclui.
     """
-    log.info("🚀 BGX Capital v12.1 (KuCoin) iniciando...")
+    log.info("🚀 BGX Capital v12.2 (%s %s) iniciando...", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
     # ══════════════════════════════════════════════════════════════
     # SELF-CHECK DE INTEGRIDADE (previne bugs silenciosos)
@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
 
         app.state.blocked = False
         app.state.engine_task = asyncio.create_task(engine.run())
-        log.info("✅ BGX Capital online (KuCoin Futures)")
+        log.info("✅ BGX Capital online (%s %s)", EXCHANGE_NAME, EXCHANGE_PRODUCT)
 
         # Mensagem de startup deriva do estado operacional real. Em especial,
         # PAPER_TRADE=false + VALIDATION_LOCK agora é SHADOW_LIVE e nunca
@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
     log.info("👋 Encerrado")
 
 
-app = FastAPI(title="BGX Capital KuCoin", version="12.1.0", lifespan=lifespan)
+app = FastAPI(title=f"BGX Capital {EXCHANGE_NAME}", version="12.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -238,8 +238,8 @@ async def health():
     )
     return {
         "status":   "ok",
-        "version":  "12.1.0",
-        "exchange": "kucoin",
+        "version":  "12.2.0",
+        "exchange": EXCHANGE_NAME,
         "ready":    runtime["ready"],
         "connected": runtime["connected"],
         "active": runtime["active"],
@@ -255,7 +255,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "version": "12.1.0", "exchange": "kucoin"}
+    return {"status": "online", "version": "12.2.0", "exchange": EXCHANGE_NAME}
 
 
 # ── Status / Saldo / Posições ─────────────────────────────────────
