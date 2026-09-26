@@ -188,9 +188,13 @@ async def finalize_initial_reconciliation(engine, *, orders_reconciled: bool) ->
         return False
 
     try:
-        payload = await engine.client._get(
-            "/api/v1/orders", {"status": "active"}, auth=True
-        )
+        get_open_orders = getattr(engine.client, "get_open_orders", None)
+        if callable(get_open_orders):
+            payload = await get_open_orders()
+        else:
+            payload = await engine.client._get(
+                "/api/v1/orders", {"status": "active"}, auth=True
+            )
     except Exception as exc:
         log.critical(
             "[INITIAL_RECONCILIATION] complete=false stage=active_orders_read error=%s",
