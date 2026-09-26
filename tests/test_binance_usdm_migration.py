@@ -372,6 +372,118 @@ class BinanceMigrationTests(unittest.TestCase):
         self.assertEqual(str(result["orderId"]), "123")
         self.assertTrue(result["sl_tp_failed"])
 
+    def test_ambiguous_entry_response_recovers_by_client_order_id(self):
+        client = FakeBinance()
+        body = {
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": "0.01",
+            "newClientOrderId": "bgx7-ambiguous-recover",
+        }
+        recovered = {
+            "orderId": "12345",
+            "clientOid": "bgx7-ambiguous-recover",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+        }
+        with patch.object(
+            client,
+            "_request",
+            AsyncMock(
+                side_effect=RuntimeError(
+                    "Binance POST /fapi/v1/order network failure"
+                )
+            ),
+        ) as request, patch.object(
+            client,
+            "_recover_ambiguous_order",
+            AsyncMock(return_value=recovered),
+        ) as recover:
+            result = run(
+                client._post(
+                    "/fapi/v1/order",
+                    body,
+                    single_attempt=True,
+                )
+            )
+
+        request.assert_awaited_once()
+        recover.assert_awaited_once_with("/fapi/v1/order", body)
+        self.assertEqual(result["orderId"], "12345")
+        self.assertTrue(result["recoveredByClientOid"])
+
+    def test_unresolved_ambiguous_entry_never_requests_blind_resubmission(self):
+        client = FakeBinance()
+        body = {
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": "0.01",
+            "newClientOrderId": "bgx7-ambiguous-unresolved",
+        }
+        with patch.object(
+            client,
+            "_request",
+            AsyncMock(
+                side_effect=RuntimeError(
+                    "Binance POST /fapi/v1/order HTTP 504 "
+                    "code=-1007 msg=Timeout waiting for response"
+                )
+            ),
+        ) as request, patch.object(
+            client,
+            "_recover_ambiguous_order",
+            AsyncMock(return_value={}),
+        ) as recover:
+            result = run(
+                client._post(
+                    "/fapi/v1/order",
+                    body,
+                    single_attempt=True,
+                )
+            )
+
+        request.assert_awaited_once()
+        recover.assert_awaited_once_with("/fapi/v1/order", body)
+        self.assertTrue(result["_ambiguous"])
+        self.assertEqual(result.get("orderId", ""), "")
+        self.assertEqual(
+            result["clientOid"],
+            "bgx7-ambiguous-unresolved",
+        )
+
+    def test_definitive_binance_order_error_is_not_treated_as_ambiguous(self):
+        client = FakeBinance()
+        body = {
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": "0.01",
+            "newClientOrderId": "bgx7-bad-precision",
+        }
+        error = RuntimeError(
+            "Binance POST /fapi/v1/order HTTP 400 "
+            "code=-1111 msg=Precision is over the maximum"
+        )
+        with patch.object(
+            client, "_request", AsyncMock(side_effect=error)
+        ), patch.object(
+            client,
+            "_recover_ambiguous_order",
+            AsyncMock(return_value={}),
+        ) as recover:
+            with self.assertRaisesRegex(RuntimeError, "code=-1111"):
+                run(
+                    client._post(
+                        "/fapi/v1/order",
+                        body,
+                        single_attempt=True,
+                    )
+                )
+
+        recover.assert_not_awaited()
+
     def test_binance_live_migration_gate_fails_closed(self):
         client = FakeBinance()
         old = bn.PAPER_TRADE
