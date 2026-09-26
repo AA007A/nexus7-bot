@@ -23,11 +23,15 @@ class Config:
     API_PASSPHRASE: str = os.environ.get("KUCOIN_API_PASSPHRASE", "")
     BOT_API_SECRET: str = os.environ.get("BOT_API_SECRET", "")
 
-    # KuCoin Futures symbols
+    # Liquid / widely traded USD-M futures monitoring universe.
+    # Runtime exchange viability checks remain authoritative: unavailable or
+    # unsuitable contracts are dropped fail-closed before trading.
     SYMBOLS: list = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
-        "ADAUSDT", "DOGEUSDT", "LINKUSDT", "AVAXUSDT",
-        "DOTUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT",
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT",
+        "DOTUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT", "SUIUSDT",
+        "PEOPLEUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "UNIUSDT",
+        "AAVEUSDT", "FILUSDT", "INJUSDT", "SEIUSDT", "ETCUSDT",
     ]
 
     # PRE-LIVE hardened risk defaults.
