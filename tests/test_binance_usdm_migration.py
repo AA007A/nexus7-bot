@@ -213,7 +213,16 @@ class BinanceMigrationTests(unittest.TestCase):
             "LOG_LEVEL": "ERROR",
         })
         proc = subprocess.run(
-            [sys.executable, "-c", "import main_hardened; print('binance-paper-import-ok')"],
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import builtins, main_hardened; "
+                    "assert getattr(builtins, '_nexus_sitecustomize_status', None) == 'ok'; "
+                    "assert getattr(builtins, '_nexus_runtime_contract_status', None) == 'ok'; "
+                    "print('binance-paper-import-ok')"
+                ),
+            ],
             env=env,
             capture_output=True,
             text=True,
