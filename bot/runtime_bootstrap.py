@@ -70,6 +70,7 @@ def install() -> None:
     from bot import shadow_mode_observability as _shadow_mode_observability
     from bot import startup_position_unit_hardening as _startup_position_unit_hardening
     from bot import prelive_protection_failclosed as _prelive_protection_failclosed
+    from bot import binance_protection_failclosed as _binance_protection_failclosed
     from bot import pilot_external_position_guard as _pilot_external_position_guard
     from bot import kucoin_price_tick_hardening as _kucoin_price_tick_hardening
     from bot import kucoin_cross_margin_order as _kucoin_cross_margin_order
@@ -118,6 +119,10 @@ def install() -> None:
         _kucoin_fill_normalization.install(_kucoin.KuCoinClient, _kucoin, _log)
         _kucoin_native_tpsl.install(_kucoin.KuCoinClient, _kucoin, _log)
     else:
+        # Install protection first. The ownership wrapper installed immediately
+        # after it remains the outer/final boundary, so external/manual
+        # positions can never reach repair or emergency-close mutations.
+        _binance_protection_failclosed.install(TradingEngine, _log)
         _pilot_external_position_guard.install(
             TradingEngine, _log, exchange_name="binance"
         )
