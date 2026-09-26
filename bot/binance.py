@@ -34,8 +34,20 @@ from bot.logger import log
 from bot.order_state import OrderState, InvalidTransition
 
 
-API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
-API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
+def _clean_credential_env(name: str) -> str:
+    raw = os.environ.get(name, "")
+    cleaned = raw.strip().replace("\r", "").replace("\n", "").replace("\t", "")
+    if cleaned != raw.strip():
+        log.warning(
+            "[BINANCE_CREDENTIAL_SANITIZE] name=%s removed_control_chars=true "
+            "credential_value_redacted=true execution_effect=NONE",
+            name,
+        )
+    return cleaned
+
+
+API_KEY = _clean_credential_env("BINANCE_API_KEY")
+API_SECRET = _clean_credential_env("BINANCE_API_SECRET")
 
 _paper_env = os.environ.get("PAPER_TRADE", "").strip().lower()
 _live_ack = os.environ.get("LIVE_TRADING_CONFIRMED", "").strip()
