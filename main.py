@@ -411,7 +411,7 @@ async def status():
 @app.get("/api/balance", dependencies=[Depends(_require_auth)])
 async def balance():
     b = await app.state.client.get_balance()
-    return {"balance": b, "currency": "USDT", "exchange": "kucoin"}
+    return {"balance": b, "currency": "USDT", "exchange": EXCHANGE_NAME}
 
 @app.get("/api/positions", dependencies=[Depends(_require_auth)])
 async def positions():
@@ -419,7 +419,7 @@ async def positions():
     return {
         "open":     [p.to_dict() for p in eng.positions.values()],
         "count":    len(eng.positions),
-        "exchange": "kucoin",
+        "exchange": EXCHANGE_NAME,
     }
 
 
