@@ -168,26 +168,42 @@ async def lifespan(app: FastAPI):
                         _algo_orders = await asyncio.wait_for(
                             client.get_stop_orders(_probe_symbol), timeout=8
                         )
+                        _brackets = await asyncio.wait_for(
+                            client.get_leverage_brackets(_probe_symbol), timeout=8
+                        )
                         _mode_ok = _position_mode == "ONE_WAY"
                         _state_ok = isinstance(_account_state, dict)
                         _positions_ok = isinstance(_positions, list)
                         _normal_ok = isinstance(_normal_orders, list)
                         _algo_ok = isinstance(_algo_orders, list)
+                        _brackets_ok = bool(
+                            isinstance(_brackets, dict)
+                            and isinstance(_brackets.get("brackets"), list)
+                            and _brackets.get("brackets")
+                        )
                         _ready = all(
-                            (_mode_ok, _state_ok, _positions_ok, _normal_ok, _algo_ok)
+                            (
+                                _mode_ok,
+                                _state_ok,
+                                _positions_ok,
+                                _normal_ok,
+                                _algo_ok,
+                                _brackets_ok,
+                            )
                         )
                         log.log(
                             20 if _ready else 30,
                             "[BINANCE_READINESS] status=%s position_mode=%s "
                             "account_state=%s positions_read=%s normal_orders_read=%s "
-                            "algo_orders_read=%s probe_symbol=%s mutation=false "
-                            "execution_effect=%s",
+                            "algo_orders_read=%s leverage_brackets_read=%s "
+                            "probe_symbol=%s mutation=false execution_effect=%s",
                             "PASS" if _ready else "BLOCK_LIVE_RELEASE",
                             _position_mode,
                             _state_ok,
                             _positions_ok,
                             _normal_ok,
                             _algo_ok,
+                            _brackets_ok,
                             _probe_symbol,
                             "NONE" if _ready else "BLOCK_LIVE_RELEASE",
                         )
