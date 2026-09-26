@@ -105,15 +105,9 @@ def install(TradingEngine, log) -> None:
         external_origin_runtime.install(
             TradingEngine, binance_accounting_evidence, log
         )
-        log.warning(
-            "[BINANCE_ACCOUNTING] adapter=LIFECYCLE_READY source=BINANCE_USDM "
-            "user_trades=true income=true normal_order_identity=true "
-            "algo_order_identity=true lifecycle_reconstruction=true "
-            "flat_anchor_proof=true durable_lineage_required=true "
-            "live_accounting_authority=false "
-            "release_state=AWAITING_CONTROLLED_LIVE_EVIDENCE "
-            "paper_decisions_unchanged=true execution_effect=BLOCK_LIVE_RELEASE"
-        )
+        from bot import runtime_release_contract
+
+        log.warning(runtime_release_contract.current().accounting_log())
     regime_transition.install(nexus_ai, log)
     if exchange_runtime.is_binance():
         binance_cross_portfolio_stress.install(TradingEngine, log)
