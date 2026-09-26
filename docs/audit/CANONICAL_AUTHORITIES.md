@@ -23,3 +23,6 @@ one that actually executes. Anything not listed as the owner is diagnostics.
 | Accounting | `binance_accounting_evidence` | evidence only, no execution effect. |
 | Notifications | `notifier` / `nexus_terminal_notifications` (fire-and-forget, dedupe/cooldown) | never alters trading state. |
 | Market Radar (Telegram panel) | `market_radar` (passive log observer; started/cancelled by the `TradingEngine.run` owner) | observability only: never changes score, NEXUS, risk, sizing or orders; stale entries expire to SCANNING; configurable via `MARKET_RADAR_ENABLED`, `MARKET_RADAR_INTERVAL_S` (default 1800, min 300), `MARKET_RADAR_STALE_S` (default 900), `MARKET_RADAR_FIRST_DELAY_S` (default 300). |
+| Account capital for RiskManagerV3 | `account_capital_reader.read_account_capital` (venue-aware since the full audit: `get_account_state()` on Binance) | same venue rule as `account_balance_semantics.read_account_state`. |
+| Quantity units | `quantity.quantity_rules` (contract venues: contracts×multiplier; BASE_ASSET venues: stepSize units) | contract conversions refuse BASE_ASSET instruments (fail-closed). |
+| Telegram credentials | `telegram_credentials` (TELEGRAM_TOKEN/TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT/TELEGRAM_CHAT_ID) | used by config, logger and funnel_metrics. |

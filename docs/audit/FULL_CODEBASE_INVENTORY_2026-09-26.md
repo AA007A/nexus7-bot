@@ -221,7 +221,7 @@ RUNTIME_REACHABLE: `IMPORT` = loaded at bootstrap; `LAZY` = reachable through a 
 | bot/score_floor_shadow.py | 492 | SHADOW | LAZY | 1 | no | mtf_strategy_observability | KEEP |  |
 | bot/score_floor_shadow_persistence.py | 146 | SHADOW | LAZY | 1 | no | score_floor_shadow | KEEP |  |
 | bot/score_tf_rebalanced_shadow.py | 204 | SHADOW | IMPORT | 1 | no | adaptive_mtf_dedup_shadow | KEEP |  |
-| bot/score_weights.py | 222 | RESEARCH | NONE | 0 | no | — | DELETE_SAFE | A-F satisfied: no import/call, no string/dynamic ref, no CI, no test; unused offline calibrator (comments only) |
+| bot/score_weights.py | 222 | RESEARCH | NONE | 0 | no | — | DELETE_SAFE → REMOVED (commit `b4e0aa6`) | A-F satisfied: no import/call, no string/dynamic ref, no CI, no test; unused offline calibrator (comments only) |
 | bot/scoring_safety_hardening.py | 277 | HARDENING_OVERLAY | IMPORT | 1 | no | runtime_overlays | KEEP |  |
 | bot/selfcheck.py | 481 | CORE | IMPORT | 4 | yes | runtime_bootstrap, scan_summary_hardening, main | KEEP |  |
 | bot/selfcheck_entrypoint_hardening.py | 57 | HARDENING_OVERLAY | IMPORT | 1 | no | runtime_bootstrap | KEEP |  |

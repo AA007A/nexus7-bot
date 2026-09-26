@@ -234,3 +234,19 @@ Scenario → test mapping was established in PR #417 (see `NEXUS_PRODUCTION_CONS
 | main.py / main_hardened.py | KEEP both | `main_hardened` wraps `main`'s app; production CMD uses `main_hardened` |
 
 No other file met all of A–F. "Legacy-looking" names were not treated as evidence.
+
+## 16. Resolution in this PR (commit per category)
+
+| # | category | commit | content |
+|---|---|---|---|
+| 1 | audit report | `4be095f` | this report + generated inventory |
+| 2 | dead code | `b4e0aa6` | `bot/score_weights.py` removed (A–F) |
+| 3 | duplicate consolidation | `abe5d5e` | one Telegram credential authority (`bot/telegram_credentials.py`); restores the 2 emitters silently disabled in production |
+| 4 | P0 | — | none found with evidence; no commit fabricated |
+| 5 | P1 | `44dcd55` | P1-1 venue-aware capital read (Binance) |
+| 5 | P1 | `8feed8e` | P1-2 Binance base-asset quantity units (byte-pin updated for `bot/quantity.py` only, documented) |
+| 5 | P1 | `9c0a1c4` | P1-3 unreadable external positions block instead of vanishing |
+| 6 | P2 | `e313f44` | observability fail-closed on unknown drawdown; single backtest loop; venue-aware reconciliation diagnostic; stale risk comments |
+| 7 | docs | this commit | README (Binance), HISTORICAL banners, Railway divergence note, canonical-authority rows |
+
+Not fixed (needs operator or larger change): P1-4 deploy gating (Railway settings); P2-5/P2-6 wrapper stacking and duplicate regime/score/drawdown/daily-stop authorities (need a design decision, not a cleanup commit); P2-7 balance-observability consolidation; P2-8 config invariant; P2-9 `{}` ambiguity in Binance order reads; OOS on Binance data; drift/calibration monitoring.
