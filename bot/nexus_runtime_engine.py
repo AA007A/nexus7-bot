@@ -9,6 +9,8 @@ No exchange mutation, release state, or execution permission is changed here.
 """
 from __future__ import annotations
 
+import math
+
 from bot import account_balance_semantics
 from bot import missed_opportunity_audit
 from bot.account_capital_reader import read_account_capital
@@ -16,6 +18,7 @@ from bot.config import cfg
 from bot.drawdown_persistence import restore_update_real_account_peak
 from bot.engine import TradingEngine as CoreTradingEngine
 from bot.kucoin_position_units import KuCoinPositionUnitAdapter
+from bot.exchange import EXCHANGE_NAME
 from bot.logger import log
 from bot.nexus_validation_observability import observe_nexus_validation
 from bot.notifier import notify
@@ -29,11 +32,13 @@ class TradingEngine(CoreTradingEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # KuCoin currentQty is native contracts while every engine/risk/Position
-        # quantity is base asset. Normalize all engine-facing position reads at
-        # one explicit runtime boundary. The underlying exchange client and all
-        # order-dispatch methods remain untouched/delegated.
-        if not isinstance(self.client, KuCoinPositionUnitAdapter):
+        # KuCoin exposes native contract counts and therefore needs an inbound
+        # normalization proxy. Binance USD-M already exposes base-asset
+        # quantities, so wrapping it in the KuCoin multiplier adapter would
+        # convert the quantity a second time.
+        if EXCHANGE_NAME == "kucoin" and not isinstance(
+            self.client, KuCoinPositionUnitAdapter
+        ):
             self.client = KuCoinPositionUnitAdapter(self.client)
         if not isinstance(self.risk, ProfessionalRiskAdapter):
             self.risk = ProfessionalRiskAdapter(self.risk)
@@ -51,9 +56,9 @@ class TradingEngine(CoreTradingEngine):
         This override is intentionally limited to the composed runtime. The
         unwrapped legacy core keeps its original contracts-to-base conversion.
         """
-        if isinstance(self.client, KuCoinPositionUnitAdapter):
+        if isinstance(self.client, KuCoinPositionUnitAdapter) or EXCHANGE_NAME == "binance":
             value = float(quantity)
-            if value != value or value < 0:
+            if not math.isfinite(value) or value < 0:
                 raise ValueError(
                     f"_contracts_to_base_qty({symbol}): invalid normalized base quantity"
                 )
