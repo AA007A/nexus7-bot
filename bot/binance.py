@@ -464,6 +464,10 @@ class BinanceClient:
                     "code=-1001",  # DISCONNECTED
                     "code=-1006",  # UNEXPECTED_RESP / execution unknown
                     "code=-1007",  # TIMEOUT / execution unknown
+                    # ClientOrderId is duplicated: an order with this exact id
+                    # already exists, so the logical submission may already be
+                    # live. Reconcile by id; never treat it as a clean reject.
+                    "code=-4116",
                 )
             )
         )
