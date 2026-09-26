@@ -387,9 +387,11 @@ async def news_summary_msg(total: int, bull: int, bear: int,
 # Se o MOTIVO mudar, a mensagem sai na hora — mudança de motivo é
 # informação nova.
 _nexus_veto_cache: dict = {}     # (symbol, motivo_curto) → timestamp
+_nexus_score_cache: dict = {}    # symbol → (timestamp, fingerprint)
 _nexus_msg_count:  dict = {}     # minuto → contagem (guarda de rate limit)
 
 NEXUS_VETO_COOLDOWN = int(os.environ.get("NEXUS_VETO_COOLDOWN", "900"))   # 15min
+NEXUS_SCORE_COOLDOWN = int(os.environ.get("NEXUS_SCORE_COOLDOWN", "180")) # 3min
 NEXUS_MAX_MSG_MIN   = int(os.environ.get("NEXUS_MAX_MSG_MIN", "12"))      # msgs/min
 
 
@@ -447,6 +449,101 @@ async def nexus_approved_msg(d: dict) -> str:
         f"_{'; '.join(d.get('reasoning', [])[-2:])}_"
     )
 
+
+def _nexus_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nexus_plain(value, limit: int = 150) -> str:
+    text = str(value or "").replace("`", "'").replace("*", "").replace("_", " ")
+    return text[:limit]
+
+
+async def nexus_score_msg(d: dict) -> str:
+    """Compact score telemetry for non-terminal NEXUS WAIT evaluations."""
+    final_score = _nexus_number(d.get("final_score"))
+    estimated = _nexus_number(d.get("estimated_final"))
+    if final_score is not None and final_score > 0:
+        score_text = f"{final_score:.1f}/100 (final)"
+    elif estimated is not None:
+        score_text = f"{estimated:.1f}/100 (estimado)"
+    else:
+        score_text = "N/A"
+
+    confidence = _nexus_number(d.get("confidence"))
+    rr_net = _nexus_number(d.get("rr_net"))
+    ev_pct = _nexus_number(d.get("ev_pct"))
+    dq = _nexus_number(d.get("data_quality"))
+    reason = _nexus_plain(d.get("reason") or "aguardando confirmação")
+    mtf = _nexus_plain(d.get("mtf") or "N/A", 90)
+
+    return (
+        f"🧠 *NEXUS AI — SCORE*\n"
+        f"📍 Par: `{d.get('symbol', '?')}`\n"
+        f"⏳ Estado: `WAIT`\n"
+        f"📊 Score: `{score_text}`\n"
+        f"🎯 Confiança: `{'N/A' if confidence is None else f'{confidence:.1f}%'}`\n"
+        f"⚖️ R:R líq: `{'N/A' if rr_net is None else f'{rr_net:.2f}'}`\n"
+        f"📈 EV: `{'N/A' if ev_pct is None else f'{ev_pct:+.3f}%'}`\n"
+        f"📡 Dados: `{'N/A' if dq is None else f'{dq:.0f}/100'}`\n"
+        f"🌐 Regime: `{d.get('regime', 'N/A')}`\n"
+        f"🧭 MTF: `{mtf}`\n"
+        f"💡 {reason}"
+    )
+
+
+async def notify_nexus_score(d: dict) -> bool:
+    """Send deduplicated WAIT score telemetry without changing trading state."""
+    if os.environ.get("NEXUS_SCORE_TELEGRAM", "true").lower() != "true":
+        return False
+
+    decision = str(d.get("decision") or "").upper()
+    if decision != "WAIT":
+        return False
+
+    sym = str(d.get("symbol") or "?")
+    final_score = _nexus_number(d.get("final_score"))
+    estimated = _nexus_number(d.get("estimated_final"))
+    display_score = final_score if final_score is not None and final_score > 0 else estimated
+    confidence = _nexus_number(d.get("confidence"))
+    rr_net = _nexus_number(d.get("rr_net"))
+    reason = _nexus_plain(d.get("reason"), 80)
+    fingerprint = (
+        decision,
+        None if display_score is None else round(display_score, 1),
+        None if confidence is None else round(confidence),
+        None if rr_net is None else round(rr_net, 2),
+        reason,
+    )
+
+    now = time.time()
+    last = _nexus_score_cache.get(sym)
+    if last and last[1] == fingerprint and (now - last[0]) < NEXUS_SCORE_COOLDOWN:
+        return False
+
+    if not _nexus_rate_ok():
+        log.info("[NEXUS_TELEGRAM_SCORE] symbol=%s decision=WAIT sent=false reason=rate_limit", sym)
+        return False
+
+    _nexus_score_cache[sym] = (now, fingerprint)
+    try:
+        await notify(await nexus_score_msg(d))
+        log.info(
+            "[NEXUS_TELEGRAM_SCORE] symbol=%s decision=WAIT sent=true score=%s",
+            sym,
+            "N/A" if display_score is None else f"{display_score:.1f}",
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "[NEXUS_TELEGRAM_SCORE] symbol=%s decision=WAIT sent=false error=%s",
+            sym,
+            type(exc).__name__,
+        )
+        return False
 
 async def nexus_veto_msg(d: dict) -> str:
     """Mensagem de VETO — compacta, pois é o caso mais frequente."""

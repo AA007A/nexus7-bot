@@ -184,7 +184,7 @@ def install() -> None:
     _nexus_grade_display.install(_notifier, _log)
     _nexus_optional_evidence.install(_nexus_ai, _log)
     _nexus_structure_semantics.install(_nexus_ai, _log)
-    _nexus_decision_consistency.install(_nexus_ai, _log)
+    _nexus_decision_consistency.install(_nexus_ai, _log, _notifier)
     _nexus_live_cost_calibration.install(TradingEngine, _nexus_ai, _log)
     _nexus_prefinal_veto_observability.install(_nexus_ai, _log)
     _nexus_terminal_notifications.install(TradingEngine, _notifier, _nexus_types, _log)

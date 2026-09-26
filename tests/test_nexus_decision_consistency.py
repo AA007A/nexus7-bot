@@ -1,4 +1,6 @@
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from bot import nexus_decision_consistency as consistency
 
@@ -104,6 +106,37 @@ def test_detect_regime_outside_entry_decision_retains_original_inputs():
 
     fake_ai.detect_regime([1] * 15, [1] * 15, [1] * 15, [1] * 15)
     assert observed == [15]
+
+
+def test_wait_score_schedules_telegram_observability_without_execution_change():
+    def original(symbol, k15, k1h, k4h, *args, **kwargs):
+        return SimpleNamespace(
+            decision="WAIT",
+            setup_quality=0.0,
+            reasoning=["aguardando confirmação"],
+        )
+
+    fake_ai = _fake_ai(original)
+    fake_log = SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+    )
+    fake_notifier = SimpleNamespace(notify_nexus_score=AsyncMock(return_value=True))
+
+    async def scenario():
+        consistency.install(fake_ai, fake_log, fake_notifier)
+        result = fake_ai.decide(
+            "SOLUSDT", _candles(100), _candles(100), _candles(100)
+        )
+        await asyncio.sleep(0)
+        return result
+
+    result = asyncio.run(scenario())
+    assert result.decision == "WAIT"
+    fake_notifier.notify_nexus_score.assert_awaited_once()
+    payload = fake_notifier.notify_nexus_score.await_args.args[0]
+    assert payload["symbol"] == "SOLUSDT"
+    assert payload["decision"] == "WAIT"
 
 
 def test_install_is_idempotent():
